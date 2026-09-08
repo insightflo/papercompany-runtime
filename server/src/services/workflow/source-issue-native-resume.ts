@@ -10,7 +10,8 @@
 //   1. source issue 의 최신 workflowStepRun 조회(없으면 report-only).
 //   2. workflowRun 조회 — 반드시 status=running(아니면 report-only).
 //   3. workflowDefinition 조회(없으면 report-only).
-//   4. buildWorkflowExecutionSteps(definition) 로 persisted step 해석 — stepId 불일치면 report-only.
+//   4. loadExecutionDefinition(db, run.id) 의 검증된 steps(frozen snapshot, 없으면 genuine legacy 만
+//      current fallback) 로 persisted step 을 해석 — stepId 불일치면 report-only.
 //   5. (agentId 제공 시) findExistingWorkflowResumeWake 로 이미 native wake 가 있으면 already_in_flight.
 //   6. wakeExistingWorkflowStepIssue(allowBlockedIssue) 로 wake. 거부되면 report-only.
 // [계약] 공식 retry/iteration/QA verdict 는 workflow layer 소유. 여기서 source status 를 직접
@@ -21,15 +22,15 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { resumeWorkflowRun } from "./workflow-store.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 import { restoreFailedSourceIssueWorkflowState } from "./source-issue-failed-state-restore.js";
 
-// "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts LIVE_WAKEUP_STATUSES 와 동일 집합.
-//   이슈가 이 상태의 wake 나 queued/running heartbeat 를 가지면 중복 dispatch 금지.
+// "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts 와 동일. 이 상태의 wake/heartbeat 보유 시 중복 dispatch 금지.
 const LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution", "coalesced"] as const;
 const LIVE_HEARTBEAT_STATUSES = ["queued", "running"] as const;
 
@@ -164,9 +165,8 @@ export async function dispatchSourceIssueNativeResume(
     };
   }
 
-  // 4. definition 으로부터 persisted step 를 재조립하고 stepRun.stepId 가 실제 존재하는지 확인.
-  //   이 단계를 통과해야 "native DAG 가 아는 step" 이 보증된다(할당/iteration/retry 계약의 주체).
-  const steps: WorkflowStep[] = buildWorkflowExecutionSteps(definition);
+  // 4. 실행정의는 frozen snapshot(genuine unmarked legacy 만 current fallback) 의 검증된 steps 로 읽는다 — corrupt/missing 은 422 로 전파(step_not_found 로 위장 금지).
+  const steps: WorkflowStep[] = (await loadExecutionDefinition(db, run.id, { requireHistorical: false })).steps;
   const step = steps.find((candidate) => candidate.id === stepRun.stepId) ?? null;
   if (!step) {
     return {

@@ -1,4 +1,6 @@
 import path from "node:path";
+import { registerExactArtifact } from "./exact-artifact-registration.js";
+import type { ExactProducer } from "./exact-artifact-validation.js";
 import type { Db } from "@paperclipai/db";
 import { workflowStepRuns } from "@paperclipai/db";
 import type { WorkflowArtifactRegister } from "@paperclipai/shared/validators/workflow-agent-api";
@@ -26,7 +28,9 @@ export async function registerWorkflowArtifactWithStorage(input: {
   readonly data: WorkflowArtifactRegister;
   readonly delegation?: WorkflowApiDelegation | null;
   readonly artifactMirrorDeps?: WorkflowArtifactMirrorDeps;
+  readonly exactProducer?: ExactProducer;
 }) {
+  if (input.exactProducer !== undefined) return registerExactArtifact({ ...input, exactProducer: input.exactProducer });
   if (!("path" in input.data)) return registerWorkflowArtifact(input);
 
   const artifactPath = input.data.path.trim();

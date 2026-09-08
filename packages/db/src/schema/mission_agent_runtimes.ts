@@ -18,6 +18,8 @@ import { heartbeatRuns } from "./heartbeat_runs.js";
 export type MissionAgentRuntimeStateJson = {
   runtimeKey?: string;
   bootstrapContextInjected?: boolean;
+  /** [Task6d] resume 세대 표식(진단 전용). resume apply 로 재개된 세대의 ensure 에서 기록된다. */
+  resumeRequestId?: string;
   bootstrapContextInjectedAt?: string | null;
   lastIssueEnvelopeAt?: string | null;
   workspaceKey?: string | null;

@@ -12,6 +12,7 @@ import {
 import { defaultMissionSearchScopes, missionSearchScopesAllowRepo, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
 import { resolveWorkProductLocalFilePath } from "./work-products.js";
 import { ensurePlanQaWorkProduct } from "./missions/plan-qa-work-product.js";
+import { loadExecutionDefinition } from "./workflow/execution-definition.js";
 
 export type RuntimeSearchPathPermissions = {
   version: 1;
@@ -130,7 +131,7 @@ export async function buildRuntimeSearchPathPermissions(input: {
   if (!currentStep) return permissions;
 
   const workflow = await input.db
-    .select({ stepsJson: workflowDefinitions.stepsJson })
+    .select({ workflowRunId: workflowRuns.id })
     .from(workflowRuns)
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(
@@ -140,7 +141,14 @@ export async function buildRuntimeSearchPathPermissions(input: {
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  const dependencyStepIds = collectDependencyStepIds(workflow?.stepsJson, currentStep.stepId);
+  if (!workflow) return permissions;
+  // [Task5a2c] scoped linked run: dependency steps come from the frozen execution definition
+  //   (snapshot), never from live stepsJson — an editor rewiring/removing dependencies cannot
+  //   widen or redirect search rights. Missing/corrupt expected snapshots fail closed (422)
+  //   before any permissions are returned. collectDependencyStepIds keeps projecting/traversing
+  //   the (already normalized) edges, including conditional/transitive edges.
+  const execution = await loadExecutionDefinition(input.db, workflow.workflowRunId, { requireHistorical: false });
+  const dependencyStepIds = collectDependencyStepIds(execution.steps, currentStep.stepId);
   if (dependencyStepIds.length === 0) return permissions;
   const dependencyToolArtifactPaths = card.cardJson.evidenceRefs.flatMap((ref) => {
     if (ref.type !== "dependency_tool_artifact" || typeof ref.path !== "string" || !path.isAbsolute(ref.path)) {

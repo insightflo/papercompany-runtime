@@ -5,11 +5,10 @@ import {
   heartbeatRuns,
   issueExecutionCards,
   issues,
-  workflowDefinitions,
-  workflowRuns,
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import {
   workflowNonblockingAcceptanceSchema,
   workflowQaRemediationsSchema,
@@ -63,10 +62,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function trimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function readSteps(value: unknown): StepLike[] {
-  return Array.isArray(value) ? value.filter((step): step is StepLike => Boolean(step) && typeof step === "object") : [];
 }
 
 function isLegacyWorkflowValidationStep(issue: WorkflowValidationIssue, step: StepLike | null): boolean {
@@ -130,23 +125,13 @@ export async function resolveWorkflowValidationContext(
     .limit(1)
     .then((rows) => rows[0] ?? null);
 
-  const workflowRun = stepRun
-    ? await db
-        .select({ workflowId: workflowRuns.workflowId })
-        .from(workflowRuns)
-        .where(eq(workflowRuns.id, stepRun.workflowRunId))
-        .limit(1)
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const definition = workflowRun
-    ? await db
-        .select({ stepsJson: workflowDefinitions.stepsJson })
-        .from(workflowDefinitions)
-        .where(eq(workflowDefinitions.id, workflowRun.workflowId))
-        .limit(1)
-        .then((rows) => rows[0] ?? null)
-    : null;
-  const step = readSteps(definition?.stepsJson).find((candidate) => trimmedString(candidate.id) === stepRun?.stepId) ?? null;
+  // [task5a2b] linked run 이 있으면 항상 실행정의를 로더로 검증한다(record/completion·card 무관).
+  //   WorkflowValidationDb 는 Pick<Db,"select"|"insert"> 지만 loader 는 SELECT-only 라서 select 표면만 요구한다
+  //   (loader read 입력은 Pick<Db,"select"> 로 확장됨 — mutation 요구 신규 추가 없음). missing/corrupt 는 422.
+  const steps = stepRun
+    ? (await loadExecutionDefinition(db, stepRun.workflowRunId, { requireHistorical: false })).steps
+    : [];
+  const step = steps.find((candidate) => trimmedString(candidate.id) === stepRun?.stepId) ?? null;
   const hasStepRunContext = Boolean(stepRun?.workflowRunId && stepRun.id);
   const mode = options.mode ?? "completion";
   const recordableWorkflowStep = issue.originKind === "workflow_execution" && hasStepRunContext;

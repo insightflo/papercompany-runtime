@@ -5,6 +5,7 @@ import {
   recordWorkflowStepStatusTransition,
   type WorkflowSyncSource,
 } from "./workflow-sync-source.js";
+import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 
 type WorkflowStepRunWriteDb = Pick<Db, "select" | "update" | "insert" | "transaction">;
@@ -26,6 +27,8 @@ export async function completeLinkedWorkflowStepRunsForIssue(input: {
       status: workflowStepRuns.status,
       startedAt: workflowStepRuns.startedAt,
       metadata: workflowStepRuns.metadata,
+      executionGeneration: workflowStepRuns.executionGeneration,
+      runMetadata: workflowRuns.metadata,
       companyId: workflowRuns.companyId,
       missionId: workflowRuns.missionId,
     })
@@ -54,6 +57,16 @@ export async function completeLinkedWorkflowStepRunsForIssue(input: {
       return contract?.createdAt ? new Date(contract.createdAt) : null;
     })();
     const attemptStartedAt = stepRun.startedAt ?? issueStartedAt ?? reworkStartedAt ?? input.completedAt;
+    // [Task6c-C] resume run(step stamp 존재)의 closeout 은 세대/stamp 정체로 한 세대에만 수렴한다.
+    //   (a) step stamp ≠ 부모 run 현재 stamp → 이 step 은 현재 resume 세대에서 재시작되지 않은
+    //   이전 세대 잔존물 — 무음 스킵(stale). (b) stamp 이 일치해도 generation CAS 를 where 에
+    //   추가해 select/update 사이 concurrent resume reset 이 끼어들면 0 row 로 무음 스킵한다.
+    //   ordinary run(step stamp 없음)은 조건 추가 없이 기존 where 그대로 — byte-identical.
+    const resumeStamp = readOwnResumeRequestId(stepRun.metadata);
+    if (resumeStamp !== null && readOwnResumeRequestId(stepRun.runMetadata) !== resumeStamp) continue;
+    const resumeCloseoutCondition = resumeStamp !== null
+      ? eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration)
+      : undefined;
     const [updated] = await input.db
       .update(workflowStepRuns)
       .set({
@@ -61,7 +74,13 @@ export async function completeLinkedWorkflowStepRunsForIssue(input: {
         startedAt: attemptStartedAt,
         completedAt: input.completedAt,
       })
-      .where(and(eq(workflowStepRuns.id, stepRun.id), ACTIVE_STEP_STATUS_CONDITION))
+      .where(resumeCloseoutCondition
+        ? and(
+          eq(workflowStepRuns.id, stepRun.id),
+          ACTIVE_STEP_STATUS_CONDITION,
+          resumeCloseoutCondition,
+        )
+        : and(eq(workflowStepRuns.id, stepRun.id), ACTIVE_STEP_STATUS_CONDITION))
       .returning({
         id: workflowStepRuns.id,
         transitionVersion: workflowStepRuns.statusTransitionVersion,

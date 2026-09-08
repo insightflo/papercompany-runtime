@@ -19,6 +19,7 @@ import {
 import { startEmbeddedPostgresTestDatabase } from "./embedded-postgres.js";
 import { buildQaCapKey } from "../../services/workflow/source-issue-cap-override.js";
 import { wakeExistingWorkflowStepIssue } from "../../services/workflow/dag-engine.js";
+import { createWorkflowRun } from "../../services/workflow/workflow-store.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
@@ -79,6 +80,9 @@ export interface SeedOpts {
   decisionAuthorAgentId?: string;   // default: owner agent (authorized). override to test wrong author.
   decision?: string;                // default: retry_source_issue. override to test wrong decision.
   decisionCreatedAt?: Date;         // default: after producer completion. override to test stale.
+  // [task5a2b] frozen variant: run via store.createWorkflowRun (real snapshot capture + creation marker), then restore test-state status/timestamps.
+  frozenDefinition?: boolean;
+  frozenStepsJson?: (agents: { producerAgentId: string; qaAgentId: string }) => unknown;
 }
 
 export interface Seed {
@@ -111,7 +115,7 @@ export async function seedCapExhaustedRun(db: Db, overrides: SeedOpts = {}): Pro
   const qaAgentId = randomUUID();
   const missionId = randomUUID();
   const workflowId = randomUUID();
-  const workflowRunId = randomUUID();
+  let workflowRunId = randomUUID();
   const producerIssueId = randomUUID();
   const qaIssueId = randomUUID();
   const producerStepRunId = randomUUID();
@@ -131,17 +135,29 @@ export async function seedCapExhaustedRun(db: Db, overrides: SeedOpts = {}): Pro
     { id: qaAgentId, companyId, name: "QA Agent", role: "qa", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
   ]);
   await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Cap override mission", status: "active" });
+  const defaultStepsJson = [
+    { id: PRODUCER, name: "Produce artifact", agentId: producerAgentId, dependencies: [], conditionalDependencies: [{ stepId: QA, when: "qa_request_changes", isBackEdge: true, maxIterations: MAX_ITER }], description: "Produce the artifact" },
+    { id: QA, name: "[QA] Validate the produced artifact", agentId: qaAgentId, dependencies: [PRODUCER], description: "QA gate" },
+  ];
+  const stepsJson = overrides.frozenDefinition && overrides.frozenStepsJson
+    ? overrides.frozenStepsJson({ producerAgentId, qaAgentId })
+    : defaultStepsJson;
   await db.insert(workflowDefinitions).values({
     id: workflowId, companyId, name: "cap-override-loop",
-    stepsJson: [
-      { id: PRODUCER, name: "Produce artifact", agentId: producerAgentId, dependencies: [], conditionalDependencies: [{ stepId: QA, when: "qa_request_changes", isBackEdge: true, maxIterations: MAX_ITER }], description: "Produce the artifact" },
-      { id: QA, name: "[QA] Validate the produced artifact", agentId: qaAgentId, dependencies: [PRODUCER], description: "QA gate" },
-    ],
+    stepsJson: stepsJson as typeof defaultStepsJson,
   });
-  await db.insert(workflowRuns).values({
-    id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system",
-    status: overrides.runStatus ?? "failed", startedAt: RUN_STARTED, completedAt: RUN_COMPLETED,
-  });
+  if (overrides.frozenDefinition) {
+    const created = await createWorkflowRun(db, { workflowId, companyId, missionId, triggeredBy: "task5a2b" });
+    workflowRunId = created.id;
+    await db.update(workflowRuns).set({
+      status: overrides.runStatus ?? "failed", startedAt: RUN_STARTED, completedAt: RUN_COMPLETED,
+    }).where(eq(workflowRuns.id, workflowRunId));
+  } else {
+    await db.insert(workflowRuns).values({
+      id: workflowRunId, workflowId, companyId, missionId, triggeredBy: "system",
+      status: overrides.runStatus ?? "failed", startedAt: RUN_STARTED, completedAt: RUN_COMPLETED,
+    });
+  }
   await db.insert(issues).values([
     { id: producerIssueId, companyId, missionId, title: "Produce artifact", status: overrides.producerIssueStatus ?? "todo", assigneeAgentId: producerAgentId, originKind: "workflow_execution", originRunId: workflowRunId, startedAt: PRODUCER_STARTED, completedAt: PRODUCER_COMPLETED, updatedAt: PRODUCER_ISSUE_UPDATED_AT },
     { id: qaIssueId, companyId, missionId, title: "[QA] Validate", status: "done", assigneeAgentId: qaAgentId, originKind: "workflow_execution", originRunId: workflowRunId, startedAt: new Date("2026-07-10T00:00:01.000Z") },

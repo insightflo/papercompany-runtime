@@ -9,13 +9,7 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
-
-type DigestWorkflowStep = {
-  id: string;
-  name: string;
-  dependencies: string[];
-  toolNames?: string[];
-};
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 
 function asTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -50,32 +44,6 @@ export function metadataDigestPath(metadata: Record<string, unknown> | null | un
     : null;
 }
 
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-}
-
-function normalizeWorkflowStepsForDigest(rawSteps: unknown): DigestWorkflowStep[] {
-  if (!Array.isArray(rawSteps)) return [];
-  return rawSteps.map((rawStep) => {
-    const step = isRecord(rawStep) ? rawStep : {};
-    const rawId = asTrimmedString(step.id);
-    const id = rawId ?? crypto.randomUUID();
-    return {
-      id,
-      name: asTrimmedString(step.name) ?? asTrimmedString(step.title) ?? rawId ?? "Untitled step",
-      dependencies: asStringArray(step.dependencies).length > 0
-        ? asStringArray(step.dependencies)
-        : asStringArray(step.dependsOn),
-      toolNames: [
-        ...asStringArray(step.toolNames),
-        ...asStringArray(step.tools),
-        ...(asTrimmedString(step.toolName) ? [asTrimmedString(step.toolName)!] : []),
-      ],
-    };
-  });
-}
-
 const MISSION_WORKFLOW_STEP_STATUSES = new Set([
   "pending",
   "running",
@@ -104,7 +72,6 @@ export async function buildMissionExecutionDigest(
     .select({
       run: workflowRuns,
       workflowName: workflowDefinitions.name,
-      workflowSteps: workflowDefinitions.stepsJson,
     })
     .from(workflowRuns)
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
@@ -134,10 +101,15 @@ export async function buildMissionExecutionDigest(
     stepRunsByRunId.set(stepRun.workflowRunId, entries);
   }
 
-  for (const { run, workflowName, workflowSteps } of runRows) {
+  for (const { run, workflowName } of runRows) {
+    // run 당 1회 로드 — snapshot 이면 저장된 steps/캡처 이름, unmarked legacy 만 current fallback.
+    const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
+    const displayedWorkflowName = execution.source === "snapshot"
+      ? execution.provenance?.workflowName ?? workflowName
+      : workflowName;
+    const definitionSteps = execution.steps;
     const startedAt = run.startedAt ? run.startedAt.toISOString() : "not_started";
     const completedAt = run.completedAt ? run.completedAt.toISOString() : "open";
-    const definitionSteps = normalizeWorkflowStepsForDigest(workflowSteps);
     const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
     const rawStepRuns = [...(stepRunsByRunId.get(run.id) ?? [])].sort((left, right) => {
       const leftIndex = definitionStepOrder.get(left.stepId) ?? Number.MAX_SAFE_INTEGER;
@@ -174,7 +146,7 @@ export async function buildMissionExecutionDigest(
       });
     }
 
-    lines.push(`Workflow run: ${workflowName ?? run.workflowId} (${run.id}) status=${run.status} started=${startedAt} completed=${completedAt}`);
+    lines.push(`Workflow run: ${displayedWorkflowName ?? run.workflowId} (${run.id}) status=${run.status} started=${startedAt} completed=${completedAt}`);
     const remainingSteps = steps
       .filter((step) => !["completed", "done"].includes(step.status))
       .map((step) => `${step.stepId}:${step.status}`);

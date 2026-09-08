@@ -308,3 +308,8 @@ export type {
   PluginJobRunRecord,
   PluginWebhookDeliveryRecord,
 } from "./plugin.js";
+export type {
+  ResumeBlocker,
+  ResumePreview,
+  ResumeRequestView,
+} from "./workflow-resume.js";

@@ -19,6 +19,7 @@ import {
   type WorkflowSyncSource,
 } from "./workflow-sync-source.js";
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
+import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
@@ -37,14 +38,8 @@ import {
   renderMissionQualityReviewLines,
   renderVerificationBeforeCompletionGateLines,
 } from "../missions/mission-quality-contract.js";
-import {
-  hasExistingDeliveryReadbackStep,
-  isDeliveryRelevantStep,
-  strengthenDeliveryReadbackSteps,
-  synthesizeDeliveryVerificationGateStep,
-} from "./delivery-verification-gate.js";
 import { logActivity } from "../activity-log.js";
-import { normalizeConditionalEdges, type ConditionalEdge } from "./control-flow/types.js";
+import type { ConditionalEdge } from "./control-flow/types.js";
 import {
   classifyStepActivation,
   findSkippableSteps,
@@ -74,15 +69,11 @@ import {
 } from "../work-products/artifact-registration-instructions.js";
 import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workflow-upsert.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
-import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
-import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
 import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue, stripShellEscapeResidue } from "./tool-step-args.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
 import { STEP_MACHINE_CHECKS_TOOL, evaluateStepMachineChecks, renderMachineCheckFailure } from "./step-machine-checks.js";
 import { applyMachineContractTruth } from "./tool-result-truth.js";
-import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
-import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { validateWorkflowControlNodes } from "./control-flow/control-node-validation.js";
 import {
   executeWorkflowControlNode,
@@ -115,6 +106,25 @@ import { markRetryDispatching } from "./retry-dispatch-state.js";
 import { retryIssueLessToolWorkflowStepInternal } from "./retry-issue-less-manual.js";
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
 import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
+import {
+  getWorkflowLaunchSteps,
+  isDynamicOwnerPlanWorkflowDefinition,
+  type PersistedWorkflowStep,
+  type WorkflowDefinitionExecutionShape,
+} from "./execution-steps.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
+import { projectExecutionDefinition } from "./execution-definition-view.js";
+import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
+import { assertResumeAccepted } from "./resume/acceptance.js";
+import { assertResumeExecutionReadiness } from "./resume/readiness.js";
+import { withResumeSerialization, type ResumeMutationTransaction } from "./resume/serialization.js";
+export {
+  buildWorkflowExecutionSteps,
+  getWorkflowLaunchSteps,
+  isDynamicOwnerPlanWorkflowDefinition,
+  normalizeWorkflowStepsForExecution,
+  type WorkflowDefinitionExecutionInput,
+} from "./execution-steps.js";
 export { markRetryDispatching };
 
 /**
@@ -202,28 +212,6 @@ export interface WorkflowStepExecutionControls {
   cacheTtlSeconds?: number;
   deleteAfterUse?: boolean;
 }
-
-type PersistedWorkflowStep = WorkflowStep & {
-  title?: unknown;
-  dependsOn?: unknown;
-  tools?: unknown;
-  toolName?: unknown;
-  toolArgs?: unknown;
-  type?: unknown;
-  qaType?: unknown;
-  agentName?: unknown;
-  executionControls?: unknown;
-  graphConcurrencyKey?: unknown;
-  graphConcurrencyLimit?: unknown;
-  graphPriority?: unknown;
-  graphCacheEnabled?: unknown;
-  graphCacheTtlSeconds?: unknown;
-  graphDeleteAfterUse?: unknown;
-  graphWorkProductRequired?: unknown;
-  autoApproveTools?: unknown;
-  workProductRequired?: unknown;
-  requiresWorkProduct?: unknown;
-};
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
 
@@ -318,225 +306,8 @@ export type WorkflowExecutionContext = {
   stepRuns: (typeof workflowStepRuns.$inferSelect)[];
 };
 
-type WorkflowDefinitionExecutionShape = {
-  name?: unknown;
-  executionMode?: unknown;
-  dynamicPlanBootstrapOnly?: unknown;
-  workflowMode?: unknown;
-  steps?: WorkflowStep[];
-};
-
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (Array.isArray(value)) {
-    const strings = value
-      .map((item) => typeof item === "string" ? item.trim() : "")
-      .filter(Boolean);
-    return strings.length > 0 ? strings : undefined;
-  }
-  if (typeof value === "string") {
-    const strings = value.split(",").map((item) => item.trim()).filter(Boolean);
-    return strings.length > 0 ? strings : undefined;
-  }
-  return undefined;
-}
-
 function normalizeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function normalizeBooleanMarker(value: unknown): boolean | undefined {
-  if (value === true) return true;
-  if (value === false) return false;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") return true;
-    if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off" || normalized === "") return false;
-  }
-  return undefined;
-}
-
-function normalizePositiveInteger(value: unknown): number | undefined {
-  const numberValue = typeof value === "number"
-    ? value
-    : typeof value === "string" && value.trim()
-      ? Number(value.trim())
-      : NaN;
-  if (!Number.isFinite(numberValue)) return undefined;
-  const integer = Math.trunc(numberValue);
-  return integer > 0 ? integer : undefined;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function normalizeWorkflowStepExecutionControls(step: PersistedWorkflowStep): WorkflowStepExecutionControls | undefined {
-  const rawControls = normalizeRecord(step.executionControls);
-  const concurrencyKey = normalizeOptionalString(rawControls.concurrencyKey) ?? normalizeOptionalString(step.graphConcurrencyKey);
-  const concurrencyLimit = normalizePositiveInteger(rawControls.concurrencyLimit) ?? normalizePositiveInteger(step.graphConcurrencyLimit);
-  const priority = (normalizeOptionalString(rawControls.priority) ?? normalizeOptionalString(step.graphPriority))?.toLowerCase();
-  const explicitCacheEnabled = normalizeBooleanMarker(rawControls.cacheEnabled) ?? normalizeBooleanMarker(step.graphCacheEnabled);
-  const cacheTtlSeconds = normalizePositiveInteger(rawControls.cacheTtlSeconds) ?? normalizePositiveInteger(step.graphCacheTtlSeconds);
-  const deleteAfterUse = normalizeBooleanMarker(rawControls.deleteAfterUse) ?? normalizeBooleanMarker(step.graphDeleteAfterUse);
-  const controls: WorkflowStepExecutionControls = {};
-
-  if (concurrencyKey) controls.concurrencyKey = concurrencyKey;
-  if (concurrencyLimit) controls.concurrencyLimit = concurrencyLimit;
-  if (priority) controls.priority = priority;
-  if (explicitCacheEnabled === true || cacheTtlSeconds) {
-    controls.cacheEnabled = true;
-  }
-  if (controls.cacheEnabled && cacheTtlSeconds) {
-    controls.cacheTtlSeconds = cacheTtlSeconds;
-  }
-  if (deleteAfterUse === true) controls.deleteAfterUse = true;
-
-  return Object.keys(controls).length > 0 ? controls : undefined;
-}
-
-export function normalizeWorkflowStepsForExecution(rawSteps: unknown): WorkflowStep[] {
-  if (!Array.isArray(rawSteps)) return [];
-  return rawSteps.map((rawStep) => {
-    const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as PersistedWorkflowStep;
-    const id = typeof step.id === "string" && step.id.trim() ? step.id.trim() : crypto.randomUUID();
-    const name = typeof step.name === "string" && step.name.trim()
-      ? step.name.trim()
-      : typeof step.title === "string" && step.title.trim()
-        ? step.title.trim()
-        : typeof step.id === "string" && step.id.trim()
-          ? step.id.trim()
-          : "Untitled step";
-    const dependencies = normalizeStringArray(step.dependencies) ?? normalizeStringArray(step.dependsOn) ?? [];
-    const toolNames = normalizeStringArray(step.toolNames)
-      ?? normalizeStringArray(step.tools)
-      ?? normalizeStringArray(step.toolName);
-    const executionControls = normalizeWorkflowStepExecutionControls(step);
-    const conditionalDependencies = normalizeConditionalEdges(step.conditionalDependencies);
-    const qaType = normalizeWorkflowQaType(step.qaType);
-    const graphWorkProductRequired = isQaLikeStep({
-      id,
-      name,
-      title: typeof step.title === "string" ? step.title : undefined,
-      type: typeof step.type === "string" ? step.type : undefined,
-      qaType,
-    })
-      ? false
-      : readWorkProductRequirementMarker(step) === true;
-    const autoApproveTools = step.autoApproveTools === true ? true : undefined;
-    return {
-      ...step,
-      id,
-      name,
-      agentId: typeof step.agentId === "string" ? step.agentId : "",
-      dependencies,
-      qaType: qaType ?? undefined,
-      ...(toolNames ? { toolNames } : {}),
-      ...(executionControls ? { executionControls } : {}),
-      // raw 를 normalized(또는 undefined)로 덮어쓴다 — undefined 면 직렬화에서 생략.
-      conditionalDependencies,
-      graphWorkProductRequired,
-      autoApproveTools,
-    };
-  });
-}
-
-function isTruthyBooleanMarker(value: unknown): boolean {
-  return value === true || value === "true" || value === "1";
-}
-
-function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
-  return isTruthyBooleanMarker(step.dynamicChildren)
-    || isTruthyBooleanMarker(step.ownerPlanBootstrapOnly)
-    || isTruthyBooleanMarker(step.bootstrapOnly)
-    || step.executionMode === "dynamic_owner_plan"
-    || step.workflowMode === "dynamic_owner_plan";
-}
-
-function hasRootPlanningStep(steps: WorkflowStep[]): boolean {
-  return steps.some((step) => {
-    if (step.triggerOn === "escalation" || step.dependencies.length > 0) {
-      return false;
-    }
-    const id = step.id.toLowerCase();
-    const name = step.name.toLowerCase();
-    return id === "plan" || id.endsWith("-plan") || name.includes("plan") || name.includes("계획");
-  });
-}
-
-function isLegacyResearchDailyWorkflowName(name: unknown): boolean {
-  if (typeof name !== "string") return false;
-  const normalized = name.trim().toLowerCase();
-  return normalized === "tech-scout"
-    || normalized === "tech-ai-news"
-    || normalized === "daily-tech-scout"
-    || normalized === "daily-tech-ai-news";
-}
-
-export function isDynamicOwnerPlanWorkflowDefinition(
-  definition: WorkflowDefinitionExecutionShape,
-): boolean {
-  if (definition.executionMode === "static_dag" || definition.workflowMode === "static_dag") {
-    return false;
-  }
-
-  if (
-    definition.executionMode === "dynamic_owner_plan"
-    || definition.workflowMode === "dynamic_owner_plan"
-    || isTruthyBooleanMarker(definition.dynamicPlanBootstrapOnly)
-  ) {
-    return true;
-  }
-
-  const steps = Array.isArray(definition.steps) ? definition.steps : [];
-  if (steps.some(isDynamicOwnerPlanStep)) {
-    return true;
-  }
-
-  return isLegacyResearchDailyWorkflowName(definition.name) && hasRootPlanningStep(steps);
-}
-
-export function getWorkflowLaunchSteps(
-  steps: WorkflowStep[],
-  options: { dynamicOwnerPlan?: boolean } = {},
-): WorkflowStep[] {
-  if (!options.dynamicOwnerPlan) return steps;
-  return steps.filter((step) => step.triggerOn !== "escalation" && step.dependencies.length === 0);
-}
-
-export interface WorkflowDefinitionExecutionInput {
-  readonly name: unknown;
-  readonly stepsJson: unknown;
-  readonly executionMode?: unknown;
-  readonly dynamicPlanBootstrapOnly?: unknown;
-  readonly workflowMode?: unknown;
-}
-
-export function buildWorkflowExecutionSteps(definition: WorkflowDefinitionExecutionInput): WorkflowStep[] {
-  let steps = normalizeWorkflowStepsForExecution(definition.stepsJson);
-  if (
-    !isDynamicOwnerPlanWorkflowDefinition({
-      name: definition.name,
-      executionMode: definition.executionMode,
-      dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
-      workflowMode: definition.workflowMode,
-      steps,
-    })
-  ) {
-    const deliverySteps = steps.filter(isDeliveryRelevantStep);
-    if (deliverySteps.length > 0 && hasExistingDeliveryReadbackStep(steps)) {
-      steps = strengthenDeliveryReadbackSteps(steps);
-    } else if (deliverySteps.length > 0) {
-      const gateAgentId = deliverySteps[deliverySteps.length - 1]?.agentId ?? "";
-      steps = [
-        ...steps,
-        synthesizeDeliveryVerificationGateStep({
-          dependencyStepIds: deliverySteps.map((step) => step.id),
-          agentId: gateAgentId,
-        }),
-      ];
-    }
-  }
-  return steps;
 }
 
 function buildWorkflowDefinitionExecutionShape(context: WorkflowExecutionContext): WorkflowDefinitionExecutionShape {
@@ -644,34 +415,6 @@ function dfsReachable(step: WorkflowStep, allSteps: WorkflowStep[], visited: Set
       dfsReachable(dep, allSteps, visited);
     }
   }
-}
-
-async function loadWorkflowExecutionContext(db: Db, runId: string): Promise<WorkflowExecutionContext> {
-  const runResult = await db
-    .select({
-      run: workflowRuns,
-      definition: workflowDefinitions,
-    })
-    .from(workflowRuns)
-    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-    .where(eq(workflowRuns.id, runId))
-    .limit(1);
-
-  if (!runResult[0]) {
-    throw new Error(`Workflow run ${runId} not found`);
-  }
-
-  const { run, definition } = runResult[0] as {
-    run: typeof workflowRuns.$inferSelect;
-    definition: typeof workflowDefinitions.$inferSelect;
-  };
-  const steps = buildWorkflowExecutionSteps(definition);
-  const stepRuns = await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, runId));
-
-  return { run, definition, steps, stepRuns };
 }
 
 async function ensureStepRunRecords(
@@ -1580,11 +1323,13 @@ async function createWorkflowStepIssue(input: {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
+  /** [Task5a2a] 캡처된 실행 steps(loader 결과) — 로컬 builder 로 다시 정규화하지 않는다. */
+  steps: WorkflowStep[];
 }): Promise<string | null> {
   const issueSvc = issueService(input.db);
   const heartbeat = heartbeatService(input.db);
 
-  const executionSteps = buildWorkflowExecutionSteps(input.definition);
+  const executionSteps = input.steps;
   const structuralReadiness = await evaluateSemanticStructuralReadiness({
     db: input.db,
     companyId: input.run.companyId,
@@ -2067,14 +1812,29 @@ export async function wakeExistingWorkflowStepIssue(input: {
   /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
   idempotencyKey?: string | null;
 }): Promise<boolean> {
+  // [Task5a2a] external recovery paths 는 live steps/definition 을 넘길 수 있다. 진입 시 1회 로드해 snapshot 이면
+  //   caller 입력을 캡처 정의/저장 step 으로 대체하고(구조게이트·QA-cap 배열 소비자 모두 캡처 배열), 저장 step 이
+  //   없으면 mutation/wake 없이 false. legacy_current 는 caller step/definition 동작 + legacy builder 배열 유지.
+  const execution = await loadExecutionDefinition(input.db, input.run.id, { requireHistorical: false });
+  let effectiveInput = input;
+  if (execution.source === "snapshot") {
+    const storedStep = execution.steps.find((candidate) => candidate.id === input.step.id);
+    if (!storedStep) return false;
+    effectiveInput = {
+      ...input,
+      definition: projectExecutionDefinition(input.definition, execution),
+      step: storedStep,
+    };
+  }
+  const executionSteps = execution.steps;
   // This guards every resume entry point (normal recheck, reconciler, owner
   // recovery). A semantic QA issue may not be queued from status alone.
   const structuralReadiness = await evaluateSemanticStructuralReadiness({
     db: input.db,
     companyId: input.run.companyId,
     workflowRunId: input.run.id,
-    step: input.step,
-    steps: buildWorkflowExecutionSteps(input.definition),
+    step: effectiveInput.step,
+    steps: executionSteps,
   });
   if (!structuralReadiness.ready) return false;
 
@@ -2097,7 +1857,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
 
   let wakeIssue = issue;
   if (!wakeIssue.assigneeAgentId) {
-    const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, input.step);
+    const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, effectiveInput.step);
     if (!assigneeAgentId) return false;
 
     const [updatedIssue] = await input.db
@@ -2146,7 +1906,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
   const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
     db: input.db,
     workflowRunId: input.run.id,
-    predecessorStepIds: resolveEdges(input.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
+    predecessorStepIds: resolveEdges(effectiveInput.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
   });
   const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
     ? { acceptedQaLimitations: capAcceptanceContext }
@@ -2160,9 +1920,9 @@ export async function wakeExistingWorkflowStepIssue(input: {
     .from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, input.run.id));
   const qaCapAcceptanceContract = buildQaCapAcceptanceRuntimeContract({
-    qaStep: input.step,
+    qaStep: effectiveInput.step,
     qaIssueId: issue.id,
-    steps: buildWorkflowExecutionSteps(input.definition),
+    steps: executionSteps,
     stepRuns: executionStepRuns,
   });
   const qaCapAcceptancePayload = qaCapAcceptanceContract
@@ -2734,6 +2494,8 @@ async function startIssueLessToolStepRun(input: {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
+  /** [Task5a2a] 캡처된 실행 steps(loader 결과) — raw definition.stepsJson 재정규화 금지. */
+  steps: WorkflowStep[];
   stepRun: typeof workflowStepRuns.$inferSelect;
   now: Date;
 }): Promise<boolean> {
@@ -2741,7 +2503,7 @@ async function startIssueLessToolStepRun(input: {
 
   const toolName = getSingleToolStepName(step);
   const requestId = `${run.id}:${step.id}:${Date.now()}`;
-  const workflowSteps = normalizeWorkflowStepsForExecution(definition.stepsJson);
+  const workflowSteps = input.steps;
   let args: unknown;
   try {
     args = await resolveWorkflowToolStepArgs({
@@ -2942,7 +2704,9 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
   let orphanedCount = 0;
   let skippedCount = 0;
   for (const row of candidateRows) {
-    const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+    // [Task5a2a] step 선택/실패 mutation 전에 캡처 실행정의를 로드한다. 타임아웃 정책/카운터/
+    //   persisted invocation 권위/에러 fallback 은 변경 없다.
+    const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
     if (!step || !isIssueLessToolStep(step)) {
       skippedCount += 1;
@@ -3013,7 +2777,10 @@ export async function processQueuedWorkflowToolStepRuns(
 
   for (const row of queuedRows) {
     const now = options.now ?? new Date();
-    const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+    // [Task5a2a] 활성화/claim/tool call 전에 각 선택 행의 캡처 실행정의를 로드하고 delegation 기본
+    //   title 은 캡처 name(projected definition)에서 만든다. persisted toolInvocation 권위 유지.
+    const execution = await loadExecutionDefinition(db, row.run.id, { requireHistorical: false });
+    const steps = execution.steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
     if (!step || !isIssueLessToolStep(step)) {
       result.skippedCount += 1;
@@ -3076,7 +2843,12 @@ export async function processQueuedWorkflowToolStepRuns(
       },
     };
 
-    const claimedStepRun = await db
+    // [Task6b-2 bounded queue-claim lock] 기존 conditional claim UPDATE 를 apply 와 같은
+    //   mission→run→steps FOR UPDATE 순서의 짧은 tx 안에서 실행한다(serialization 헬퍼 재사용,
+    //   SQL 중복 없음). claim 결과 판정(0 rows skip) 이후 위임/executor dispatch, complete/fail 은
+    //   잠금 밖 기존 경로 그대로다. mission 미연결 ordinary run 은 잠글 mission 이 없으므로
+    //   기존 direct claim 을 유지한다(serialization 실패 시 스킵, 다음 틱 재시도).
+    const claimStepRun = (executor: Pick<ResumeMutationTransaction, "update">) => executor
       .update(workflowStepRuns)
       .set({
         lastDispatchAcceptedAt: now,
@@ -3091,6 +2863,13 @@ export async function processQueuedWorkflowToolStepRuns(
       ))
       .returning()
       .then((rows) => rows[0] ?? null);
+    const claimedStepRun = row.run.missionId === null
+      ? await claimStepRun(db)
+      : await withResumeSerialization(db, {
+        companyId: row.run.companyId,
+        missionId: row.run.missionId,
+        runId: row.run.id,
+      }, (lock) => claimStepRun(lock.tx)).catch(() => null);
 
     if (!claimedStepRun) {
       result.skippedCount += 1;
@@ -3104,7 +2883,7 @@ export async function processQueuedWorkflowToolStepRuns(
         const delegated = await startDelegatedWorkflowStep({
           db,
           run: row.run,
-          definition: row.definition,
+          definition: projectExecutionDefinition(row.definition, execution),
           step,
           stepRun: claimedStepRun,
           args,
@@ -3320,12 +3099,25 @@ export async function completeWorkflowToolStepFromResult(
   if (!row || row.run.companyId !== input.companyId) return null;
   if (input.workflowRunId && input.workflowRunId !== row.run.id) return null;
   if (input.stepId && input.stepId !== row.stepRun.stepId) return null;
+  // [Task6c-A] resume run 결과 수용은 정확한 dispatch 신원을 요구한다. requestId 가 없거나
+  //   현재 dispatch 와 다르면 이 결과는 이전/미지 세대의 늦은 도착물 — zero write 로
+  //   snapshot 만 돌려준다(ordinary run 은 이 가드가 없어 기존과 byte-identical). 이 가드는
+  //   resetForResume 이 stamp 한 own non-null metadata.resumeRequestId 로만 판정한다.
+  const resumeScopeRequestId = readOwnResumeRequestId(row.stepRun.metadata);
+  if (
+    resumeScopeRequestId !== null
+    && (input.requestId === undefined || input.requestId !== row.stepRun.lastDispatchRequestId)
+  ) {
+    return getWorkflowExecutionResultSnapshot(db, row.run.id);
+  }
   if (input.requestId && row.stepRun.lastDispatchRequestId && input.requestId !== row.stepRun.lastDispatchRequestId) {
     return null;
   }
   // [Hybrid QA] Structural gate callback guard and verdict handling (extracted).
-  const stepForGuard = normalizeWorkflowStepsForExecution(row.definition.stepsJson)
-    .find((candidate) => candidate.id === row.stepRun.stepId);
+  // [Task5a2a] snapshot 을 artifact/step metadata/status mutation(terminal recovery 포함) 전에
+  //   검증한다(422 fail-closed). 이후 두 step lookup 이 같은 로드 배열을 쓴다(2차 raw 정규화 삭제).
+  const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
+  const stepForGuard = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   // [tool truth — 2026-09-02] 기계 계약 실패(data.ok===false)는 success=true여도 실패로 기록.
   // 구조 게이트는 verdict 원장 계약상 제외. 상세: tool-result-truth.ts
   input = {
@@ -3352,7 +3144,6 @@ export async function completeWorkflowToolStepFromResult(
   const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
     ? row.stepRun.metadata
     : {};
-  const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
   const artifactPath = readWorkflowToolArtifactPath({
@@ -3428,6 +3219,18 @@ export async function completeWorkflowToolStepFromResult(
   // entirely, so we set it here on successful completion (only if not already set).
   const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
   const nextStatus = effectiveSuccess ? "completed" : "failed";
+  // [Task6c-A] resume run 의 최종 UPDATE 는 세대 CAS 로 강화된다: load 시점과 update 시점 사이
+  //   resetForResume 이 executionGeneration/statusTransitionVersion 을 정확히 함께 +1 하고 새
+  //   resumeRequestId 로 stamp 을 교체하므로, (generation, transitionVersion) 이 여전히 일치하는
+  //   행은 필연히 같은 resumeRequestId 를 가진다(metadata 동등성은 이 CAS 가 보장 — 별도 where
+  //   불필요). 0 row 이면 stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다. ordinary run
+  //   은 where(eq(id)) 그대로 유지된다.
+  const resumeCasCondition = resumeScopeRequestId !== null
+    ? and(
+      eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
+      eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion),
+    )
+    : undefined;
   const [updatedStepRun] = await db.update(workflowStepRuns).set({
     status: nextStatus,
     startedAt: row.stepRun.startedAt ?? now, completedAt: now,
@@ -3438,11 +3241,17 @@ export async function completeWorkflowToolStepFromResult(
       : structuralContractFailure ? "structural_gate_contract_failure"
       : (input.error ?? input.stderr ?? null),
     metadata: resultMetadata,
-  }).where(eq(workflowStepRuns.id, row.stepRun.id)).returning({
+  }).where(resumeCasCondition
+    ? and(eq(workflowStepRuns.id, row.stepRun.id), resumeCasCondition)
+    : eq(workflowStepRuns.id, row.stepRun.id)).returning({
     id: workflowStepRuns.id,
     transitionVersion: workflowStepRuns.statusTransitionVersion,
   });
-  if (updatedStepRun) {
+  if (!updatedStepRun) {
+    // [Task6c-A] stale resume 결과: 한 건도 쓰지 않고 현재 상태 snapshot 으로 수렴.
+    return getWorkflowExecutionResultSnapshot(db, row.run.id);
+  }
+  {
     await recordWorkflowStepStatusTransition(db, {
       companyId: row.run.companyId,
       missionId: row.run.missionId,
@@ -3706,6 +3515,12 @@ export async function syncWorkflowRunState(
 ): Promise<WorkflowExecutionResult> {
   const normalizedSource = normalizeWorkflowSyncSource(source);
   const context = await loadWorkflowExecutionContext(db, runId);
+  // [Task6b resume native entry] resume 수락 가드 — ensureStepRunRecords 를 포함한 모든 sync
+  //   쓰기(step 레코드 생성/메타데이터 mutation)보다 엄격히 앞선다. own resumeRequestId 가
+  //   없는 ordinary run 은 no-op 이고, resume run 은 durable 수락 계약 위반 시 conflict 로
+  //   중단한다(catch-and-continue 없음; 기존 caller 에러 처리 유지). SELECT 가드일 뿐이며
+  //   queue/claim/dispatch 의 공통 lock/TOCTOU 방어를 대체하지 않는다.
+  await assertResumeAccepted(db, runId, context.run.dispatchAuthorityVersion);
   let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
   const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
@@ -3905,6 +3720,7 @@ export async function syncWorkflowRunState(
             run: context.run,
             definition: context.definition,
             step,
+            steps: context.steps,
             stepRun,
             now: new Date(),
           });
@@ -3947,6 +3763,7 @@ export async function syncWorkflowRunState(
           run: context.run,
           definition: context.definition,
           step,
+          steps: context.steps,
         });
         if (!issueId) continue;
         await db
@@ -4111,24 +3928,15 @@ export async function executeWorkflowRun(
   runId: string,
 ): Promise<WorkflowExecutionResult> {
   const context = await loadWorkflowExecutionContext(db, runId);
-  await assertWorkflowToolStepsReady({
-    companyId: context.run.companyId,
-    steps: context.steps,
-  });
-  // [Hybrid QA] Persisted runtime execution: a structural gate must fail closed
-  //   here too (tool registered + enabled + structural_validation_v1 capability
-  //   + assignee grant), even if the definition was inserted bypassing the engine
-  //   create/update path. Ordinary tool/agent steps are unaffected.
-  const structuralErrors = await validateStructuralGateReadinessForSteps({
+  // [Hybrid QA] readiness 블록은 resume/readiness.ts 로 추출됐다 — 기존과 동일한 tool 체커를
+  //   콜백으로 주입해 tool check → structural gate readiness/topology 순서와 에러를 유지한다.
+  //   시작(startedAt/start activation) 트랜잭션은 아래에서 그대로 유지된다.
+  await assertResumeExecutionReadiness({
     db,
     companyId: context.run.companyId,
     steps: context.steps,
+    assertToolsReady: assertWorkflowToolStepsReady,
   });
-  const structuralTopologyErrors = getStructuralTopologyErrors(context.steps);
-  const allStructuralErrors = [...structuralErrors, ...structuralTopologyErrors];
-  if (allStructuralErrors.length > 0) {
-    throw new Error(`Structural gate validation failed: ${allStructuralErrors.join("; ")}`);
-  }
   const startedAt = new Date();
   await db.transaction(async (tx) => {
     const [startedRun] = await tx

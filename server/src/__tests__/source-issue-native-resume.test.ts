@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agentWakeupRequests, agents, companies, createDb, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 
@@ -7,7 +7,18 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+// [task5a2b external-boundary isolation] the scenarios below use the REAL heartbeat/queue path with
+// codex_local agents. The recording adapter stub keeps every DB write (wake + heartbeat rows) but
+// guarantees no CLI/adapter process is ever spawned during tests. No scenario assertion changes.
+const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
+vi.mock("../adapters/index.js", () => ({
+  getServerAdapter: vi.fn(() => ({ supportsLocalAgentJwt: false, execute: executeSpy })),
+  runningProcesses: new Map(),
+}));
+
 import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
+import { drainHeartbeatRuns } from "./helpers/cap-override-fixtures.js";
 
 // [목적] owner-action 회복(Unblock 완료 · app.ts owner-decision retry callback)이 공유하는 검증된
 //   native DAG 헬퍼(dispatchSourceIssueNativeResume → wakeExistingWorkflowStepIssue) 의 계약 검증.
@@ -32,6 +43,10 @@ describeEmbeddedPostgres("dispatchSourceIssueNativeResume (validated native DAG 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-native-resume-");
     db = createDb(tempDb.connectionString);
+    executeSpy.mockResolvedValue({
+      exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null,
+      provider: "test", model: "test-model", resultJson: null, runtimeServices: [],
+    });
     companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -47,6 +62,8 @@ describeEmbeddedPostgres("dispatchSourceIssueNativeResume (validated native DAG 
   }, 60_000);
 
   afterAll(async () => {
+    // recording-adapter async postprocessing must settle before the temp DB dies (ECONNRESET guard).
+    await drainHeartbeatRuns(db);
     await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   });

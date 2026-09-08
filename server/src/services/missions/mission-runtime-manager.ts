@@ -7,6 +7,7 @@ import {
   missionRollingState,
   missions,
   issues,
+  type MissionAgentRuntimeStateJson,
   type MissionIssueHandoffDecisionUpdate,
   type MissionIssueHandoffEvidenceRef,
   type MissionIssueHandoffJson,
@@ -88,6 +89,8 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
   currentIssueId?: string | null;
   runId?: string | null;
   sessionId?: string | null;
+  /** Request-specific runtime identity; never reuse a pre-resume row or session. */
+  resumeContext?: { resumeRequestId: string };
 }) {
   await assertMissionRuntimeAcceptsWork(db, {
     companyId: input.companyId,
@@ -95,7 +98,10 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
   });
 
   const now = new Date();
-  const workspaceKey = input.workspaceKey?.trim() || input.workspaceId || "default";
+  const physicalWorkspaceKey = input.workspaceKey?.trim() || input.workspaceId || "default";
+  const workspaceKey = input.resumeContext
+    ? `resume-runtime:${JSON.stringify([physicalWorkspaceKey, input.resumeContext.resumeRequestId])}`
+    : physicalWorkspaceKey;
   const runtimeKey = buildMissionRuntimeKey({ ...input, workspaceKey });
 
   const existing = await db
@@ -111,6 +117,7 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
     .then((rows) => rows[0] ?? null);
 
   const bootstrapRequired = !existing?.contextInjectedAt;
+  const resumeMarker = input.resumeContext?.resumeRequestId ?? null;
 
   const [runtime] = await db
     .insert(missionAgentRuntimes)
@@ -125,7 +132,7 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
       status: "busy",
       currentIssueId: input.currentIssueId ?? null,
       lastRunId: input.runId ?? null,
-      sessionId: input.sessionId ?? null,
+      sessionId: input.resumeContext ? null : input.sessionId ?? null,
       startedAt: now,
       lastIssueEnvelopeAt: now,
       stateJson: {
@@ -134,6 +141,7 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
         bootstrapContextInjectedAt: existing?.contextInjectedAt ? existing.contextInjectedAt.toISOString() : null,
         lastIssueEnvelopeAt: now.toISOString(),
         workspaceKey,
+        ...(resumeMarker ? { resumeRequestId: resumeMarker } : {}),
       },
     })
     .onConflictDoUpdate({
@@ -147,13 +155,16 @@ export async function ensureMissionAgentRuntime(db: Db, input: {
         status: "busy",
         currentIssueId: input.currentIssueId ?? null,
         lastRunId: input.runId ?? null,
-        sessionId: input.sessionId ?? existing?.sessionId ?? null,
+        sessionId: input.resumeContext
+          ? sql`${missionAgentRuntimes.sessionId}`
+          : input.sessionId ?? existing?.sessionId ?? null,
         runtimeKey,
         workspaceId: input.workspaceId ?? existing?.workspaceId ?? null,
         lastIssueEnvelopeAt: now,
         stoppedAt: null,
         stopReason: null,
         updatedAt: now,
+
       },
     })
     .returning();
@@ -167,10 +178,10 @@ export async function markMissionRuntimeBootstrapInjected(db: Db, runtimeId: str
     .update(missionAgentRuntimes)
     .set({
       contextInjectedAt: now,
-      stateJson: {
+      stateJson: sql`coalesce(${missionAgentRuntimes.stateJson}, '{}'::jsonb) || ${JSON.stringify({
         bootstrapContextInjected: true,
         bootstrapContextInjectedAt: now.toISOString(),
-      },
+      })}::jsonb`,
       updatedAt: now,
     })
     .where(eq(missionAgentRuntimes.id, runtimeId));
@@ -216,25 +227,77 @@ function terminateRuntimeProcess(pid: number | null): { attempted: boolean; erro
   }
 }
 
+/**
+ * [Task6d 계약 E] resume 세대 표식 보존. 이전 stateJson 이 resumeRequestId 표식을 가진 행에서만
+ * (표식 행 한정) 다음 stateJson 쓰기에 표식을 재부착한다. 무표식 행은 완전 동일 — ordinary
+ * 미션 byte-identical. 표식은 진단 전용이지만 낡은 idle/reset 경로가 새 epoch 표식을 지우지
+ * 않도록 하는 계약 E 의 실제 방어선이다.
+ */
+export function preserveResumeEpochMarkers(
+  previous: MissionAgentRuntimeStateJson | null | undefined,
+  next: MissionAgentRuntimeStateJson,
+): MissionAgentRuntimeStateJson {
+  const marker = previous?.resumeRequestId;
+  if (typeof marker !== "string" || marker.length === 0) return next;
+  if (next.resumeRequestId === marker) return next;
+  return { ...next, resumeRequestId: marker };
+}
+
 export async function stopMissionRuntimesForMission(db: Db, input: {
   companyId: string;
   missionId: string;
   reason: string;
+  /** [Task6d 계약 B] 제공되면 종료(프로세스 kill + stopped UPDATE)를 캡처된 id 로만 제한한다. */
+  onlyRuntimeIds?: string[];
 }): Promise<number> {
   const now = new Date();
-  const activeRuntimes = await db
-    .select({ id: missionAgentRuntimes.id, processPid: missionAgentRuntimes.processPid })
-    .from(missionAgentRuntimes)
-    .where(and(
-      eq(missionAgentRuntimes.companyId, input.companyId),
-      eq(missionAgentRuntimes.missionId, input.missionId),
-      inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES]),
-    ));
+  const onlyIds = input.onlyRuntimeIds;
+  const scopedToIds = onlyIds !== undefined;
+  const activeRuntimes = scopedToIds
+    ? await db
+      .select({ id: missionAgentRuntimes.id, processPid: missionAgentRuntimes.processPid })
+      .from(missionAgentRuntimes)
+      .where(and(
+        eq(missionAgentRuntimes.companyId, input.companyId),
+        eq(missionAgentRuntimes.missionId, input.missionId),
+        inArray(missionAgentRuntimes.id, onlyIds),
+      ))
+    : await db
+      .select({ id: missionAgentRuntimes.id, processPid: missionAgentRuntimes.processPid })
+      .from(missionAgentRuntimes)
+      .where(and(
+        eq(missionAgentRuntimes.companyId, input.companyId),
+        eq(missionAgentRuntimes.missionId, input.missionId),
+        inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES]),
+      ));
 
-  const killResults = activeRuntimes.map((runtime) => ({
-    id: runtime.id,
-    ...terminateRuntimeProcess(runtime.processPid),
-  }));
+  let killResults: Array<{ id: string; attempted: boolean; error?: string }>;
+  if (scopedToIds) {
+    // [계약 B] kill 직전 행 재조회: id+company+mission+active 상태가 그대로일 때만 종료한다.
+    //   낡은(이미 stopped) 행은 kill 을 건너뛰고, DB stop 도 활성 상태일 때만 포함된다(아래 WHERE).
+    killResults = [];
+    for (const runtime of activeRuntimes) {
+      const [fresh] = await db
+        .select({ id: missionAgentRuntimes.id, status: missionAgentRuntimes.status, processPid: missionAgentRuntimes.processPid })
+        .from(missionAgentRuntimes)
+        .where(and(
+          eq(missionAgentRuntimes.id, runtime.id),
+          eq(missionAgentRuntimes.companyId, input.companyId),
+          eq(missionAgentRuntimes.missionId, input.missionId),
+        ))
+        .limit(1);
+      if (!fresh || !(ACTIVE_MISSION_RUNTIME_STATUSES as readonly string[]).includes(fresh.status)) {
+        killResults.push({ id: runtime.id, attempted: false });
+        continue;
+      }
+      killResults.push({ id: runtime.id, ...terminateRuntimeProcess(fresh.processPid) });
+    }
+  } else {
+    killResults = activeRuntimes.map((runtime) => ({
+      id: runtime.id,
+      ...terminateRuntimeProcess(runtime.processPid),
+    }));
+  }
 
   const stopped = await db
     .update(missionAgentRuntimes)
@@ -254,7 +317,9 @@ export async function stopMissionRuntimesForMission(db: Db, input: {
     .where(and(
       eq(missionAgentRuntimes.companyId, input.companyId),
       eq(missionAgentRuntimes.missionId, input.missionId),
-      inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES]),
+      ...(scopedToIds
+        ? [inArray(missionAgentRuntimes.id, onlyIds), inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES])]
+        : [inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES])]),
     ))
     .returning({ id: missionAgentRuntimes.id });
   return stopped.length;
@@ -935,15 +1000,19 @@ export async function reapStaleBusyMissionRuntimes(db: Db, opts?: {
         status: "idle",
         currentIssueId: null,
         lastError: `stale_busy_reaped: no queued/running heartbeat run backed this runtime for over ${Math.round(graceMs / 1000)}s`,
-        stateJson: {
-          ...previousState,
-          busyReaper: {
-            reapedAt: now.toISOString(),
-            graceMs,
-            previousStatus: "busy",
-            previousCurrentIssueId: runtime.currentIssueId,
+        // [Task6d 계약 E] resume 표식 행은 회수(idle 전환) 후에도 표식을 보존한다.
+        stateJson: preserveResumeEpochMarkers(
+          runtime.stateJson,
+          {
+            ...previousState,
+            busyReaper: {
+              reapedAt: now.toISOString(),
+              graceMs,
+              previousStatus: "busy",
+              previousCurrentIssueId: runtime.currentIssueId,
+            },
           },
-        },
+        ),
         updatedAt: now,
       })
       .where(and(

@@ -17,8 +17,10 @@ import type {
   WorkflowStepExecutionContract,
 } from "./types.js";
 import type { CreateWorkflowDefinitionInput, CreateWorkflowRunInput } from "./types.js";
-import { isDynamicOwnerPlanWorkflowDefinition, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { isDynamicOwnerPlanWorkflowDefinition, normalizeWorkflowStepsForExecution } from "./execution-steps.js";
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
+import { createWorkflowRunWithDefinition } from "./workflow-run-create.js";
 import { stepTimeoutSignalsFromStep } from "../heartbeat-stability.js";
 
 function inferWorkflowExecutionMode(name: string, steps: WorkflowStep[]): WorkflowExecutionMode {
@@ -255,32 +257,15 @@ export async function deleteWorkflowDefinition(db: Db, id: string): Promise<bool
 
 /**
  * Create a new workflow run.
+ *
+ * 실행은 새 run INSERT 와 불변 실행정의 스냅샷 캡처를 원자적으로 수행하는
+ * createWorkflowRunWithDefinition 에 위임한다(Task5a1). snapshot 없는 새 run 은 없다.
  */
 export async function createWorkflowRun(
   db: Db,
   input: CreateWorkflowRunInput,
 ): Promise<WorkflowRun> {
-  const id = crypto.randomUUID();
-  const now = new Date();
-
-  await db.insert(workflowRuns).values({
-    id,
-    workflowId: input.workflowId,
-    companyId: input.companyId,
-    missionId: input.missionId ?? null,
-    status: "pending",
-    triggeredBy: input.triggeredBy,
-    triggerSource: input.triggerSource ?? null,
-    runDate: input.runDate ?? null,
-    runNumber: input.runNumber ?? null,
-    runLabel: input.runLabel ?? null,
-    parentIssueId: input.parentIssueId ?? null,
-    scheduledSlotId: input.scheduledSlotId ?? null,
-    metadata: input.metadata ?? {},
-    createdAt: now,
-  });
-
-  return getWorkflowRunById(db, id) as Promise<WorkflowRun>;
+  return mapWorkflowRun(await createWorkflowRunWithDefinition(db, input));
 }
 
 export async function claimWorkflowRunSlot(
@@ -426,11 +411,7 @@ export async function getWorkflowStepExecutionContractForIssue(
   issueId: string,
 ): Promise<WorkflowStepExecutionContract | null> {
   const result = await db
-    .select({
-      stepRun: workflowStepRuns,
-      run: workflowRuns,
-      definition: workflowDefinitions,
-    })
+    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
@@ -440,8 +421,8 @@ export async function getWorkflowStepExecutionContractForIssue(
   const row = result[0];
   if (!row) return null;
 
-  const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
-  const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+  // [Task5a2a] 캡처 실행정의 기준 계약 — live 정의 편집 후에도 이름/tool/args/kb/timeout 불변. CRUD/list 의 current 정규화(mapWorkflowDefinition)는 유지.
+  const step = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolNames = Array.isArray(step?.toolNames)
     ? step.toolNames.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];

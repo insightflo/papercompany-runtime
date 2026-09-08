@@ -1,9 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { asBoolean } from "../../adapters/utils.js";
-import {
-  buildIssueEnvelopePolicy,
-  ensureMissionAgentRuntime,
-} from "./mission-runtime-manager.js";
+import { buildIssueEnvelopePolicy } from "./mission-runtime-manager.js";
+import { ensureMissionRuntimeForHeartbeat } from "./resume-runtime-context.js";
 import { ensureMissionWorkingNote } from "./mission-working-note.js";
 
 export const MISSION_RUNTIME_CONTEXT_INVARIANT =
@@ -62,7 +60,7 @@ export async function compileMissionRunContext(db: Db, input: {
       })
     : null;
   const missionAgentRuntimeForRun = input.missionId
-    ? await ensureMissionAgentRuntime(db, {
+    ? await ensureMissionRuntimeForHeartbeat(db, {
         companyId: input.companyId,
         missionId: input.missionId,
         agentId: input.agentId,

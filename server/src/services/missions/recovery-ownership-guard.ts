@@ -5,8 +5,9 @@
 
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { isQaLikeStep } from "./supervision-helpers.js";
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 
 export const RECOVERY_WAKEUP_STATUSES = ["queued", "claimed"] as const;
 export const RECOVERY_HEARTBEAT_STATUSES = ["queued", "running"] as const;
@@ -90,19 +91,19 @@ export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipI
   return verdict;
 }
 
-// issue 가 workflow QA gate step 인지(step definition 기반 isQaLikeStep) 확인.
+// issue 가 workflow QA gate step 인지(캡처된 실행정의 기반 isQaLikeStep) 확인.
+// frozen QA 분류 — editor 가 live 를 non-QA 로 바꿔도 캡처 시점 QA type 을 유지한다.
 async function isIssueQaGateStep(db: Db, companyId: string, issueId: string): Promise<boolean> {
   const row = await db
-    .select({ stepId: workflowStepRuns.stepId, stepsJson: workflowDefinitions.stepsJson })
+    .select({ stepId: workflowStepRuns.stepId, workflowRunId: workflowRuns.id })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(eq(workflowRuns.companyId, companyId), eq(workflowStepRuns.issueId, issueId)))
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!row) return false;
-  const steps = row.stepsJson as Parameters<typeof isQaLikeStep>[0][] | null;
-  const step = Array.isArray(steps) ? steps.find((s) => (s as { id?: string }).id === (row.stepId ?? "")) : null;
+  const execution = await loadExecutionDefinition(db, row.workflowRunId, { requireHistorical: false });
+  const step = execution.steps.find((candidate) => candidate.id === (row.stepId ?? "")) ?? null;
   return Boolean(step && isQaLikeStep(step));
 }
 

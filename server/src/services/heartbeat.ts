@@ -173,6 +173,11 @@ import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
+import {
+  assertIssueResumeScopeIdentity,
+  recordResumeStaleResultRejected,
+  resolveHeartbeatResumeScopeFence,
+} from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import {
@@ -1310,6 +1315,10 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
   claimedArtifactPaths: string[];
   allowedArtifactRoot?: string | null;
 }) {
+  // [Task6c-C-ii] resume-linked issue 의 workProduct 자동등록은 같은 세대 정체 검증을 공유한다.
+  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: input.issue.companyId, issueId: input.issue.id }))) {
+    return null;
+  }
   const issueDocs = await input.tx
     .select({
       id: documents.id,
@@ -1409,6 +1418,10 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
   };
   requireExistingLocalFile?: boolean;
 }) {
+  // [Task6c-C-ii] resume-linked issue 의 workProduct 자동등록은 같은 세대 정체 검증을 공유한다.
+  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: input.issue.companyId, issueId: input.issue.id }))) {
+    return null;
+  }
   // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
   //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
   //   문서가 없어 못 잡을 때, claimed 절대경로가 실제 파일이면 그 파일을 workProduct 로 등록한다.
@@ -1590,6 +1603,12 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
 
   if (!sourceIssue || sourceIssue.hiddenAt || sourceIssue.missionId !== ownerActionIssue.missionId) return null;
   if (sourceIssue.status === "cancelled") return null;
+
+  // [Task6c-C-ii] resume-linked source issue 의 owner-unblock artifact 자동등록도 같은 세대
+  //   정체 검증을 공유한다 — 어긋나면 등록/완료 mutation 전에 무음 스킵한다.
+  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: sourceIssue.companyId, issueId: sourceIssue.id }))) {
+    return null;
+  }
 
   const existingWorkProduct = await input.tx
     .select({ id: issueWorkProducts.id })
@@ -8899,6 +8918,24 @@ export function heartbeatService(db: Db) {
       }
 
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
+        // [Task6c-C] resume run settlement fence: acting run 의 기록 링크(stepRunId, generation)
+        //   이 현재 행과 정확히 일치할 때만 issue→done / step closeout 로 진행한다. 불일치면
+        //   mutation 을 건너뛰고 구조화 진단 activity log(workflow.resume_stale_result_rejected)
+        //   1건만 기록한다 — 표시/감사 전용이며 실행 권위로 파싱되지 않는다 — heartbeat 자체는
+        //   실패시키지 않는다. ordinary run 은 fence 가 즉시 allow (stamp 없는 step) — 기존과
+        //   byte-identical.
+        const resumeScopeVerdict = await resolveHeartbeatResumeScopeFence(tx as unknown as Parameters<typeof resolveHeartbeatResumeScopeFence>[0], run);
+        if (resumeScopeVerdict.action === "reject") {
+          await recordResumeStaleResultRejected(tx as unknown as Parameters<typeof recordResumeStaleResultRejected>[0], {
+            companyId: issue.companyId,
+            issueId: issue.id,
+            heartbeatRunId: run.id,
+            agentId: run.agentId,
+            verdict: resumeScopeVerdict,
+            source: "heartbeat_settlement",
+          });
+          queuePostTransactionWorkflowIssueSync(issue.id);
+        } else {
         const now = new Date();
         const latestRunForComment = await tx
           .select()
@@ -8956,6 +8993,7 @@ export function heartbeatService(db: Db) {
         return {
           promotedRun: null,
         };
+        }
       }
 
       if (

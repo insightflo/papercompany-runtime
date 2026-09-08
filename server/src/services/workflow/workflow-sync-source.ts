@@ -17,6 +17,7 @@ export const WORKFLOW_SYNC_SOURCES = [
   "workflow_execution",
   "workflow_tool_queue",
   "workflow_tool_result",
+  "workflow_resume_dispatch",
   "workflow_retry",
   "workflow_cancellation",
   "workflow_reconciler",

@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
+import { conflict } from "../errors.js";
+import { assertIssueResumeScopeIdentity } from "./workflow/resume-scope-fence.js";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
 type WorkProductOpenTarget = { kind: "path" | "url"; value: string };
@@ -133,6 +135,13 @@ export function workProductService(db: Db) {
 
     createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
       if (!hasValidLocalFilePath(data)) return null;
+      // [Task6c-D] resume-linked issue 의 agent artifact 등록은 세대 정체 검증만 수행한다
+      //   (새 approval 절차 추가 아님). issue 의 active step run 이 resume run 부모의 현재
+      //   stamp 과 어긋나면 그 등록은 이전 세대 결과 — 409 stale_generation 으로 거절한다.
+      //   ordinary issue 는 검증이 즉시 true — 기존 동작 byte-identical.
+      if (!(await assertIssueResumeScopeIdentity(db, { companyId, issueId }))) {
+        throw conflict("stale_generation", { issueId });
+      }
       const row = await db.transaction(async (tx) => {
         if (data.isPrimary) {
           await tx

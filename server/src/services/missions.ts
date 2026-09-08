@@ -10,19 +10,15 @@ import { isUuidLike } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  agentRuntimeState,
-  heartbeatRuns,
   issueComments,
   issueWorkProducts,
   issues,
   missionAgents,
-  missionPlanArtifacts,
   missionSessions,
   missions,
   companies,
   pluginEntities,
   projects,
-  workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
@@ -35,10 +31,9 @@ import {
   buildOwnerActionExplanations,
   type MissionOwnerActionExplanation,
 } from "./missions/mission-owner-recovery-explanations.js";
-import { normalizeWorkflowStepsForExecution } from "./workflow/dag-engine.js";
 import { normalizeConditionalEdges, readCapBoostAmount } from "./workflow/control-flow/types.js";
+import { loadMissionWorkflowRunDefinitions } from "./missions/workflow-run-definitions.js";
 import { buildMissionRunFlowmap, readVendoredFlowmapTemplate, renderFlowmapHtml } from "./missions/mission-flowmap-export.js";
-import { stopMissionRuntimesForMission } from "./missions/mission-runtime-manager.js";
 import { asStringArray, asTrimmedString, isMissionDateOnlyFilter, parseMissionDateFilter, parsePluginDate } from "./missions/utils.js";
 import {
   buildWorkflowRunProgress,
@@ -61,6 +56,8 @@ import {
   type PluginWorkflowStepRunData,
 } from "./missions/plugin-workflow.js";
 import { isTerminalMissionStatus } from "./missions/shared-types.js";
+import { runMissionTerminalCleanup } from "./missions/terminal-cleanup-fence.js";
+import { captureMissionTerminalAuthority } from "./missions/terminal-cleanup-authority.js";
 import { createOwnerActions } from "./missions/owner-actions.js";
 import { createSupervision } from "./missions/supervision.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
@@ -774,146 +771,22 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     if (input.startedAt !== undefined) updates.startedAt = input.startedAt;
     if (input.completedAt !== undefined) updates.completedAt = input.completedAt;
 
-    await db
-      .update(missions)
-      .set(updates)
-      .where(eq(missions.id, id));
-
     if (isTerminalMissionStatus(input.status)) {
-      const terminalPlanStatus = input.status === "completed" ? "completed" : "archived";
-
-      if (input.status === "cancelled") {
-        await db
-          .update(issues)
-          .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
-          .where(and(
-            eq(issues.missionId, id),
-            sql`${issues.status} not in ('done', 'cancelled')`,
-          ));
-      }
-
-      // Cancel active heartbeat runs for this mission's issues.
-      // Use the heartbeat service cancel (kills the process + releases issue lock)
-      // when available, falling back to a bulk DB update for callers that don't
-      // inject the heartbeat dependency.
-      const activeRunIds = await db
-        .select({ id: heartbeatRuns.id })
-        .from(heartbeatRuns)
-        .where(and(
-          eq(heartbeatRuns.companyId, existing.companyId),
-          inArray(
-            heartbeatRuns.issueId,
-            db
-              .select({ id: issues.id })
-              .from(issues)
-              .where(eq(issues.missionId, id)),
-          ),
-          inArray(heartbeatRuns.status, ["queued", "running"]),
-        ));
-
-      if (activeRunIds.length && deps.cancelHeartbeatRun) {
-        await Promise.all(
-          activeRunIds.map((row) =>
-            deps.cancelHeartbeatRun!(row.id).catch(() => {
-              // Best-effort: cancelRunInternal already sets status, but if it
-              // throws we fall through to the bulk update below.
-            }),
-          ),
-        );
-      }
-
-      // Bulk-update any runs that are still queued/running (covers runs the
-      // per-run cancel missed or callers without the heartbeat dependency).
-      await db
-        .update(heartbeatRuns)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          error: `Cancelled because mission was ${input.status}`,
-          errorCode: "cancelled",
-          updatedAt: now,
-        })
-        .where(and(
-          eq(heartbeatRuns.companyId, existing.companyId),
-          inArray(
-            heartbeatRuns.issueId,
-            db
-              .select({ id: issues.id })
-              .from(issues)
-              .where(eq(issues.missionId, id)),
-          ),
-          inArray(heartbeatRuns.status, ["queued", "running"]),
-        ));
-
-      await stopMissionRuntimesForMission(db, {
+      const capturedAuthority = await captureMissionTerminalAuthority(db, existing.companyId, id, existing);
+      await runMissionTerminalCleanup(db, {
+        capturedAuthority,
+        pendingMissionUpdates: updates,
         companyId: existing.companyId,
         missionId: id,
-        reason: `mission.${input.status}`,
+        status: input.status,
+        now,
+        completedAt: updates.completedAt ?? null,
+        missionSnapshot: existing,
+        completeOpenMissionOversightIfSettled: (mission, completedAt, executor) =>
+          createOwnerActions({ db: executor as Db, deps }).completeOpenMissionOversightIfSettled(mission, completedAt),
       });
-
-      await db
-        .update(missionPlanArtifacts)
-        .set({ status: terminalPlanStatus, updatedAt: now })
-        .where(and(
-          eq(missionPlanArtifacts.companyId, existing.companyId),
-          eq(missionPlanArtifacts.missionId, id),
-          eq(missionPlanArtifacts.status, "active"),
-        ));
-
-      await db
-        .update(missionSessions)
-        .set({ status: "closed", lastActiveAt: now })
-        .where(and(
-          eq(missionSessions.companyId, existing.companyId),
-          eq(missionSessions.missionId, id),
-          eq(missionSessions.status, "active"),
-        ));
-
-      const missionAgentRows = await db
-        .select({ agentId: missionAgents.agentId })
-        .from(missionAgents)
-        .where(eq(missionAgents.missionId, id));
-      const issueAssigneeRows = await db
-        .select({ agentId: issues.assigneeAgentId })
-        .from(issues)
-        .where(and(eq(issues.missionId, id), sql`${issues.assigneeAgentId} is not null`));
-      const affectedAgentIds = Array.from(new Set([
-        existing.ownerAgentId,
-        ...missionAgentRows.map((row) => row.agentId),
-        ...issueAssigneeRows.map((row) => row.agentId).filter((agentId): agentId is string => Boolean(agentId)),
-      ]));
-
-      if (affectedAgentIds.length > 0) {
-        await db
-          .update(agents)
-          .set({ status: "idle", updatedAt: now })
-          .where(and(
-            inArray(agents.id, affectedAgentIds),
-            inArray(agents.status, ["running", "error"]),
-          ));
-
-        await db
-          .update(agentRuntimeState)
-          .set({ lastError: null, sessionId: null, updatedAt: now })
-          .where(inArray(agentRuntimeState.agentId, affectedAgentIds));
-      }
-
-      if (input.status === "completed") {
-        await ownerActions.completeOpenMissionOversightIfSettled(
-          { ...existing, status: "completed", completedAt: updates.completedAt ?? existing.completedAt ?? now },
-          updates.completedAt ?? existing.completedAt ?? now,
-        );
-      }
-
-      try {
-        const { missionDelegationService } = await import("./mission-delegations.js");
-        await missionDelegationService(db).finalizeTargetMission({
-          targetMissionId: id,
-          targetStatus: input.status,
-        });
-      } catch (err) {
-        logger.warn({ err, missionId: id, status: input.status }, "failed to finalize delegated target mission");
-      }
+    } else {
+      await db.update(missions).set(updates).where(eq(missions.id, id));
     }
 
     return getById(id);
@@ -1068,16 +941,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const [mission] = await db.select().from(missions).where(eq(missions.id, missionId)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${missionId}`);
 
-    const runs = await db
-      .select({
-        run: workflowRuns,
-        workflowName: workflowDefinitions.name,
-        workflowSteps: workflowDefinitions.stepsJson,
-      })
-      .from(workflowRuns)
-      .leftJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-      .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, missionId)))
-      .orderBy(desc(workflowRuns.createdAt));
+    const runs = await loadMissionWorkflowRunDefinitions(db, mission.companyId, missionId);
 
     const allStepRuns = runs.length
       ? await db
@@ -1161,7 +1025,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const agentIdByName = new Map(companyAgents.map((agent) => [agent.name, agent.id]));
 
     const nativeDetails = runs.map(({ run, workflowName, workflowSteps }) => {
-      const definitionSteps = normalizeWorkflowStepsForExecution(workflowSteps);
+      const definitionSteps = workflowSteps;
       const definitionStepOrder = new Map(definitionSteps.map((step, index) => [step.id, index]));
       const rawStepRuns = [...(stepRunsMap.get(run.id) ?? [])].sort((left, right) => {
         const leftIndex = definitionStepOrder.get(left.stepId) ?? Number.MAX_SAFE_INTEGER;

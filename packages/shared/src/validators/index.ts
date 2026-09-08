@@ -479,3 +479,11 @@ export {
   readHumanReviewPacket,
   type HumanReviewPacketInput,
 } from "./human-review.js";
+
+export {
+  resumeRequestSchema,
+  type ResumeRequestBody,
+  resumeBlockerCodes,
+  resumeBlockerCodeSchema,
+  type ResumeBlockerCode,
+} from "./workflow-resume.js";

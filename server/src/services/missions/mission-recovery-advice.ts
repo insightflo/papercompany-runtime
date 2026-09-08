@@ -22,11 +22,11 @@ import {
   issueWorkProducts,
   missionPlanArtifacts,
   missionPlanQaVerdicts,
-  workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 
 export type RecoveryDecision =
   | "producer_rework"
@@ -593,27 +593,6 @@ function buildQaRecheckComment(input: { qa: IssueForAdvice; producer: IssueForAd
   ].join("\n");
 }
 
-function normalizeWorkflowDefinitionSteps(value: unknown) {
-  const steps = Array.isArray(value) ? value : [];
-  const normalized = new Map<string, {
-    dependencies: string[];
-    conditionalDependencies: WorkflowConditionalDependencyForAdvice[];
-  }>();
-  for (const entry of steps) {
-    const step = asRecord(entry);
-    const id = asString(step?.id);
-    if (!id) continue;
-    const dependencies = asStringArray(step?.dependencies).length > 0
-      ? asStringArray(step?.dependencies)
-      : asStringArray(step?.dependsOn);
-    normalized.set(id, {
-      dependencies,
-      conditionalDependencies: normalizeConditionalDependencies(step?.conditionalDependencies),
-    });
-  }
-  return normalized;
-}
-
 // ---------------------------------------------------------------------------
 // DB loader — pure 함수에 데이터를 공급.
 // ---------------------------------------------------------------------------
@@ -647,11 +626,9 @@ export async function getMissionRecoveryAdvice(
     .select({
       workflowRunId: workflowRuns.id,
       stepRun: workflowStepRuns,
-      stepsJson: workflowDefinitions.stepsJson,
     })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)));
 
   // Official workflow_api validation verdicts only, scoped to issue + same-issue heartbeat.
@@ -704,19 +681,23 @@ export async function getMissionRecoveryAdvice(
     if (candidateTs >= existingTs) latestStepByIssue.set(issueId, row.stepRun);
   }
 
-  const definitionStepsByRunId = new Map<string, ReturnType<typeof normalizeWorkflowDefinitionSteps>>();
+  // 캡처된 실행정의의 canonical step 을 run 별 1회 로드해 id 로 매핑한다. live stepsJson 재판단 없음
+  // (DTO projection 일 뿐, graph normalization 아님). corrupt/미인증 snapshot 은 422 로 실패한다.
+  type CanonicalAdviceStep = Awaited<ReturnType<typeof loadExecutionDefinition>>["steps"][number];
+  const definitionStepsByRunId = new Map<string, Map<string, CanonicalAdviceStep>>();
   const workflowSteps: WorkflowStepForAdvice[] = [];
   for (const row of workflowRows) {
     const issueId = row.stepRun.issueId;
     const latest = issueId ? latestStepByIssue.get(issueId) : null;
     // Only expose current step-run context for recovery binding (stale attempts stay out of pure input).
     if (latest && row.stepRun.id !== latest.id) continue;
-    let definitionSteps = definitionStepsByRunId.get(row.workflowRunId);
-    if (!definitionSteps) {
-      definitionSteps = normalizeWorkflowDefinitionSteps(row.stepsJson);
-      definitionStepsByRunId.set(row.workflowRunId, definitionSteps);
+    let stepsById = definitionStepsByRunId.get(row.workflowRunId);
+    if (!stepsById) {
+      const execution = await loadExecutionDefinition(db, row.workflowRunId, { requireHistorical: false });
+      stepsById = new Map(execution.steps.map((step) => [step.id, step]));
+      definitionStepsByRunId.set(row.workflowRunId, stepsById);
     }
-    const definitionStep = definitionSteps.get(row.stepRun.stepId);
+    const definitionStep = stepsById.get(row.stepRun.stepId);
     workflowSteps.push({
       workflowRunId: row.workflowRunId,
       workflowStepRunId: row.stepRun.id,
@@ -724,7 +705,12 @@ export async function getMissionRecoveryAdvice(
       issueId: row.stepRun.issueId,
       status: row.stepRun.status,
       dependencies: definitionStep?.dependencies ?? [],
-      conditionalDependencies: definitionStep?.conditionalDependencies ?? [],
+      // canonical ConditionalEdge 의 optional 필드를 기존 required nullable DTO 로 투영한다.
+      conditionalDependencies: (definitionStep?.conditionalDependencies ?? []).map((edge) => ({
+        stepId: edge.stepId,
+        when: edge.when ?? null,
+        isBackEdge: edge.isBackEdge ?? null,
+      })),
     });
   }
 
