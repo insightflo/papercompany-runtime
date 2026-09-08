@@ -13,6 +13,7 @@ const STEP_TYPE_LABELS: Record<StepDraft["type"], string> = {
   tool: "🔧 Tool",
   if: "⬦ IF",
   complete: "✓ Complete",
+  workflow: "🔗 Workflow",
 };
 
 const stepCardStyle: CSSProperties = {
@@ -389,6 +390,10 @@ export function StepEditor({
                 <FieldLabel help="Comma-separated upstream step ids. Empty means this can be an entry step.">Depends On / upstream IDs</FieldLabel>
                 <input style={inputStyle} value={step.dependsOn} placeholder={allIds.filter((id) => id !== step.id).join(", ") || "none"} onChange={(e) => update(i, { dependsOn: e.target.value })} />
               </div>
+              {/* [descope v1 D1/D2] workflow 스텝은 항상 자식 실행 완료까지 대기(wait:true 고정)하며
+                  재시도 정책 컨트롤을 노출하지 않는다 — fire-and-forget(wait:false) 선택기도 없다. */}
+              {step.type !== "workflow" && (
+                <>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Runtime policy when this step fails. Retry uses Max Retries and retry delay/backoff below.">On Failure</FieldLabel>
                 <select style={selectStyle} value={step.onFailure} onChange={(e) => update(i, { onFailure: e.target.value })}>
@@ -411,6 +416,8 @@ export function StepEditor({
                   onChange={(e) => update(i, { maxRetries: e.target.value })}
                 />
               </div>
+                </>
+              )}
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Step-level timeout in seconds. Leave blank to use the runtime default.">Timeout Seconds</FieldLabel>
                 <input
@@ -423,6 +430,8 @@ export function StepEditor({
                   onChange={(e) => update(i, { timeoutSeconds: e.target.value })}
                 />
               </div>
+              {step.type !== "workflow" && (
+                <>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Optional delay before retrying this step.">Retry delay seconds</FieldLabel>
                 <input
@@ -453,6 +462,8 @@ export function StepEditor({
                 Add retry jitter
                 <HelpIcon label="Adds small random timing variation so multiple retries do not all fire at exactly the same time." />
               </label>
+                </>
+              )}
             </div>
             <div style={{ display: "grid", gap: "6px" }} onClick={(e) => e.stopPropagation()}>
               <FieldLabel help="Optional expression that stops the workflow early when it evaluates as true. Leave blank for normal downstream execution.">Early Stop Condition</FieldLabel>

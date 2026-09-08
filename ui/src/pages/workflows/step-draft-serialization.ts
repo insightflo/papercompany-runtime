@@ -58,6 +58,10 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
       const toolsList = safeCsv(d.tools);
       if (toolsList.length > 0) step.tools = toolsList;
     }
+    // [descope v1 D1] workflow 스텝은 wait:true 만 emission 하거나 키를 생략한다.
+    // false 는 1급 필드로 표현 불가이며, extra 의 raw 통과값(wait:false 등)은 침묵
+    // 강등/제거 없이 그대로 남겨 공유 검증기(workflowStepDefinitionSchema)가 거부한다.
+    if (d.wait === true) step.wait = true;
     if (d.onFailure) step.onFailure = d.onFailure;
     const maxRetries = parseOptionalNonNegativeInteger(String(d.maxRetries ?? ""));
     if (maxRetries !== undefined) step.maxRetries = maxRetries;
@@ -259,7 +263,11 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       id: s.id,
       title: s.title,
       description: raw.description as string || "",
-      type: s.type === "tool" || s.type === "if" || s.type === "complete" ? s.type : "agent",
+      // [workflow child step] type:"workflow" 도 draft 로 보존 — 저장 시 agent 로 강등되지 않는다.
+      type: s.type === "tool" || s.type === "if" || s.type === "complete" || s.type === "workflow" ? s.type : "agent",
+      // [descope v1 D1] literal true 만 1급 필드로 승격한다. false/문자열 등 invalid 값은
+      // 1급 승격 없이 extra 통과값으로 그대로 남겨 공유 검증기가 거부한다(침묵 강등/제거 금지).
+      wait: raw.wait === true ? true : undefined,
       conditionGroup: cloneWorkflowConditionGroup(raw.conditionGroup),
       completionReason: typeof raw.completionReason === "string" ? raw.completionReason : "",
       toolName: s.toolName || "",

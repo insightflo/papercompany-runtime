@@ -84,8 +84,10 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     await db.update(issues).set({ checkoutRunId: null, executionRunId: null });
     await db.delete(heartbeatRunFinalizationSteps);
     await db.delete(heartbeatRunFinalizations);
+    // Straggler run events can appear while runs are torn down — clear them again right
+    // before the parent delete, otherwise delete heartbeat_runs violates the FK under load.
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
-    // Straggler run events can appear while runs are torn down.
     await db.delete(heartbeatRunEvents);
     await db.delete(agentWakeupRequests);
     await db.delete(issueWorkProducts);
