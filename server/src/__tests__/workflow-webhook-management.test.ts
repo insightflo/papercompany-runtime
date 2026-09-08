@@ -163,6 +163,8 @@ describeEmbeddedPostgres("workflow webhook management routes", () => {
     expect(res.status).toBe(403);
     const del = await request(agentApp).delete(`/api/workflows/${workflowId}/webhook`);
     expect(del.status).toBe(403);
+    const status = await request(agentApp).get(`/api/workflows/${workflowId}/webhook`);
+    expect(status.status).toBe(403);
   });
 
   it("disable keeps receipts and returns 404 when repeated; status counts deliveries", async () => {
@@ -195,7 +197,7 @@ describeEmbeddedPostgres("workflow webhook management routes", () => {
     expect(delAgain.status).toBe(200);
     expect(delAgain.body.enabled).toBe(false);
 
-    // 404 when the webhook was never configured for the workflow.
+    // DELETE remains 404; GET reports an unconfigured status without creating a config.
     const freshWorkflowId = crypto.randomUUID();
     await db.insert(workflowDefinitions).values({ id: freshWorkflowId, companyId, name: "wf-no-webhook" });
     mockEngine.workflowService.getDefinition.mockResolvedValue({
@@ -209,7 +211,11 @@ describeEmbeddedPostgres("workflow webhook management routes", () => {
     const delNever = await request(app).delete(`/api/workflows/${freshWorkflowId}/webhook`);
     expect(delNever.status).toBe(404);
     const getNever = await request(app).get(`/api/workflows/${freshWorkflowId}/webhook`);
-    expect(getNever.status).toBe(404);
+    expect(getNever.status).toBe(200);
+    expect(getNever.body).toEqual({ enabled: false, last4: null, deliveriesLast24h: 0 });
+    const configs = await db.select().from(workflowWebhookConfigs)
+      .where(eq(workflowWebhookConfigs.workflowId, freshWorkflowId));
+    expect(configs).toEqual([]);
 
     const [disabledLog] = await db
       .select()
@@ -226,7 +232,26 @@ describeEmbeddedPostgres("workflow webhook management routes", () => {
 
   it("404 for an unknown workflow", async () => {
     mockEngine.workflowService.getDefinition.mockResolvedValue(undefined);
-    const res = await request(app).post(`/api/workflows/${crypto.randomUUID()}/webhook`);
+    const unknownId = crypto.randomUUID();
+    const res = await request(app).post(`/api/workflows/${unknownId}/webhook`);
     expect(res.status).toBe(404);
+    const status = await request(app).get(`/api/workflows/${unknownId}/webhook`);
+    expect(status.status).toBe(404);
+  });
+
+  it("GET returns 404 for a workflow outside the board actor's companies", async () => {
+    const otherCompanyApp = buildApp({
+      ...boardActor,
+      source: "session",
+      companyIds: [crypto.randomUUID()],
+    }, db);
+    const status = await request(otherCompanyApp).get(`/api/workflows/${workflowId}/webhook`);
+    expect(status.status).toBe(404);
+  });
+
+  it("GET requires authentication", async () => {
+    const anonymousApp = buildApp({ type: "none" }, db);
+    const status = await request(anonymousApp).get(`/api/workflows/${workflowId}/webhook`);
+    expect(status.status).toBe(401);
   });
 });

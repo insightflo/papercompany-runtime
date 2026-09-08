@@ -24,6 +24,7 @@ vi.mock("react", async (importOriginal) => {
 });
 
 const ENABLED = { enabled: true, last4: "ab12", deliveriesLast24h: 2 };
+const UNCONFIGURED = { enabled: false, last4: null, deliveriesLast24h: 0 };
 const jsonResponse = (body: unknown, status = 200) =>
   ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
 
@@ -74,7 +75,7 @@ describe("Finding 1 — failed register/rotate/disable recover with visible erro
   it.each(["등록", "재발급", "비활성화"] as const)("failed %s action: busy settles, error visible, real setters observed", async (label) => {
     const io = deferredFetch();
     const panel = await mountPanel("wf-1");
-    io.calls.filter((c) => c.url.includes("/webhook")).at(-1)!.resolve(jsonResponse(label === "등록" ? { error: "not configured" } : ENABLED, label === "등록" ? 404 : 200));
+    io.calls.filter((c) => c.url.includes("/webhook")).at(-1)!.resolve(jsonResponse(label === "등록" ? UNCONFIGURED : ENABLED));
     await act(async () => {});
     if (label !== "등록") { vi.spyOn(window, "confirm").mockReturnValue(true); }
     await click(panel.container, label === "등록" ? "웹훅 등록" : label === "재발급" ? "키 재발급" : "비활성화");
@@ -96,7 +97,7 @@ describe("Finding 1 — failed register/rotate/disable recover with visible erro
   it("success after a failure recovers the controls (positive control)", async () => {
     const io = deferredFetch();
     const panel = await mountPanel("wf-1");
-    io.calls.filter((c) => c.url.includes("/webhook")).at(-1)!.resolve(jsonResponse({ error: "not configured" }, 404));
+    io.calls.filter((c) => c.url.includes("/webhook")).at(-1)!.resolve(jsonResponse(UNCONFIGURED));
     await act(async () => {});
     await click(panel.container, "웹훅 등록");
     io.calls.filter((c) => c.init?.method === "POST").at(-1)!.reject(new Error("first attempt failed"));

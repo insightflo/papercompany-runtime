@@ -42,8 +42,14 @@ describe("fetchWorkflowWebhookStatus — structured status-code contract", () =>
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/api/workflows/wf-1/webhook");
   });
 
-  it("real 404 (unconfigured) raises WebhookApiError with status 404 — the machine signal for the register path", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "Workflow webhook is not configured" }, 404)));
+  it("returns unconfigured status as a normal 200 response", async () => {
+    const status = { enabled: false, last4: null, deliveriesLast24h: 0 };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(status)));
+    await expect(fetchWorkflowWebhookStatus("wf-1")).resolves.toEqual(status);
+  });
+
+  it("real 404 raises WebhookApiError instead of returning an unconfigured status", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "Workflow definition not found" }, 404)));
     const error = await fetchWorkflowWebhookStatus("wf-1").then(() => null, (e: unknown) => e);
     expect(error).toBeInstanceOf(WebhookApiError);
     expect((error as WebhookApiError).status).toBe(404);

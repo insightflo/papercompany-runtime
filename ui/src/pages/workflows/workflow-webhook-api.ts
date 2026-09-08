@@ -1,7 +1,7 @@
 // ui/src/pages/workflows/workflow-webhook-api.ts
 //
 // [purpose] 워크플로 웹훅 관리 패널 전용 API 경계(bounded extraction — 승인 경로). HTTP 상태
-//   코드를 기계 신호로 보존하는 typed 오류(404=미구성, 그 외=알 수 없음)와, 신원/마운트 수명을
+//   코드를 보존하는 typed 오류와, 신원/마운트 수명을
 //   넘는 지연 완료를 무시하는 수명 토큰(실질 stale-fencing 헬퍼 — 지연 Promise 로 검증됨)을
 //   제공한다. 응답 본문 산문(prose)은 절대 권위로 파싱하지 않는다(규칙 9).
 // [authority] 표시/계약 전용 — 실행 권위 없음. 응답은 공유 zod 스키마로만 해석한다.
@@ -15,7 +15,7 @@ import {
 } from "@paperclipai/shared";
 import { apiBaseUrl } from "./workflow-page-api.js";
 
-/** 상태 코드를 보존하는 구조화 fetch 오류 — 404(미구성)와 그 외 오류의 유일한 구분 신호다. */
+/** 상태 코드를 보존하는 구조화 fetch 오류 — 404를 포함한 모든 오류는 조회 실패다. */
 export class WebhookApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -102,8 +102,8 @@ export type WebhookPanelPhase =
   | { phase: "enabled"; status: WebhookPanelStatus };
 
 /**
- * 패널 상태 머신(순수 함수) — 알 수 없는 상태(로딩/404 아님 오류)에서는 변이 금지를 도출하고,
- * 실제 404 만 미구성(등록 허용)으로 승격한다.
+ * 패널 상태 머신(순수 함수) — 알 수 없는 상태(로딩/오류)에서는 변이를 금지하고,
+ * 정상 응답의 last4:null을 미구성(등록 허용)으로 판정한다.
  */
 export function deriveWebhookPanelState(input: {
   loading: boolean;
@@ -113,11 +113,10 @@ export function deriveWebhookPanelState(input: {
 }): WebhookPanelPhase {
   if (input.loading) return { phase: "loading" };
   if (input.error !== null) {
-    return input.errorStatus === 404
-      ? { phase: "unconfigured" }
-      : { phase: "load-error", message: input.error };
+    return { phase: "load-error", message: input.error };
   }
   if (input.status === null) return { phase: "loading" };
+  if (input.status.last4 === null) return { phase: "unconfigured" };
   return input.status.enabled
     ? { phase: "enabled", status: input.status }
     : { phase: "disabled", status: input.status };
