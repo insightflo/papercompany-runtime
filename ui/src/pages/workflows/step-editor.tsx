@@ -2,17 +2,20 @@ import { useEffect, useState, type CSSProperties, type JSX } from "react";
 import { useCompany } from "../../context/CompanyContext";
 import { emptyStep, type StepDraft } from "./step-draft.js";
 import { apiBaseUrl } from "./workflow-page-api.js";
+import { StepSecondaryField } from "./workflow-target-picker.js";
 import type { WorkflowToolGrant, WorkflowToolOption } from "./workflow-page-types.js";
 import { buttonStyle, dangerButtonStyle, inputStyle, mutedTextStyle, selectStyle, textareaStyle } from "./workflow-page-styles.js";
 import { FieldLabel, HelpIcon } from "./shared-controls.js";
 import { splitCommaList, WorkflowToolPicker } from "./workflow-tool-picker.js";
 import { GraphInspectorControlNode } from "./graph-editor/GraphInspectorControlNode.js";
+import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
 
 const STEP_TYPE_LABELS: Record<StepDraft["type"], string> = {
   agent: "🤖 Agent",
   tool: "🔧 Tool",
   if: "⬦ IF",
   complete: "✓ Complete",
+  workflow: "🔗 Workflow",
 };
 
 const stepCardStyle: CSSProperties = {
@@ -53,11 +56,14 @@ export function StepEditor({
   onChange,
   availableTools,
   availableToolGrants,
+  editingWorkflowId,
 }: {
   steps: StepDraft[];
   onChange: (steps: StepDraft[]) => void;
   availableTools: WorkflowToolOption[];
   availableToolGrants: WorkflowToolGrant[];
+  /** 편집 중 워크플로 id — 하위 워크플로 선택기에서 자기 자신(self-cycle)을 제외한다. */
+  editingWorkflowId?: string;
 }): JSX.Element {
   const { selectedCompanyId } = useCompany();
   const companyId = selectedCompanyId ?? "";
@@ -237,12 +243,16 @@ export function StepEditor({
                     const granted = new Set(availableToolGrants.filter((g) => g.agentName === step.agentName).map((g) => g.toolName));
                     const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
                     update(i, { type: newType, tools: cleaned });
+                  } else if (newType === "if" && !step.conditionGroup) {
+                    // IF 로 전환할 때 조건 그룹이 없으면 기본값을 주입한다 — 없으면 검사기가 group.combinator 에서 크래시한다.
+                    update(i, { type: newType, conditionGroup: cloneWorkflowConditionGroup(defaultIfConditionGroup) });
                   } else {
                     update(i, { type: newType });
                   }
                 }}>
                   <option value="tool" disabled={availableTools.length === 0}>{"\uD83D\uDD27"} Tool (시스템 실행)</option>
                   <option value="agent">{"\uD83E\uDD16"} Agent (에이전트 작업)</option>
+                  <option value="workflow">🔗 Workflow (하위 워크플로 호출)</option>
                   <option value="if">⬦ IF (조건 분기)</option>
                   <option value="complete">✓ Complete (성공 종료)</option>
                 </select>
@@ -251,38 +261,14 @@ export function StepEditor({
                 ) : null}
               </div>
               <div style={{ display: "grid", gap: "4px" }}>
-                {step.type === "tool" ? (
-                  <>
-                    <FieldLabel help="Authorized tool that this tool step runs. The picker only lists tools currently available to workflows.">Tool Name</FieldLabel>
-                    <WorkflowToolPicker
-                      value={step.toolName}
-                      multiple={false}
-                      tools={availableTools}
-                      onChange={(value) => update(i, { toolName: value })}
-                    />
-                  </>
-                ) : step.type === "agent" ? (
-                  <>
-                    <FieldLabel help="Worker assigned to this step. Changing this also trims tool access to grants for that agent.">Agent</FieldLabel>
-                    <select style={selectStyle} value={step.agentId || agents.find((a) => a.name === step.agentName)?.id || ""} onChange={(e) => {
-                  const selectedId = e.target.value;
-                  const agent = agents.find((a) => a.id === selectedId);
-                  const newName = agent?.name ?? "";
-                  const granted = new Set(availableToolGrants.filter((g) => g.agentName === newName).map((g) => g.toolName));
-                  const cleaned = splitCommaList(step.tools).filter((t) => granted.has(t)).join(", ");
-                  update(i, { agentId: selectedId, agentName: newName, tools: cleaned });
-                }}>
-                      <option value="">— Select agent —</option>
-                      {agents.map((a) => (
-                        <option key={a.id} value={a.id}>{a.name}</option>
-                      ))}
-                    </select>
-                  </>
-                ) : (
-                  <span style={{ ...mutedTextStyle, alignSelf: "end", fontSize: "11px" }}>
-                    엔진이 직접 실행하며 에이전트나 도구를 호출하지 않습니다.
-                  </span>
-                )}
+                <StepSecondaryField
+                  step={step}
+                  agents={agents}
+                  availableTools={availableTools}
+                  availableToolGrants={availableToolGrants}
+                  editingWorkflowId={editingWorkflowId}
+                  onPatch={(patch) => update(i, patch)}
+                />
               </div>
             </div>
             {(step.type === "if" || step.type === "complete") ? (
@@ -389,6 +375,10 @@ export function StepEditor({
                 <FieldLabel help="Comma-separated upstream step ids. Empty means this can be an entry step.">Depends On / upstream IDs</FieldLabel>
                 <input style={inputStyle} value={step.dependsOn} placeholder={allIds.filter((id) => id !== step.id).join(", ") || "none"} onChange={(e) => update(i, { dependsOn: e.target.value })} />
               </div>
+              {/* [descope v1 D1/D2] workflow 스텝은 항상 자식 실행 완료까지 대기(wait:true 고정)하며
+                  재시도 정책 컨트롤을 노출하지 않는다 — fire-and-forget(wait:false) 선택기도 없다. */}
+              {step.type !== "workflow" && (
+                <>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Runtime policy when this step fails. Retry uses Max Retries and retry delay/backoff below.">On Failure</FieldLabel>
                 <select style={selectStyle} value={step.onFailure} onChange={(e) => update(i, { onFailure: e.target.value })}>
@@ -411,6 +401,8 @@ export function StepEditor({
                   onChange={(e) => update(i, { maxRetries: e.target.value })}
                 />
               </div>
+                </>
+              )}
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Step-level timeout in seconds. Leave blank to use the runtime default.">Timeout Seconds</FieldLabel>
                 <input
@@ -423,6 +415,8 @@ export function StepEditor({
                   onChange={(e) => update(i, { timeoutSeconds: e.target.value })}
                 />
               </div>
+              {step.type !== "workflow" && (
+                <>
               <div style={{ display: "grid", gap: "4px" }}>
                 <FieldLabel help="Optional delay before retrying this step.">Retry delay seconds</FieldLabel>
                 <input
@@ -453,6 +447,8 @@ export function StepEditor({
                 Add retry jitter
                 <HelpIcon label="Adds small random timing variation so multiple retries do not all fire at exactly the same time." />
               </label>
+                </>
+              )}
             </div>
             <div style={{ display: "grid", gap: "6px" }} onClick={(e) => e.stopPropagation()}>
               <FieldLabel help="Optional expression that stops the workflow early when it evaluates as true. Leave blank for normal downstream execution.">Early Stop Condition</FieldLabel>

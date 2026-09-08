@@ -112,6 +112,7 @@ export { workflowResumeExecutions } from "./workflow_resume_executions.js";
 export { workflowLateEvidenceSubmissions } from "./workflow_late_evidence_submissions.js";
 export { workflowCuJobs } from "./workflow_cu_jobs.js";
 export { workflowCuObservations } from "./workflow_cu_observations.js";
+export { workflowStepInvocations } from "./workflow_step_invocations.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";
 export { workflowDelegations } from "./workflow_delegations.js";
 export { workflowResyncJobs } from "./workflow_resync_jobs.js";

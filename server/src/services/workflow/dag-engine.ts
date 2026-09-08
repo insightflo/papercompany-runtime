@@ -6,6 +6,13 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import {
+  ensureWorkflowStepRunRecords,
+  type MaterializationOutcome,
+} from "./workflow-step-materialization.js";
+import {
+  type ChildStartFence,
+} from "./workflow-child-start-state.js";
 import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
@@ -20,6 +27,11 @@ import {
 } from "./workflow-sync-source.js";
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
+import {
+  dispatchWorkflowChildStep,
+  isWorkflowChildStep,
+  runWorkflowChildCompletionHook,
+} from "./workflow-child-execution.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
@@ -28,7 +40,6 @@ import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
-import { activatePlanningMissionForWorkflowRun } from "../missions/mission-workflow-lifecycle.js";
 import {
   MISSION_QUALITY_PURPOSE_FITNESS_SENTENCE,
   VERIFICATION_BEFORE_COMPLETION_MARKER,
@@ -92,7 +103,6 @@ import {
 } from "./control-flow/structural-completion.js";
 import {
   readWorkflowRetryMetadata,
-  isWorkflowRetryDue,
 } from "./retry-policy.js";
 import {
   isRetryDelayBlockingDispatch,
@@ -116,7 +126,6 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
 import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
 import { assertResumeAccepted } from "./resume/acceptance.js";
-import { assertResumeExecutionReadiness } from "./resume/readiness.js";
 import { withResumeSerialization, type ResumeMutationTransaction } from "./resume/serialization.js";
 export {
   buildWorkflowExecutionSteps,
@@ -125,7 +134,24 @@ export {
   normalizeWorkflowStepsForExecution,
   type WorkflowDefinitionExecutionInput,
 } from "./execution-steps.js";
+export { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
+import { readWorkflowRunWithStepRuns } from "./workflow-run-step-read.js";
+import { discoverWorkflowChildStart } from "./workflow-child-discovery.js";
+import {
+  cancelDescendantWorkflowRunWithChildFence,
+  cancelWorkflowRunWithChildFence,
+  logWorkflowRunCancellationRefused,
+  logWorkflowRunFinalizationRefused,
+  resolveWorkflowRunFinalizationGate,
+  type CancelledRunRef,
+} from "./workflow-cancel-bridge.js";
+import { applyLinkedWorkflowRunFinalization, reloadWorkflowRunForFinalization } from "./workflow-child-native-finalization.js";
 export { markRetryDispatching };
+
+/** workflow-type 스텝 id 집합 — 리셋/재오픈 금지(D2) 필터에 쓴다. */
+function workflowChildStepIds(steps: WorkflowStep[]): Set<string> {
+  return new Set(steps.filter(isWorkflowChildStep).map((step) => step.id));
+}
 
 /**
  * Workflow step definition.
@@ -141,6 +167,12 @@ export interface WorkflowStep {
   dependsOn?: string[];
   description?: string;
   type?: string;
+  /** workflow→workflow 자식 실행(n8n "Execute Workflow"). type==="workflow" 일 때 사용. */
+  targetWorkflowId?: string;
+  /** [descope D1] wait:true 만 허용 — 생략은 true 로 취급된다. false 는 정의/런타임 검증에서 거부된다. */
+  wait?: boolean;
+  /** 자식 run 입력(토큰 렌더 대상, 최대 20키). 미해결 토큰은 fail-closed. */
+  inputs?: Record<string, string>;
   qaType?: string;
   toolName?: string;
   toolArgs?: unknown;
@@ -421,34 +453,20 @@ async function ensureStepRunRecords(
   db: Db,
   runId: string,
   steps: WorkflowStep[],
-): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  const existing = await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, runId));
-
-  const existingStepIds = new Set(existing.map((stepRun) => stepRun.stepId));
-  const missingSteps = steps.filter((step) => !existingStepIds.has(step.id));
-
-  if (missingSteps.length > 0) {
-    await db.insert(workflowStepRuns).values(
-      missingSteps.map((step) => ({
-        id: crypto.randomUUID(),
-        workflowRunId: runId,
-        stepId: step.id,
-        status: "pending",
-        metadata: buildWorkflowStepRunMetadata(step),
-      })),
-    );
-  }
-
-  const stepRuns = missingSteps.length === 0
-    ? existing
-    : await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, runId));
-  return syncStepRunExecutionControlMetadata(db, stepRuns, steps);
+  childStartFence?: ChildStartFence,
+  requireRunning?: boolean,
+): Promise<MaterializationOutcome> {
+  // [fix4 §2.3 / cycle A §7] materialization 은 전용 모듈로 이관했다 — run 행 직렬화, (run,step)
+  //   유일 인덱스 충돌 안전 insert, 자식 시작 fence 원자 소비. 소유 결과(ready/not-owner/busy)를
+  //   타입으로 그대로 보존한다(null 로 버리지 않는다).
+  return await ensureWorkflowStepRunRecords(db, {
+    runId,
+    steps,
+    ...(childStartFence ? { childStartFence } : {}),
+    ...(requireRunning ? { requireRunning } : {}),
+    buildMetadata: (step) => buildWorkflowStepRunMetadata(step as unknown as WorkflowStep),
+    syncControls: (syncDb, rows, syncSteps) => syncStepRunExecutionControlMetadata(syncDb, rows, syncSteps as unknown as WorkflowStep[]),
+  });
 }
 
 function buildWorkflowStepRunMetadata(
@@ -1246,9 +1264,11 @@ async function syncStepRunsFromIssueState(
 async function resetUnlaunchedTerminalStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+  excludeWorkflowStepIds?: ReadonlySet<string>,
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  // controlFlowSkipped/failureCascadeSkipped sentinel: IF false-branch 로 skip 된 step 과
-  // 60min reconciler 가 kill 한 step(failureCascadeSkipped, 가즈아 저녁3 4f8cfacb 플랩)
+  // [descope D2] workflow-type S 는 리셋 대상에서 "명시적으로" 제외된다 — 자식 실패로 정산된
+  //  (또는 pre-admission 거부된) 부모 스텝은 resume/retry 경로에서 재오픈되지 않는다.
+  // controlFlowSkipped/failureCascadeSkipped sentinel: IF false-branch 로 skip 된 step 과 60min reconciler 가 kill 한 step(failureCascadeSkipped, 가즈아 저녁3 4f8cfacb 플랩)
   // 은 리셋에서 제외한다. 그렇지 않으면 매 sync 마다 skipped→pending→(skip pass)→skipped 로
   // flap 하며 finalize 가 allStepsTerminal 에 수렴하지 못해 런 상태 진동을 유발한다.
   const unlaunchedTerminal = stepRuns.filter((stepRun) =>
@@ -1256,6 +1276,7 @@ async function resetUnlaunchedTerminalStepRuns(
     && stepRun.issueId == null
     && stepRun.startedAt == null
     && stepRun.lastDispatchAttemptAt == null
+    && !(excludeWorkflowStepIds?.has(stepRun.stepId) ?? false)
     && normalizeRecord(stepRun.metadata).controlFlowSkipped !== true
     && normalizeRecord(stepRun.metadata).failureCascadeSkipped !== true
   );
@@ -3048,24 +3069,16 @@ function mapWorkflowExecutionResult(
   };
 }
 
-async function getWorkflowExecutionResultSnapshot(
+export async function getWorkflowExecutionResultSnapshot(
   db: Db,
   runId: string,
 ): Promise<WorkflowExecutionResult | null> {
-  const run = await db
-    .select()
-    .from(workflowRuns)
-    .where(eq(workflowRuns.id, runId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!run) return null;
+  // [cycle B F8] run+step 행을 한 문장으로 읽는다 — 거부 시작(refused-start) 스냅숏과 컨텍스트가
+  //   같은 일관 읽기 shape 을 공유하고, 단독 빈 step SELECT(프록시 배리어 표적)를 없앤다.
+  const read = await readWorkflowRunWithStepRuns(db, runId, { requireDefinition: false });
+  if (!read) return null;
 
-  const stepRuns = await db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, runId));
-
-  return mapWorkflowExecutionResult(run, stepRuns);
+  return mapWorkflowExecutionResult(read.run, read.stepRuns);
 }
 
 export async function completeWorkflowToolStepFromResult(
@@ -3118,6 +3131,12 @@ export async function completeWorkflowToolStepFromResult(
   //   검증한다(422 fail-closed). 이후 두 step lookup 이 같은 로드 배열을 쓴다(2차 raw 정규화 삭제).
   const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
   const stepForGuard = steps.find((candidate) => candidate.id === row.stepRun.stepId);
+  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 거부한다 — toolName/status/
+  //   metadata 는 완료 권위가 아니고, 자식 정산은 settlement writers(전체 신원 형태) 전용이다.
+  //   무변이 스냅숏으로 양보한다. 일반 tool 브랜치는 기존 동작을 그대로 유지한다.
+  if (stepForGuard && isWorkflowChildStep(stepForGuard)) {
+    return getWorkflowExecutionResultSnapshot(db, row.run.id);
+  }
   // [tool truth — 2026-09-02] 기계 계약 실패(data.ok===false)는 success=true여도 실패로 기록.
   // 구조 게이트는 verdict 원장 계약상 제외. 상세: tool-result-truth.ts
   input = {
@@ -3231,6 +3250,8 @@ export async function completeWorkflowToolStepFromResult(
       eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion),
     )
     : undefined;
+  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 절대 마감하지 않는다 —
+  //   자식 정산 권위는 workflow-child-settlement-writers 의 전체 신원 형태뿐이다(위에서 거부됨).
   const [updatedStepRun] = await db.update(workflowStepRuns).set({
     status: nextStatus,
     startedAt: row.stepRun.startedAt ?? now, completedAt: now,
@@ -3273,12 +3294,21 @@ export async function retryIssueLessToolWorkflowStep(
   db: Db,
   input: { companyId: string; runId: string; stepId: string },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
+  // [descope D2] workflow-type S 는 수동 issue-less retry 를 명시적으로 거부한다 — schedule/
+  //   reset/retry-count 증가 같은 어떤 변이도 일어나기 "전"이다(스케줄러 리셋 제외 포함).
+  const preflight = await loadWorkflowExecutionContext(db, input.runId);
+  if (preflight.run.companyId === input.companyId) {
+    const targetStep = preflight.steps.find((candidate) => candidate.id === input.stepId);
+    if (targetStep && isWorkflowChildStep(targetStep)) return null;
+  }
   return retryIssueLessToolWorkflowStepInternal({
     db,
     ...input,
     loadWorkflowExecutionContext,
     isIssueLessToolStep,
-    resetUnlaunchedTerminalStepRuns,
+    // [descope D2] 리셋 경로에서도 정산된 workflow S 는 재오픈되지 않는다.
+    resetUnlaunchedTerminalStepRuns: (resetDb, rows) =>
+      resetUnlaunchedTerminalStepRuns(resetDb, rows, workflowChildStepIds(preflight.steps)),
     syncWorkflowRunState: (syncDb, runId) => syncWorkflowRunState(syncDb, runId, "workflow_retry"),
   });
 }
@@ -3312,13 +3342,32 @@ async function finalizeWorkflowRunState(
     completedAt: nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled" ? new Date() : null,
   };
 
-  const [updatedRun] = await db
-    .update(workflowRuns)
-    .set(patch)
-    .where(eq(workflowRuns.id, context.run.id))
-    .returning();
-
-  const finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+  // [descope D5][r9 §1] 링크 자식 최종 변이는 유한 writer(잠금 하 P→I→S→C + 대상 재평가)로만 — 0행/경합은 실패닫힌 관찰(내구 행 재적재).
+  const gate = await resolveWorkflowRunFinalizationGate(db, { runId: context.run.id, companyId: context.run.companyId, nextStatus });
+  let finalRun: typeof workflowRuns.$inferSelect;
+  if (gate.kind === "refused-invalid") {
+    await logWorkflowRunFinalizationRefused(db, { companyId: context.run.companyId, runId: context.run.id, reason: gate.reason });
+    finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
+  } else if (gate.kind === "linked") {
+    const result = await applyLinkedWorkflowRunFinalization(db, {
+      bound: gate.bound, companyId: context.run.companyId, nextStatus,
+      patch: { startedAt: patch.startedAt, completedAt: patch.completedAt }, boundWhere: gate.boundWhere,
+    });
+    if (result.outcome !== "updated" && nextStatus === "completed") {
+      // 동일 종말 반복은 오염이 아니다 — 상실 사유만 구조화 감사에 남는다(실행/재시도 권위 없음 — 규칙 9).
+      await logWorkflowRunFinalizationRefused(db, {
+        companyId: context.run.companyId, runId: context.run.id,
+        reason: `linked finalization gate lost (${result.outcome}: identity/status/receipt)`,
+      });
+    }
+    finalRun = result.outcome === "updated"
+      ? result.run
+      : await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
+  } else {
+    const [updatedRun] = await db.update(workflowRuns).set(patch)
+      .where(eq(workflowRuns.id, context.run.id)).returning();
+    finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+  }
   const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
   const missionId = finalRun.missionId;
   const shouldStopMissionRuntimes = missionId !== null
@@ -3358,42 +3407,159 @@ async function cancelOutstandingWorkflowIssues(
 }
 
 
+const WORKFLOW_RUN_TERMINAL_STATUSES_SQL = sql`('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`;
+const WORKFLOW_RUN_TERMINAL_STATUSES = new Set(["completed", "cancelled", "aborted", "failed", "timed-out"]);
+
 export async function cancelWorkflowRunWithCleanup(
   db: Db,
   runId: string,
-  companyId?: string,
+  companyId: string,
+  options?: {
+    childParentFence: {
+      invocationId: string;
+      generation: number;
+      parentRunId: string;
+      parentStepRunId: string;
+    };
+  },
 ): Promise<boolean> {
-  const whereClause = companyId
-    ? and(eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId))
-    : eq(workflowRuns.id, runId);
-  const updatedRows = await db
-    .update(workflowRuns)
-    .set({
-      status: "cancelled",
-      completedAt: new Date(),
-    })
-    .where(whereClause)
-    .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
+  // [descope D5 — DAG:3604/3607] 회사는 항상 호출자가 명시한다(parentRunId 유추 금지). 링크 자식은
+  //   공유 전체 신원(BASE_ID/CURRENT) fence 취소 헬퍼로만 취소되고, 무효 표지 run 은 무변환 거부,
+  //   plain run 은 명시적 no-child 가드가 있는 기존 조건부 취소 UPDATE 다. 상세 분류는
+  //   workflow-cancel-bridge 가 담당한다(oversized 파일 밖 — 설계 §5).
+  const disposition = await cancelWorkflowRunWithChildFence(db, {
+    runId,
+    companyId,
+    suppliedFence: options?.childParentFence,
+  });
+  if (disposition.refusedInvalidReason) {
+    await logWorkflowRunCancellationRefused(db, companyId, runId, disposition.refusedInvalidReason);
+    return false;
+  }
+  const updatedRows: CancelledRunRef[] = disposition.rows;
 
   const updatedRun = updatedRows[0];
   if (!updatedRun) {
     return false;
   }
 
-  await cancelOutstandingWorkflowIssues(db, runId);
+  // [workflow child fix2 P1-6] 자손 run 취소 전파 — parent_run_id 링크 BFS(회사 범위).
+  //   종말 중간 run(완료된 fire-and-forget 자식 등)도 frontier 확장은 통과시키고, 취소는
+  //   비종말 노드에만 적용한다 — 단일 반복 순회라 visited/깊이 상한이 전역으로 유효하다.
+  //   자손을 먼저 취소해 자손 종말 hook 이 부모 waiting 스텝을 child_run_cancelled 로 마감하게 한다.
+  await cancelDescendantWorkflowRuns(db, {
+    rootRunId: updatedRun.id,
+    companyId: updatedRun.companyId,
+  });
+
+  await cleanupCancelledWorkflowRun(db, updatedRun);
+  return true;
+}
+
+/** 취소 확정된 run 1개의 정리: 이슈 취소 + 스텝 동기화 + 상위 훅 + 미션 런타임 중단. */
+async function cleanupCancelledWorkflowRun(
+  db: Db,
+  run: { id: string; companyId: string; missionId: string | null },
+): Promise<void> {
+  await cancelOutstandingWorkflowIssues(db, run.id);
   await syncCancelledWorkflowRunState({
     db,
-    run: updatedRun,
+    run,
     syncStepRunsFromIssueState,
   });
-  if (updatedRun.missionId) {
+  // [workflow child step] 자식 run 취소 → 부모 waiting 스텝 child_run_cancelled 마감.
+  //   취소 경로의 run 상태는 항상 cancelled 이므로 리터럴로 훅을 발화한다.
+  try {
+    await runWorkflowChildCompletionHook(db, {
+      id: run.id,
+      companyId: run.companyId,
+      status: "cancelled",
+    });
+  } catch {
+    // swallowed: reconciler 가 회복한다.
+  }
+  if (run.missionId) {
     await stopMissionRuntimesForMission(db, {
-      companyId: updatedRun.companyId,
-      missionId: updatedRun.missionId,
-      reason: `workflow ${runId} cancelled`,
+      companyId: run.companyId,
+      missionId: run.missionId,
+      reason: `workflow ${run.id} cancelled`,
     });
   }
-  return true;
+}
+
+/**
+ * [workflow child fix2 P1-6] parent_run_id 링크 전체를 순회하는 경계 취소 전파(회사 범위).
+ * - 종말 중간 run 도 frontier 확장에 포함한다(그 아래 살아있는 손자 도달).
+ * - 방문 집합과 깊이 상한이 순회 전체에서 공유된다(재귀 재진입으로 초기화되지 않는다).
+ * - [descope D5 — DAG:3700] 링크 자식은 공유 전체 신원 fence 취소 헬퍼로만 변이하고, 무효 링크는
+ *   감사 후 건너뛴다(mutate only valid links). plain 자손은 기존 조건부 UPDATE 를 유지한다.
+ *   자손 1개 변이의 상세는 workflow-cancel-bridge 가 담당한다(oversized 파일 밖 — 설계 §5).
+ * - 개별 자손 취소 실패는 조용히 삼키지 않고 구조화 activity 로 남긴다.
+ */
+async function cancelDescendantWorkflowRuns(
+  db: Db,
+  input: { rootRunId: string; companyId: string },
+): Promise<void> {
+  const visited = new Set<string>([input.rootRunId]);
+  let frontier = [input.rootRunId];
+  // 전역 깊이 상한: 비정상 링크 데이터(사이클/무한 체인)에서도 선형 종료를 보장한다.
+  for (let depth = 0; depth < 8 && frontier.length > 0; depth++) {
+    const children = await db
+      .select({
+        id: workflowRuns.id,
+        companyId: workflowRuns.companyId,
+        missionId: workflowRuns.missionId,
+        status: workflowRuns.status,
+        parentRunId: workflowRuns.parentRunId,
+        parentStepRunId: workflowRuns.parentStepRunId,
+        triggeredBy: workflowRuns.triggeredBy,
+      })
+      .from(workflowRuns)
+      .where(and(
+        eq(workflowRuns.companyId, input.companyId),
+        inArray(workflowRuns.parentRunId, frontier),
+      ));
+    frontier = [];
+    for (const child of children) {
+      if (visited.has(child.id)) continue;
+      visited.add(child.id);
+      frontier.push(child.id);
+      if (WORKFLOW_RUN_TERMINAL_STATUSES.has(child.status)) continue;
+      try {
+        const propagated = await cancelDescendantWorkflowRunWithChildFence(db, child);
+        if (!propagated) continue;
+        await cleanupCancelledWorkflowRun(db, child);
+        // 취소 전파 관측 기록(.activity) — 루트 취소가 자손 run 을 함께 종료시켰음을 남긴다.
+        await logActivity(db, {
+          companyId: input.companyId,
+          actorType: "system",
+          actorId: "workflow-cancel",
+          action: "workflow_run.cancelled",
+          entityType: "workflow_run",
+          entityId: child.id,
+          details: {
+            propagatedFrom: input.rootRunId,
+            reason: "parent workflow run cancelled",
+          },
+        });
+      } catch (error) {
+        // [fix2 P1-6] 개별 자손 취소 실패를 조용히 삼키지 않는다 — 구조화 activity 로 남기고
+        // 남은 자손 전파는 계속한다(미정산 자손은 reconciler 강제 종결 경로로 회수).
+        await logActivity(db, {
+          companyId: input.companyId,
+          actorType: "system",
+          actorId: "workflow-cancel",
+          action: "workflow_run.cancellation_propagation_failed",
+          entityType: "workflow_run",
+          entityId: child.id,
+          details: {
+            propagatedFrom: input.rootRunId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+    }
+  }
 }
 
 async function commentOnMainExecutorOversightForFailures(
@@ -3508,11 +3674,26 @@ async function applyConditionalSkipPropagation(input: {
   }
 }
 
+/** [cycle A §7] sync 소유 결과 — 실행 스냅숏과 별도로 전달되는 타입핑 결과. */
+export type WorkflowSyncOutcome = { kind: "synced" | "not-owner" | "busy"; result: WorkflowExecutionResult };
+
+/** 공개 시그니처 유지 — 소유 결과를 풀어 result 만 반환한다(cycle A §7). */
 export async function syncWorkflowRunState(
   db: Db,
   runId: string,
   source: WorkflowSyncSource = "workflow_sync",
+  options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean },
 ): Promise<WorkflowExecutionResult> {
+  return (await syncWorkflowRunStateWithOutcome(db, runId, source, options)).result;
+}
+
+/** [cycle A §7] sync 본체 — 소유권/경합 결과를 스냅숏과 함께 타입으로 반환한다. */
+export async function syncWorkflowRunStateWithOutcome(
+  db: Db,
+  runId: string,
+  source: WorkflowSyncSource = "workflow_sync",
+  options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean },
+): Promise<WorkflowSyncOutcome> {
   const normalizedSource = normalizeWorkflowSyncSource(source);
   const context = await loadWorkflowExecutionContext(db, runId);
   // [Task6b resume native entry] resume 수락 가드 — ensureStepRunRecords 를 포함한 모든 sync
@@ -3521,14 +3702,32 @@ export async function syncWorkflowRunState(
   //   중단한다(catch-and-continue 없음; 기존 caller 에러 처리 유지). SELECT 가드일 뿐이며
   //   queue/claim/dispatch 의 공통 lock/TOCTOU 방어를 대체하지 않는다.
   await assertResumeAccepted(db, runId, context.run.dispatchAuthorityVersion);
-  let stepRuns = await ensureStepRunRecords(db, runId, context.steps);
+  // [descope D3/D5] materializer 트랜잭션 진입 "전" 읽기 전용 발견 프리플라이트 — 수리는 존재하지
+  //   않는다. invalid-child 는 not-owner 스냅숏으로 양보하고(fail-closed), linked/plain 은 각각
+  //   임대 소유 materializer/기존 plain 경로로 진행한다(ancestor 잠금 없음).
+  const syncEntry = await discoverWorkflowChildStart(db, runId);
+  if (syncEntry.kind === "invalid-child") {
+    const snapshot = await getWorkflowExecutionResultSnapshot(db, runId);
+    if (!snapshot) throw new Error(`Workflow run ${runId} not found`);
+    return { kind: "not-owner", result: snapshot };
+  }
+  // [cycle A §7] fence 소실(not-owner)/경합(busy)은 초기화/launch 로 진행하지 않고, 롤백 완료 "후"
+  // 실제 영속 결과를 적재해 반환한다. running/빈 결과를 조작해 만들지 않는다.
+  const materialization = await ensureStepRunRecords(db, runId, context.steps, options?.childStartFence, options?.requireRunning);
+  if (materialization.kind !== "ready") {
+    const snapshot = await getWorkflowExecutionResultSnapshot(db, runId);
+    if (!snapshot) throw new Error(`Workflow run ${runId} not found`);
+    return { kind: materialization.kind, result: snapshot };
+  }
+  let stepRuns = materialization.rows;
   const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
   const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
 
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
-    stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns);
+    // [descope D2] 정산된 workflow S 는 이 리셋에서 명시 제외된다.
+    stepRuns = await resetUnlaunchedTerminalStepRuns(db, stepRuns, workflowChildStepIds(context.steps));
   }
   if (context.run.status !== "cancelled") {
     stepRuns = await failMalformedCompletedControlNodes(db, context, stepRuns);
@@ -3714,6 +3913,22 @@ export async function syncWorkflowRunState(
           continue;
         }
 
+        // [workflow child step] type:"workflow" — 같은 회사 대상 워크플로우를 자식 run 으로 실행.
+        //   대기 스텝은 pending 유지 + invocation 멱등 클레임으로 재진입 안전. 마감은 completion hook 이 담당.
+        //   [descope D2] retry admission/wait 힌트는 존재하지 않는다 — 세대는 항상 1이다.
+        if (isWorkflowChildStep(step)) {
+          const dispatched = await dispatchWorkflowChildStep({
+            db,
+            run: context.run,
+            definition: context.definition,
+            step,
+            stepRun,
+            now: new Date(),
+          });
+          failedIssueLessToolStep = failedIssueLessToolStep || !dispatched;
+          continue;
+        }
+
         if (isIssueLessToolStep(step)) {
           const started = await startIssueLessToolStepRun({
             db,
@@ -3825,6 +4040,24 @@ export async function syncWorkflowRunState(
   }
 
   const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns);
+  // [workflow child step] 자식 run 종말 → 부모 waiting 스텝 마감 훅. 훅 실패는 sync 를 깨뜨리지 않는다
+  //   (reconciler 가 회복). 훅은 자기 waiting 스텝만 마감한다(규칙 7/8).
+  if (TERMINAL_WORKFLOW_STATUSES.has(updatedRun.status)) {
+    try {
+      // [descope D3/D5] linked 발견에 한해 종말 훅을 발화한다 — 훅은 linked 전체 신원으로만
+      //   부모 스텝을 정산하고, invalid 신원은 정산을 촉발하지 않는다(회복 경로 소관).
+      const hookEntry = await discoverWorkflowChildStart(db, updatedRun.id);
+      if (hookEntry.kind === "linked") {
+        await runWorkflowChildCompletionHook(db, {
+          id: updatedRun.id,
+          companyId: updatedRun.companyId,
+          status: updatedRun.status,
+        });
+      }
+    } catch {
+      // swallowed: reconciler (reconcileWorkflowChildStepWaits) 가 회복한다.
+    }
+  }
   try {
     await closeResolvedWorkflowUnblocks({
       db,
@@ -3863,21 +4096,24 @@ export async function syncWorkflowRunState(
   });
 
   return {
-    runId,
-    workflowId: updatedRun.workflowId,
-    missionId: updatedRun.missionId,
-    status: updatedRun.status as "running" | "completed" | "failed" | "cancelled",
-    completedAt: updatedRun.completedAt,
-    error: updatedRun.status === "failed" ? "One or more workflow steps failed" : undefined,
-    stepRuns: stepRuns.map((stepRun) => ({
-      id: stepRun.id,
-      workflowRunId: stepRun.workflowRunId,
-      stepId: stepRun.stepId,
-      issueId: stepRun.issueId,
-      status: stepRun.status as "pending" | "running" | "completed" | "failed" | "skipped",
-      startedAt: stepRun.startedAt,
-      completedAt: stepRun.completedAt,
-    })),
+    kind: "synced",
+    result: {
+      runId,
+      workflowId: updatedRun.workflowId,
+      missionId: updatedRun.missionId,
+      status: updatedRun.status as "running" | "completed" | "failed" | "cancelled",
+      completedAt: updatedRun.completedAt,
+      error: updatedRun.status === "failed" ? "One or more workflow steps failed" : undefined,
+      stepRuns: stepRuns.map((stepRun) => ({
+        id: stepRun.id,
+        workflowRunId: stepRun.workflowRunId,
+        stepId: stepRun.stepId,
+        issueId: stepRun.issueId,
+        status: stepRun.status as "pending" | "running" | "completed" | "failed" | "skipped",
+        startedAt: stepRun.startedAt,
+        completedAt: stepRun.completedAt,
+      })),
+    },
   };
 }
 
@@ -3915,55 +4151,13 @@ export async function syncWorkflowRunForIssue(
   return syncWorkflowRunState(db, linkedStepRun.workflowRunId, normalizedSource);
 }
 
-/**
- * Executes a workflow run.
- *
- * @param db - Database instance.
- * @param runId - The workflow run ID to execute.
- * @param tx - Optional transaction for atomic execution.
- * @returns Execution result.
- */
-export async function executeWorkflowRun(
-  db: Db,
-  runId: string,
-): Promise<WorkflowExecutionResult> {
-  const context = await loadWorkflowExecutionContext(db, runId);
-  // [Hybrid QA] readiness 블록은 resume/readiness.ts 로 추출됐다 — 기존과 동일한 tool 체커를
-  //   콜백으로 주입해 tool check → structural gate readiness/topology 순서와 에러를 유지한다.
-  //   시작(startedAt/start activation) 트랜잭션은 아래에서 그대로 유지된다.
-  await assertResumeExecutionReadiness({
-    db,
-    companyId: context.run.companyId,
-    steps: context.steps,
-    assertToolsReady: assertWorkflowToolStepsReady,
-  });
-  const startedAt = new Date();
-  await db.transaction(async (tx) => {
-    const [startedRun] = await tx
-      .update(workflowRuns)
-      .set({ status: "running", startedAt, completedAt: null })
-      .where(and(
-        eq(workflowRuns.id, runId),
-        eq(workflowRuns.companyId, context.run.companyId),
-      ))
-      .returning({
-        id: workflowRuns.id,
-        companyId: workflowRuns.companyId,
-        missionId: workflowRuns.missionId,
-        startedAt: workflowRuns.startedAt,
-      });
-    if (!startedRun?.startedAt) {
-      throw new Error(`Workflow run disappeared before execution start: ${runId}`);
-    }
-    await activatePlanningMissionForWorkflowRun(tx, {
-      companyId: startedRun.companyId,
-      missionId: startedRun.missionId,
-      workflowRunId: startedRun.id,
-      startedAt: startedRun.startedAt,
-    });
-  });
-  return syncWorkflowRunState(db, runId, "workflow_execution");
-}
+// [cycle A §7] 실행 진입 래퍼/타입은 줄 수 예산을 위해 workflow-run-execution.ts 로 이관했다.
+// 공개 표면(dag-engine 재노출)은 그대로 유지된다.
+export {
+  executeWorkflowRun,
+  executeWorkflowRunWithStartOutcome,
+  type WorkflowRunExecutionOutcome,
+} from "./workflow-run-execution.js";
 
 // NOTE: stuck-run 정리(reconcile)는 services/workflow/reconciler.ts 의
 // createNativeWorkflowReconciler + reconcileWorkflow 로 이관했다. 과거 이 파일에

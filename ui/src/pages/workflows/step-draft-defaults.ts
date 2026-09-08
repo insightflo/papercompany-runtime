@@ -14,6 +14,7 @@ export function emptyStep(): StepDraft {
     agentId: "",
     agentName: "",
     tools: "",
+    targetWorkflowId: "",
     dependsOn: "",
     onFailure: "",
     maxRetries: "",

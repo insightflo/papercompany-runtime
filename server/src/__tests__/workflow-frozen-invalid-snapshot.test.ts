@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDb, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import {
@@ -29,7 +29,6 @@ import {
   createFrozenRun,
   markRunStatus,
   seedCompanyOnly,
-  seedQueuedToolStepRun,
   seedToolDefinition,
   seedWorkflowDefinition,
   startExecutionDefinitionFixture,
@@ -58,6 +57,26 @@ async function breakSnapshot(state: SnapshotState, sql: RawSql, runId: string): 
   } else {
     await corruptSnapshotSteps(sql, runId);
   }
+}
+
+// Requeue the captured row in place: (workflow_run_id, step_id) is unique.
+// All setup writes precede the snapshot corruption and no-mutation baseline.
+async function seedQueuedToolStepRun(db: Db, input: { runId: string; stepId: string; requestId: string }) {
+  const [row] = await db.update(workflowStepRuns).set({
+    status: "running",
+    issueId: null,
+    startedAt: null,
+    completedAt: null,
+    lastDispatchRequestId: input.requestId,
+    lastDispatchAcceptedAt: null,
+    lastDispatchErrorAt: null,
+    metadata: { toolQueue: { status: "queued", queuedAt: new Date().toISOString() } },
+  }).where(and(
+    eq(workflowStepRuns.workflowRunId, input.runId),
+    eq(workflowStepRuns.stepId, input.stepId),
+  )).returning();
+  if (!row) throw new Error("Expected captured step row to requeue");
+  return row;
 }
 
 describeEP("workflow frozen invalid snapshots (durable no-mutation at all execution boundaries)", () => {

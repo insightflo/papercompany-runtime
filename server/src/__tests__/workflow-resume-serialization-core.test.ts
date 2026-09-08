@@ -41,19 +41,20 @@ describeEmbeddedPostgres("workflow resume serialization core", () => {
 
   it("serializes mission, run and steps ordered by stepId then id under one transaction", async () => {
     const graph = await seedMutationCoreGraph(fixture.sql, "SEQ");
-    const twinA = await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "b" });
-    const twinB = await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "b" });
+    const middleB = await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "b-2" });
+    const middleA = await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "b-1" });
     await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "c" });
     const first = await seedMutationCoreStepRun(db, { runId: graph.runId, stepId: "a", values: { status: "pending" } });
-    // twin UUID 는 random 발생이므로 기대 순서도 동일한 lexical 정렬로 계산한다 (production .orderBy(stepId, id) 대응).
-    const [twinLow, twinHigh] = [twinA.id, twinB.id].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    // The SELECT/locks are run-scoped, so runStepUq makes the id tiebreak
+    // unreachable (same-step rows in another mission run would be excluded).
+    // Seed distinct step IDs out of order and retain exact row-order assertions.
     await withResumeSerialization(db, graph, async ({ mission, run, steps }) => {
       expect(mission).toMatchObject({ id: graph.missionId, companyId: graph.companyId });
       expect(run).toMatchObject({ id: graph.runId, companyId: graph.companyId, missionId: graph.missionId });
       expect(steps.map((step) => [step.stepId, step.id])).toEqual([
         ["a", first.id],
-        ["b", twinLow],
-        ["b", twinHigh],
+        ["b-1", middleA.id],
+        ["b-2", middleB.id],
         ["c", expect.any(String)],
       ]);
       expect(steps[0]!.status).toBe("pending");

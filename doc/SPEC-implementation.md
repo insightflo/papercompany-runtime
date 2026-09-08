@@ -127,6 +127,31 @@ directly advance downstream steps after issue or agent-run events. Manual missio
 creation and plugin workflow creation are separate management surfaces that feed
 the same server-native workflow service.
 
+### 6.4.0.1 Workflow child-step start ownership (0101)
+
+Workflow→workflow child runs acquire a start lease (60s token + expiry, immutable
+five-minute deadline, materialization receipt) before readiness; only the lease
+owner may materialize child steps, and the receipt commits atomically with the
+step rows. Recovery re-acquires expired leases through the same fenced entry.
+
+Child steps are wait-only: an omitted `wait` normalizes to true and `wait:false`
+is rejected at definition create/update and at runtime definition validation; no
+per-invocation wait mode is persisted. Retry policy on workflow steps is
+rejected at definition validation and removed at runtime: generation is always 1
+with no replacement generation, and a failed child terminally fails its parent
+step. Manual resume of a linked child returns
+`workflow_child_resume_not_supported` before any mutation. Deleting a child run
+keeps its linked invocation as a tombstone (`child_run_id` set NULL by FK
+action): claim and dispatch never recreate a child from it, and reconciliation
+settles the bound pending parent step as `child_run_failed`. Every final
+mutation binds the full identity (company, parent run, parent step, logical
+step, invocation, generation 1, child) and fails closed on any omitted or
+mismatched binding. Archiving or deleting either definition is rejected with
+`workflow_definition_has_active_child_invocations` while associated child
+invocations are active; claim serializes against archive and delete through
+definition row locks, and unshipped 0101 enforces the same guard with a DB
+trigger.
+
 The native DAG engine also owns two control-node types:
 
 - `if` evaluates one bounded `all`/`any` condition group against registered JSON

@@ -7,10 +7,13 @@
 // never hides in `extra`, and stepsToJson emits a consistent id+name pair.
 
 import { describe, expect, it } from "vitest";
+import { workflowStepDefinitionSchema } from "@paperclipai/shared";
 import { jsonToSteps, stepsToJson } from "./Workflows";
 import type { StepDraft } from "./Workflows";
 
 type StepsInput = Parameters<typeof jsonToSteps>[0];
+
+const TARGET = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 
 function step(over: Record<string, unknown> = {}): StepsInput[number] {
   return {
@@ -26,6 +29,47 @@ function roundTrip(over: Record<string, unknown>): Record<string, unknown> {
   const drafts = jsonToSteps([step(over)]);
   return stepsToJson(drafts)[0] as Record<string, unknown>;
 }
+
+describe("Workflows editor serialization — child workflow step (targetWorkflowId)", () => {
+  it("round-trips a workflow step preserving targetWorkflowId as a first-class draft field", () => {
+    const drafts = jsonToSteps([step({ type: "workflow", targetWorkflowId: TARGET })]);
+    expect(drafts[0].type).toBe("workflow");
+    expect(drafts[0].targetWorkflowId).toBe(TARGET);
+    // The id must NOT also linger in the generic extra bag.
+    expect(drafts[0].extra).not.toHaveProperty("targetWorkflowId");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out.targetWorkflowId).toBe(TARGET);
+  });
+
+  it("emits targetWorkflowId only for workflow steps and keeps it through a full round-trip", () => {
+    const agentOut = roundTrip({ type: "agent", agentName: "A", targetWorkflowId: TARGET });
+    expect(agentOut).not.toHaveProperty("targetWorkflowId");
+    const wfOut = roundTrip({ type: "workflow", targetWorkflowId: TARGET });
+    expect(wfOut.targetWorkflowId).toBe(TARGET);
+  });
+
+  it("a workflow step without targetWorkflowId is preserved as an empty draft (server validator rejects at save)", () => {
+    const drafts = jsonToSteps([step({ type: "workflow" })]);
+    expect(drafts[0].targetWorkflowId).toBe("");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out).not.toHaveProperty("targetWorkflowId");
+    // Client contract: the shared schema requires targetWorkflowId when type==="workflow",
+    // so an empty draft must fail the shared validator while the round-trip itself is lossless.
+    expect(() => workflowStepDefinitionSchema.parse({
+      ...out,
+      wait: true,
+      dependsOn: [],
+    })).toThrow(/targetWorkflowId/);
+  });
+
+  it("a serialized workflow step with targetWorkflowId passes the shared definition schema", () => {
+    const drafts = jsonToSteps([step({ type: "workflow", targetWorkflowId: TARGET })]);
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(() => workflowStepDefinitionSchema.parse({ ...out, wait: true, dependsOn: [] })).not.toThrow();
+  });
+});
 
 describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
   it("jsonToSteps hydrates agentId as a first-class field and strips it from extra", () => {
@@ -137,3 +181,97 @@ describe("Workflows editor serialization — stale assignee (AREA-1)", () => {
       expect(out).not.toHaveProperty("contract");
     });
   });
+
+describe("Workflows editor serialization — workflow child step round-trip", () => {
+  it("preserves targetWorkflowId, wait:true, and inputs through jsonToSteps → stepsToJson", () => {
+    // n8n "Execute Workflow" type:"workflow" 스텝. 편집기 전용 UI 필드가 아니므로
+    // extra bag 을 통해 load → save 라운드트립에서 유실되지 않아야 한다.
+    const drafts = jsonToSteps([step({
+      type: "workflow",
+      targetWorkflowId: TARGET,
+      wait: true,
+      inputs: { q: "{$runDate}" },
+    })]);
+    expect(drafts[0].type).toBe("workflow");
+    // [descope v1 D1] literal true 만 1급 필드로 승격된다.
+    expect(drafts[0].wait).toBe(true);
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.type).toBe("workflow");
+    expect(out.targetWorkflowId).toBe(TARGET);
+    expect(out.wait).toBe(true);
+    expect(out.inputs).toEqual({ q: "{$runDate}" });
+    expect(workflowStepDefinitionSchema.safeParse(out).success).toBe(true);
+  });
+
+  it("round-trips an omitted wait as omitted on the wire and the shared validator accepts it", () => {
+    // [descope v1 D1] 생략된 wait 는 true 로 강등되지 않고 그대로 생략되며,
+    // 런타임 정규화(wait 생략 = true)는 공유 검증기/서버 계약이다.
+    const out = roundTrip({ type: "workflow", targetWorkflowId: TARGET, inputs: { q: "x" } });
+    expect(out.wait).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(out))).not.toHaveProperty("wait");
+    expect(workflowStepDefinitionSchema.safeParse(out).success).toBe(true);
+  });
+
+  it("keeps wait/inputs in the extra bag and never routes them into agent/tool cleanup branches", () => {
+    const drafts = jsonToSteps([step({
+      type: "workflow",
+      targetWorkflowId: TARGET,
+      wait: true,
+    })]);
+    // [workflow child step UI] targetWorkflowId 는 이제 1급 draft 필드로 승격된다(extra 잔존 금지).
+    expect(drafts[0].targetWorkflowId).toBe(TARGET);
+    expect(drafts[0].extra).not.toHaveProperty("targetWorkflowId");
+    // wait/inputs 는 여전히 extra 통과값으로 유지된다(에이전트/도구 정리 분기가 먹지 않음).
+    expect(drafts[0].extra.wait).toBe(true);
+  });
+
+  it("refuses wait:false through the shared validator contract without coercing or stripping it", () => {
+    // [descope v1 D1] fire-and-forget 제거 — import 된 false 는 true 로 강등되거나
+    // 조용히 제거되지 않고 그대로 통과되며, 공유 검증기가 parse 실패로 거부한다.
+    const out = roundTrip({ type: "workflow", targetWorkflowId: TARGET, wait: false });
+    expect(out.wait).toBe(false);
+    const parsed = workflowStepDefinitionSchema.safeParse(out);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.path.includes("wait"))).toBe(true);
+    }
+  });
+
+  it("promotes only literal true — a string wait passes through and is refused by the shared validator", () => {
+    const drafts = jsonToSteps([step({ type: "workflow", targetWorkflowId: TARGET, wait: "true" })]);
+    expect(drafts[0].wait).toBeUndefined();
+    expect(drafts[0].extra.wait).toBe("true");
+    const out = stepsToJson(drafts)[0] as Record<string, unknown>;
+    expect(out.wait).toBe("true");
+    expect(workflowStepDefinitionSchema.safeParse(out).success).toBe(false);
+  });
+
+  it("refuses a workflow draft carrying retry policy fields (kept intact, refused by the shared validator)", () => {
+    // [descope v1 D2] workflow 스텝 재시도 정책 금지 — 직렬화가 재시도 필드를 지우지 않고
+    // (침묵 무시 금지) 그대로 통과시켜 공유 검증기가 거부한다.
+    const out = roundTrip({
+      type: "workflow",
+      targetWorkflowId: TARGET,
+      onFailure: "retry",
+      maxRetries: "3",
+      graphRetryDelaySeconds: "30",
+      graphRetryBackoff: "exponential",
+      graphRetryJitter: true,
+    });
+    expect(out.onFailure).toBe("retry");
+    expect(out.maxRetries).toBe(3);
+    expect(out.graphRetryDelaySeconds).toBe(30);
+    expect(out.graphRetryBackoff).toBe("exponential");
+    expect(out.graphRetryJitter).toBe(true);
+    const parsed = workflowStepDefinitionSchema.safeParse(out);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const issuePaths = new Set(parsed.error.issues.map((issue) => issue.path[0]));
+      expect(issuePaths.has("onFailure")).toBe(true);
+      expect(issuePaths.has("maxRetries")).toBe(true);
+      expect(issuePaths.has("graphRetryDelaySeconds")).toBe(true);
+      expect(issuePaths.has("graphRetryBackoff")).toBe(true);
+      expect(issuePaths.has("graphRetryJitter")).toBe(true);
+    }
+  });
+});

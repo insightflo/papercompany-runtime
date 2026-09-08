@@ -881,7 +881,12 @@ export function workflowRoutes(db: Db) {
       .where(eq(workflowWebhookConfigs.workflowId, workflowId))
       .limit(1);
     if (!config) {
-      throw notFound("Workflow webhook is not configured");
+      res.json(workflowWebhookStatusResponseSchema.parse({
+        enabled: false,
+        last4: null,
+        deliveriesLast24h: 0,
+      }));
+      return;
     }
     const dayAgo = new Date(Date.now() - 24 * 3_600_000);
     const [countRow] = await db

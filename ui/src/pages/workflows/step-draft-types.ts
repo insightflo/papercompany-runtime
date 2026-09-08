@@ -10,7 +10,7 @@ export type StepDraft = {
   id: string;
   title: string;
   description: string;
-  type: "agent" | "tool" | "if" | "complete";
+  type: "agent" | "tool" | "if" | "complete" | "workflow";
   conditionGroup: WorkflowConditionGroup;
   completionReason: string;
   toolName: string;
@@ -18,7 +18,14 @@ export type StepDraft = {
   agentId: string;
   agentName: string;
   tools: string;
+  // [workflow child step] type==="workflow" 인 하위 워크플로 호출 대상 정의 id. 공유 검증기는
+  //  type==="workflow" 일 때 이 필드를 필수로 요구한다(자기 자신 참조는 UI 선택기에서 제외).
+  targetWorkflowId: string;
   dependsOn: string;
+  // [descope v1 D1] workflow 스텝 wait 계약 — 생략 또는 리터럴 true 만 허용한다.
+  // false 는 초안 타입에서 표현 불가(typed invalid)이며, 직렬화는 true 만 emission 하고
+  // import 된 invalid 값은 침묵 강등/제거 없이 extra 통과 후 공유 검증기가 거부한다.
+  wait?: true;
   onFailure: string;
   maxRetries: string | number;
   graphRetryDelaySeconds: string | number;

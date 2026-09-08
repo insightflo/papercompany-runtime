@@ -32,6 +32,9 @@ export async function createWorkflowRunWithDefinition(
       runNumber: input.runNumber ?? null,
       runLabel: input.runLabel ?? null,
       parentIssueId: input.parentIssueId ?? null,
+      parentRunId: input.parentRunId ?? null,
+      parentStepRunId: input.parentStepRunId ?? null,
+      rootRunId: input.rootRunId ?? null,
       scheduledSlotId: input.scheduledSlotId ?? null,
       metadata: {
         ...(input.metadata ?? {}),

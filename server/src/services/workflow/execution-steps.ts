@@ -25,6 +25,9 @@ export type PersistedWorkflowStep = WorkflowStep & {
   toolArgs?: unknown;
   type?: unknown;
   qaType?: unknown;
+  targetWorkflowId?: unknown;
+  wait?: unknown;
+  inputs?: unknown;
   agentName?: unknown;
   executionControls?: unknown;
   graphConcurrencyKey?: unknown;

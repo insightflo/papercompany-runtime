@@ -8,6 +8,7 @@
 import type { Db } from "@paperclipai/db";
 import { workflowDefinitions, workflowRunSlots, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
 import { eq, and, desc, sql } from "drizzle-orm";
+import { archiveWorkflowDefinitionWithGuard } from "./workflow-definition-delete-guard.js";
 import type {
   WorkflowDefinition,
   WorkflowRun,
@@ -90,6 +91,9 @@ function mapWorkflowRun(run: typeof workflowRuns.$inferSelect): WorkflowRun {
     runNumber: run.runNumber,
     runLabel: run.runLabel,
     parentIssueId: run.parentIssueId,
+    parentRunId: run.parentRunId,
+    parentStepRunId: run.parentStepRunId,
+    rootRunId: run.rootRunId,
     scheduledSlotId: run.scheduledSlotId,
     legacyPluginRunEntityId: run.legacyPluginRunEntityId,
     metadata: normalizeMetadata(run.metadata),
@@ -243,16 +247,11 @@ export async function updateWorkflowDefinition(
 }
 
 /**
- * Archive a workflow definition. Public REST delete semantics are archive-only.
+ * [descope D6] 정의 보관(공개 DELETE 는 archive-only). 잠금/활성 invocation 재검사/typed 409
+ * 구조는 workflow-definition-delete-guard.ts 의 bounded 헬퍼로 위임한다(설계 §5).
  */
 export async function deleteWorkflowDefinition(db: Db, id: string): Promise<boolean> {
-  const rows = await db
-    .update(workflowDefinitions)
-    .set({ status: "archived", updatedAt: new Date() })
-    .where(eq(workflowDefinitions.id, id))
-    .returning({ id: workflowDefinitions.id });
-
-  return rows.length > 0;
+  return await archiveWorkflowDefinitionWithGuard(db, id);
 }
 
 /**
@@ -488,20 +487,4 @@ export async function resumeWorkflowRun(
     .returning();
 
   return run ? mapWorkflowRun(run) : null;
-}
-
-/**
- * Cancel a workflow run with company scope.
- */
-export async function cancelWorkflowRun(db: Db, input: { id: string; companyId: string }): Promise<boolean> {
-  const rows = await db
-    .update(workflowRuns)
-    .set({
-      status: "cancelled",
-      completedAt: new Date(),
-    })
-    .where(and(eq(workflowRuns.id, input.id), eq(workflowRuns.companyId, input.companyId)))
-    .returning({ id: workflowRuns.id });
-
-  return rows.length > 0;
 }

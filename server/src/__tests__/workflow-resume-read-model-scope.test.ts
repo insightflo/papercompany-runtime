@@ -125,7 +125,7 @@ describeEP("readResumeExecutionHistory — scope and validation rejections", () 
     expect((row!.steps as Array<{ id: string }>)[0]!.id).toBe("tampered");
   });
 
-  it("rejects duplicate/missing/extra step rows — exact step-id set comparison, not array position", async () => {
+  it("rejects missing/extra step rows — exact step-id set comparison, not array position", async () => {
     const missing = await seedReadModelGraph(fixture.sql, db);
     await seedReadModelStepRun(db, { runId: missing.runId, stepId: missing.definitionStepIds[0]! });
     expectUnproven(await rejectsWith(readModelScope(missing), "resume_history_unproven"), "step_set_mismatch");
@@ -135,12 +135,11 @@ describeEP("readResumeExecutionHistory — scope and validation rejections", () 
     await seedReadModelStepRun(db, { runId: extra.runId, stepId: "resume-step-extra" });
     expectUnproven(await rejectsWith(readModelScope(extra), "resume_history_unproven"), "step_set_mismatch");
 
-    const duplicate = await seedReadModelGraph(fixture.sql, db);
-    const [dupA, dupB] = duplicate.definitionStepIds;
-    await seedReadModelStepRun(db, { runId: duplicate.runId, stepId: dupA! });
-    await seedReadModelStepRun(db, { runId: duplicate.runId, stepId: dupA!, status: "running" });
-    await seedReadModelStepRun(db, { runId: duplicate.runId, stepId: dupB! });
-    expectUnproven(await rejectsWith(readModelScope(duplicate), "resume_history_unproven"), "step_set_mismatch");
+    // Duplicate step IDs in this SELECT are structurally unreachable:
+    // workflow_step_runs_run_step_uq enforces (workflow_run_id, step_id), and
+    // readResumeExecutionHistory selects only workflowRunId = run.id. A same-step
+    // row in a second run is excluded, not a duplicate candidate. The production
+    // defensive check remains; missing/extra cases above cover step_set_mismatch.
   });
 
   it("rejects dangling FK-free owner pointers and foreign-company linked rows instead of omitting them", async () => {

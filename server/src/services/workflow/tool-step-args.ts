@@ -20,6 +20,15 @@ type WorkflowArgRun = {
 
 const STEP_ARTIFACT_TOKEN = /\{\$steps\.([A-Za-z0-9_-]+)\.(workProductPath|workProductDir|siblingAssetsDir)\}/g;
 const RUN_METADATA_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
+/**
+ * [workflow child fix P2-9] 자식 run 입력 토큰 — 부모 workflow 스텝 inputs 가
+ * 자식 run metadata.workflowChildInputs 에 저장되고, 자식의 tool 스텝이
+ * {$childInputs.<key>} 로 개별 소비한다. 미지 키는 토큰 잔존 → 기존 strict
+ * fail-closed(ANY_UNRESOLVED_TOKEN_RE) 가 dispatch 를 거부한다.
+ */
+const CHILD_INPUTS_TOKEN = /\{\$childInputs\.([A-Za-z0-9_]+)\}/g;
+/** 렌더 후 잔존 검출용(fail-closed) — 유효 문자셋 밖의 키(customer-id 등)도 포괄한다(fix3 P2-6). */
+const UNRESOLVED_CHILD_INPUTS_TOKEN = /\{\$childInputs\.[^}]*\}/u;
 
 /**
  * 문자열이 아닌 run metadata 값을 템플릿 치환 문자열로 변환.
@@ -42,7 +51,7 @@ export async function resolveWorkflowToolStepArgs(input: {
   const runMetadata = input.run.metadata ?? {};
   const references = collectArtifactReferences(args);
   if (references.size === 0) {
-    return renderTemplates(args, input.run.runDate ?? "", input.run.id, new Map(), runMetadata);
+    return renderChecked(args, input.run.runDate ?? "", input.run.id, new Map(), runMetadata);
   }
 
   const ancestors = collectAncestorStepIds(input.step.id, input.workflowSteps);
@@ -110,7 +119,24 @@ export async function resolveWorkflowToolStepArgs(input: {
     }
   }
 
-  return renderTemplates(args, input.run.runDate ?? "", input.run.id, pathsByStepId, runMetadata);
+  return renderChecked(args, input.run.runDate ?? "", input.run.id, pathsByStepId, runMetadata);
+}
+
+/**
+ * [fix2 P2-7] 렌더 후 미해결 {$childInputs.*} 토큰은 fail-closed — enqueue/실행 이전에
+ * 구조화 실패(throw)로 마감된다. 도구 실행기가 알 수 없는 자식 입력 토큰을 받는 일은 없다.
+ */
+function renderChecked(value: unknown, runDate: string, runId: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
+  const rendered = renderTemplates(value, runDate, runId, pathsByStepId, runMetadata);
+  const serialized = JSON.stringify(rendered ?? "");
+  const unresolved = UNRESOLVED_CHILD_INPUTS_TOKEN.exec(serialized);
+  if (unresolved) {
+    throw new Error(
+      `Unresolved {$childInputs} token in tool args: ${unresolved[0]}`
+      + " (child input keys must be declared on the parent workflow step inputs)",
+    );
+  }
+  return rendered;
 }
 
 function collectArtifactReferences(value: unknown, result = new Set<string>()): Set<string> {
@@ -189,6 +215,14 @@ function renderTemplates(value: unknown, runDate: string, runId: string, pathsBy
       .replace(RUN_METADATA_TOKEN, (token, key: string) => {
         if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
         const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
+        return rendered === null ? token : rendered;
+      })
+      .replace(CHILD_INPUTS_TOKEN, (token, key: string) => {
+        const childInputs = runMetadata.workflowChildInputs;
+        if (!childInputs || typeof childInputs !== "object" || Array.isArray(childInputs)) return token;
+        const bag = childInputs as Record<string, unknown>;
+        if (!Object.prototype.hasOwnProperty.call(bag, key)) return token;
+        const rendered = stringifyWorkflowRunMetadataValue(bag[key]);
         return rendered === null ? token : rendered;
       }));
   }

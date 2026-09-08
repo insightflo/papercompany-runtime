@@ -6,7 +6,9 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { agents, companies } from "@paperclipai/db";
+import { agents,
+  companies,
+} from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
@@ -248,6 +250,10 @@ async function findActiveScheduledWorkflowMissionRun(
   return null;
 }
 
+import { assertWorkflowChildDefinitionCycles } from "./workflow-child-execution.js";
+import { discoverWorkflowChildStart } from "./workflow-child-discovery.js";
+import { HttpError } from "../../errors.js";
+
 async function assertWorkflowToolReadiness(
   db: Db,
   companyId: string,
@@ -289,6 +295,8 @@ export const workflowService = {
     }
     validateRunInputDeclarations(input.runInputs);
     await assertWorkflowToolReadiness(db, input.companyId, steps);
+    // [workflow child step] 정의 생성 시 workflow-step 타깃 체인 CYCLE DFS(자기참조 거부, diamond 허용).
+    await assertWorkflowChildDefinitionCycles(db, input.companyId, null, steps);
 
     return createWorkflowDefinition(db, { ...input, steps });
   },
@@ -326,6 +334,8 @@ export const workflowService = {
       const existing = await getWorkflowDefinitionById(db, id);
       if (!existing) return null;
       await assertWorkflowToolReadiness(db, existing.companyId, steps);
+      // [workflow child step] 정의 수정 시에도 CYCLE DFS(자기참조 거부, diamond 허용).
+      await assertWorkflowChildDefinitionCycles(db, existing.companyId, id, steps);
       updates = { ...updates, steps };
     }
     // runInputs는 배열 패치 시 전체 교체이므로 새 배열 단위로 선언 무결성 검증.
@@ -484,6 +494,24 @@ export const workflowService = {
     if (!existingRun || existingRun.companyId !== input.companyId) {
       throw new Error(`Workflow run not found: ${input.runId}`);
     }
+    // [descope D3] 자식 run 의 공개 resume 은 어떤 부수효과(정의 검증/리셋/임대/실행) "이전"에
+    //   typed 거부된다. linked 는 workflow_child_resume_not_supported, 표지가 있지만 비정합인
+    //   run 은 workflow_child_invalid_state 다 — plain fallback 은 절대 없다. missing 은 기존
+    //   not-found 를 유지한다. 자동 회복(초기화/정산)은 회복 경로의 소관이지 사용자 resume 이 아니다.
+    const discovery = await discoverWorkflowChildStart(db, input.runId);
+    if (discovery.kind === "linked") {
+      throw new HttpError(
+        409,
+        `workflow_child_resume_not_supported: run ${input.runId} is a linked child owned by its parent workflow step; rerun the parent workflow instead`,
+      );
+    }
+    if (discovery.kind === "invalid-child") {
+      throw new HttpError(409, `workflow_child_invalid_state: run ${input.runId} (${discovery.reason})`);
+    }
+    if (discovery.kind === "missing") {
+      throw new Error(`Workflow run not found: ${input.runId}`);
+    }
+    // 일반 run — pre-feature plain resume 을 그대로 유지한다(검증 → store resume → 컨트롤 리셋 → 실행).
     const workflow = await getWorkflowDefinitionById(db, existingRun.workflowId);
     if (!workflow || workflow.companyId !== input.companyId) {
       throw new Error(`Workflow definition not found: ${existingRun.workflowId}`);
@@ -506,6 +534,7 @@ export const workflowService = {
     });
     // [run9 RCA] 완료된 IF 노드도 verdict 입력(소스 work product)이 평가 시점보다 새로 갱신됐으면
     //   stale 로 보고 pending 리셋 후 재평가한다 — producer 수정 후에도 skip 스티키가 영구화되지 않게.
+    //   정산(failed/completed)된 workflow S 는 리셋/재오픈되지 않는다(D2 — 재실행은 새 최상위 run).
     await resetStaleIfControlNodesForResume({
       db,
       companyId: input.companyId,

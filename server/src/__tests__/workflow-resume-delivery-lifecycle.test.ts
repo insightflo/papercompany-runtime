@@ -111,28 +111,43 @@ describeEP("workflow resume delivery × mission lifecycle (dispatcher-side runti
     expect(execution?.state).toBe("completed");
     expect(execution?.completed_at).not.toBeNull();
 
-    // 오너 런타임: stopped pre-resume 행 → 재부트스트랩 경로(bootstrapRequired) + 표식 기록.
-    const ownerRow = await readRuntimeRow(db, graph.ownerRuntimeId);
-    expect(ownerRow?.status).toBe("busy");
-    expect(ownerRow?.contextInjectedAt).toBeNull();
-    expect(ownerRow?.stateJson.resumeRequestId).toBe(requestId);
-    expect(ownerRow?.stateJson.bootstrapContextInjected).toBe(false);
+    // 오너 런타임: pre-resume stopped 행은 재사용 금지(불변) — 재부트스트랩은
+    // 새 resume-runtime 행으로 수행한다(mission-resume-runtime-ensure 계약 C와 동일).
+    const stoppedOwnerRow = await readRuntimeRow(db, graph.ownerRuntimeId);
+    expect(stoppedOwnerRow?.status).toBe("stopped");
+    expect(stoppedOwnerRow?.contextInjectedAt).not.toBeNull();
+    const resumeWorkspaceKey = `resume-runtime:${JSON.stringify(["default", requestId])}`;
+    const ownerRows = await db.select().from(missionAgentRuntimes).where(and(
+      eq(missionAgentRuntimes.companyId, graph.companyId),
+      eq(missionAgentRuntimes.agentId, graph.ownerAgentId),
+    ));
+    expect(ownerRows).toHaveLength(2);
+    const resumeOwnerRow = ownerRows.find((row) => row.workspaceKey === resumeWorkspaceKey);
+    expect(resumeOwnerRow).toBeDefined();
+    expect(resumeOwnerRow?.status).toBe("busy");
+    expect(resumeOwnerRow?.contextInjectedAt).toBeNull();
+    expect(resumeOwnerRow?.stateJson.resumeRequestId).toBe(requestId);
+    expect(resumeOwnerRow?.stateJson.bootstrapContextInjected).toBe(false);
+    expect(resumeOwnerRow?.sessionId).toBeNull();
     // 수행자 런타임: resume 문맥으로 새 생성 — 표식 + bootstrap required.
     const assigneeRows = await db.select().from(missionAgentRuntimes).where(and(
       eq(missionAgentRuntimes.companyId, graph.companyId),
       eq(missionAgentRuntimes.agentId, graph.assigneeAgentId),
     ));
     expect(assigneeRows).toHaveLength(1);
+    expect(assigneeRows[0]?.workspaceKey).toBe(resumeWorkspaceKey);
     expect(assigneeRows[0]?.stateJson.resumeRequestId).toBe(requestId);
     expect(assigneeRows[0]?.stateJson.bootstrapContextInjected).toBe(false);
-    // ONLY 오너+영향 스텝 수행자: 타 run 수행자 런타임 없음, 미션 런타임은 정확히 2 행.
+    // ONLY 오너+영향 스텝 수행자: 타 run 수행자 런타임 없음. 미션 런타임은 3행
+    // (pre-resume stopped 오너 1 + resume-runtime 오너/수행자 각 1).
     const thirdRows = await db.select().from(missionAgentRuntimes)
       .where(eq(missionAgentRuntimes.agentId, thirdAgentId));
     expect(thirdRows).toHaveLength(0);
     const missionRuntimeRows = await db.select().from(missionAgentRuntimes)
       .where(eq(missionAgentRuntimes.missionId, graph.missionId));
-    expect(missionRuntimeRows.map((row) => row.agentId).sort())
-      .toEqual([graph.assigneeAgentId, graph.ownerAgentId].sort());
+    expect(missionRuntimeRows).toHaveLength(3);
+    expect(missionRuntimeRows.filter((row) => row.agentId === graph.ownerAgentId)).toHaveLength(2);
+    expect(missionRuntimeRows.filter((row) => row.agentId === graph.assigneeAgentId)).toHaveLength(1);
     // 세션/플랜 부활 없음(계약 D 불변).
     expect(await readMissionSessionStatus(db, graph.missionSessionId)).toBe("active");
     expect(await readPlanArtifactStatus(db, graph.planArtifactId)).toBe("active");
