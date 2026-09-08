@@ -29,10 +29,7 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 import { agents } from "@paperclipai/db";
-import {
-  dispatchWorkflowChildStep,
-  isWorkflowChildStep,
-} from "../services/workflow/workflow-child-execution.js";
+import { dispatchWorkflowChildStep } from "../services/workflow/workflow-child-execution.js";
 import { normalizeWorkflowStepsForExecution } from "../services/workflow/dag-engine.js";
 import {
   childStep,
@@ -69,67 +66,9 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
     await tempDb?.cleanup();
   });
 
-  it("isWorkflowChildStep detects workflow-type steps only", () => {
-    const steps = normalizeWorkflowStepsForExecution([
-      { id: "w", name: "W", type: "workflow", targetWorkflowId: randomUUID() },
-      { id: "a", name: "A", type: "agent", agentId: "" },
-      { id: "t", name: "T", type: "tool", toolNames: ["some-tool"] },
-    ]);
-    expect(steps.map(isWorkflowChildStep)).toEqual([true, false, false]);
-  });
-
-  it("dispatches wait:false child immediately and completes the step with childRunId", async () => {
-    const companyId = await createCompanyFixture("Fire Forget Co");
-    const childDefId = await insertDefinition({
-      companyId,
-      name: "child-wf",
-      steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
-    });
-    const parentDefId = await insertDefinition({
-      companyId,
-      name: "parent-wf",
-      steps: [childStep(childDefId, { wait: false })],
-    });
-    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({
-      companyId,
-      workflowId: parentDefId,
-      metadata: {},
-    });
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
-    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
-
-    const dispatched = await dispatchWorkflowChildStep({
-      db,
-      run,
-      definition,
-      step: normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!,
-      stepRun,
-      now: new Date(),
-    });
-    expect(dispatched).toBe(true);
-
-    const [storedStepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
-    expect(storedStepRun?.status).toBe("completed");
-    expect((storedStepRun?.metadata as Record<string, unknown>).toolResult).toEqual(
-      expect.objectContaining({ success: true }),
-    );
-
-    const [childRun] = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
-    expect(childRun).toBeTruthy();
-    expect(childRun?.parentRunId).toBe(runId);
-    expect(childRun?.rootRunId).toBe(runId);
-    expect(childRun?.parentStepRunId).toBe(stepRunId);
-
-    const [invocation] = await db.select().from(workflowStepInvocations);
-    expect(invocation?.childRunId).toBe(childRun?.id);
-    expect(invocation?.generation).toBe(1);
-  });
-
-  it("keeps wait:true step pending with waiting metadata and idempotently reuses the same child on re-dispatch", async () => {
+  // [descope D1] fire-and-forget 즉시 완료 분기는 삭제됐다 — workflow 스텝은 항상 대기한다.
+  //   dispatch → linked 자식 생성 + adoption 표시 → 부모 스텝은 pending 유지. 재진입은 같은 자식 재사용.
+  it("keeps the step pending with waiting metadata and idempotently reuses the same child on re-dispatch", async () => {
     const companyId = await createCompanyFixture("Waiter Co");
     const childDefId = await insertDefinition({
       companyId,
@@ -139,7 +78,7 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
     const parentDefId = await insertDefinition({
       companyId,
       name: "parent-wf",
-      steps: [childStep(childDefId)],
+      steps: [childStep(childDefId, { wait: true })],
     });
     const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
     const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
@@ -171,6 +110,13 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
     expect(workflowChild.generation).toBe(1);
     const [invocation] = await db.select().from(workflowStepInvocations);
     expect(invocation?.childRunId).toBe(childRun1?.id);
+    expect(invocation?.state).toBe("linked");
+    expect(invocation?.generation).toBe(1);
+    // [D5] 자식 run 행은 클레임 CREATE 형의 완전한 linked 신원을 가진다.
+    expect(childRun1?.parentRunId).toBe(runId);
+    expect(childRun1?.parentStepRunId).toBe(stepRunId);
+    expect(childRun1?.rootRunId).toBe(runId);
+    expect(childRun1?.triggeredBy).toBe("workflow-step");
   });
 
   it("fails closed with child_inputs_unresolved when a token cannot render", async () => {
@@ -223,8 +169,10 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
       expect.objectContaining({ success: false, error: "child_workflow_not_found" }),
     );
 
-    // reset step run, target a foreign-company definition
+    // reset step run, target a foreign-company definition. 첫 거부 정산이 run 동기화로 run 을
+    // 종말로 바꿨을 수 있으므로, 두번째 하위 사례 전에 부모 run 도 running 으로 복원한다.
     await db.update(workflowStepRuns).set({ status: "pending", metadata: {} }).where(eq(workflowStepRuns.id, stepRunId));
+    await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, runId));
     const parentDefId2 = await insertDefinition({
       companyId,
       name: "parent-wf-2",
@@ -237,6 +185,7 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
     expect((failed2?.metadata as Record<string, unknown>).toolResult).toEqual(
       expect.objectContaining({ success: false, error: "child_workflow_not_found" }),
     );
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
   });
 
   it("fails with child_depth_exceeded beyond depth 3", async () => {
@@ -284,6 +233,6 @@ describeEmbeddedPostgres("workflow-child-execution (dispatch)", () => {
     expect((failed?.metadata as Record<string, unknown>).toolResult).toEqual(
       expect.objectContaining({ success: false, error: "child_depth_exceeded" }),
     );
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
   });
-
 });

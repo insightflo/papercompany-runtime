@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refineWorkflowChildStepContract } from "./workflow-child-contract.js";
 import { workflowConditionGroupSchema } from "./workflow-condition.js";
 
 /**
@@ -98,7 +99,14 @@ export const workflowStepDefinitionSchema = z.object({
   // [workflow child step] n8n "Execute Workflow" — 같은 회사 대상 워크플로우 실행.
   // targetWorkflowId 필수 여부는 type==="workflow" refine 에서 검증.
   targetWorkflowId: optionalUuidSchema,
-  wait: z.boolean().optional(),
+  // [descope v1 D1] wait 는 생략(=true 정규화) 또는 리터럴 true 만 허용한다.
+  // fire-and-forget(false) 은 정의 단계에서 거부된다(수입 false 도 invalid 로 표면화) —
+  // 묵시적 강등/침묵 제거 금지.
+  wait: z.literal(true, {
+    errorMap: () => ({
+      message: "workflow steps always wait for the child run; wait:false is not supported",
+    }),
+  }).optional(),
   inputs: z
     // [fix2 P2-7] 키 문자셋을 토큰 접근 문법({$childInputs.<key>})과 정합시킨다:
     // [A-Za-z0-9_]+ 만 허용 — 렌더러가 개별 키로 접근 불가능한 키(customer-id 등)는
@@ -157,6 +165,11 @@ export const workflowStepDefinitionSchema = z.object({
         path: ["targetWorkflowId"],
         message: "targetWorkflowId is required when type is \"workflow\"",
       });
+    }
+    // [descope v1 D2] workflow 스텝 정책 재시도 거부 — 계약 로직은 전용 헬퍼(descope v1,
+    // 레거시 oversized validator 성장 제한). wait:false 거부는 wait 리터럴 스키마가 담당.
+    if (nodeType === "workflow") {
+      refineWorkflowChildStepContract(step, ctx);
     }
     if (step.contract !== undefined && (nodeType === "if" || nodeType === "complete")) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["contract"], message: "contract is only allowed on executable steps, not if/complete control nodes" });

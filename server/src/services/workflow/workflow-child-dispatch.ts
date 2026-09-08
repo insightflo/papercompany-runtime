@@ -1,32 +1,32 @@
 // server/src/services/workflow/workflow-child-dispatch.ts
 //
-// [purpose] workflow→workflow 자식 스텝 dispatch 본체(0101, fix round 4 + cycle A §6/§10).
-//   사전검사(precheck) → (레거시 claimed+자식 판별자 수리) → 클레임 트랜잭션
-//   (workflow-child-invocation-claim.ts) → 커밋 승자는 adoption 기록 후 실행 진입
-//   (executeWorkflowRunWithStartOutcome — 임대 소유자만 초기화)에 도달한다. 재사용/경합/자격
-//   탈락은 모두 클레임 트랜잭션 안에서 판정된다 — 잠금 밖 빠른 재사응 권위는 없다(cycle A §6).
-//   재사용의 wait 모드는 invocation 의 내구 값이 권위다(fix4 §6 — 정의 변경을 소급하지 않는다).
-// [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8).
+// [purpose] descope v1 — workflow→workflow 자식 스텝 dispatch 본체. 흐름은 사전검사(precheck,
+//   v1 계약 거부 포함) → 클레임 트랜잭션(claimChildInvocation, 세대는 항상 1) → 결과 분기다.
+//   레거시 판별자 수리/네이티브 retry admission/incomingWait 는 존재하지 않는다(D1/D2/D5).
+//   분기: parent-cancelled/cap-exceeded → pre-admission 형 실패 정산, tombstone → tombstone 형
+//   정산, invalid-state → 구조화 감사 이벤트 + skipped(행 무변경), ineligible/busy → skipped,
+//   reused/created → adoption(표시 프로젝션 전용, 새 시그니처) 후 created 만 실행 진입.
+// [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8, 파싱 권위 없음).
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   workflowDefinitions,
   workflowRuns,
-  workflowStepInvocations,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { logActivity } from "../activity-log.js";
 import { executeWorkflowRunWithStartOutcome } from "./dag-engine.js";
 import type { WorkflowStep } from "./dag-engine.js";
-import { precheckWorkflowChildDispatch } from "./workflow-child-dispatch-precheck.js";
-import { WORKFLOW_CHILD_MAX_CONCURRENT_WAITING } from "./workflow-child-guards.js";
 import { failChildStep } from "./workflow-child-completion.js";
 import {
   adoptChildForWaitingStep,
   logWorkflowChildRunCreatedActivity,
 } from "./workflow-child-execution.js";
+import { WORKFLOW_CHILD_MAX_CONCURRENT_WAITING } from "./workflow-child-guards.js";
 import { claimChildInvocation } from "./workflow-child-invocation-claim.js";
-import { repairLegacyChildLink } from "./workflow-child-legacy-link.js";
+import { precheckWorkflowChildDispatch } from "./workflow-child-dispatch-precheck.js";
 import { isChildStartContention } from "./workflow-child-start-contention.js";
+import type { WorkflowChildIdentity } from "./workflow-child-start-predicates.js";
 
 export type WorkflowChildDispatchInput = {
   db: Db;
@@ -35,16 +35,10 @@ export type WorkflowChildDispatchInput = {
   step: WorkflowStep;
   stepRun: typeof workflowStepRuns.$inferSelect;
   now: Date;
-  /** [cycle B F2] DAG workflow-child 호출부만 채우는 네이티브 retry admission 힌트. */
-  nativeRetryAdmission?: {
-    retryNumber: number;
-    retryCount: number;
-    metadata: Record<string, unknown>;
-  };
 };
 
-/** [cycle A §7] dispatch 결과 — progressed 만 이 호출의 소유 진행이다. waiting 은 재사용(내구
- *  대기 유지), skipped 는 소유자/정산 경로 양보, failed 는 스텝이 fenced 실패로 마감됐음을 뜻한다. */
+/** dispatch 결과 — progressed 만 이 호출의 소유 진행이다. waiting 은 내구 대기 유지, skipped 는
+ *  소유자/정산/무효 상태 양보, failed 는 스텝이 fenced 실패로 마감됐음을 뜻한다. */
 export type WorkflowChildDispatchOutcome = {
   outcome: "progressed" | "waiting" | "skipped" | "failed";
 };
@@ -59,124 +53,100 @@ export async function dispatchWorkflowChildStepWithOutcome(
   try {
     const precheck = await precheckWorkflowChildDispatch(db, { run, definition, step });
     if (!precheck.ok) {
-      await failChildStep(db, {
+      // 클레임 이전 실패 — invocation 부재 조건이 있는 pre-admission 형으로 정산한다.
+      const settled = await failChildStep(db, {
         companyId,
         workflowRunId: run.id,
         stepRunId: stepRun.id,
-        stepId: step.id,
+        stepId: stepRun.stepId,
         errorCode: precheck.errorCode,
         detail: precheck.detail,
       });
-      return { outcome: "failed" };
+      return settled.outcome === "settled" ? { outcome: "failed" } : { outcome: "skipped" };
     }
     const { target, renderedInputs } = precheck;
-    const incomingWait = (step as { wait?: unknown }).wait !== false;
-    const expectedGeneration = (stepRun.retryCount ?? 0) + 1;
 
-    // [cycle A §10] 레거시 coherent claimed+자식 영수증의 재사용 — 클레임 트랜잭션은 linked 만
-    //   재사용하므로, 동일 세대 claimed+nonnull 을 먼저 경비 수리하고 진행한다. 수리 실패는 양보.
-    const [existingInvocation] = await db
-      .select()
-      .from(workflowStepInvocations)
-      .where(eq(workflowStepInvocations.parentStepRunId, stepRun.id))
-      .limit(1);
-    if (
-      existingInvocation
-      && existingInvocation.generation === expectedGeneration
-      && existingInvocation.state === "claimed"
-      && existingInvocation.childRunId !== null
-    ) {
-      const repaired = await repairLegacyChildLink(db, {
-        companyId,
-        parentRunId: run.id,
-        parentStepRunId: stepRun.id,
-        invocationId: existingInvocation.id,
-        generation: existingInvocation.generation,
-        childRunId: existingInvocation.childRunId,
-      });
-      if (repaired === "ineligible" || repaired === "busy") return { outcome: "skipped" };
-    }
-
-    // 원자적 클레임: 잠금 하 세대 유도/검증 + invocation 판정 + 자식 run 행 생성 + 링크 커밋.
-    // [cycle B F2 수정] nativeRetryAdmission 힌트를 클레임까지 전달한다 — 이전 구현은 여기서 힌트를
-    //   유실해 due waiting retry 의 네이티브 해제가 항상 ineligible 로 탈락했다(설계 §2 위반).
+    // 원자적 클레임 — 부모/정의 잠금 하 단일 invocation 판정 + 자식 run 행 생성 + 링크 커밋.
     const claim = await claimChildInvocation(db, {
       companyId,
       run,
       parentStepRunId: stepRun.id,
-      incomingWait,
-      generation: expectedGeneration,
+      stepId: stepRun.stepId,
+      generation: 1,
       targetWorkflowId: target.id,
       renderedInputs,
       now,
-      ...(input.nativeRetryAdmission ? { nativeRetryAdmission: input.nativeRetryAdmission } : {}),
     });
 
     if (claim.outcome === "parent-cancelled") {
-      await failChildStep(db, {
+      const settled = await failChildStep(db, {
         companyId,
         workflowRunId: run.id,
         stepRunId: stepRun.id,
-        stepId: step.id,
+        stepId: stepRun.stepId,
         errorCode: "child_run_cancelled",
         detail: "parent workflow run was cancelled before child dispatch",
       });
-      return { outcome: "failed" };
+      return settled.outcome === "settled" ? { outcome: "failed" } : { outcome: "skipped" };
     }
     if (claim.outcome === "cap-exceeded") {
-      await failChildStep(db, {
+      const settled = await failChildStep(db, {
         companyId,
         workflowRunId: run.id,
         stepRunId: stepRun.id,
-        stepId: step.id,
+        stepId: stepRun.stepId,
         errorCode: "child_concurrency_exceeded",
         detail: `parent run already has ${WORKFLOW_CHILD_MAX_CONCURRENT_WAITING} committed waiting children (cap ${WORKFLOW_CHILD_MAX_CONCURRENT_WAITING})`,
       });
-      return { outcome: "failed" };
+      return settled.outcome === "settled" ? { outcome: "failed" } : { outcome: "skipped" };
     }
     if (claim.outcome === "tombstone") {
-      // [fix3 P1-4] 회복과 동일한 tombstone 정산 — 자식을 재생성하지 않고 fenced 실패로 마감.
-      await failChildStep(db, {
+      // [D4] 삭제 tombstone — 자식을 재생성하지 않고 tombstone 형으로 1회 fenced 정산.
+      const settled = await failChildStep(db, {
         companyId,
         workflowRunId: run.id,
         stepRunId: stepRun.id,
-        stepId: step.id,
+        stepId: stepRun.stepId,
         errorCode: "child_run_failed",
         detail: "linked child workflow run was deleted",
-        fence: { invocationId: claim.invocationId, generation: claim.generation, childDeleted: true },
+        tombstone: { invocationId: claim.invocationId, generation: claim.generation },
       });
-      return { outcome: "failed" };
+      return settled.outcome === "settled" ? { outcome: "failed" } : { outcome: "skipped" };
+    }
+    if (claim.outcome === "invalid-state") {
+      // 설계 §2 표 밖 상태 — 구조화 감사 이벤트만 남기고 실행 행은 무변경(fail-closed).
+      await logInvalidStateAudit(db, {
+        companyId,
+        stepRunId: stepRun.id,
+        parentRunId: run.id,
+        reason: claim.reason,
+      });
+      return { outcome: "skipped" };
     }
     if (claim.outcome === "ineligible" || claim.outcome === "busy") {
-      // [cycle A §6/§8] 스테일 세대/자격 상실/경합 — 부작용 없이 소유자에게 양보한다.
+      // 자격 상실/경합 — 부작용 없이 소유자에게 양보한다.
       return { outcome: "skipped" };
     }
 
+    // reused/created — adoption(표시 프로젝션 전용)을 새 시그니처로 기록한다.
+    const identity: WorkflowChildIdentity = {
+      companyId,
+      parentRunId: run.id,
+      parentStepRunId: stepRun.id,
+      stepId: stepRun.stepId,
+      invocationId: claim.invocationId,
+      childRunId: claim.childRunId,
+      generation: 1,
+    };
     if (claim.outcome === "reused") {
-      // [cycle A §6] 재사용도 adoption 을 현재 fence 로 수리한다(커밋된 wait/신원 사용 — 세대
-      //   재구성 없음). 실행 재진입은 없다 — 내구 대기는 그대로 유지된다.
-      await adoptChildForWaitingStep(db, {
-        companyId, run, step, stepRun, now,
-        wait: claim.wait,
-        renderedInputs,
-        invocationId: claim.invocationId,
-        childRunId: claim.childRunId,
-        generation: claim.generation,
-      });
+      // 내구 대기는 그대로 유지 — 실행 재진입 없다. adoption 상실(무해 드리프트)도 waiting.
+      await adoptWithFreshMetadata(db, identity, now);
       return { outcome: "waiting" };
     }
 
-    // claim.outcome === "created" — adoption 을 실행 "전에" 기록한다(종말 훅 fence 요구).
-    const adopted = await adoptChildForWaitingStep(db, {
-      companyId, run, step, stepRun, now, wait: claim.wait, renderedInputs,
-      invocationId: claim.invocationId,
-      childRunId: claim.childRunId,
-      generation: claim.generation,
-    });
-    if (!adopted) {
-      // 최신 세대 adoption 이 경합에서 이겼다 — 소유자가 계속 진행한다(스텝 실패 아님).
-      return { outcome: "skipped" };
-    }
+    // created — adoption 을 실행 "전에" 기록한다. 경합 패자는 양보(스텝 실패 아님).
+    const adopted = await adoptWithFreshMetadata(db, identity, now);
+    if (!adopted) return { outcome: "skipped" };
     await logWorkflowChildRunCreatedActivity(db, {
       companyId,
       childRunId: claim.childRunId,
@@ -185,11 +155,9 @@ export async function dispatchWorkflowChildStepWithOutcome(
       targetWorkflowId: target.id,
     });
 
-    // 실행 진입 — 임대 소유자만 초기화한다(creator race/duplicate steps 차단).
-    // readiness 실패는 run-start 내부에서 fenced 소유자 실패 정산 후 원본 오류를 재던진다 —
-    // 이 호출의 소유 진행으로 보고한다(정산은 이미 커밋됐다).
-    // [cycle B §7] 타입핑 결과로만 판단한다 — started=시작/sync 진입, settled=이 호출의 마감 정산,
-    //   materialized=기존 초기화된 자식(새 시작 아님→waiting), busy/ineligible/expired=양보(skipped).
+    // 실행 진입 — 전체 신원 임대(start-lease) 소유자만 초기화한다.
+    // [cycle B §7] started/settled=소유 진행, materialized=기존 초기화 자식(waiting),
+    //   busy/ineligible/expired=양보(skipped).
     const startOutcome = await executeWorkflowRunWithStartOutcome(db, claim.childRunId);
     switch (startOutcome.kind) {
       case "started":
@@ -201,17 +169,59 @@ export async function dispatchWorkflowChildStepWithOutcome(
         return { outcome: "skipped" };
     }
   } catch (error) {
-    // [cycle A §8] 경합은 실패 정산 없이 양보한다. 그 외 실행 진입 예외는 이미 소유 fence 정산
-    // (run-start preparation scope)되었거나 회복 경로의 소관이다 — failed 로 보고하고 원본을
-    // 실행 경계로 전파하지 않는다(공개 boolean 래퍼는 false).
+    // 경합은 실패 정산 없이 양보한다. [설계 §6 r7] 알 수 없는 오류는 정확한 원본 그대로 호출자에게
+    // 전파된다(롤백 후) — 정산 승리 없는 failed 보고/삼키기 금지. 실행 정산은 이미 소유 fence
+    // (run-start scope)에서 커밋됐을 수 있고, 그 경우에도 원본 오류가 우선 권위다.
     if (isChildStartContention(error)) return { outcome: "skipped" };
-    return { outcome: "failed" };
+    throw error;
+  }
+}
+
+/** adoption 직전 step-run metadata 를 재적재해 관측 스냅숏을 신선하게 유지한다(무해 드리프트 최소화). */
+async function adoptWithFreshMetadata(
+  db: Db,
+  identity: WorkflowChildIdentity,
+  now: Date,
+): Promise<boolean> {
+  const [fresh] = await db
+    .select({ metadata: workflowStepRuns.metadata })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, identity.parentStepRunId))
+    .limit(1);
+  return await adoptChildForWaitingStep(db, {
+    identity,
+    observedMetadata: fresh?.metadata ?? null,
+    now,
+  });
+}
+
+/** invalid-state 구조화 감사 이벤트 — 2차 기록 실패는 primary 흐름(행 무변경)을 대체하지 않는다. */
+async function logInvalidStateAudit(
+  db: Db,
+  input: { companyId: string; stepRunId: string; parentRunId: string; reason: string },
+): Promise<void> {
+  try {
+    await logActivity(db, {
+      companyId: input.companyId,
+      actorType: "system",
+      actorId: "workflow-step",
+      action: "workflow_child_invalid_state",
+      entityType: "workflow_step_run",
+      entityId: input.stepRunId,
+      details: {
+        reason: input.reason,
+        parentRunId: input.parentRunId,
+        disposition: "skipped_rows_unchanged",
+      },
+    });
+  } catch {
+    // 감사 기록 실패는 invalid-state 의 fail-closed 결과(행 무변경)를 바꾸지 않는다.
   }
 }
 
 /**
  * type:"workflow" 스텝 dispatch. true = dispatched/waiting/양보(기존 자식 포함), false = step 실패로
- * 마감. 공개 래퍼 — failed 만 false 다(cycle A §6/§8).
+ * 마감. 공개 래퍼 — failed 만 false 다.
  */
 export async function dispatchWorkflowChildStep(input: WorkflowChildDispatchInput): Promise<boolean> {
   const { db, ...rest } = input;

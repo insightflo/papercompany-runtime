@@ -4,6 +4,7 @@ import { workflowStepRuns } from "@paperclipai/db";
 import type { WorkflowStep } from "./dag-engine.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
 import { isWorkflowControlNode } from "./control-flow/control-node-executor.js";
+import { isWorkflowChildStep } from "./workflow-child-guards.js";
 import {
   appendRetryAttempt,
   classifyWorkflowStepRetry,
@@ -39,12 +40,10 @@ function supportedStepType(step: WorkflowStep): boolean {
   const hasToolNames = Array.isArray(step.toolNames)
     && step.toolNames.some((tool) => typeof tool === "string" && tool.trim().length > 0);
   if (stepType === "if" || stepType === "complete") return false;
-  if (stepType === "" || stepType === "agent") return true;
-  // [workflow child fix P1-3] type:"workflow" 스텝도 기존 bounded retry 스케줄링을 탄다.
-  //   retry 스케줄은 failed→pending + retryCount+1 CAS 이고, 재 dispatch 시
-  //   dispatchWorkflowChildStep 의 세대 CAS(retryCount+1)가 새 자식을 정확히 1개 생성한다.
-  if (stepType === "workflow") return true;
-  return stepType === "tool" && hasToolNames;
+  // [descope D2] workflow-type S 는 retry 스케줄링에서 명시 제외다 — 자식 실패는 부모 스텝의
+  //   종말 정산이고, 재실행은 새 최상위 run 의 몫이다(세대 교체/재개 재시도 없음).
+  if (stepType === "workflow") return false;
+  return stepType === "" || stepType === "agent" || (stepType === "tool" && hasToolNames);
 }
 
 
@@ -101,6 +100,10 @@ export async function applyWorkflowStepRetryPass(input: {
   for (const failedRun of failedRuns) {
     const step = input.context.steps.find((candidate) => candidate.id === failedRun.stepId);
     if (!step) continue;
+    // [descope D2] workflow-type S 는 이 pass 의 "어떤 변이도" 금지된다 — malformed metadata
+    //   정리(수리)조차 예외다(수리 없음, fail-closed). retryCount/metadata 는 호출자가 존중해야 할
+    //   신원 값이고, 거부는 구조화 사유로 통과된다(무변경).
+    if (isWorkflowChildStep(step)) continue;
     const metadata = record(failedRun.metadata);
     if (hasMalformedWorkflowRetry(metadata)) {
       await clearRetryMetadata({

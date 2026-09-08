@@ -41,14 +41,16 @@ import {
   createCompanyFixture,
   insertDefinition,
   insertRunWithWorkflowStepRun,
+  insertStepRunForRun,
 } from "./helpers/workflow-child-fixtures.js";
+import { insertLinkedInvocation, insertMaterializedChildRun, insertTombstoneInvocation } from "./helpers/workflow-child-invocation-fixtures.js";
 
 let db: Awaited<ReturnType<typeof createDb>>;
 let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-describeEmbeddedPostgres("workflow-child-execution (guards/caps/cycles)", () => {
+describeEmbeddedPostgres("workflow-child-guards (cycles/caps/v1 refusals)", () => {
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workflow-child-dispatch-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workflow-child-guards-");
     db = createDb(tempDb.connectionString);
     configureWorkflowChildFixtures(db);
   }, 60_000);
@@ -79,64 +81,83 @@ describeEmbeddedPostgres("workflow-child-execution (guards/caps/cycles)", () => 
     expect(steps.map(isWorkflowChildStep)).toEqual([true, false, false]);
   });
 
-  it("per-parent concurrent waiting children cap rejects the 6th child", async () => {
+  it("per-parent cap counts 5 committed invocations on pending steps and atomically rejects the 6th", async () => {
     const companyId = await createCompanyFixture("Cap Co");
     const childDefId = await insertDefinition({
       companyId,
       name: "child-wf",
       steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
     });
+    const siblingIds = Array.from({ length: 5 }, (_, i) => `child-sibling-${i}`);
     const parentDefId = await insertDefinition({
       companyId,
       name: "parent-wf",
-      steps: [
-        childStep(childDefId),
-        ...Array.from({ length: 5 }, (_, i) => ({
-          id: `child-sibling-${i}`,
-          name: `Sibling ${i}`,
-          type: "workflow",
-          dependencies: [],
-          targetWorkflowId: childDefId,
-        })),
-      ],
+      steps: [childStep(childDefId), ...siblingIds.map((id) => ({
+        id,
+        name: id,
+        type: "workflow",
+        dependencies: [],
+        targetWorkflowId: childDefId,
+      }))],
     });
     const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
+    // 5 pending sibling steps with committed invocations in MIXED projection states (r3 UnadoptedCap):
+    // adopted+materialized / unadopted+materialized / unadopted+linked-pending / tombstone 등.
+    for (let i = 0; i < 5; i += 1) {
+      const siblingStepRunId = await insertStepRunForRun({ runId, stepId: siblingIds[i]! });
+      if (i === 0) {
+        // adopted + materialized child
+        await insertMaterializedChildRun(db, {
+          companyId,
+          parentRunId: runId,
+          parentStepRunId: siblingStepRunId,
+          childWorkflowId: childDefId,
+          stepId: siblingIds[i]!,
+        });
+        const [sibling] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, siblingStepRunId));
+        const [invocation] = await db.select().from(workflowStepInvocations)
+          .where(eq(workflowStepInvocations.parentStepRunId, siblingStepRunId));
+        await db.update(workflowStepRuns).set({ metadata: {
+          ...(sibling?.metadata ?? {}),
+          workflowChild: { childRunId: invocation?.childRunId, invocationId: invocation?.id, generation: 1 },
+        } }).where(eq(workflowStepRuns.id, siblingStepRunId));
+      } else if (i === 1) {
+        // unadopted + materialized child
+        await insertMaterializedChildRun(db, {
+          companyId,
+          parentRunId: runId,
+          parentStepRunId: siblingStepRunId,
+          childWorkflowId: childDefId,
+          stepId: siblingIds[i]!,
+        });
+      } else if (i < 4) {
+        // unadopted + linked pending children
+        await insertLinkedInvocation(db, {
+          companyId,
+          parentRunId: runId,
+          parentStepRunId: siblingStepRunId,
+          childWorkflowId: childDefId,
+          stepId: siblingIds[i]!,
+        });
+      } else {
+        // settled 되지 않은 tombstone — pending 부모 스텝의 invocation 도 cap 에 섞인다.
+        await insertTombstoneInvocation(db, { companyId, parentStepRunId: siblingStepRunId, targetWorkflowId: childDefId });
+      }
+    }
+
     const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
     const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
-    for (let i = 0; i < 5; i += 1) {
-      const siblingChildRunId = randomUUID();
-      await db.insert(workflowRuns).values({
-        id: siblingChildRunId,
-        workflowId: childDefId,
-        companyId,
-        status: "running",
-        triggeredBy: "workflow-step",
-        triggerSource: "workflow",
-        parentRunId: runId,
-        rootRunId: runId,
-      });
-      const siblingStepRunId = randomUUID();
-      await db.insert(workflowStepRuns).values({
-        id: siblingStepRunId,
-        workflowRunId: runId,
-        stepId: `child-sibling-${i}`,
-        status: "pending",
-        metadata: { workflowChild: { childRunId: siblingChildRunId, generation: 1 } },
-      });
-      await db.insert(workflowStepInvocations).values({
-        companyId,
-        parentStepRunId: siblingStepRunId,
-        childRunId: siblingChildRunId,
-        generation: 1,
-      });
-    }
-
     expect(await dispatchWorkflowChildStep({ db, run, definition, step, stepRun: (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0], now: new Date() })).toBe(false);
     const [failed] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
     expect((failed?.metadata as Record<string, unknown>).toolResult).toEqual(
       expect.objectContaining({ success: false, error: "child_concurrency_exceeded" }),
     );
+    // 원자 거부 — 6번째 invocation/자식 run 은 존재하지 않는다(커밋된 5개만).
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(5);
+    const childRuns = await db.select().from(workflowRuns)
+      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
+    expect(childRuns).toHaveLength(4);
   });
 
   it("cycle DFS rejects self-reference and true cycles but allows diamonds", () => {
@@ -183,7 +204,6 @@ describeEmbeddedPostgres("workflow-child-execution (guards/caps/cycles)", () => 
       name: "child-wf",
       steps: [{ id: "back", name: "Back", type: "workflow", dependencies: [], targetWorkflowId: null }],
     });
-    // make the child target the parent definition — but we don't know parent id before insert; update after
     const parentDefId = await insertDefinition({
       companyId,
       name: "parent-wf",
@@ -204,5 +224,36 @@ describeEmbeddedPostgres("workflow-child-execution (guards/caps/cycles)", () => 
       expect.objectContaining({ success: false, error: "child_cycle_detected" }),
     );
     expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+  });
+
+  // [descope v1 D1/D2] wait:false / retry 정책은 dispatch 사전검사에서 클레임 이전에 기계 거부된다.
+  it.each([
+    ["wait:false", { wait: false }],
+    ["onFailure:retry", { onFailure: "retry" }],
+    ["maxRetries:0", { maxRetries: 0 }],
+    ["graphRetryDelaySeconds:0", { graphRetryDelaySeconds: 0 }],
+    ["graphRetryBackoff", { graphRetryBackoff: "fixed" }],
+    ["graphRetryJitter:false", { graphRetryJitter: false }],
+  ])("refuses workflow step with unsupported option %s before any claim", async (_label, option) => {
+    const companyId = await createCompanyFixture(`Refusal ${_label.replace(/\W+/g, "")}`);
+    const parentDefId = await insertDefinition({
+      companyId,
+      name: "parent-wf",
+      steps: [{ id: "run-child", name: "Run child", type: "workflow", dependencies: [], targetWorkflowId: randomUUID(), ...option }],
+    });
+    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
+    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
+    const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
+    expect(await dispatchWorkflowChildStep({ db, run, definition, step, stepRun: (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0], now: new Date() })).toBe(false);
+    const [failed] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect((failed?.metadata as Record<string, unknown>).toolResult).toEqual(
+      expect.objectContaining({ success: false, error: "workflow_child_unsupported_option" }),
+    );
+    // R-클래스 증거 — 클레임 이전 거부: invocation/자식 run 행 0개.
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+    const childRuns = await db.select().from(workflowRuns)
+      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
+    expect(childRuns).toHaveLength(0);
   });
 });

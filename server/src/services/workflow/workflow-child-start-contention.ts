@@ -1,10 +1,11 @@
 // server/src/services/workflow/workflow-child-start-contention.ts
 //
-// [purpose] PostgreSQL 구조화 경합 오류 분류 전용 모듈(cycle A §9).
+// [purpose] PostgreSQL 구조화 경합 오류 분류 전용 모듈(설계 §3).
 //   object.code 와 error.cause 체인(최대 5단계, 순환 방지)에서 SQLSTATE 를 검사한다.
 //   메시지/스택/정규식/클래스명 매칭은 금지(규칙 7/8 — 오류 텍스트는 실행 권위가 아니다).
 //   57014 는 statement 취소/타임아웃과 코드를 공유하므로 경합으로 분류하지 않는다.
-// [cycle B F5] 문자열 SQLSTATE 만 인정 — 숫자 40001/프로스/23505/23514/57014 는 경합 아님.
+// [descope] 문자열 SQLSTATE 만 인정 — 숫자 40001/프로스/23505/23514/57014 는 경합 아님.
+//   retry-admission 센티널(CHILD_START_ADMISSION_LOST 계열)은 재시도 입장 삭제로 함께 삭제됐다(D2).
 const CONTENTION_SQLSTATES = new Set<string>(["55P03", "40P01", "40001"]);
 const MAX_CAUSE_DEPTH = 5;
 
@@ -30,7 +31,7 @@ function hasContentionSqlState(error: unknown, depth: number, seen: Set<unknown>
   seen.add(error);
   if (typeof error === "object") {
     const candidate = error as { code?: unknown; cause?: unknown };
-    // [cycle B F5] typeof code === "string" 만 허용(숫자 코드/기타 타입 배제).
+    // [descope] typeof code === "string" 만 허용(숫자 코드/기타 타입 배제).
     if (typeof candidate.code === "string" && CONTENTION_SQLSTATES.has(candidate.code)) return true;
     if (candidate.cause !== undefined) return hasContentionSqlState(candidate.cause, depth + 1, seen);
   }
@@ -67,23 +68,4 @@ export class ChildStartFenceLostError extends Error {
 export function isChildStartFenceLost(error: unknown): boolean {
   return error instanceof ChildStartFenceLostError
     || (typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[CHILD_START_FENCE_LOST] === true);
-}
-
-/**
- * [cycle B F2] 자식 retry admission CAS 소실 전용 비공개 센티널 — 트랜잭션 내부 throw 로
- * waiting→dispatching 전이+클레임을 함께 롤백하고, 외부에서만 busy 로 변환한다(메시지 매칭 금지).
- */
-export const CHILD_START_ADMISSION_LOST = Symbol("workflow-child-start-admission-lost");
-
-export class ChildStartAdmissionLostError extends Error {
-  readonly [CHILD_START_ADMISSION_LOST] = true as const;
-  constructor() {
-    super("workflow child retry admission lost");
-    this.name = "ChildStartAdmissionLostError";
-  }
-}
-
-export function isChildStartAdmissionLost(error: unknown): boolean {
-  return error instanceof ChildStartAdmissionLostError
-    || (typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[CHILD_START_ADMISSION_LOST] === true);
 }

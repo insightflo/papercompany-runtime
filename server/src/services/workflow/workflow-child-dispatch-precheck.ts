@@ -1,10 +1,12 @@
 // server/src/services/workflow/workflow-child-dispatch-precheck.ts
 //
-// [purpose] workflow→workflow 자식 스텝 dispatch 사전검사 모듈(0101, fix round).
-//   대상 정의 존재/회사 일치 → CYCLE guard(정의 그래프 DFS) → DEPTH guard(root_run_id 체인,
-//   회사 불일치 조상 fail-closed) → strict inputs 토큰 렌더(fail-closed). 하나라도 위반하면
-//   기계 errorCode 로 즉시 실패 응답 — 클레임 트랜잭션 진입 전에 모든 정적 검증을 끝낸다.
-// [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8, 파싱 권위 없음).
+// [purpose] workflow→workflow 자식 스텝 dispatch 사전검사 모듈(descope v1).
+//   첫 검사로 v1 계약 거부(D1/D2 — wait:false, onFailure:"retry", 모든 retry 정책 필드는
+//   workflow 스텝에서 기계적으로 거부)를 수행하고, 이어서 대상 정의 존재/회사 일치 → CYCLE guard
+//   (정의 그래프 DFS) → DEPTH guard(root_run_id 체인, 회사 불일치 조상 fail-closed) → strict
+//   inputs 토큰 렌더(fail-closed). 하나라도 위반하면 기계 errorCode 로 즉시 실패 응답 — 클레임
+//   트랜잭션 진입 전에 모든 정적 검증을 끝낸다.
+// [authority] 모든 판정은 구조화 DB 레코드/정의 JSON 필드만 읽는다(규칙 7/8, 파싱 권위 없음).
 import type { Db } from "@paperclipai/db";
 import {
   workflowDefinitions,
@@ -39,6 +41,21 @@ export type WorkflowChildDispatchPrecheck =
   | { ok: false; errorCode: string; detail: string };
 
 /**
+ * [descope v1 D1/D2] workflow 스텝의 지원되지 않는 옵션을 기계 검사한다 — 다른 검사보다 먼저.
+ *  wait:false, onFailure:"retry", maxRetries/graphRetryDelaySeconds/graphRetryBackoff/
+ *  graphRetryJitter 중 하나라도 공급되면(0/false 포함) 거부한다. 위반 옵션 이름을 반환한다.
+ */
+function firstUnsupportedChildStepOption(step: NormalizedWorkflowStep): string | null {
+  if (step.wait === false) return "wait";
+  if (step.onFailure === "retry") return "onFailure";
+  if (step.maxRetries !== undefined) return "maxRetries";
+  if (step.graphRetryDelaySeconds !== undefined) return "graphRetryDelaySeconds";
+  if (step.graphRetryBackoff !== undefined) return "graphRetryBackoff";
+  if (step.graphRetryJitter !== undefined) return "graphRetryJitter";
+  return null;
+}
+
+/**
  * dispatch 사전검사. ok:false 면 호출자가 failChildStep(errorCode, detail) 로 스텝을 마감한다.
  */
 export async function precheckWorkflowChildDispatch(
@@ -48,6 +65,16 @@ export async function precheckWorkflowChildDispatch(
   const { run, definition, step } = input;
   const persisted = step as NormalizedWorkflowStep;
   const companyId = run.companyId;
+
+  // [descope v1 D1/D2] v1 계약 거부 — 모든 다른 검사/DB 접근 전에 기계적으로 수행한다.
+  const unsupportedOption = firstUnsupportedChildStepOption(persisted);
+  if (unsupportedOption) {
+    return {
+      ok: false,
+      errorCode: "workflow_child_unsupported_option",
+      detail: `workflow step carries unsupported option "${unsupportedOption}" (descope v1: wait is always true and retry policy is rejected)`,
+    };
+  }
 
   const targetWorkflowIdRaw = typeof persisted.targetWorkflowId === "string" ? persisted.targetWorkflowId.trim() : "";
   if (!targetWorkflowIdRaw) {

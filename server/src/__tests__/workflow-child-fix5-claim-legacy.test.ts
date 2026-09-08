@@ -1,42 +1,33 @@
 // @vitest-environment node
-// [workflow-child fix5 — claim/legacy] cycle A §6 잠금 세대 클레임 + §10 레거시 claimed+nonnull
-// 판별자 수리 검증. 스테일 세대 탈락, waiting 자기 해제 금지, 네이티브 해제 1회 승인, 재사용
-// 내구 wait 보존, 부모 잠금 경합 busy, 레거시 3-pass 정산/무변화 픽스처.
+// [workflow-child fix5 — claim] descope v1 엄격 클레임/거부 스위트(설계 §2/§3/§6).
+//   레거시 수리·세대 admission 사례는 삭제됐다(D2/D5). 남는 계약:
+//   재사용은 정합 linked 자식뿐(슬롯 미소모), tombstone(linked+NULL)은 재생성 없이 fenced 정산,
+//   커밋된 claimed/세대≠1/workflowRetry 스텝은 변이 전 fail-closed 거부, 같은 회사 부모/스텝
+//   치환·비활성/타회사 정의도 거부다. 커밋된 claimed 비정합 fixture 만 §2 허용대로 격리
+//   트랜잭션에서 트리거를 우회해 만든다(실행 경로는 이 상태를 절대 만들지 않는다).
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  activityLog,
-  agents,
-  companies,
-  createDb,
-  issueComments,
-  issues,
-  missions,
-  workflowDefinitions,
-  workflowRuns,
-  workflowStepInvocations,
-  workflowStepRuns,
+  activityLog, agents, companies, createDb, issueComments, issues, missions,
+  workflowDefinitions, workflowRuns, workflowStepInvocations, workflowStepRuns,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import {
-  dispatchWorkflowChildStep,
-  dispatchWorkflowChildStepWithOutcome,
-  reconcileWorkflowChildStepWaits,
-} from "../services/workflow/workflow-child-execution.js";
-import { refreshWorkflowChildRecoveryRow } from "../services/workflow/workflow-child-recovery-candidates.js";
+import { dispatchWorkflowChildStepWithOutcome } from "../services/workflow/workflow-child-execution.js";
+import { claimChildInvocation } from "../services/workflow/workflow-child-invocation-claim.js";
+import { acquireWorkflowChildStartLease } from "../services/workflow/workflow-child-start-lease.js";
 import { normalizeWorkflowStepsForExecution } from "../services/workflow/dag-engine.js";
-import { reconcileDueWorkflowStepRetries } from "../services/workflow/reconciler.js";
 import {
-  childStep,
-  configureWorkflowChildFixtures,
-  createCompanyFixture,
-  insertDefinition,
-  insertRunWithWorkflowStepRun,
+  childStep, configureWorkflowChildFixtures, createCompanyFixture, insertDefinition,
+  insertRunWithWorkflowStepRun, insertStepRunForRun,
 } from "./helpers/workflow-child-fixtures.js";
+import {
+  insertLinkedInvocation, insertMaterializedChildRun, insertOrphanChildMarkedRun,
+  insertTombstoneInvocation,
+} from "./helpers/workflow-child-invocation-fixtures.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -44,254 +35,257 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 let db: ReturnType<typeof createDb>;
 let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-type ReceiptOptions = {
-  state?: "linked" | "claimed";
-  childStatus?: string | null;
-  wait?: boolean;
-  adopted?: boolean;
-};
+type ChildSuite = { companyId: string; childDefId: string; parentDefId: string; runId: string; stepRunId: string };
 
-async function receipt(name: string, opts: ReceiptOptions = {}) {
+/** 자식 정의(agent 1스텝) + 부모 정의(child 스텝) + running run/pending 스텝 기본 픽스처. */
+async function childSuite(name: string, opts: { retryCount?: number; metadata?: Record<string, unknown> } = {}): Promise<ChildSuite> {
   const companyId = await createCompanyFixture(name);
   const childDefId = await insertDefinition({
-    companyId,
-    name: `${name}-child`,
+    companyId, name: `${name}-child`,
     steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
   });
   const parentDefId = await insertDefinition({ companyId, name: `${name}-parent`, steps: [childStep(childDefId)] });
-  const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
-  const childRunId = opts.childStatus === null ? null : randomUUID();
-  if (childRunId) {
-    await db.insert(workflowRuns).values({
-      id: childRunId,
-      workflowId: childDefId,
-      companyId,
-      status: opts.childStatus ?? "pending",
-      triggeredBy: "workflow-step",
-      triggerSource: "workflow",
-      parentRunId: runId,
-      parentStepRunId: stepRunId,
-      rootRunId: runId,
-    });
-  }
-  const [inv] = await db.insert(workflowStepInvocations).values({
-    companyId,
-    parentStepRunId: stepRunId,
-    childRunId,
-    generation: 1,
-    state: opts.state ?? "linked",
-    wait: opts.wait ?? true,
-  }).returning();
-  if (opts.adopted ?? true) {
-    await db.update(workflowStepRuns).set({
-      metadata: { workflowChild: { childRunId, invocationId: inv.id, generation: 1, wait: opts.wait ?? true } },
-    }).where(eq(workflowStepRuns.id, stepRunId));
-  }
-  return { companyId, parentDefId, childDefId, runId, stepRunId, childRunId, invocationId: inv.id };
+  const { runId, stepRunId } = await insertRunWithWorkflowStepRun({
+    companyId, workflowId: parentDefId, retryCount: opts.retryCount, metadata: opts.metadata,
+  });
+  return { companyId, childDefId, parentDefId, runId, stepRunId };
 }
 
-async function dispatchInputOf(x: Awaited<ReturnType<typeof receipt>>) {
+/** dispatch 입력 — 현재 DB 상태를 재적재해 스테일 스냅숏 혼입을 막는다. */
+async function dispatchInputOf(x: ChildSuite) {
   const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, x.runId));
-  const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, x.stepRunId));
   const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, x.parentDefId));
-  const step = normalizeWorkflowStepsForExecution(definition!.stepsJson)[0];
-  return { db, run: run!, definition: definition!, step, stepRun: stepRun!, now: new Date() };
+  const step = normalizeWorkflowStepsForExecution(definition!.stepsJson).find((s) => s.id === "run-child")!;
+  const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, x.stepRunId));
+  return { run: run!, definition: definition!, step, stepRun: stepRun!, now: new Date() };
 }
 
 const childrenOf = (parentRunId: string) =>
   db.select().from(workflowRuns).where(and(eq(workflowRuns.parentRunId, parentRunId), eq(workflowRuns.triggerSource, "workflow")));
 const invocationOf = (stepRunId: string) =>
   db.select().from(workflowStepInvocations).where(eq(workflowStepInvocations.parentStepRunId, stepRunId)).limit(1);
-const stepOf = (stepRunId: string) =>
-  db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)).limit(1);
-function retryMetadata(nextEligibleAt: string) {
-  return { state: "waiting", retryNumber: 1, maxRetries: 2, nextEligibleAt, sourceRequestId: null, sourceCompletedAt: null, lastErrorSummary: null };
+const runRow = async (id: string) => (await db.select().from(workflowRuns).where(eq(workflowRuns.id, id)))[0];
+const stepRow = async (id: string) => (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, id)))[0];
+const toolResultOf = async (stepRunId: string) =>
+  ((await stepRow(stepRunId))?.metadata as Record<string, unknown>).toolResult as Record<string, unknown>;
+
+/** [§2 비정합 fixture 전용] 격리 트랜잭션에서 트리거를 우회해 커밋된 claimed 행을 만든다. */
+async function insertCommittedClaimedRow(input: { companyId: string; parentStepRunId: string; childRunId?: string; targetWorkflowId: string }): Promise<string> {
+  const invocationId = randomUUID();
+  await db.transaction(async (tx) => {
+    await tx.execute("set local session_replication_role = replica");
+    await tx.insert(workflowStepInvocations).values({
+      id: invocationId,
+      companyId: input.companyId,
+      parentStepRunId: input.parentStepRunId,
+      childRunId: input.childRunId ?? null,
+      state: "claimed",
+      generation: 1,
+      targetWorkflowId: input.targetWorkflowId,
+    });
+  });
+  return invocationId;
 }
 
-describeEmbeddedPostgres("workflow child fix5 — locked claim + legacy link", () => {
+describeEmbeddedPostgres("workflow child fix5 — strict claim/refusal (no repair, no retry admission)", () => {
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-wfw-fix5-claim-legacy-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-wfw-fix5-claim-");
     db = createDb(tempDb.connectionString);
     configureWorkflowChildFixtures(db);
   }, 60_000);
 
   afterEach(async () => {
-    await db.delete(workflowStepInvocations);
-    await db.delete(workflowStepRuns);
-    await db.delete(workflowRuns);
-    await db.delete(workflowDefinitions);
-    await db.delete(activityLog);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(missions);
-    await db.delete(agents);
-    await db.delete(companies);
+    for (const table of [activityLog, issueComments, issues, missions, workflowStepInvocations, workflowStepRuns, workflowRuns, workflowDefinitions, agents, companies]) {
+      await db.delete(table);
+    }
   });
 
   afterAll(async () => {
     await tempDb?.cleanup();
   });
 
-  it("stale caller generation 2 vs durable retryCount 0 yields ineligible with the whole receipt preserved", async () => {
-    const x = await receipt("F5 Stale Gen2", { state: "linked", childStatus: "pending", adopted: true });
-    const stale = { ...(await dispatchInputOf(x)), stepRun: { ...(await stepOf(x.stepRunId))[0]!, retryCount: 1 } };
-    expect(await dispatchWorkflowChildStep(stale)).toBe(true);
-    const [inv] = await invocationOf(x.stepRunId);
-    expect(inv?.generation).toBe(1);
-    expect(inv?.childRunId).toBe(x.childRunId);
-    expect((await stepOf(x.stepRunId))[0]?.retryCount).toBe(0);
-    expect(await childrenOf(x.runId)).toHaveLength(1);
+  it("cap=5 counts committed invocations including tombstones and mixed states; the sixth claim fails atomically", async () => {
+    const x = await childSuite("F5C Cap");
+    const kinds = ["materialized", "linked", "tombstone", "materialized", "linked"] as const;
+    for (let i = 0; i < kinds.length; i += 1) {
+      const siblingStepRunId = await insertStepRunForRun({ runId: x.runId, stepId: `sib-${i}` });
+      if (kinds[i] === "materialized") {
+        await insertMaterializedChildRun(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: siblingStepRunId, childWorkflowId: x.childDefId, stepId: `sib-${i}` });
+      } else if (kinds[i] === "linked") {
+        await insertLinkedInvocation(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: siblingStepRunId, childWorkflowId: x.childDefId, stepId: `sib-${i}` });
+      } else {
+        await insertTombstoneInvocation(db, { companyId: x.companyId, parentStepRunId: siblingStepRunId, targetWorkflowId: x.childDefId });
+      }
+    }
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("failed");
+    expect(await toolResultOf(x.stepRunId)).toEqual(expect.objectContaining({ success: false, error: "child_concurrency_exceeded" }));
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(5);
+    expect(await childrenOf(x.runId)).toHaveLength(4);
   });
 
-  it("stale generation 1 against current generation 2 yields without adopting the newer child", async () => {
-    const x = await receipt("F5 Stale Gen1", { state: "linked", childStatus: "running", adopted: true });
-    const stale = await dispatchInputOf(x);
-    await db.update(workflowStepRuns).set({ retryCount: 1 }).where(eq(workflowStepRuns.id, x.stepRunId));
-    await db.update(workflowStepInvocations).set({ generation: 2 }).where(eq(workflowStepInvocations.id, x.invocationId));
-    // 호출자 스냅숏은 구세대(retryCount 0 → expected 1) — 내구 세대는 이미 2 다.
-    const outcome = await dispatchWorkflowChildStepWithOutcome(db, { ...stale, stepRun: { ...stale.stepRun, retryCount: 0 } });
-    expect(outcome.outcome).toBe("skipped");
+  it("reuse of a coherent linked child consumes no cap slot and creates no replacement", async () => {
+    const x = await childSuite("F5C Reuse");
+    const identity = await insertLinkedInvocation(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: x.stepRunId, childWorkflowId: x.childDefId });
+    for (const [i, kind] of ["tombstone", "linked", "materialized", "linked"].entries()) {
+      const siblingStepRunId = await insertStepRunForRun({ runId: x.runId, stepId: `rs-${i}` });
+      if (kind === "linked") {
+        await insertLinkedInvocation(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: siblingStepRunId, childWorkflowId: x.childDefId, stepId: `rs-${i}` });
+      } else if (kind === "materialized") {
+        await insertMaterializedChildRun(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: siblingStepRunId, childWorkflowId: x.childDefId, stepId: `rs-${i}` });
+      } else {
+        await insertTombstoneInvocation(db, { companyId: x.companyId, parentStepRunId: siblingStepRunId, targetWorkflowId: x.childDefId });
+      }
+    }
+    // cap 이 꽉 찬 5개 커밋 상태에서도 같은 스텝 재도달은 재사용이다 — 6번째 슬롯을 소모하지 않는다.
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("waiting");
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("waiting");
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(5);
     const [inv] = await invocationOf(x.stepRunId);
-    expect(inv?.generation).toBe(2);
-    expect(inv?.childRunId).toBe(x.childRunId);
-    const [step] = await stepOf(x.stepRunId);
-    expect((step?.metadata as Record<string, unknown>).workflowChild).toEqual(
-      expect.objectContaining({ childRunId: x.childRunId, generation: 1 }),
-    );
-    expect(await childrenOf(x.runId)).toHaveLength(1);
-  });
-
-  it("waiting retry even when due cannot self-release via recovery; metadata unchanged", async () => {
-    const x = await receipt("F5 Waiting", { state: "linked", childStatus: "failed", adopted: true });
-    const nextEligibleAt = new Date(Date.now() - 60_000).toISOString();
-    const [step] = await stepOf(x.stepRunId);
-    await db.update(workflowStepRuns).set({
-      retryCount: 1,
-      metadata: { ...(step?.metadata as Record<string, unknown>), workflowRetry: retryMetadata(nextEligibleAt) },
-    }).where(eq(workflowStepRuns.id, x.stepRunId));
-    expect(await refreshWorkflowChildRecoveryRow(db, x.invocationId)).toBeNull();
-    expect(await reconcileWorkflowChildStepWaits(db).then((rows) => rows.filter((r) => r.stepRunId === x.stepRunId))).toHaveLength(0);
-    const [after] = await stepOf(x.stepRunId);
-    const retry = (after?.metadata as Record<string, unknown>).workflowRetry as Record<string, unknown>;
-    expect(retry.state).toBe("waiting");
-    expect(retry.nextEligibleAt).toBe(nextEligibleAt);
-    expect(after?.status).toBe("pending");
-    expect(await childrenOf(x.runId)).toHaveLength(1);
-  });
-
-  it("native due-retry release authorizes the next generation exactly once", async () => {
-    const x = await receipt("F5 Release", { state: "linked", childStatus: "failed", adopted: true });
-    const [step] = await stepOf(x.stepRunId);
-    await db.update(workflowStepRuns).set({
-      retryCount: 1,
-      metadata: { ...(step?.metadata as Record<string, unknown>), workflowRetry: retryMetadata(new Date(Date.now() - 1_000).toISOString()) },
-    }).where(eq(workflowStepRuns.id, x.stepRunId));
-    await reconcileDueWorkflowStepRetries(db);
-    const children = await childrenOf(x.runId);
-    expect(children).toHaveLength(2);
-    const [inv] = await invocationOf(x.stepRunId);
-    expect(inv?.generation).toBe(2);
-    expect(inv?.childRunId).not.toBe(x.childRunId);
     expect(inv?.state).toBe("linked");
-    await reconcileDueWorkflowStepRetries(db);
-    expect(await childrenOf(x.runId)).toHaveLength(2);
+    expect(inv?.childRunId).toBe(identity.childRunId);
+    expect((await childrenOf(x.runId)).map((c) => c.id).sort()).toContain(identity.childRunId);
+    expect(await childrenOf(x.runId)).toHaveLength(4);
   });
 
-  it("reused dispatch preserves the durable wait after definition edits in both reuse directions", async () => {
-    const x = await receipt("F5 Wait Edit", { state: "linked", childStatus: "pending", adopted: true });
-    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("waiting");
-    await db.update(workflowDefinitions).set({ stepsJson: [childStep(x.childDefId, { wait: false })] })
-      .where(eq(workflowDefinitions.id, x.parentDefId));
-    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("waiting");
+  it("tombstone (linked+NULL) dispatch settles the bound step once and never recreates a child", async () => {
+    const x = await childSuite("F5C Tomb");
+    const tomb = await insertTombstoneInvocation(db, { companyId: x.companyId, parentStepRunId: x.stepRunId, targetWorkflowId: x.childDefId });
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("failed");
+    expect(await toolResultOf(x.stepRunId)).toEqual(expect.objectContaining({ success: false, error: "child_run_failed" }));
     const [inv] = await invocationOf(x.stepRunId);
-    expect(inv?.wait).toBe(true);
-    const [step] = await stepOf(x.stepRunId);
-    expect((step?.metadata as Record<string, unknown>).workflowChild).toEqual(expect.objectContaining({ wait: true }));
-    expect(await childrenOf(x.runId)).toHaveLength(1);
-  });
-
-  it("held parent lock yields busy without writes and the dispatch succeeds after release", async () => {
-    const x = await receipt("F5 Held Lock", { state: "claimed", childStatus: null, adopted: false });
-    let locked!: () => void;
-    let release!: () => void;
-    const lockedPromise = new Promise<void>((resolve) => { locked = resolve; });
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const holder = db.transaction(async (tx) => {
-      await tx.execute("select id from workflow_runs where id = '" + x.runId + "' for update");
-      locked();
-      await gate;
-    });
-    await lockedPromise;
-    try {
-      const outcome = await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x));
-      expect(outcome.outcome).toBe("skipped");
-    } finally {
-      release();
-      await holder;
-    }
+    expect(inv?.state).toBe("linked");
+    expect(inv?.childRunId).toBeNull();
+    expect(inv?.generation).toBe(tomb.generation);
     expect(await childrenOf(x.runId)).toHaveLength(0);
-    const [invBefore] = await invocationOf(x.stepRunId);
-    expect(invBefore?.childRunId).toBeNull();
-    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("progressed");
-    expect(await childrenOf(x.runId)).toHaveLength(1);
-    const [invAfter] = await invocationOf(x.stepRunId);
-    expect(invAfter?.state).toBe("linked");
-    expect(invAfter?.childRunId).not.toBeNull();
-  }, 20_000);
-
-  it("legacy claimed receipts: younger terminal receipt settles in the first pass and stays settled; older row repairs once", async () => {
-    const old = await receipt("F5 Legacy Old", { state: "claimed", childStatus: "pending", adopted: false });
-    await db.update(workflowStepInvocations).set({ createdAt: new Date(Date.now() - 60_000) })
-      .where(eq(workflowStepInvocations.id, old.invocationId));
-    const young = await receipt("F5 Legacy Young", { state: "claimed", childStatus: "completed", adopted: false });
-    const first = await reconcileWorkflowChildStepWaits(db, { limit: 1 });
-    expect(first.map((r) => r.stepRunId)).toEqual([young.stepRunId]);
-    expect(first[0]?.action).toBe("recovered");
-    expect((await stepOf(young.stepRunId))[0]?.status).toBe("completed");
-    expect((await invocationOf(old.stepRunId))[0]?.state).toBe("claimed");
-    expect((await childrenOf(old.runId))[0]?.status).toBe("pending");
-    await reconcileWorkflowChildStepWaits(db, { limit: 1 });
-    await reconcileWorkflowChildStepWaits(db, { limit: 1 });
-    expect((await stepOf(young.stepRunId))[0]?.status).toBe("completed");
-    const [oldInv] = await invocationOf(old.stepRunId);
-    expect(oldInv?.state).toBe("linked");
-    expect(oldInv?.childRunId).toBe(old.childRunId);
-    expect(await childrenOf(old.runId)).toHaveLength(1);
-    const oldChild = (await childrenOf(old.runId))[0]!;
-    expect(oldChild.status).not.toBe("pending");
-    expect(oldChild.startedAt).not.toBeNull();
-    const [oldStep] = await stepOf(old.stepRunId);
-    expect((oldStep?.metadata as Record<string, unknown>).workflowChild).toEqual(
-      expect.objectContaining({ childRunId: old.childRunId, generation: 1 }),
-    );
+    // 반복 콜백 no-op — 이미 정산된 스텝은 재정산/재생성되지 않는다(D4).
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("skipped");
+    expect((await stepRow(x.stepRunId))?.status).toBe("failed");
+    expect(await childrenOf(x.runId)).toHaveLength(0);
   });
 
-  it("linked discriminator control settles without repair; waiting-retry and wrong-company legacy fixtures unchanged across three passes", async () => {
-    const control = await receipt("F5 Link Control", { state: "linked", childStatus: "completed", adopted: false });
-    const waiting = await receipt("F5 Wait Legacy", { state: "claimed", childStatus: "failed", adopted: true });
-    const future = new Date(Date.now() + 3_600_000).toISOString();
-    const [waitStep] = await stepOf(waiting.stepRunId);
-    await db.update(workflowStepRuns).set({
-      retryCount: 1,
-      metadata: { ...(waitStep?.metadata as Record<string, unknown>), workflowRetry: retryMetadata(future) },
-    }).where(eq(workflowStepRuns.id, waiting.stepRunId));
-    const wrong = await receipt("F5 Wrong Co", { state: "claimed", childStatus: "running", adopted: false });
-    const otherCompany = await createCompanyFixture("F5 Other Co Holder");
-    await db.update(workflowRuns).set({ companyId: otherCompany }).where(eq(workflowRuns.id, wrong.childRunId!));
-    for (let i = 0; i < 3; i += 1) {
-      await reconcileWorkflowChildStepWaits(db, { limit: 25 });
+  it("committed claimed rows refuse claim as invalid-state; execution rows stay unchanged (no repair/adoption)", async () => {
+    // (1) claimed+NULL — 수리/재사용/자식 생성 없음.
+    const nullCase = await childSuite("F5C ClaimedNull");
+    await insertCommittedClaimedRow({ companyId: nullCase.companyId, parentStepRunId: nullCase.stepRunId, targetWorkflowId: nullCase.childDefId });
+    const claim = await claimChildInvocation(db, {
+      companyId: nullCase.companyId, run: (await runRow(nullCase.runId))!, parentStepRunId: nullCase.stepRunId,
+      stepId: "run-child", generation: 1, targetWorkflowId: nullCase.childDefId, renderedInputs: {}, now: new Date(),
+    });
+    expect(claim).toEqual(expect.objectContaining({ outcome: "invalid-state" }));
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(nullCase))).outcome).toBe("skipped");
+    const [nullInv] = await invocationOf(nullCase.stepRunId);
+    expect(nullInv?.state).toBe("claimed");
+    expect(nullInv?.childRunId).toBeNull();
+    expect((await stepRow(nullCase.stepRunId))?.status).toBe("pending");
+    // 입양 프로젝션 없음 — metadata 는 초기값 {} 에 머문다.
+    expect((await stepRow(nullCase.stepRunId))?.metadata).toEqual({});
+    expect(await childrenOf(nullCase.runId)).toHaveLength(0);
+    // (2) claimed+nonnull — 영수증 유무와 무관하게 거부, 입양 없음(r6 판별자).
+    const nnCase = await childSuite("F5C ClaimedNN");
+    const orphanRunId = await insertOrphanChildMarkedRun(db, {
+      companyId: nnCase.companyId, parentRunId: nnCase.runId, parentStepRunId: nnCase.stepRunId, childWorkflowId: nnCase.childDefId,
+    });
+    await insertCommittedClaimedRow({ companyId: nnCase.companyId, parentStepRunId: nnCase.stepRunId, childRunId: orphanRunId, targetWorkflowId: nnCase.childDefId });
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(nnCase))).outcome).toBe("skipped");
+    const [nnInv] = await invocationOf(nnCase.stepRunId);
+    expect(nnInv?.state).toBe("claimed");
+    expect(nnInv?.childRunId).toBe(orphanRunId);
+    expect((await stepRow(nnCase.stepRunId))?.metadata).toEqual({});
+    expect((await runRow(orphanRunId))?.status).toBe("pending");
+    // 감사 — 구조화 invalid-state 이벤트만 남는다(행 무변경의 증거).
+    const audits = await db.select().from(activityLog).where(eq(activityLog.action, "workflow_child_invalid_state"));
+    expect(audits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("generation != 1 is refused before any mutation at claim and lease entries", async () => {
+    const x = await childSuite("F5C Gen");
+    const baseInput = {
+      companyId: x.companyId, run: (await runRow(x.runId))!, parentStepRunId: x.stepRunId, stepId: "run-child",
+      generation: 1, targetWorkflowId: x.childDefId, renderedInputs: {}, now: new Date(),
+    };
+    const stale = await claimChildInvocation(db, { ...baseInput, generation: 2 } as typeof baseInput);
+    expect(stale).toEqual({ outcome: "invalid-state", reason: expect.stringContaining("generation must be 1") });
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+    expect(await childrenOf(x.runId)).toHaveLength(0);
+    // 행 레벨 세대 불일치도 fail-closed — linked 자식이 있어도 임대/변이 없다.
+    const identity = await insertLinkedInvocation(db, { companyId: x.companyId, parentRunId: x.runId, parentStepRunId: x.stepRunId, childWorkflowId: x.childDefId });
+    expect((await acquireWorkflowChildStartLease(db, { ...identity, generation: 2 })).kind).toBe("ineligible");
+    const child = await runRow(identity.childRunId);
+    expect(child?.status).toBe("pending");
+    expect(child?.childStartToken).toBeNull();
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(1);
+  });
+
+  it("workflowRetry metadata (any value, even null) and nonzero retryCount refuse the claim before mutation", async () => {
+    const cases = [
+      { label: "meta", opts: { metadata: { workflowRetry: { state: "waiting", nextEligibleAt: new Date().toISOString() } } } },
+      { label: "null", opts: { metadata: { workflowRetry: null } } },
+      { label: "count", opts: { retryCount: 1 } },
+    ] as const;
+    for (const { label, opts } of cases) {
+      const x = await childSuite(`F5C Retry ${label}`, opts);
+      expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("skipped");
+      expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+      expect(await childrenOf(x.runId)).toHaveLength(0);
+      const step = await stepRow(x.stepRunId);
+      expect(step?.status).toBe("pending");
+      expect(step?.retryCount).toBe(opts.retryCount ?? 0);
     }
-    expect((await stepOf(control.stepRunId))[0]?.status).toBe("completed");
-    const [waitAfter] = await stepOf(waiting.stepRunId);
-    const retry = (waitAfter?.metadata as Record<string, unknown>).workflowRetry as Record<string, unknown>;
-    expect(retry.state).toBe("waiting");
-    expect(retry.nextEligibleAt).toBe(future);
-    expect(waitAfter?.retryCount).toBe(1);
-    expect((await invocationOf(waiting.stepRunId))[0]?.state).toBe("claimed");
-    const [wrongInv] = await invocationOf(wrong.stepRunId);
-    expect(wrongInv?.state).toBe("claimed");
-    expect(wrongInv?.childRunId).toBe(wrong.childRunId);
-    expect((await childrenOf(wrong.runId))[0]?.status).toBe("running");
-    expect((await stepOf(wrong.stepRunId))[0]?.status).toBe("pending");
+  });
+
+  it("same-company wrong parent/step substitution fails closed with zero mutations on both sides", async () => {
+    const companyId = await createCompanyFixture("F5C Swap Co");
+    const childDefId = await insertDefinition({ companyId, name: "swap-child", steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }] });
+    const donorDefId = await insertDefinition({ companyId, name: "swap-donor", steps: [childStep(childDefId)] });
+    const recipientDefId = await insertDefinition({ companyId, name: "swap-recipient", steps: [childStep(childDefId)] });
+    const donor = await insertRunWithWorkflowStepRun({ companyId, workflowId: donorDefId });
+    const recipient = await insertRunWithWorkflowStepRun({ companyId, workflowId: recipientDefId });
+    const donorIdentity = await insertLinkedInvocation(db, { companyId, parentRunId: donor.runId, parentStepRunId: donor.stepRunId, childWorkflowId: childDefId });
+    const snapshotOf = async () => JSON.stringify({
+      donor: await runRow(donor.runId), donorChild: await runRow(donorIdentity.childRunId),
+      donorStep: await stepRow(donor.stepRunId), donorInv: (await invocationOf(donor.stepRunId))[0] ?? null,
+      recipient: await runRow(recipient.runId), recipientStep: await stepRow(recipient.stepRunId),
+    });
+    const before = await snapshotOf();
+    // (1) 클레임 치환 — 수신자 run 에 공여자 parentStepRunId 를 건네면 fail-closed.
+    const swapped = await claimChildInvocation(db, {
+      companyId, run: (await runRow(recipient.runId))!, parentStepRunId: donor.stepRunId, stepId: "run-child",
+      generation: 1, targetWorkflowId: childDefId, renderedInputs: {}, now: new Date(),
+    });
+    expect(swapped.outcome).toBe("ineligible");
+    // (2) 임대 신원 치환 — 부모/스텝은 수신자, invocation/자식은 공여자.
+    expect((await acquireWorkflowChildStartLease(db, {
+      companyId, parentRunId: recipient.runId, parentStepRunId: recipient.stepRunId, stepId: "run-child",
+      invocationId: donorIdentity.invocationId, generation: 1, childRunId: donorIdentity.childRunId,
+    })).kind).toBe("ineligible");
+    // (3) 논리 스텝 ID 치환 — stepId 만 어긋나도 거부.
+    expect((await acquireWorkflowChildStartLease(db, { ...donorIdentity, stepId: "other-step" })).kind).toBe("ineligible");
+    expect(await snapshotOf()).toBe(before);
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(1);
+  });
+
+  it("inactive and cross-company target definitions refuse claim; execution rows stay empty", async () => {
+    const x = await childSuite("F5C Defn");
+    // (1) 대상 정의 비활성 — 정의 잠금 하 클레임 거부(ineligible), 실행 행 무변경.
+    const inactiveChild = await insertDefinition({ companyId: x.companyId, name: "inactive-child", steps: [] });
+    await db.update(workflowDefinitions).set({ status: "archived" }).where(eq(workflowDefinitions.id, inactiveChild));
+    await db.update(workflowDefinitions).set({ stepsJson: [childStep(inactiveChild)] }).where(eq(workflowDefinitions.id, x.parentDefId));
+    const claim = await claimChildInvocation(db, {
+      companyId: x.companyId, run: (await runRow(x.runId))!, parentStepRunId: x.stepRunId, stepId: "run-child",
+      generation: 1, targetWorkflowId: inactiveChild, renderedInputs: {}, now: new Date(),
+    });
+    expect(claim.outcome).toBe("ineligible");
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("skipped");
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+    expect(await childrenOf(x.runId)).toHaveLength(0);
+    expect((await stepRow(x.stepRunId))?.status).toBe("pending");
+    // (2) 타회사 대상 — 사전검사(child_workflow_not_found)가 클레임 전 pre-admission 실패 정산.
+    const otherCompanyId = await createCompanyFixture("F5C Other Co");
+    const foreignDefId = await insertDefinition({ companyId: otherCompanyId, name: "foreign", steps: [] });
+    await db.update(workflowDefinitions).set({ stepsJson: [childStep(foreignDefId)] }).where(eq(workflowDefinitions.id, x.parentDefId));
+    expect((await dispatchWorkflowChildStepWithOutcome(db, await dispatchInputOf(x))).outcome).toBe("failed");
+    expect(await toolResultOf(x.stepRunId)).toEqual(expect.objectContaining({ success: false, error: "child_workflow_not_found" }));
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(0);
+    expect(await childrenOf(x.runId)).toHaveLength(0);
   });
 });

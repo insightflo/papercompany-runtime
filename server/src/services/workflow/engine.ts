@@ -6,8 +6,8 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { agents, companies,
-  workflowRuns,
+import { agents,
+  companies,
 } from "@paperclipai/db";
 import { and, eq, asc, ne } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
@@ -249,9 +249,8 @@ async function findActiveScheduledWorkflowMissionRun(
 }
 
 import { assertWorkflowChildDefinitionCycles } from "./workflow-child-execution.js";
-import { findChildStartIdentityForRun } from "./workflow-child-start-state.js";
-import { prepareManualChildResume } from "./workflow-child-manual-resume.js";
-import { repairWorkflowChildStartDiscovery } from "./workflow-child-discovery.js";
+import { discoverWorkflowChildStart } from "./workflow-child-discovery.js";
+import { HttpError } from "../../errors.js";
 
 async function assertWorkflowToolReadiness(
   db: Db,
@@ -499,68 +498,27 @@ export const workflowService = {
     if (!existingRun || existingRun.companyId !== input.companyId) {
       throw new Error(`Workflow run not found: ${input.runId}`);
     }
+    // [descope D3] 자식 run 의 공개 resume 은 어떤 부수효과(정의 검증/리셋/임대/실행) "이전"에
+    //   typed 거부된다. linked 는 workflow_child_resume_not_supported, 표지가 있지만 비정합인
+    //   run 은 workflow_child_invalid_state 다 — plain fallback 은 절대 없다. missing 은 기존
+    //   not-found 를 유지한다. 자동 회복(초기화/정산)은 회복 경로의 소관이지 사용자 resume 이 아니다.
+    const discovery = await discoverWorkflowChildStart(db, input.runId);
+    if (discovery.kind === "linked") {
+      throw new HttpError(
+        409,
+        `workflow_child_resume_not_supported: run ${input.runId} is a linked child owned by its parent workflow step; rerun the parent workflow instead`,
+      );
+    }
+    if (discovery.kind === "invalid-child") {
+      throw new HttpError(409, `workflow_child_invalid_state: run ${input.runId} (${discovery.reason})`);
+    }
+    if (discovery.kind === "missing") {
+      throw new Error(`Workflow run not found: ${input.runId}`);
+    }
+    // 일반 run — pre-feature plain resume 을 그대로 유지한다(검증 → store resume → 컨트롤 리셋 → 실행).
     const workflow = await getWorkflowDefinitionById(db, existingRun.workflowId);
     if (!workflow || workflow.companyId !== input.companyId) {
       throw new Error(`Workflow definition not found: ${existingRun.workflowId}`);
-    }
-    // [cycle A §3 + cycle B F4] 자식 분류를 readiness/store resume 변이 "이전"에 발견한다. 판별자는
-    //   plain/linked/legacy/invalid-child 를 구분하고, 레거시 coherent claimed+nonnull 은 여기서 1회
-    //   수리 후 신선한 linked 신원으로 진행한다. invalid/수리 실패는 무차별 store resume/resets 없이
-    //   진실한 스냅숏으로 양보하고, plain/missing 만 기존 store resume 을 사용한다.
-    const childEntry = await repairWorkflowChildStartDiscovery(db, input.runId);
-    let detected: Awaited<ReturnType<typeof findChildStartIdentityForRun>> = null;
-    if (childEntry.kind === "yield") {
-      // invalid-child/경합/수리 불가 — 실행 재호출 준비 없이 ineligible 스냅숏만(fail-closed).
-      return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
-    }
-    if (childEntry.kind === "proceed") {
-      detected = await findChildStartIdentityForRun(db, input.runId);
-      if (!detected) {
-        return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
-      }
-    }
-    if (detected) {
-      // [cycle B F3] materialized(기존 행) 경로는 준비 트랜잭션 "이전에" 현재 정의 기준
-      //   readiness/구조 검증을 수행한다(검증 선행 플래그로 경합 시 busy 양보).
-      const [childRow] = await db
-        .select({ m: workflowRuns.childStartMaterializedAt })
-        .from(workflowRuns)
-        .where(eq(workflowRuns.id, input.runId))
-        .limit(1);
-      const materialized = childRow?.m != null;
-      if (materialized) {
-        await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
-      }
-      const prepared = await prepareManualChildResume(db, detected.identity, {
-        // [cycle B F3] 리셋은 준비 트랜잭션 안으로 이동한다(콜백은 txDb 만 받는다 — 외부 db 캡처 금지).
-        resetControls: (txDb) => {
-          resetFailedControlNodesForResume({
-            db: txDb,
-            workflowRunId: input.runId,
-            steps: normalizeWorkflowStepsForExecution(workflow.steps),
-          });
-          resetStaleIfControlNodesForResume({
-            db: txDb,
-            companyId: input.companyId,
-            workflowRunId: input.runId,
-            steps: normalizeWorkflowStepsForExecution(workflow.steps),
-          });
-        },
-        validatedMaterialized: materialized || undefined,
-      });
-      if (prepared.kind === "busy" || prepared.kind === "ineligible") {
-        // 경합/무자격 — 실행 재호출 없이 진실한 스냅숏만 반환한다(리셋/시작 부수효과 0).
-        return executeWorkflowRun(db, input.runId, { intent: "manual-resume", preparedChildStartFence: undefined });
-      }
-      if (prepared.kind === "native") {
-        // materialized 수동 resume — 네이티브 계속(초기화 없음, 시작 시각/영수증 불변).
-        return executeWorkflowRun(db, input.runId, { intent: "native-continuation" });
-      }
-      // owned(0행 재초기화) — 공급된 fence 로만 실행한다(토큰 연속성 보장).
-      return executeWorkflowRun(db, input.runId, {
-        intent: "manual-resume",
-        preparedChildStartFence: prepared.fence,
-      });
     }
     await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
@@ -577,14 +535,13 @@ export const workflowService = {
     });
     // [run9 RCA] 완료된 IF 노드도 verdict 입력(소스 work product)이 평가 시점보다 새로 갱신됐으면
     //   stale 로 보고 pending 리셋 후 재평가한다 — producer 수정 후에도 skip 스티키가 영구화되지 않게.
+    //   정산(failed/completed)된 workflow S 는 리셋/재오픈되지 않는다(D2 — 재실행은 새 최상위 run).
     await resetStaleIfControlNodesForResume({
       db,
       companyId: input.companyId,
       workflowRunId: run.id,
       steps: normalizeWorkflowStepsForExecution(workflow.steps),
     });
-    // [cycle A §3] 일반 run — 기존 store resume/readiness/control-reset 동작을 유지하고 intent 없이
-    //   실행한다(수동 의도는 링크 자식 경로 전용이다).
     return executeWorkflowRun(db, run.id);
   },
 

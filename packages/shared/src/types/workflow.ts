@@ -36,7 +36,8 @@ export interface WorkflowStepDefinition {
    * wait 는 기본 true(자식 종말 대기), inputs 는 토큰 렌더 대상 문자열 인자(최대 20키).
    */
   targetWorkflowId?: string;
-  wait?: boolean;
+  /** [descope v1 D1] wait 는 생략(기본 true) 또는 true 만 허용 — false 는 검증에서 거부. */
+  wait?: true;
   inputs?: Record<string, string>;
   conditionalDependencies?: WorkflowConditionalDependency[];
   type?: string;

@@ -1,6 +1,8 @@
 // @vitest-environment node
-// [workflow-child fix round] P1-1/2/3/8 검증: 원자적 클레임(이중 자식 차단), 세대 CAS 완료,
-// type:workflow policy retry, adopted-waiting 동시성 cap. /tmp/task-spec-wfw-fix.txt 기준.
+// [workflow-child fix round / descope v1] 신원/입력/CURRENT 제어와 동시성 cap 회귀. 원자적
+//   클레임(이중 자식 차단, generation=1 고정)과 adopted-waiting cap 5는 유지되고, policy retry
+//   체인/세대 CAS 상호작용은 D2 로 삭제됐다(거부 계약은 workflow-child-retry-refusal 스위트).
+//   /tmp/task-spec-wfw-fix.txt 기준 + /tmp/wfw-descope-design.md §5 S 처분.
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -105,9 +107,12 @@ describeEmbeddedPostgres("workflow child fix round — concurrency/retry", () =>
     const [invocation] = await db.select().from(workflowStepInvocations);
     expect(invocation?.childRunId).toBe(children[0]?.id);
     expect(invocation?.childRunId).not.toBe(runId);
+    // [descope D2] 세대 교체 없음 — 클레임 신원은 항상 generation 1 이다.
+    expect(invocation?.generation).toBe(1);
+    expect(invocation?.state).toBe("linked");
   });
 
-  it("enforces adopted-waiting cap at 5 for six parallel wait:true steps (P2-8)", async () => {
+  it("enforces the waiting cap at 5 for six concurrent workflow steps (P2-8, wait:true only)", async () => {
     const companyId = await createCompanyFixture("Fix Cap Co");
     const childDefId = await insertDefinition({
       companyId,

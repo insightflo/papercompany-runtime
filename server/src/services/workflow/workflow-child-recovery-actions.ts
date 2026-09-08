@@ -1,19 +1,22 @@
 // server/src/services/workflow/workflow-child-recovery-actions.ts
 //
-// [purpose] workflow→workflow 자식 회복의 상태별 정산 분기 전용 모듈(fix4 §4 + cycle A §5).
-//   모든 액션은 실행 권위(임대/소유 토큰/fence)를 스스로 재검증하며, "recovered"는 실제 소유
-//   진행(시작/정산/입양 복구)이 확정될 때만 보고한다. HealthyUnadopted 계약: materialized 자식은
-//   절대 실행 재진입/시작 시각 재설정 없이 adoption 복구만 받는다.
-//   [cycle A §5] runStartOrResume 는 adoption 복구 성공 후 1회 refresh 하고, 변경된 클래스에 따라
-//   1회 재분기한다(라이프사이클 뮤테이터/adopt-only/skip) — materialized 로 바뀐 후보는 절대 자동
-//   실행 재진입을 받지 않는다.
+// [purpose] descope v1 — workflow→workflow 자식 회복의 상태별 정산 분기 전용 모듈. 수리
+//   (legacy repair)와 수동 resume 분기는 삭제됐다(D3/D5). 남는 액션은 세 가지다:
+//   - same-child 초기화: 전체 신원 임대 취득(start-lease) 소유자만 — executeWorkflowRunWithStartOutcome
+//     경유. unleased 시작 헬퍼는 존재하지 않는다.
+//   - adoption: 표시 프로젝션 전용(새 시그니처 — identity + 관측 metadata 스냅숏).
+//   - 정산: completion 모듈의 전용 엄격 최종 writer(linked/tombstone)로 위임.
+//   "recovered"는 실제 소유 진행(시작/정산)이 커밋됐을 때만 보고한다. HealthyUnadopted 계약:
+//   materialized 자식은 실행 재진입/시작 시각 재설정 없이 adoption 표시 복구만 받는다.
 // [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8).
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { normalizeWorkflowStepsForExecution, executeWorkflowRunWithStartOutcome } from "./dag-engine.js";
+import { workflowStepRuns } from "@paperclipai/db";
+import { executeWorkflowRunWithStartOutcome } from "./dag-engine.js";
 import { failChildStep, runWorkflowChildCompletionHook } from "./workflow-child-completion.js";
 import { adoptChildForWaitingStep } from "./workflow-child-execution.js";
 import { expireWorkflowChildStart } from "./workflow-child-start-lease.js";
-import { repairLegacyChildLink } from "./workflow-child-legacy-link.js";
+import type { WorkflowChildIdentity } from "./workflow-child-start-predicates.js";
 import {
   isAdopted,
   refreshWorkflowChildRecoveryRow,
@@ -21,66 +24,51 @@ import {
 } from "./workflow-child-recovery-candidates.js";
 import type { WorkflowChildReconciliationResult } from "./workflow-child-reconciler.js";
 
-/**
- * [cycle B F4] linked-only 잠금 뮤테이터(취소/만료) 외부 진입 레거시 수리 — coherent claimed+nonnull
- *   영수증은 뮤테이터 진입 전에 판별자를 수리한다(DEAD/AUTO 수리 가드는 repairLegacyChildLink 내부).
- *   수리 실패(busy/ineligible)는 "skipped" — 무제한 취소/시작 없이 양보한다. 이미 linked 면 null.
- */
-async function repairClaimedReceiptAtMutatorEntry(
-  db: Db,
-  row: ChildRecoveryRow,
-): Promise<"skipped" | null> {
-  if (row.invocation.state !== "claimed" || row.invocation.childRunId === null) return null;
-  const repaired = await repairLegacyChildLink(db, {
+/** 후보 행에서 완전 신원 B 를 구성한다(generation 은 선출 단계에서 이미 1로 강제됐다). */
+function identityOfRow(row: ChildRecoveryRow): WorkflowChildIdentity {
+  if (row.invocation.childRunId === null) {
+    throw new Error("child identity requested for a tombstone invocation — fail-closed");
+  }
+  return {
     companyId: row.run.companyId,
     parentRunId: row.run.id,
     parentStepRunId: row.stepRun.id,
+    stepId: row.stepRun.stepId,
     invocationId: row.invocation.id,
-    generation: row.invocation.generation,
     childRunId: row.invocation.childRunId,
-  });
-  return repaired === "busy" || repaired === "ineligible" ? "skipped" : null;
+    generation: 1,
+  };
 }
 
-/** 요청된 wait 모드(invocation 내구 값)를 반영해 adoption 을 원자 복구한다. */
+/** adoption 을 원자 복구한다(표시 프로젝션 전용) — 관측 metadata 는 직전에 재적재한다. */
 async function repairAdoption(db: Db, row: ChildRecoveryRow, now: Date): Promise<boolean> {
-  const step = normalizeWorkflowStepsForExecution(row.definition!.stepsJson)
-    .find((candidate) => candidate.id === row.stepRun.stepId);
-  if (!step) return false;
+  const [fresh] = await db
+    .select({ metadata: workflowStepRuns.metadata })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, row.stepRun.id))
+    .limit(1);
   return await adoptChildForWaitingStep(db, {
-    companyId: row.run.companyId,
-    run: row.run,
-    step,
-    stepRun: row.stepRun,
+    identity: identityOfRow(row),
+    observedMetadata: fresh?.metadata ?? null,
     now,
-    // [fix3 P1-1 / fix4 §6] 요청 모드는 invocation 의 내구 컬럼이 권위다(정의 변경 소급 금지).
-    wait: row.invocation.wait,
-    renderedInputs: {},
-    invocationId: row.invocation.id,
-    childRunId: row.invocation.childRunId!,
-    generation: row.invocation.generation,
   });
 }
 
 /**
- * [cycle A §5] 라이프사이클 우선 분기 — 죽은 부모 취소/절대 마감 정산. 뮤테이터가 잠금 하
- * DEAD/미 materialized+경과 마감을 재검증하고, 정의/입양/스텝 해석은 하지 않는다.
- * 대상 클래스가 아니면 null 을 반환한다(호출자가 다음 분기로 진행).
+ * 라이프사이클 우선 분기 — 죽은 부모 취소/절대 마감 정산. 뮤테이터가 잠금 하 DEAD/경과 마감을
+ * 재검증하며 정의/입양/스텝 해석은 하지 않는다. 대상 클래스가 아니면 null(호출자가 다음 분기).
  */
 export async function dispatchLifecycleAction(
   db: Db,
   row: ChildRecoveryRow,
 ): Promise<WorkflowChildReconciliationResult[] | null> {
   if (row.recoveryKind === "cancel-dead-parent") {
-    const repair = await repairClaimedReceiptAtMutatorEntry(db, row);
-    if (repair) {
-      return [{ stepRunId: row.stepRun.id, action: "skipped", reason: `dead-parent legacy receipt repair yielded (${repair})` }];
-    }
+    // DEAD 부모의 linked 자식 — 전체 신원 fence 하 취소(dag-engine 공유 취소 헬퍼).
     const { cancelWorkflowRunWithCleanup } = await import("./dag-engine.js");
     const cancelled = await cancelWorkflowRunWithCleanup(db, row.invocation.childRunId!, row.run.companyId, {
       childParentFence: {
         invocationId: row.invocation.id,
-        generation: row.invocation.generation,
+        generation: 1,
         parentRunId: row.run.id,
         parentStepRunId: row.stepRun.id,
       },
@@ -92,21 +80,12 @@ export async function dispatchLifecycleAction(
     }];
   }
   if (row.recoveryKind === "expire-start") {
-    const repair = await repairClaimedReceiptAtMutatorEntry(db, row);
-    if (repair) {
-      return [{ stepRunId: row.stepRun.id, action: "skipped", reason: `start expiry legacy receipt repair yielded (${repair})` }];
-    }
-    const expired = await expireWorkflowChildStart(db, {
-      companyId: row.run.companyId,
-      parentRunId: row.run.id,
-      parentStepRunId: row.stepRun.id,
-      invocationId: row.invocation.id,
-      generation: row.invocation.generation,
-      childRunId: row.invocation.childRunId!,
-    });
+    // (AUTO OR DEAD) + U + 경과 마감 — 공유 만료 뮤테이터가 잠금 하 재검증한다.
+    const expired = await expireWorkflowChildStart(db, identityOfRow(row));
     if (!expired?.settled) {
       return [{ stepRunId: row.stepRun.id, action: "skipped", reason: "start deadline expiry settled by another worker" }];
     }
+    // 만료 정산 후 같은 호출에서 completion hook — 종말 자식의 pending 부모 스텝 정산.
     const completed = await runWorkflowChildCompletionHook(db, {
       id: row.invocation.childRunId!,
       companyId: row.run.companyId,
@@ -121,29 +100,28 @@ export async function dispatchLifecycleAction(
   return null;
 }
 
-/** 링크됐던 자식이 삭제된 tombstone — never-created 와 구분해 fenced 실패 정산. */
+/** 링크됐던 자식이 삭제된 tombstone — 자식 재생성 없이 tombstone 형 fenced 실패 정산 1회. */
 export async function settleDeletedChildTombstone(
   db: Db,
   row: ChildRecoveryRow,
-  stepId: string,
 ): Promise<WorkflowChildReconciliationResult[]> {
   const settled = await failChildStep(db, {
     companyId: row.run.companyId,
     workflowRunId: row.run.id,
     stepRunId: row.stepRun.id,
-    stepId,
+    stepId: row.stepRun.stepId,
     errorCode: "child_run_failed",
     detail: "linked child workflow run was deleted",
-    fence: { invocationId: row.invocation.id, generation: row.invocation.generation, childDeleted: true },
+    tombstone: { invocationId: row.invocation.id, generation: 1 },
   });
   return [{
     stepRunId: row.stepRun.id,
-    action: settled ? "recovered" : "skipped",
-    reason: settled ? "deleted child tombstone settled child_run_failed" : "deleted child but step not completable",
+    action: settled.outcome === "settled" ? "recovered" : "skipped",
+    reason: settled.outcome === "settled" ? "deleted child tombstone settled child_run_failed" : "deleted child tombstone settlement yielded (no-op)",
   }];
 }
 
-/** 종말 자식 정산 — 미입양이면 권위 링크로 adoption 복구 후 fenced hook. */
+/** 종말 자식 정산 — 입양은 정산 조건이 아니다(D5: 표시 프로젝션은 실행 권위가 없다). */
 export async function settleTerminalChild(
   db: Db,
   row: ChildRecoveryRow,
@@ -151,10 +129,8 @@ export async function settleTerminalChild(
   now: Date,
 ): Promise<WorkflowChildReconciliationResult[]> {
   if (!adopted) {
-    const repaired = await repairAdoption(db, row, now);
-    if (!repaired) {
-      return [{ stepRunId: row.stepRun.id, action: "skipped", reason: "terminal child adoption repair lost a race" }];
-    }
+    // 표시 프로젝션 복구는 best-effort — 상실해도 정산은 진행한다.
+    await repairAdoption(db, row, now);
   }
   const completed = await runWorkflowChildCompletionHook(db, {
     id: row.invocation.childRunId!,
@@ -169,12 +145,9 @@ export async function settleTerminalChild(
 }
 
 /**
- * 시작/이어받기(fix4 §2.2 + cycle A §5) — 미입양이면 먼저 adoption 복구(내구 wait 모드)하고,
- * 성공 후 1회 refresh 한다. refresh 결과:
- *  - null → 양보(skip). adopt-only → adoption 전용 복구만(실행 재진입 없음).
- *  - cancel-dead-parent / expire-start → 라이프사이클 뮤테이터로 1회 재분기.
- *  - start-or-resume 유지 → execute 진입(임대 소유자만 초기화). 그 외 클래스 → 양보.
- * busy/materialized/expired/ineligible 은 소유자·정산 경로에 양보하는 no-op(스텝 실패 아님).
+ * same-child 초기화 — 미입양이면 먼저 adoption 표시 복구하고, 성공 후 1회 refresh 한다.
+ * refresh 결과: null → skip. adopt-only → adoption 전용 복구. 라이프사이클 클래스 → 재분기.
+ * start-unmaterialized 유지 → execute 진입(전체 신원 임대 소유자만 초기화). 그 외 → skip.
  */
 export async function runStartOrResume(
   db: Db,
@@ -188,7 +161,6 @@ export async function runStartOrResume(
       return [{ stepRunId: row.stepRun.id, action: "skipped", reason: "start candidate adoption repair lost a race" }];
     }
   }
-  // [cycle A §5] refresh 자체는 잠금이 아니므로 뮤테이터가 여전히 권위다. 변경된 클래스는 1회만 재분기.
   const refreshed = await refreshWorkflowChildRecoveryRow(db, row.invocation.id);
   if (!refreshed) {
     return [{ stepRunId: row.stepRun.id, action: "skipped", reason: "start candidate is no longer actionable after adoption repair" }];
@@ -198,7 +170,7 @@ export async function runStartOrResume(
   }
   const lifecycle = await dispatchLifecycleAction(db, refreshed);
   if (lifecycle) return lifecycle;
-  if (refreshed.recoveryKind !== "start-or-resume") {
+  if (refreshed.recoveryKind !== "start-unmaterialized") {
     return [{
       stepRunId: row.stepRun.id,
       action: "skipped",
@@ -206,8 +178,7 @@ export async function runStartOrResume(
     }];
   }
   const outcome = await executeWorkflowRunWithStartOutcome(db, row.invocation.childRunId!);
-  // [cycle A §7/§8] recovered 는 이 호출이 시작을 소유했을 때만 — settled(만료 정산 승리)도
-  //   소유 정산이므로 recovered 다. 그 외는 소유자/정산 경로에 양보한다.
+  // recovered 는 이 호출이 시작/정산을 소유했을 때만 — settled(만료 정산 승리)도 소유 정산이다.
   if (outcome.kind === "started" || outcome.kind === "settled") {
     return [{
       stepRunId: row.stepRun.id,
@@ -224,7 +195,7 @@ export async function runStartOrResume(
   }];
 }
 
-/** materialized 살아있는 자식의 adoption 전용 복구 — 실행 재진입/시작 시각 변경 없음(fix4 finding 4). */
+/** materialized 살아있는 자식의 adoption 전용 복구 — 실행 재진입/시작 시각 변경 없음. */
 export async function adoptOnlyRepair(
   db: Db,
   row: ChildRecoveryRow,

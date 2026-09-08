@@ -1,6 +1,7 @@
 // @vitest-environment node
-// [workflow-child fix round 2] P1-8/P2-7/P2-8/FK 정합 회귀: wait:false cap 면제, childInputs
-// 미해결 토큰 fail-closed(실행기 0회), 스키마 FK 정합(cascade/set null).
+// [workflow-child fix round 2 / descope v1] P1-8/P2-7/P2-8/FK 정합 회귀: cap 은 wait 모드를
+//   구분하지 않는다(fire 면제 삭제 — 전 스텝이 대기), childInputs 미해결 토큰 fail-closed
+//   (실행기 0회), 스키마 FK 정합(cascade/set null). /tmp/task-spec-wfw-fix2.txt + 설계 §5 S 처분.
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -65,7 +66,7 @@ describeEmbeddedPostgres("workflow child fix round 2 — semantics", () => {
     await tempDb?.cleanup();
   });
 
-  it("reg P2-8: an incoming wait:false child is admitted while five wait:true siblings hold the cap", async () => {
+  it("reg P2-8: five waiting siblings hold the cap and the sixth dispatch is refused (fire exemption removed)", async () => {
     const companyId = await createCompanyFixture("R2 Cap Fire Co");
     const childDefId = await insertDefinition({
       companyId,
@@ -75,14 +76,11 @@ describeEmbeddedPostgres("workflow child fix round 2 — semantics", () => {
     const parentDefId = await insertDefinition({
       companyId,
       name: "parent-wf",
-      steps: [
-        ...Array.from({ length: 5 }, (_, i) => ({
-          ...childStep(childDefId),
-          id: `wait-${i}`,
-          name: `Wait ${i}`,
-        })),
-        { ...childStep(childDefId), id: "fire", name: "Fire", wait: false },
-      ],
+      steps: Array.from({ length: 6 }, (_, i) => ({
+        ...childStep(childDefId),
+        id: `wait-${i}`,
+        name: `Wait ${i}`,
+      })),
     });
     const result = await workflowService.trigger(db, {
       workflowId: parentDefId,
@@ -90,16 +88,19 @@ describeEmbeddedPostgres("workflow child fix round 2 — semantics", () => {
       triggeredBy: "board",
       triggerSource: "api",
     });
+    // 전 스텝이 대기형(wait:true only) — 5개는 linked 대기, 6번째는 cap 으로 fenced 실패.
     const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, result.runId));
-    expect(stepRuns.filter((s) => s.status === "failed")).toHaveLength(0);
     expect(stepRuns.filter((s) => s.status === "pending")).toHaveLength(5);
-    const fired = stepRuns.find((s) => s.stepId === "fire");
-    expect(fired?.status).toBe("completed");
+    const refused = stepRuns.filter((s) => s.status === "failed");
+    expect(refused).toHaveLength(1);
+    expect((refused[0]?.metadata as Record<string, unknown>).toolResult)
+      .toEqual(expect.objectContaining({ error: "child_concurrency_exceeded" }));
     const children = await db
       .select()
       .from(workflowRuns)
       .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
-    expect(children).toHaveLength(6);
+    expect(children).toHaveLength(5);
+    expect(await db.select().from(workflowStepInvocations)).toHaveLength(5);
   });
 
   it("reg P2-7: unresolved childInputs token in child tool args fails closed with zero executor calls", async () => {

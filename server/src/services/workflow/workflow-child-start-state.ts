@@ -1,32 +1,44 @@
 // server/src/services/workflow/workflow-child-start-state.ts
 //
-// [purpose] workflow→workflow 자식 초기화의 공유 잠금/신원 검증 모듈(fix4 §2.1).
-//   부모 run → invocation → 부모 step-run → 자식 run 순 행 잠금 하에서 회사/링크/세대 정합을
-//   검증하고, 시작 허용 조건(parentPermitsStart)을 제공한다. 모든 신규 자식 초기화/보호 취소/
-//   소유자 실패 트랜잭션이 이 순서와 술어를 공유한다(규칙 7/8 — 내구 레코드만이 권위).
+// [purpose] descope v1(설계 §2/§3) workflow→workflow 자식 초기화의 공유 잠금/신원 검증 모듈.
+//   부모 run → invocation → 부모 step-run → 자식 run 순 행 잠금 하에서 회사/링크/스텝/세대 정합을
+//   검증하고, 합법 시작 조건(부모 running + 스텝 pending + CURRENT)과 죽은 부모(DEAD) fence 취소를
+//   제공한다. 수동 resume/수동 임대 의도와 fire-and-forget(wait:false) 팔은 삭제됐다(D1/D3) —
+//   합법 시작은 자동 하나뿐이다.
+// [authority] 내구 레코드만이 권위(규칙 7/8/9). 최종 변이는 잠금 하 최종 UPDATE 의 술어로 판정한다.
 import { and, eq, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
   workflowRuns,
   workflowStepInvocations,
   workflowStepRuns,
 } from "@paperclipai/db";
+import {
+  WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL,
+  deadPredicate,
+  type WorkflowChildIdentity,
+} from "./workflow-child-start-predicates.js";
 
-/** 자식 초기화 신원 — 호출자가 먼저 발견하더라도 변경 전 잠금 하에 재적재/재검증해야 한다. */
+/**
+ * 자식 초기화 신원(설계 §3 B). 발견용 stepId 를 포함한 완전 신원이다. 호출자가 먼저 발견하더라도
+ * 변경 전 잠금 하에 재적재/재검증해야 한다. generation 은 타입 수준에서 number — 모든 진입점이
+ * ===1 임을 검증한 뒤 완전 바운드 B 로 쓴다(D2 — 세대는 신원 확인이지 재시도 능력이 아니다).
+ */
 export type ChildStartIdentity = {
   companyId: string;
   parentRunId: string;
   parentStepRunId: string;
+  stepId: string;
   invocationId: string;
   generation: number;
   childRunId: string;
 };
 
-/** fix4 §2.2 — 자식 시작 fence (자동/수동 의도 포함). */
+/** 자식 시작 fence — 소유 토큰과 완전 신원만 운반한다. 수동/자동 intent 는 삭제됐다(D3). */
 export type ChildStartFence = {
   identity: ChildStartIdentity;
   token: string;
-  intent: "automatic" | "manual-resume";
 };
 
 export type LockedChildStartContext = {
@@ -38,7 +50,7 @@ export type LockedChildStartContext = {
 
 /**
  * 공통 잠금 순서(부모 run → invocation → 부모 step-run → 자식 run)로 적재하고
- * 회사/링크/세대/부모 ID 정합을 검증한다. 하나라어도 어긋나면 null(fail-closed).
+ * 회사/링크/스텝 ID/세대/부모 정합(BASE_ID + stepId)을 검증한다. 하나라도 어긋나면 null(fail-closed).
  * 트랜잭션 시작 시 lock_timeout/statement_timeout을 설정한다(경합은 재시도 가능한 skip).
  */
 export async function withLockedChildStartIdentity(
@@ -67,6 +79,8 @@ export async function withLockedChildStartIdentity(
     .for("update")
     .limit(1);
   if (!parentStep || parentStep.workflowRunId !== parent.id) return null;
+  // [D5] 같은 회사의 다른 부모/스텝 치환도 회사 치환만큼 무효다 — 논리 스텝 ID 까지 검증한다.
+  if (parentStep.stepId !== identity.stepId) return null;
   if (invocation.parentStepRunId !== parentStep.id) return null;
   const [child] = await tx
     .select()
@@ -82,60 +96,31 @@ export async function withLockedChildStartIdentity(
 }
 
 /**
- * [fix4 §2.1] 자식 시작 허용 조건.
- *  arm1: 부모 running + 부모 스텝 pending.
- *  arm2: 부모 running/completed + 요청 wait=false + 부모 스텝 completed(fire-and-forget 채택이
- *        시작 클레임 전에 스텝을 완료하는 정상 경로).
- *  양쪽 모두 현재 시도 정합(retryCount+1=generation)과 retry 미대기를 요구한다.
+ * [descope D1/D2/D3] 합법 자식 시작 조건 — 부모 running + 부모 스텝 pending + retryCount 0 +
+ * workflowRetry 키 부재(null/불량 포함) + invocation 세대 1. fire-and-forget(wait:false) 팔과
+ * retry 대기 검사는 설계 §4 에 따라 삭제됐다. 결과가 거짓이면 시작 변이가 없어야 한다.
  */
 export function parentPermitsStart(
   parent: { status: string },
   parentStep: { status: string; retryCount: number; metadata: unknown },
-  invocation: { generation: number; wait: boolean },
+  invocation: { generation: number },
 ): boolean {
-  const retryState = readRetryState(parentStep.metadata);
-  const attemptCurrent = parentStep.retryCount + 1 === invocation.generation;
-  if (!attemptCurrent || retryState === "waiting") return false;
-  if (parent.status === "running" && parentStep.status === "pending") return true;
-  if (
-    (parent.status === "running" || parent.status === "completed")
-    && invocation.wait === false
-    && parentStep.status === "completed"
-  ) {
-    return true;
-  }
-  return false;
+  if (parent.status !== "running" || parentStep.status !== "pending") return false;
+  if (parentStep.retryCount !== 0) return false;
+  if (hasWorkflowRetryKey(parentStep.metadata)) return false;
+  return invocation.generation === 1;
 }
 
-function readRetryState(metadata: unknown): string {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "";
-  const retry = (metadata as Record<string, unknown>).workflowRetry;
-  if (!retry || typeof retry !== "object" || Array.isArray(retry)) return "";
-  const state = (retry as Record<string, unknown>).state;
-  return typeof state === "string" ? state : "";
-}
-
-/** 자식 run 이 materialized 되었는가 — 영수증 또는 기존 스텝 행(레거시) 중 하나라도 있으면 참. */
-export function isChildMaterialized(
-  child: { childStartMaterializedAt: Date | null },
-  childStepRowCount: number,
-): boolean {
-  return child.childStartMaterializedAt !== null || childStepRowCount > 0;
-}
-
-/** 공통 잠금 하 현재 시도/부모 허용을 모두 만족하는 시작 가능 상태인지(lease/acquire 공용). */
-export function lockedContextPermitsStart(ctx: LockedChildStartContext): boolean {
-  return parentPermitsStart(ctx.parent, ctx.parentStep, ctx.invocation);
-}
-
-/** 잠금 검증 실패 여부 표준 표시. */
-export function describeLockContext(ctx: LockedChildStartContext | null): string {
-  return ctx === null ? "locked child identity verification failed" : "verified";
+/** workflowRetry 키 존재 — 값이 null/불량이어도 "키가 있으면" 위반이다(D2.3, null-safe). */
+function hasWorkflowRetryKey(metadata: unknown): boolean {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  return Object.prototype.hasOwnProperty.call(metadata, "workflowRetry");
 }
 
 /**
- * run id 로 연결된 자식 시작 신원을 발견한다(잠금 없는 1차 발견 — 변경 전 재검증 필수).
- * run 이 링크된 자식이 아니면 null(비자식 실행 경로).
+ * run id 로 연결된 자식 시작 신원을 발견한다(잠금 없는 읽기 전용 1차 발견 — 변경 전 재검증 필수).
+ * 부모 스텝 행과 조인해 stepId 를 포함한 완전 신원을 반환한다. run 이 링크된 자식이 아니면
+ * null(비자식 실행 경로). 수리(claimed→linked 복구)는 존재하지 않는다(D3).
  */
 export async function findChildStartIdentityForRun(
   db: Db,
@@ -157,11 +142,18 @@ export async function findChildStartIdentityForRun(
     .limit(1);
   if (!invocation) return null;
   if (!child.parentRunId || !child.parentStepRunId) return null;
+  const [parentStep] = await db
+    .select({ stepId: workflowStepRuns.stepId })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, child.parentStepRunId))
+    .limit(1);
+  if (!parentStep) return null;
   return {
     identity: {
       companyId: child.companyId,
       parentRunId: child.parentRunId,
       parentStepRunId: child.parentStepRunId,
+      stepId: parentStep.stepId,
       invocationId: invocation.id,
       generation: invocation.generation,
       childRunId: child.id,
@@ -172,9 +164,10 @@ export async function findChildStartIdentityForRun(
 }
 
 /**
- * [fix4 §3] 죽은 부모 fence 하 취소 행 점유 — 공통 잠금 순서로 죽은 부모 술어와 링크/회사
- * 정합을 재검증하고 자식을 cancelled 로 전환한다(토큰/임대 정리 포함). 0행이면 호출자가
- * cleanup 없이 false 를 반환한다. 반환 shape 은 cancelWorkflowRunWithCleanup 의 기존 계약.
+ * [fix4 §3, descope §4] 죽은 부모(DEAD) fence 하 취소 — 전파 정산(propagated cleanup) 소관.
+ * 공통 잠금 순서로 신원을 재적재하고, 최종 UPDATE 의 WHERE 에서 BASE_ID+CURRENT+DEAD(완료 부모
+ * 포함)+비종말 자식을 재평가한다. 완료된 부모도 죽은 부모다(wait 분기는 삭제됐다, D1). 0행이면
+ * 호출자가 cleanup 없이 false 를 반환한다. 반환 shape 은 cancelWorkflowRunWithCleanup 의 기존 계약.
  */
 export async function claimCancelledChildRunWithParentFence(
   db: Db,
@@ -184,34 +177,61 @@ export async function claimCancelledChildRunWithParentFence(
     fence: { invocationId: string; generation: number; parentRunId: string; parentStepRunId: string };
   },
 ): Promise<Array<{ id: string; companyId: string; missionId: string | null }>> {
+  // step_id 는 불변 컬럼 — 잠금 전 선읽기로 완전 신원(B)을 구성해도 시효(staleness)가 없다.
+  const [stepRef] = await db
+    .select({ stepId: workflowStepRuns.stepId })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, input.fence.parentStepRunId))
+    .limit(1);
+  if (!stepRef) return [];
+  const identity: ChildStartIdentity = {
+    companyId: input.companyId,
+    parentRunId: input.fence.parentRunId,
+    parentStepRunId: input.fence.parentStepRunId,
+    stepId: stepRef.stepId,
+    invocationId: input.fence.invocationId,
+    generation: input.fence.generation,
+    childRunId: input.childRunId,
+  };
+  // [D2] 구세대 신원은 CURRENT/DEAD 술어가 거부한다 — 진입점에서 먼저 거부한다(fail-closed).
+  if (identity.generation !== 1) return [];
   return await db.transaction(async (tx) => {
-    const ctx = await withLockedChildStartIdentity(tx as unknown as Db, {
-      companyId: input.companyId,
-      parentRunId: input.fence.parentRunId,
-      parentStepRunId: input.fence.parentStepRunId,
-      invocationId: input.fence.invocationId,
-      generation: input.fence.generation,
-      childRunId: input.childRunId,
-    });
+    const ctx = await withLockedChildStartIdentity(tx as unknown as Db, identity);
     if (!ctx) return [];
-    const parentDead = ["failed", "cancelled", "aborted", "timed-out"].includes(ctx.parent.status)
-      || (ctx.parent.status === "completed" && ctx.invocation.wait === true);
-    if (!parentDead) return [];
     if (TERMINAL_CHILD_STATUSES.includes(ctx.child.status)) return [];
+    const bound = identityBound(identity);
     return await tx
       .update(workflowRuns)
       .set({
         status: "cancelled",
-        completedAt: new Date(),
+        completedAt: sql`clock_timestamp()`,
         childStartToken: null,
         childStartLeaseExpiresAt: null,
       })
       .where(and(
         eq(workflowRuns.id, ctx.child.id),
-        sql`${workflowRuns.status} not in ('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`,
+        eq(workflowRuns.companyId, identity.companyId),
+        // [D5] 최종 변이의 WHERE 가 완전 신원 + DEAD + 비종말 자식을 잠금 하 재평가한다.
+        sql`exists (select 1
+          from workflow_runs ${CANCEL_TABLES.parent}, workflow_step_invocations ${CANCEL_TABLES.invocation}, workflow_step_runs ${CANCEL_TABLES.parentStep}, workflow_runs ${CANCEL_TABLES.child}
+          where ${deadPredicate(CANCEL_TABLES, bound)}
+            and ${CANCEL_TABLES.child}.id = workflow_runs.id
+            and workflow_runs.status not in ${WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL})`,
       ))
       .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
   });
 }
 
+const CANCEL_TABLES = {
+  parent: alias(workflowRuns, "wcs_parent") as unknown as typeof workflowRuns,
+  invocation: workflowStepInvocations,
+  parentStep: workflowStepRuns,
+  child: alias(workflowRuns, "wcs_child") as unknown as typeof workflowRuns,
+} as const;
+
 const TERMINAL_CHILD_STATUSES = ["completed", "cancelled", "aborted", "failed", "timed-out"];
+
+/** ChildStartIdentity(number 세대)를 검증된 완전 바운드 B 로 변환한다(진입점이 ===1 을 보장). */
+function identityBound(identity: ChildStartIdentity): WorkflowChildIdentity {
+  return { ...identity, generation: 1 };
+}

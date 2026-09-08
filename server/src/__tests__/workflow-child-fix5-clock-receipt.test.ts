@@ -1,6 +1,7 @@
 // @vitest-environment node
-// [workflow-child fix5 — cycle A] Finding 1/5/7 회귀 — DB-clock 권위+원자 영수증(§2), preparation
-// 실패 정산(§5), 진실한 결과(§7). /tmp/wfw-fix-design-cycleA.md 반대(subtractive) 시나리오.
+// [workflow-child fix5 — clock/receipt] DB-clock 권위+원자 영수증(설계 §2/§3), preparation 실패 정산,
+// 진실한 결과. skew/그룹 OR/롤백/1회 영수증 통제 유지, descope v1 API 갱신: ChildStartIdentity 는
+// stepId 포함 완전 신원, fence 는 identity+token 만(D3 — intent 삭제), run-start 는 3인자.
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -17,10 +18,9 @@ import {
 } from "../services/workflow/workflow-run-start.js";
 import { ensureWorkflowStepRunRecords, type MaterializationInput } from "../services/workflow/workflow-step-materialization.js";
 import { acquireWorkflowChildStartLease } from "../services/workflow/workflow-child-start-lease.js";
+import { failOwnedWorkflowChildStart } from "../services/workflow/workflow-child-start-failure.js";
 import type { ChildStartIdentity } from "../services/workflow/workflow-child-start-state.js";
-import {
-  configureWorkflowChildFixtures, createCompanyFixture, insertDefinition, insertRunWithWorkflowStepRun,
-} from "./helpers/workflow-child-fixtures.js";
+import { configureWorkflowChildFixtures, createCompanyFixture, insertDefinition, insertRunWithWorkflowStepRun } from "./helpers/workflow-child-fixtures.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -41,7 +41,7 @@ async function ownedToolChild(name: string): Promise<{
     steps: [{ id: "t", name: "T", type: "tool", agentId: "", dependencies: [], toolNames: ["echo-tool"], toolArgs: {} }],
   });  const parentDefId = await insertDefinition({ companyId, name: "parent", steps: [{
     id: "run-child", name: "Run child workflow", type: "workflow", dependencies: [],
-    targetWorkflowId: childDefId, wait: true,
+    targetWorkflowId: childDefId,
   }] });
   const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
   const childRunId = randomUUID();
@@ -52,33 +52,27 @@ async function ownedToolChild(name: string): Promise<{
     parentRunId: runId, parentStepRunId: stepRunId, rootRunId: runId,
   });
   await db.insert(workflowStepInvocations).values({
-    id: invocationId, companyId, parentStepRunId: stepRunId, childRunId, generation: 1, state: "linked", wait: true,
+    id: invocationId, companyId, parentStepRunId: stepRunId, childRunId, generation: 1, state: "linked", targetWorkflowId: childDefId,
   });
   return { companyId, runId, stepRunId, childRunId, childDefId, invocationId };
 }
 
 const identityOf = (x: Owned): ChildStartIdentity => ({
-  companyId: x.companyId, parentRunId: x.runId, parentStepRunId: x.stepRunId,
+  companyId: x.companyId, parentRunId: x.runId, parentStepRunId: x.stepRunId, stepId: "run-child",
   invocationId: x.invocationId, generation: 1, childRunId: x.childRunId,
 });
 
 function directMaterialize(x: Owned, token: string, overrides: Partial<MaterializationInput> = {}) {
   return ensureWorkflowStepRunRecords(db, {
-    runId: x.childRunId, steps: CHILD_STEPS,
-    childStartFence: { identity: identityOf(x), token, intent: "automatic" },
-    buildMetadata: (step) => ({ seeded: true, stepId: step.id }),
-    syncControls: async (_syncDb, rows) => rows,
+    runId: x.childRunId, steps: CHILD_STEPS, childStartFence: { identity: identityOf(x), token },
+    buildMetadata: (step) => ({ seeded: true, stepId: step.id }), syncControls: async (_d, rows) => rows,
     ...overrides,
   });
 }
 
-async function childRows(x: Owned) {
-  return db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, x.childRunId));
-}
-
-async function childRow(x: Owned) {
-  return (await db.select().from(workflowRuns).where(eq(workflowRuns.id, x.childRunId)))[0];
-}
+const runRow = async (id: string) => (await db.select().from(workflowRuns).where(eq(workflowRuns.id, id)))[0];
+const childRows = (x: Owned) => db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, x.childRunId));
+const childRow = async (x: Owned) => (await db.select().from(workflowRuns).where(eq(workflowRuns.id, x.childRunId)))[0];
 
 function liteSnapshot(x: Owned): WorkflowExecutionResultLite {
   return { runId: x.childRunId, workflowId: x.childDefId, missionId: null, status: "running", completedAt: null, stepRuns: [] };
@@ -86,12 +80,9 @@ function liteSnapshot(x: Owned): WorkflowExecutionResultLite {
 function startHooks(x: Owned, overrides: Partial<WorkflowRunStartHooks> = {}): WorkflowRunStartHooks {
   return {
     loadContext: async () => ({ run: { id: x.childRunId, companyId: x.companyId, status: "pending", missionId: null }, steps: [] }),
-    assertToolsReady: async () => {},
-    validateStructural: async () => [],
-    structuralTopologyErrors: () => [],
-    activateMission: async () => ({}),
-    sync: async () => ({ kind: "synced", result: liteSnapshot(x) }),
-    snapshot: async () => liteSnapshot(x),
+    assertToolsReady: async () => {}, validateStructural: async () => [],
+    structuralTopologyErrors: () => [], activateMission: async () => ({}),
+    sync: async () => ({ kind: "synced", result: liteSnapshot(x) }), snapshot: async () => liteSnapshot(x),
     childCompletionHook: vi.fn(async () => true),
     ...overrides,
   };
@@ -194,6 +185,9 @@ describeEmbeddedPostgres("workflow child fix5 — DB clock authority, atomic rec
     expect(owned.token).not.toBe(oldToken);
     expect((await directMaterialize(x, oldToken)).kind).toBe("not-owner");
     expect(await childRows(x)).toHaveLength(0);
+    // 소유권 계열 전체 — 옛 토큰은 실패 정산 OWNER 변이의 권위도 없다(자동 전용, D3).
+    expect((await failOwnedWorkflowChildStart(db, { identity: identityOf(x), token: oldToken, errorCode: "probe" })).kind).toBe("lost");
+    expect((await childRow(x))?.childStartMaterializedAt).toBeNull();
   });
 
   it("(d) seeded receipt+token fixture is preserved byte-for-byte with no inserted step", async () => {
@@ -245,7 +239,7 @@ describeEmbeddedPostgres("workflow child fix5 — DB clock authority, atomic rec
     for (const [label, message, overrides] of cases) {
       const x = await ownedToolChild(`F5 Prep ${label}`);
       const hooks = startHooks(x, overrides);
-      await expect(executeWorkflowRunStart(db, x.childRunId, undefined, hooks)).rejects.toThrow(message);
+      await expect(executeWorkflowRunStart(db, x.childRunId, hooks)).rejects.toThrow(message);
       const child = await childRow(x);
       expect(child?.status, label).toBe("failed");
       expect(child?.completedAt, label).not.toBeNull();
@@ -272,7 +266,7 @@ describeEmbeddedPostgres("workflow child fix5 — DB clock authority, atomic rec
         if (readinessEntries === 1) { entered(); await gate; throw new Error("loser boom"); }
       },
     });
-    const loser = executeWorkflowRunStart(db, x.childRunId, undefined, hooks).catch((error) => error);
+    const loser = executeWorkflowRunStart(db, x.childRunId, hooks).catch((error) => error);
     await entry;
     await db.update(workflowRuns).set({
       childStartLeaseExpiresAt: sql`clock_timestamp() - interval '1 second'`,
@@ -285,15 +279,19 @@ describeEmbeddedPostgres("workflow child fix5 — DB clock authority, atomic rec
     expect(hooks.childCompletionHook).not.toHaveBeenCalled();
   });
 
-  it("cancelled child with a stale fence refuses start and keeps its persisted rows", async () => {
+  it("cancelled child start returns a typed ineligible boundary and keeps its persisted rows", async () => {
     const x = await ownedToolChild("F5 CancelRefusal");
     await db.insert(workflowStepRuns).values({ id: randomUUID(), workflowRunId: x.childRunId, stepId: "t", status: "pending" });
     await db.update(workflowRuns).set({
-      status: "cancelled", completedAt: new Date(),
-      childStartToken: sql`${randomUUID()}::uuid`,
+      status: "cancelled", completedAt: new Date(), childStartToken: sql`${randomUUID()}::uuid`,
       childStartLeaseExpiresAt: sql`clock_timestamp() - interval '1 second'`,
     }).where(eq(workflowRuns.id, x.childRunId));
-    await expect(executeWorkflowRunWithStartOutcome(db, x.childRunId)).rejects.toThrow(/cancelled; refusing to start execution/);
+    // [설계 §3] 취소/종말 자식은 typed ineligible 스냅숏 경계다(r2 CancelRace) — 평문 Error 는
+    //   회복 경계에서 failed 로 오보된다. 지연 시작은 취소 행을 절대 되돌리지 않는다.
+    const outcome = await executeWorkflowRunWithStartOutcome(db, x.childRunId);
+    expect(outcome.kind).toBe("ineligible");
+    expect(outcome.result.status).toBe("cancelled");
     expect(await childRows(x)).toHaveLength(1);
+    expect((await childRow(x))?.status).toBe("cancelled");
   });
 });

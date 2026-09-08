@@ -1,36 +1,41 @@
 // server/src/services/workflow/workflow-child-invocation-claim.ts
 //
-// [purpose] workflow→workflow 자식 dispatch 의 부모 잠금 클레임 트랜잭션 전용 모듈(fix4 §4,
-//   cycle A §6). 잠금 순서: 부모 run 행 → 기존 invocation → 부모 step-run(전부 FOR UPDATE,
-//   트랜잭션 시작 시 lock/statement timeout 설정). 실제 세대는 잠긴 s.retryCount+1 에서 유도하고
-//   호출자 generation 은 expected 값으로만 취급한다 — 스테일 스냅숏 클레임은 부작용 없이 탈락한다.
-//   대기 cap(admission)은 커밋된 wait:true 링크 요청 기준으로 이 트랜잭션 안에서 원자 판정한다.
-// [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8).
+// [purpose] descope v1 — workflow→workflow 자식 dispatch 의 부모 잠금 클레임 트랜잭션 전용 모듈.
+//   단일 트랜잭션/단일 invocation: ID 사전 할당 → 정의 행 FOR SHARE(정렬 잠금, D6 직렬화) →
+//   부모 run → 기존 invocation → 부모 step-run 순 FOR UPDATE. 세대는 항상 1(D2 — 교체/CAS/
+//   재시도 admission 은 존재하지 않는다). 대기 cap(부모당 pending workflow 스텝 5개)은 커밋된
+//   invocation 기준으로 부모 잠금 하 원자 판정하며, 재사용은 슬롯을 소모하지 않는다. 생성은
+//   CREATE 형 최종 변이(workflow-child-create-forms)로만 이뤄진다 — 0행은 전체 롤백.
+// [authority] 모든 판정은 구조화 DB 레코드만 읽는다(규칙 7/8). 실패 닫힘: 인식 불가 상태는
+//   invalid-state 로 반환하고 실행 행을 변경하지 않는다.
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  workflowDefinitions,
   workflowRuns,
   workflowStepInvocations,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { createChildWorkflowRunRowInTx } from "./workflow-child-execution.js";
-import { TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
-import { WORKFLOW_CHILD_MAX_CONCURRENT_WAITING } from "./workflow-child-guards.js";
-import { hasMalformedWorkflowRetry, isWorkflowRetryDue, readWorkflowRetryMetadata } from "./retry-policy.js";
 import {
-  isChildStartAdmissionLost,
+  insertChildWorkflowRunRow,
+  insertInvocationClaimRow,
+  linkInvocationToCreatedChildRow,
+} from "./workflow-child-create-forms.js";
+import { WORKFLOW_CHILD_MAX_CONCURRENT_WAITING } from "./workflow-child-guards.js";
+import {
   isChildStartContention,
-  ChildStartAdmissionLostError,
 } from "./workflow-child-start-contention.js";
+import { TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 
 export type InvocationClaim =
-  | { outcome: "created"; invocationId: string; childRunId: string; generation: number; wait: boolean }
-  | { outcome: "reused"; invocationId: string; childRunId: string; generation: number; wait: boolean }
+  | { outcome: "created"; invocationId: string; childRunId: string; generation: 1 }
+  | { outcome: "reused"; invocationId: string; childRunId: string; generation: 1 }
   | { outcome: "parent-cancelled" }
   | { outcome: "cap-exceeded" }
-  | { outcome: "tombstone"; invocationId: string; generation: number }
-  // [cycle A §6] additive — 기대 세대 불일치/자격 상실/경합. 부작용 없이 양보한다.
+  | { outcome: "tombstone"; invocationId: string; generation: 1 }
+  /** 설계 §2 표 밖 상태(커밋된 claimed, 세대 !=1 등) — fail-closed, 실행 행 무변경. */
+  | { outcome: "invalid-state"; reason: string }
   | { outcome: "ineligible" }
   | { outcome: "busy" };
 
@@ -39,29 +44,17 @@ export type ClaimChildInvocationInput = {
   /** 잠금 하 새로 적재된 부모 run 이 자식 생성의 권위다(스테일 input.run 은 신원 확인용으로만 사용). */
   run: typeof workflowRuns.$inferSelect;
   parentStepRunId: string;
-  /** 새 세대(신규 클레임/승인된 retry)만 정의의 요청 wait 를 읽는다. 재사용은 invocation.wait 가 권위. */
-  incomingWait: boolean;
-  /**
-   * [cycle B F2] 네이티브 자식 retry admission 힌트 — DAG workflow-child dispatch 호출부만 채운다
-   * (선택된 스텝이 유효한 due waiting retry 를 가질 때). DB 잠금 하 재검증되며 그 자체로 권위가 아니다.
-   * 일반 dispatch/recovery/reuse 호출자는 생략한다.
-   */
-  nativeRetryAdmission?: {
-    retryNumber: number;
-    retryCount: number;
-    metadata: Record<string, unknown>;
-  };
-  /** expected 값 — 실제 세대는 잠긴 부모 스텝의 retryCount+1 에서 유도한다(cycle A §6). */
-  generation: number;
+  stepId: string;
+  generation: 1;
   targetWorkflowId: string;
   renderedInputs: Record<string, string>;
   now: Date;
 };
 
 /**
- * 원자적 클레임: 잠금 하 세대 유도/검증 → invocation 클레임(재사용/tombstone/세대 CAS) → 자식 run
- * 행 생성 → 링크를 하나의 트랜잭션으로 커밋한다. 커밋 승자만 이후 execute 진입(임대)에 도달할 수
- * 있다. 경합(lock_timeout/deadlock/serialization)은 부작용 없이 busy 다(cycle A §8).
+ * 원자적 클레임: 정의 잠금 → 부모/invocation/스텝 잠금 하 검증 → invocation CREATE → 자식 run
+ * 행 CREATE → construction 링크를 하나의 트랜잭션으로 커밋한다. 커밋 승자만 이후 임대 진입에
+ * 도달할 수 있다. 경합(lock_timeout/deadlock/serialization)은 부작용 없이 busy 다.
  */
 export async function claimChildInvocation(
   db: Db,
@@ -69,14 +62,54 @@ export async function claimChildInvocation(
 ): Promise<InvocationClaim> {
   const companyId = input.companyId;
   const parentStepRunId = input.parentStepRunId;
-  const incomingWait = input.incomingWait;
-  const expectedGeneration = input.generation;
+  // [D2] 세대는 항상 1 — 호출자가 다른 세대를 보내면 변이 전에 거부한다.
+  if (input.generation !== 1) {
+    return { outcome: "invalid-state", reason: "workflow child invocation generation must be 1" };
+  }
   try {
     return await db.transaction(async (tx): Promise<InvocationClaim> => {
-      // 트랜잭션 로컬 타임아웃을 첫 잠금 전에 설정한다(cycle A §6/§8 — 연결 전역 설정 아님).
+      // 트랜잭션 로컬 타임아웃을 첫 잠금 전에 설정한다(연결 전역 설정 아님).
       await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`);
 
-      // (a) 부모 run 행 잠금 — 같은 run 의 형제 클레임/cap 판정/취소를 직렬화한다.
+      // (a) ID 사전 할당 — 첫 INSERT 이전에 invocation/자식 ID 를 확정한다(설계 §3).
+      const invocationId = randomUUID();
+      const childRunId = randomUUID();
+
+      // (b) [r8 finding 1] 비잠금 P 예독 — 부모 정의 ID 발견 전용. 정의 행을 P 잠금 "이전에"
+      //     정렬 잠금하기 위해 필요하다(claim vs archive/delete 역전 제거). 예독값은 아래 (d)
+      //     에서 잠긴 P 행과 재비교된다(드리프트 시 ineligible — 다른 정의를 기회적으로 잠그지
+      //     않는다). 스테일 예독은 신원 확인용일 뿐 권위가 없다.
+      const [discovered] = await tx
+        .select({
+          id: workflowRuns.id,
+          workflowId: workflowRuns.workflowId,
+          companyId: workflowRuns.companyId,
+        })
+        .from(workflowRuns)
+        .where(and(eq(workflowRuns.id, input.run.id), eq(workflowRuns.companyId, companyId)))
+        .limit(1);
+      if (!discovered || discovered.workflowId === input.targetWorkflowId) {
+        return { outcome: "ineligible" };
+      }
+
+      // (c) 정의 행 정렬 잠금 FOR SHARE — 발견된 부모 정의 + 대상 정의, ID 정렬 순(claim vs
+      //     archive/delete 잠금 역전 방지, D6/r8). 같은 회사 + active 만 통과한다.
+      const definitionIds = [discovered.workflowId, input.targetWorkflowId].sort();
+      const definitionRows = await tx
+        .select({ id: workflowDefinitions.id, companyId: workflowDefinitions.companyId, status: workflowDefinitions.status })
+        .from(workflowDefinitions)
+        .where(inArray(workflowDefinitions.id, definitionIds))
+        .orderBy(workflowDefinitions.id)
+        .for("share");
+      if (definitionRows.length !== 2) return { outcome: "ineligible" };
+      for (const definition of definitionRows) {
+        if (definition.companyId !== companyId) return { outcome: "ineligible" };
+        if (definition.status !== "active") return { outcome: "ineligible" };
+      }
+
+      // (d) 부모 run 행 잠금 — 같은 run 의 형제 클레임/cap 판정/취소를 직렬화하고, 예독 발견값과
+      //     현재 정의/회사 신원을 비교한다(발견→잠금 사이 정의 변경/이전은 ineligible —
+      //     다른 정의 행을 추가로 잠그지 않는다).
       const [parent] = await tx
         .select()
         .from(workflowRuns)
@@ -84,12 +117,17 @@ export async function claimChildInvocation(
         .for("update")
         .limit(1);
       if (!parent) return { outcome: "ineligible" };
+      if (
+        parent.workflowId !== discovered.workflowId
+        || parent.companyId !== discovered.companyId
+      ) {
+        return { outcome: "ineligible" };
+      }
       if (TERMINAL_WORKFLOW_STATUSES.has(parent.status)) return { outcome: "parent-cancelled" };
-      // [cycle A §6] 자동 클레임은 running 부모 + pending 스텝에서만 성립한다.
       if (parent.status !== "running") return { outcome: "ineligible" };
 
-      // (b) 기존 invocation(잠금). 세대 판정은 아래 (c) 의 잠긴 스텝 유도값으로 한다.
-      let [row] = await tx
+      // (d) 기존 invocation 잠금. 회사 불일치는 fail-closed(ineligible).
+      const [row] = await tx
         .select()
         .from(workflowStepInvocations)
         .where(eq(workflowStepInvocations.parentStepRunId, parentStepRunId))
@@ -97,7 +135,8 @@ export async function claimChildInvocation(
         .limit(1);
       if (row && row.companyId !== companyId) return { outcome: "ineligible" };
 
-      // (c) 부모에 속한 "신선한" 부모 스텝을 잠그고 실제 세대를 유도한다.
+      // (e) 부모에 속한 부모 스텝을 잠그고 descope CURRENT(세대1/retryCount0/무 retry 메타데이터)를
+      //     검증한다. 재시도 메타데이터/횟수가 있는 workflow 스텝은 클레임 자체를 거부한다(D2.3).
       const [step] = await tx
         .select()
         .from(workflowStepRuns)
@@ -109,165 +148,104 @@ export async function claimChildInvocation(
         .limit(1);
       if (!step) return { outcome: "ineligible" };
       if (step.status !== "pending") return { outcome: "ineligible" };
-      const generation = step.retryCount + 1;
-      if (expectedGeneration !== generation) return { outcome: "ineligible" };
+      if (step.retryCount !== 0) {
+        return { outcome: "invalid-state", reason: "workflow parent step has nonzero retryCount" };
+      }
+      if (hasWorkflowRetryKey(step.metadata)) {
+        return { outcome: "invalid-state", reason: "workflow parent step carries workflowRetry metadata" };
+      }
 
+      // (f) 기존 invocation 판정 — linked 자식 재사용 / tombstone / 인식 불가 상태 fail-closed.
       if (row) {
-        if (row.generation > generation) {
-          // 더 새 세대가 이미 커밋됐다 — 다른 세대의 자식을 대신 돌려주지 않고 양보한다(cycle A §6).
-          return { outcome: "ineligible" };
+        if (row.generation !== 1) {
+          return { outcome: "invalid-state", reason: "workflow child invocation generation is not 1" };
         }
-        if (row.generation === generation && row.childRunId !== null) {
-          // 동일 세대 + 이미 링크된 자식 → 재사용(커밋된 wait 가 권위). 멱등 재사용은 retry 표식을
-          //   소비하지 않으므로 대기/dispatching 상태와 무관하게 허용된다. claimed+nonnull 은
-          //   판별자 수리 전까지 재사용하지 않는다(cycle A §10 — dispatch 경로가 먼저 수리한다).
-          if (row.state !== "linked") return { outcome: "ineligible" };
-          return { outcome: "reused", invocationId: row.id, childRunId: row.childRunId, generation: row.generation, wait: row.wait };
-        }
-      }
-
-      // [cycle B F2] nested retry 계약을 모든 분기 "이전에" 파싱한다. 없음=레거시 무retry;
-      //   오작성=ineligible; waiting=future/due 무관 일반 클레임 전부 ineligible(재사용/tombstone/
-      //   널클레임/구세대 교체 포함) — 해제는 nativeRetryAdmission 힌트 + 원자 admission 뿐이다.
-      //   dispatching 은 retryNumber 가 잠금 retryCount 와 일치할 때 커밋된 릴리즈의 재개로만 통과.
-      const metaRecord = step.metadata && typeof step.metadata === "object" && !Array.isArray(step.metadata)
-        ? step.metadata as Record<string, unknown>
-        : {};
-      if (hasMalformedWorkflowRetry(metaRecord)) return { outcome: "ineligible" };
-      const retryMeta = readWorkflowRetryMetadata(metaRecord.workflowRetry);
-      if (retryMeta && retryMeta.retryNumber !== step.retryCount) return { outcome: "ineligible" };
-      const retryWaiting = retryMeta?.state === "waiting";
-      const sameGenerationRow = row !== undefined && row.generation === generation;
-      if (retryWaiting) {
-        // waiting 은 기존 링크 자식(재사용/tombstone)을 재해제하지 못한다 — admission 대상 아님.
-        const admission = input.nativeRetryAdmission;
-        const admissionValid = !!admission
-          && admission.retryNumber === retryMeta!.retryNumber
-          && admission.retryCount === step.retryCount
-          && isWorkflowRetryDue(metaRecord.workflowRetry, input.now)
-          && !sameGenerationRow;
-        if (!admissionValid) return { outcome: "ineligible" };
-      }
-
-      if (row && row.generation === generation) {
         if (row.state === "linked") {
-          // [fix3 P1-4] tombstone — 링크됐던 자식이 삭제된 영수증. 재생성하지 않고 fenced 정산.
-          return { outcome: "tombstone", invocationId: row.id, generation: row.generation };
-        }
-        if (row.state !== "claimed") return { outcome: "ineligible" };
-        // 동일 세대 + child NULL(state='claimed') → 크래시된 클레임의 회복 승자로 계속 진행.
-      } else if (row) {
-        // [cycle B F2] cap 은 구세대 변경/admission 메타데이터 수정 "이전에" 판정한다 —
-        //     cap-exceeded 반환 후 부분 변이가 커밋되어서는 안 된다.
-        if (incomingWait) {
-          const [capRow] = await tx
-            .select({ count: sql<number>`count(*)::int` })
-            .from(workflowStepInvocations)
-            .innerJoin(workflowStepRuns, eq(workflowStepRuns.id, workflowStepInvocations.parentStepRunId))
-            .where(and(
-              eq(workflowStepRuns.workflowRunId, parent.id),
-              eq(workflowStepRuns.status, "pending"),
-              eq(workflowStepInvocations.wait, true),
-              sql`${workflowStepInvocations.childRunId} is not null`,
-            ));
-          if ((capRow?.count ?? 0) >= WORKFLOW_CHILD_MAX_CONCURRENT_WAITING) {
-            return { outcome: "cap-exceeded" };
+          if (row.childRunId !== null) {
+            // 동일 세대 + 이미 링크된 자식 → 엄격 검증 후 재사용(슬롯 미소모).
+            return { outcome: "reused", invocationId: row.id, childRunId: row.childRunId, generation: 1 };
           }
+          // [D4] tombstone — 링크됐던 자식이 삭제된 영수증. 재생성하지 않고 fenced 정산.
+          return { outcome: "tombstone", invocationId: row.id, generation: 1 };
         }
-        const cas = await tx
-          .update(workflowStepInvocations)
-          .set({ childRunId: null, generation, state: "claimed", wait: incomingWait })
-          .where(and(
-            eq(workflowStepInvocations.id, row.id),
-            eq(workflowStepInvocations.generation, row.generation),
-          ))
-          .returning({ id: workflowStepInvocations.id });
-        if (cas.length === 0) throw new Error("invocation generation CAS lost unexpectedly");
-        row = { ...row, generation, childRunId: null, state: "claimed", wait: incomingWait };
+        // 커밋된 claimed 행(및 기타 상태)은 설계 §2 표 밖 — 수리/재사용 없이 fail-closed.
+        return { outcome: "invalid-state", reason: `committed invocation state ${row.state} is not a legal runtime state` };
       }
 
-      // (e) CONCURRENCY cap — [fix3 P2-5] 커밋된 wait:true 링크 요청 기준(입양 메타데이터 무관).
-      if (incomingWait) {
-        const [capRow] = await tx
-          .select({ count: sql<number>`count(*)::int` })
-          .from(workflowStepInvocations)
-          .innerJoin(workflowStepRuns, eq(workflowStepRuns.id, workflowStepInvocations.parentStepRunId))
-          .where(and(
-            eq(workflowStepRuns.workflowRunId, parent.id),
-            eq(workflowStepRuns.status, "pending"),
-            eq(workflowStepInvocations.wait, true),
-            sql`${workflowStepInvocations.childRunId} is not null`,
-          ));
-        if ((capRow?.count ?? 0) >= WORKFLOW_CHILD_MAX_CONCURRENT_WAITING) {
-          return { outcome: "cap-exceeded" };
-        }
-      }
-      if (!row) {
-        // 부모 잠금이 삽입을 직렬화한다 — 충돌 시 fail-closed(cycle A §6).
-        const inserted = await tx
-          .insert(workflowStepInvocations)
-          .values({ companyId, parentStepRunId, childRunId: null, generation, state: "claimed", wait: incomingWait })
-          .onConflictDoNothing({ target: workflowStepInvocations.parentStepRunId })
-          .returning();
-        if (inserted.length === 0) throw new Error("invocation claim conflict under run lock — fail-closed");
-        row = inserted[0];
-      }
-      // [cycle B F2] 네이티브 admission — waiting→dispatching 원자 전이. 자식/링크 INSERT "이전"에
-      //   수행하며 관측 메타데이터 스냅숏/잠금 세대/due 시간을 한 문장으로 재검증한다. 0행은
-      //   전송된 AdmissionLost 센티널로 롤백되고(부분 변이 커밋 금지) 외부에서 busy 로 변환된다.
-      if (retryWaiting) {
-        const admitted = await tx
-          .update(workflowStepRuns)
-          .set({
-            metadata: sql`jsonb_set(coalesce(${workflowStepRuns.metadata}, '{}'::jsonb), '{workflowRetry,state}', '"dispatching"'::jsonb)`,
-          })
-          .where(and(
-            eq(workflowStepRuns.id, step.id),
-            eq(workflowStepRuns.workflowRunId, parent.id),
-            eq(workflowStepRuns.status, "pending"),
-            eq(workflowStepRuns.retryCount, step.retryCount),
-            sql`(${workflowStepRuns.retryCount} + 1) = ${generation}`,
-            // [cycle B F2 수정] jsonb 파라미터는 텍스트로 직렬화해 ::jsonb 캐스트한다 — 원시 JS 객체
-            //   바인딩은 postgres.js 직렬화 TypeError 로 트랜잭션 전체를 깨뜨린다.
-            sql`${workflowStepRuns.metadata} is not distinct from ${JSON.stringify(step.metadata ?? {})}::jsonb`,
-            sql`(${workflowStepRuns.metadata}->'workflowRetry'->>'state') = 'waiting'`,
-            sql`(${workflowStepRuns.metadata}->'workflowRetry'->>'nextEligibleAt')::timestamptz <= clock_timestamp()`,
-          ))
-          .returning({ id: workflowStepRuns.id });
-        if (admitted.length === 0) throw new ChildStartAdmissionLostError();
+      // (g) CONCURRENCY cap — 커밋된 invocation 기준(입양/자식 상태 무관, 정산 전까지).
+      //     tombstone 포함 pending 부모 스텝의 invocation 을 센다. 불량 데이터도 슬롯으로 센다.
+      const [capRow] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(workflowStepInvocations)
+        .innerJoin(workflowStepRuns, eq(workflowStepRuns.id, workflowStepInvocations.parentStepRunId))
+        .where(and(
+          eq(workflowStepRuns.workflowRunId, parent.id),
+          eq(workflowStepRuns.status, "pending"),
+        ));
+      if ((capRow?.count ?? 0) >= WORKFLOW_CHILD_MAX_CONCURRENT_WAITING) {
+        return { outcome: "cap-exceeded" };
       }
 
-      // (f) 자식 run "행"을 같은 트랜잭션에서 생성(실행 없음). 잠금 하 새로 적재한 부모 행이
-      //     권위다(스테일 input.run 금지 — cycle A §6). missionId null — 미션 런타임 격리.
-      const childRunId = randomUUID();
-      await createChildWorkflowRunRowInTx(tx as unknown as Db, {
-        parentRun: parent,
+      // (h) invocation CREATE(설계 §4 row 2) — 회사/P/S/step ID, running 부모, CURRENT, 기존 I
+      //     부재, generation 1, 양쪽 정의 active/동일 회사를 단일 문장에서 바인딩한다.
+      const insertedInvocation = await insertInvocationClaimRow(tx as unknown as Db, {
+        companyId,
+        parentRunId: parent.id,
         parentStepRunId,
+        stepId: step.stepId,
+        invocationId,
+        targetWorkflowId: input.targetWorkflowId,
+        generation: 1,
+      });
+      if (insertedInvocation !== 1) {
+        throw new Error("invocation claim CREATE lost under parent/definition lock — fail-closed");
+      }
+
+      // (i) 자식 run "행" CREATE(설계 §4 row 3) — 실행 없음. tx-local claimed/NULL invocation +
+      //     P/S 연관 + CURRENT + 대상 정의를 같은 문장에서 바인딩한다. missionId NULL.
+      const insertedChild = await insertChildWorkflowRunRow(tx as unknown as Db, {
+        companyId,
+        parentRunId: parent.id,
+        parentStepRunId,
+        stepId: step.stepId,
+        invocationId,
         childRunId,
         targetWorkflowId: input.targetWorkflowId,
-        companyId,
         renderedInputs: input.renderedInputs,
         now: input.now,
+        generation: 1,
       });
+      if (insertedChild !== 1) {
+        throw new Error("child run CREATE lost under parent/definition lock — fail-closed");
+      }
 
-      // (g) 클레임 링크 — claimed/NULL → 실제 자식(state=linked).
-      const linked = await tx
-        .update(workflowStepInvocations)
-        .set({ childRunId, state: "linked" })
-        .where(and(
-          eq(workflowStepInvocations.id, row.id),
-          sql`${workflowStepInvocations.childRunId} is null`,
-        ))
-        .returning({ id: workflowStepInvocations.id });
-      if (linked.length === 0) throw new Error("invocation pending-claim link lost unexpectedly");
+      // (j) construction 링크(설계 §4 row 5) — claimed/NULL → linked. 0행은 전체 클레임 롤백.
+      const linked = await linkInvocationToCreatedChildRow(tx as unknown as Db, {
+        companyId,
+        parentRunId: parent.id,
+        parentStepRunId,
+        stepId: step.stepId,
+        invocationId,
+        childRunId,
+        generation: 1,
+      });
+      if (linked !== 1) {
+        throw new Error("invocation construction link lost — entire claim rolls back");
+      }
 
-      return { outcome: "created", invocationId: row.id, childRunId, generation, wait: incomingWait };
+      return { outcome: "created", invocationId, childRunId, generation: 1 };
     });
   } catch (error) {
-    // [cycle A §8] 경합은 정산/생성 없이 busy — 호출자가 양보한다. 알 수 없는 오류는 그대로 전파.
+    // 경합은 정산/생성 없이 busy — 호출자가 양보한다. 알 수 없는 오류는 그대로 전파(롤백 후).
     if (isChildStartContention(error)) return { outcome: "busy" };
-    // [cycle B F2] admission CAS 소실도 롤백 후 busy — 실패 정산/무관 세대 반환 없음.
-    if (isChildStartAdmissionLost(error)) return { outcome: "busy" };
     throw error;
   }
+}
+
+/** workflowRetry 키 존재(null/비정형 포함) — D2.3: 어떤 형태로든 공급되면 거부한다. */
+function hasWorkflowRetryKey(metadata: unknown): boolean {
+  return metadata !== null
+    && typeof metadata === "object"
+    && !Array.isArray(metadata)
+    && Object.prototype.hasOwnProperty.call(metadata, "workflowRetry");
 }

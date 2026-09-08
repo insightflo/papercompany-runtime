@@ -1,6 +1,8 @@
 // @vitest-environment node
-// [workflow-child fix round] P1-5/6 + P2-9 검증: 부모 취소의 자손 전파, 자식 미션 런타임 격리,
-// {$childInputs.*} 토큰 소비.
+// [workflow-child fix round / descope v1] P1-5/6 + P2-9 검증: 부모 취소의 자손 전파(전체 신원
+//   fence — cancelWorkflowRunWithCleanup 은 companyId 를 항상 호출자가 명시한다), 자식 미션
+//   런타임 격리, {$childInputs.*} 토큰 소비. 모든 자식 신원은 실제 클레임 트랜잭션이 만든
+//   완전한 linked identity 다(D5). /tmp/task-spec-wfw-fix.txt + 설계 §5 S 처분.
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";

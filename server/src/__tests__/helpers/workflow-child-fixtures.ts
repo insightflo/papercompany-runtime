@@ -1,17 +1,17 @@
 // server/src/__tests__/helpers/workflow-child-fixtures.ts
 //
-// [purpose] workflow-child-* 테스트 공용 fixture(0101). embedded PG 회사/정의/run/step-run
-//   생성기. db 는 호출부가 넘긴다(파일별 독립 인스턴스).
+// [purpose] descope v1 workflow-child-* 테스트 공용 기반 fixture(0101). embedded PG 회사/정의/
+//   run/step-run 생성기. db 는 호출부가 넘긴다(파일별 독립 인스턴스). 자식 상태 삽입(linked/
+//   tombstone/materialized/임대/grandchild)은 workflow-child-invocation-fixtures.ts 전용.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import type { createDb } from "@paperclipai/db";
 import {
   agents,
   companies,
   workflowDefinitions,
   workflowRuns,
-  workflowStepRuns,
 } from "@paperclipai/db";
+import { workflowStepRuns } from "@paperclipai/db";
 
 type TestDb = ReturnType<typeof createDb>;
 
@@ -41,7 +41,8 @@ export async function createCompanyFixture(name: string): Promise<string> {
 
 export type ChildStepOverrides = {
   targetWorkflowId?: string;
-  wait?: boolean;
+  /** descope v1: true 또는 생략만 법정 — false 는 검증에서 거부된다(이 오버라이드는 true 전달용). */
+  wait?: true;
   inputs?: Record<string, string>;
 };
 
@@ -103,14 +104,33 @@ export async function insertRunWithWorkflowStepRun(input: {
     ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
     ...(input.rootRunId ? { rootRunId: input.rootRunId } : {}),
   });
+  const stepRunId = await insertStepRunForRun({
+    runId,
+    stepId: input.stepId ?? "run-child",
+    status: input.stepStatus ?? "pending",
+    retryCount: input.retryCount,
+    metadata: input.metadata,
+  });
+  return { runId, stepRunId };
+}
+
+/** 임의 run 의 스텝 행 — 중간 run(자식이 부모가 되는 grandchild 경로)에도 사용한다. */
+export async function insertStepRunForRun(input: {
+  runId: string;
+  stepId: string;
+  status?: string;
+  retryCount?: number;
+  metadata?: Record<string, unknown>;
+}): Promise<string> {
+  const db = testDb;
   const stepRunId = randomUUID();
   await db.insert(workflowStepRuns).values({
     id: stepRunId,
-    workflowRunId: runId,
-    stepId: input.stepId ?? "run-child",
-    status: input.stepStatus ?? "pending",
+    workflowRunId: input.runId,
+    stepId: input.stepId,
+    status: input.status ?? "pending",
     retryCount: input.retryCount ?? 0,
     ...(input.metadata ? { metadata: input.metadata } : {}),
   });
-  return { runId, stepRunId };
+  return stepRunId;
 }

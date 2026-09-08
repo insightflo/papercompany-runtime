@@ -1,15 +1,10 @@
 // server/src/services/workflow/workflow-child-discovery.ts
 //
-// [purpose] [cycle B F4] workflow→workflow 자식 시작 판별자(discriminator) 전용 모듈.
-//   linked 전용 발견(findChildStartIdentityForRun)은 "신원 없음 = plain run"으로 동치시켜
-//   자식 표지를 가진 레거시/비정합 run 이 plain 으로 실행되는 결함을 만들었다. 이 모듈은
-//   plain / linked / legacy / invalid-child / missing 을 구분한다.
-//   - 자식 표지(child-marker): triggeredBy='workflow-step' OR 부모 포인터(parentRunId/
-//     parentStepRunId) 하나라도 non-null OR 이 run 을 child_run_id 로 가리키는 invocation 존재.
-//   - 표지가 하나도 없으면 plain. 표지가 있으면 BASE_ID 연결(회사/부모/스텝/세대/자식)을
-//     전부 검증한다 — 모호(복수 invocation)/회사 불일치/부모·스텝 부재/invocation 부재는
-//     invalid-child 다. 실패한 발견은 plain 실행 권한이 "절대" 아니다(fail-closed).
-//   - 발견은 읽기 전용이다. 수리는 별도(repairLegacyChildLink)이며 잠금 하에서만 일어난다.
+// [purpose] descope v1 — workflow→workflow 자식 시작 판별자(discriminator)의 "읽기 전용" 발견
+//   전용 모듈. plain / linked / missing / invalid-child 네 분류만 존재하고 legacy 수리 래퍼는
+//   삭제됐다(D5 — 수리/커밋된 claimed 재사용 없음). invalid-child 는 비정합 표지/링크
+//   (claimed+nonnull, 커밋된 claimed, bound 행 누락 등)로, 절대 plain fallback 이 아니다.
+//   발견은 어떤 쓰기/실행도 수행하지 않는다 — 변경은 반드시 이후 잠금 하 최종 변이가 검증한다.
 // [authority] 내구 레코드만이 권위(규칙 7/8). 텍스트/추론 권위 없음.
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -19,42 +14,40 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import type { ChildStartIdentity } from "./workflow-child-start-state.js";
-import { repairLegacyChildLink } from "./workflow-child-legacy-link.js";
 
 export type WorkflowChildStartDiscovery =
   | { kind: "plain" }
   | { kind: "missing" }
-  | { kind: "invalid-child" }
+  | { kind: "invalid-child"; reason: string }
   | {
-    kind: "linked" | "legacy";
+    kind: "linked";
     identity: ChildStartIdentity;
     childStatus: string;
     materializedAt: Date | null;
   };
 
-export type WorkflowChildStartWriteEntry =
-  | { kind: "proceed"; identity: ChildStartIdentity }
-  | { kind: "yield" }
-  | { kind: "plain" };
-
 /** 발견 결과에서 ChildStartIdentity 를 구성한다(호출자 없음 — 내부 전용). */
 function identityOf(
   child: typeof workflowRuns.$inferSelect,
   invocation: typeof workflowStepInvocations.$inferSelect,
+  stepId: string,
 ): ChildStartIdentity {
   return {
     companyId: child.companyId,
     parentRunId: child.parentRunId!,
     parentStepRunId: child.parentStepRunId!,
+    stepId,
     invocationId: invocation.id,
     generation: invocation.generation,
     childRunId: child.id,
   };
 }
 
+const invalid = (reason: string): WorkflowChildStartDiscovery => ({ kind: "invalid-child", reason });
+
 /**
  * run 의 자식 시작 상태를 판별한다(무잠금 1차 발견 — 변경 전 잠금 하 재검증 필수).
- * linked/legacy 는 유효 신원을 실어 반환하고, invalid-child 는 절대 plain fallback 이 아니다.
+ * linked 만 유효 신원을 실어 반환한다. invalid-child 는 절대 plain 실행 권한이 아니다.
  */
 export async function discoverWorkflowChildStart(
   db: Db,
@@ -81,65 +74,35 @@ export async function discoverWorkflowChildStart(
   if (!hasMarker) return { kind: "plain" };
 
   // BASE_ID 연결 검증 — 하나라도 어긋나면 invalid-child(plain fallback 금지).
-  if (invocations.length !== 1) return { kind: "invalid-child" }; // 없음(표지 불일치) 또는 모호(복수).
+  if (invocations.length !== 1) return invalid("child marker without a unique invocation link");
   const invocation = invocations[0]!;
-  if (!child.parentRunId || !child.parentStepRunId) return { kind: "invalid-child" };
-  if (invocation.childRunId !== child.id) return { kind: "invalid-child" };
-  if (invocation.companyId !== child.companyId) return { kind: "invalid-child" };
-  if (invocation.parentStepRunId !== child.parentStepRunId) return { kind: "invalid-child" };
-  if (!Number.isInteger(invocation.generation) || invocation.generation < 1) {
-    return { kind: "invalid-child" };
+  if (!child.parentRunId || !child.parentStepRunId) return invalid("child run missing parent pointers");
+  if (invocation.childRunId !== child.id) return invalid("invocation child link mismatch");
+  if (invocation.companyId !== child.companyId) return invalid("invocation company mismatch");
+  if (invocation.parentStepRunId !== child.parentStepRunId) return invalid("invocation parent step mismatch");
+  if (invocation.generation !== 1) return invalid("invocation generation is not 1");
+  if (invocation.state === "claimed") return invalid("committed claimed invocation state is not a legal runtime state");
+  if (invocation.state !== "linked") return invalid(`unknown invocation state ${invocation.state}`);
+
+  const [parentStep] = await db
+    .select({ id: workflowStepRuns.id, workflowRunId: workflowStepRuns.workflowRunId, stepId: workflowStepRuns.stepId })
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, child.parentStepRunId))
+    .limit(1);
+  if (!parentStep || parentStep.workflowRunId !== child.parentRunId) {
+    return invalid("parent step missing or mismatched");
   }
   const [parent] = await db
     .select({ id: workflowRuns.id, companyId: workflowRuns.companyId })
     .from(workflowRuns)
     .where(eq(workflowRuns.id, child.parentRunId))
     .limit(1);
-  if (!parent || parent.companyId !== child.companyId) return { kind: "invalid-child" };
-  const [parentStep] = await db
-    .select({ id: workflowStepRuns.id, workflowRunId: workflowStepRuns.workflowRunId })
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.id, child.parentStepRunId))
-    .limit(1);
-  if (!parentStep || parentStep.workflowRunId !== parent.id) return { kind: "invalid-child" };
-  if (invocation.state !== "linked" && invocation.state !== "claimed") {
-    return { kind: "invalid-child" };
-  }
-  if (invocation.state === "claimed") {
-    return {
-      kind: "legacy",
-      identity: identityOf(child, invocation),
-      childStatus: child.status,
-      materializedAt: child.childStartMaterializedAt,
-    };
-  }
+  if (!parent || parent.companyId !== child.companyId) return invalid("parent run missing or company mismatch");
+
   return {
     kind: "linked",
-    identity: identityOf(child, invocation),
+    identity: identityOf(child, invocation, parentStep.stepId),
     childStatus: child.status,
     materializedAt: child.childStartMaterializedAt,
   };
-}
-
-/**
- * 쓰기 진입 공용 프리플라이트 — 발견 → legacy 판별자 수리 → 신선한 linked 재발견.
- *   plain/missing 은 호출자의 기존 plain 경로 유지를 위해 "plain"으로 반환하고, linked(수리 후
- *   포함)는 "proceed"+신원, invalid-child/수리 실패(busy/ineligible)/재발견 실패는 "yield"다.
- *   수리는 이 헬퍼 내부의 별도 트랜잭션(repairLegacyChildLink)에서 일어난다 — 호출자 트랜잭션
- *   안에서 ancestor 잠금을 잡지 않도록 "트랜잭션 진입 전"에 호출해야 한다.
- */
-export async function repairWorkflowChildStartDiscovery(
-  db: Db,
-  runId: string,
-): Promise<WorkflowChildStartWriteEntry> {
-  const discovery = await discoverWorkflowChildStart(db, runId);
-  if (discovery.kind === "plain" || discovery.kind === "missing") return { kind: "plain" };
-  if (discovery.kind === "invalid-child") return { kind: "yield" };
-  if (discovery.kind === "linked") return { kind: "proceed", identity: discovery.identity };
-  // legacy — coherent claimed+nonnull. 공용 수리(잠금 하 CAS) 후 신선한 linked 신원으로 진행.
-  const repaired = await repairLegacyChildLink(db, discovery.identity);
-  if (repaired === "busy" || repaired === "ineligible") return { kind: "yield" };
-  const rediscovered = await discoverWorkflowChildStart(db, runId);
-  if (rediscovered.kind !== "linked") return { kind: "yield" };
-  return { kind: "proceed", identity: rediscovered.identity };
 }

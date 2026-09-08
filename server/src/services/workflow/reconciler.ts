@@ -16,6 +16,10 @@ import { hasLiveWorkflowChildWait, reconcileWorkflowChildStepWaits } from "./wor
 import { reconcileUnmaterializedChildStartTimeout } from "./workflow-child-start-recovery-timeout.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
 import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
+import {
+  isChildStartContention,
+  isChildStartDatabaseTimeout,
+} from "./workflow-child-start-contention.js";
 
 export { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 export {
@@ -72,10 +76,8 @@ export async function reconcileStuckWorkflowRuns(
 
   for (const run of stuckRuns) {
     try {
-      // [cycle A §4] 링크 자식 분기는 focused helper 로 대체했다. materialized 자식의 무조건 skip 은
-      //   없어졌고, 'native' 반환 시 기존 rework/active step/issue/heartbeat/pending retry/child-wait
-      //   검사로 그대로 흐른다. 'skipped' 는 유효 소유/경합/수리 불가 레거시, 'settled' 는 helper 의
-      //   0행 실패 CAS 로 정산됐다(레거시 claimed+child 는 helper 가 먼저 판별자 수리한다).
+      // [descope v1] 링크 자식 분기는 전용 모듈이 분류한다 — 자체 변이는 없고 커밋 결과만 보고받는다
+      //   ('settled'=커밋 승리, 'skipped'=소유/경합/무효/타임아웃 양보). materialized/일반 run 은 'native'.
       const childStartTimeout = await reconcileUnmaterializedChildStartTimeout(db, {
         childRunId: run.id,
         companyId: run.companyId,
@@ -85,7 +87,7 @@ export async function reconcileStuckWorkflowRuns(
         results.push({
           runId: run.id,
           action: "skipped",
-          reason: "Linked child run holds a live start lease; bounded start recovery owns it",
+          reason: "Linked child start is owned or not yet actionable; bounded start recovery owns it",
         });
         continue;
       }
@@ -159,32 +161,18 @@ export async function reconcileStuckWorkflowRuns(
           m && typeof m === "object" && !Array.isArray(m)
             ? (m as Record<string, unknown>)
             : {};
-        // [finding 2] If ANY pending step has a valid live workflow retry
-        // (waiting future/due or dispatching), the run has automatic
-        // continuation. Leave the ENTIRE run running and skip NO step —
-        // neither the retry step nor its pending siblings — and do not mark
-        // the run failed. Human Operator terminal reporting stays suppressed.
+        // [finding 2] 살아있는 자동 재시도(waiting/dispatching)가 있는 run 은 통째로 진행 중 —
+        // 어떤 스텝도 skip 하지 않고 run failed 도 금지. Operator 보고는 억제된다.
+        // [workflow child step] pending 스텝 중 하나라도 자식 run 대기가 있으면 동일(fix round P1-7).
         if (pendingSteps.some((step) => isStepRunAwaitingRetry(normalizeMetadata(step.metadata)))) {
-          results.push({
-            runId: run.id,
-            action: "skipped",
-            reason: "Workflow run has a live workflow retry in progress",
-          });
+          results.push({ runId: run.id, action: "skipped", reason: "Workflow run has a live workflow retry in progress" });
           continue;
         }
-        // [workflow child step] pending 스텝 중 "하나라도" 살아있는 자식 run 대기(workflow→workflow)가
-        //   있으면 run 은 진행 중이다 — 뒤따르는 의존 스텝(blocked dependents)까지 통째로 force-fail
-        //   하지 않는다(fix round P1-7: every→some). 자식 종말/크래시는 reconcileWorkflowChildStepWaits 이
-        //   먼저 마감/회복하므로(stuck 이전 순서), 여기까지 종말 자식 대기가 남아있는 경우에만 force-fail 이 진행된다.
         const liveChildWaits = await Promise.all(
           pendingSteps.map((step) => hasLiveWorkflowChildWait(db, step)),
         );
-        if (pendingSteps.length > 0 && liveChildWaits.some(Boolean)) {
-          results.push({
-            runId: run.id,
-            action: "skipped",
-            reason: "Workflow run has live workflow child step waits in progress",
-          });
+        if (liveChildWaits.some(Boolean)) {
+          results.push({ runId: run.id, action: "skipped", reason: "Workflow run has live workflow child step waits in progress" });
           continue;
         }
         const now = new Date();
@@ -238,6 +226,16 @@ export async function reconcileStuckWorkflowRuns(
         reason: "Marked stuck run as failed",
       });
     } catch (error) {
+      // [설계 §3] 경합(55P03/40P01/40001)은 실패가 아니다 — bounded skipped, 실행 행 무변경.
+      // 57014 는 타임아웃 진단 — 회복/실패 정산 근거로 쓰지 않고 skipped 로 양보한다.
+      if (isChildStartContention(error) || isChildStartDatabaseTimeout(error)) {
+        results.push({
+          runId: run.id,
+          action: "skipped",
+          reason: "stuck pass lost a lock race or hit a statement timeout; execution rows unchanged",
+        });
+        continue;
+      }
       results.push({
         runId: run.id,
         action: "failed",
@@ -256,11 +254,8 @@ export async function reconcileStuckWorkflowRuns(
  * @returns Number of orphan step runs cleaned up.
  */
 export async function reconcileOrphanStepRuns(db: Db): Promise<number> {
-  // [주의] "orphan" 은 참조 run 이 실제로 존재하지 않는(삭제된) step_run 만 해당한다.
-  // 과거 구현은 terminal(completed/failed/cancelled) run 의 step_run 까지 함께 DELETE 해
-  // 매 run 종료 시 정상 step 기록이 전부 사라지는(workflow_step_runs 가 비어버리는) 회귀가 있었다.
-  // workflow_step_runs.workflow_run_id 는 onDelete:cascade FK 라 run 삭제 시 step_run 은 이미
-  // 자동 삭제되므로, 여기서 잡아야 할 진짜 orphan 는 cascade 를 벗어난 dangling 뿐이다.
+  // [주의] orphan 은 참조 run 이 삭제된 dangling step_run 만 해당(cascade 밖). 과거엔 terminal
+  //   run 의 step_run 까지 DELETE 해 기록이 사라지는 회귀가 있었다.
   const orphanStepRuns = await db
     .select({ id: workflowStepRuns.id })
     .from(workflowStepRuns)

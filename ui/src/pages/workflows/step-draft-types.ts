@@ -19,6 +19,10 @@ export type StepDraft = {
   agentName: string;
   tools: string;
   dependsOn: string;
+  // [descope v1 D1] workflow 스텝 wait 계약 — 생략 또는 리터럴 true 만 허용한다.
+  // false 는 초안 타입에서 표현 불가(typed invalid)이며, 직렬화는 true 만 emission 하고
+  // import 된 invalid 값은 침묵 강등/제거 없이 extra 통과 후 공유 검증기가 거부한다.
+  wait?: true;
   onFailure: string;
   maxRetries: string | number;
   graphRetryDelaySeconds: string | number;

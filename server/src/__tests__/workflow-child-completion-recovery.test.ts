@@ -33,9 +33,8 @@ import {
   dispatchWorkflowChildStep,
   reconcileWorkflowChildStepWaits,
   runWorkflowChildCompletionHook,
-  isWorkflowChildStep,
-  assertNoWorkflowChildDefinitionCycles,
 } from "../services/workflow/workflow-child-execution.js";
+import { failChildStep } from "../services/workflow/workflow-child-completion.js";
 import { normalizeWorkflowStepsForExecution } from "../services/workflow/dag-engine.js";
 import {
   childStep,
@@ -48,7 +47,7 @@ import {
 let db: Awaited<ReturnType<typeof createDb>>;
 let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)", () => {
+describeEmbeddedPostgres("workflow-child completion/recovery", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-workflow-child-recovery-");
     db = createDb(tempDb.connectionString);
@@ -72,40 +71,43 @@ describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)"
     await tempDb?.cleanup();
   });
 
-  it("propagates child terminal state to the waiting parent step via the completion hook", async () => {
-    const companyId = await createCompanyFixture("Hook Co");
+  /** dispatch 로 법정 linked 자식을 만든다(클레임 트랜잭션 경유 — 유일한 legal 생성 경로). */
+  async function dispatchAndGetChild(input: { companyId: string; parentDefId: string; name: string }) {
     const childDefId = await insertDefinition({
-      companyId,
-      name: "child-wf",
+      companyId: input.companyId,
+      name: `${input.name}-child`,
       steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
     });
     const parentDefId = await insertDefinition({
-      companyId,
-      name: "parent-wf",
+      companyId: input.companyId,
+      name: `${input.name}-parent`,
       steps: [childStep(childDefId)],
     });
-    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
+    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({
+      companyId: input.companyId,
+      workflowId: parentDefId,
+    });
     const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
     const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
     const stepRun = (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0];
-    await dispatchWorkflowChildStep({ db, run, definition, step, stepRun, now: new Date() });
-
+    expect(await dispatchWorkflowChildStep({ db, run, definition, step, stepRun, now: new Date() })).toBe(true);
     const [childRun] = await db
       .select()
       .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
+      .where(and(eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.triggerSource, "workflow")));
+    expect(childRun).toBeTruthy();
+    return { runId, stepRunId, childRun: childRun! };
+  }
 
-    // child failed → parent step failed child_run_failed
+  it("propagates a durable failed child to the waiting parent step via the completion hook", async () => {
+    const companyId = await createCompanyFixture("Hook Co");
+    const { stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "hook" });
     await db
       .update(workflowRuns)
       .set({ status: "failed", completedAt: new Date() })
-      .where(eq(workflowRuns.id, childRun!.id));
-    await runWorkflowChildCompletionHook(db, {
-      id: childRun!.id,
-      companyId: childRun!.companyId,
-      status: "failed",
-    });
+      .where(eq(workflowRuns.id, childRun.id));
+    await runWorkflowChildCompletionHook(db, { id: childRun.id, companyId: childRun.companyId, status: "failed" });
     const [failedStepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
     expect(failedStepRun?.status).toBe("failed");
     expect((failedStepRun?.metadata as Record<string, unknown>).toolResult).toEqual(
@@ -115,36 +117,13 @@ describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)"
 
   it("cancelled child completes the waiting parent step with child_run_cancelled", async () => {
     const companyId = await createCompanyFixture("Cancel Co");
-    const childDefId = await insertDefinition({
-      companyId,
-      name: "child-wf",
-      steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
-    });
-    const parentDefId = await insertDefinition({
-      companyId,
-      name: "parent-wf",
-      steps: [childStep(childDefId)],
-    });
-    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
-    const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
-    await dispatchWorkflowChildStep({ db, run, definition, step, stepRun: (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0], now: new Date() });
-    const [childRun] = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
-    // fix round 계약: 훅은 호출자 status 를 신뢰하지 않고 자식 run 의 영속 종말 상태를 재조회한다 —
-    // 먼저 자식 run 행을 cancelled 로 영속화한다(미영속 합성 status 는 무시된다).
+    const { stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "cancel" });
+    // 훅은 호출자 status 를 신뢰하지 않고 자식 run 의 영속 종말 상태를 재조회한다 — 먼저 영속화.
     await db
       .update(workflowRuns)
       .set({ status: "cancelled", completedAt: new Date() })
-    .where(eq(workflowRuns.id, childRun!.id));
-    await runWorkflowChildCompletionHook(db, {
-      id: childRun!.id,
-      companyId: childRun!.companyId,
-      status: "cancelled",
-    });
+      .where(eq(workflowRuns.id, childRun.id));
+    await runWorkflowChildCompletionHook(db, { id: childRun.id, companyId: childRun.companyId, status: "cancelled" });
     const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
     expect(stepRun?.status).toBe("failed");
     expect((stepRun?.metadata as Record<string, unknown>).toolResult).toEqual(
@@ -152,91 +131,89 @@ describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)"
     );
   });
 
-  it("ignores a stale hook from a superseded generation (per-generation CAS)", async () => {
-    const companyId = await createCompanyFixture("Stale Hook Co");
-    const childDefId = await insertDefinition({
-      companyId,
-      name: "child-wf",
-      steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
+  it("completion requires a durable terminal child at the final write — hint status alone is a no-op", async () => {
+    const companyId = await createCompanyFixture("Durable Co");
+    const { stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "durable" });
+    // 자식 run 행은 아직 running — 호출자 status 힌트("completed")는 완료 권위가 없다.
+    const settled = await runWorkflowChildCompletionHook(db, {
+      id: childRun.id,
+      companyId: childRun.companyId,
+      status: "completed",
     });
-    const parentDefId = await insertDefinition({
-      companyId,
-      name: "parent-wf",
-      steps: [childStep(childDefId)],
-    });
-    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
-    const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
-    const stepRun = (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0];
-    await dispatchWorkflowChildStep({ db, run, definition, step, stepRun, now: new Date() });
-    const [childRun1] = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
+    expect(settled).toBe(false);
+    const [pendingStepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect(pendingStepRun?.status).toBe("pending");
+    expect((pendingStepRun?.metadata as Record<string, unknown>).toolResult).toBeUndefined();
+  });
 
-    // Retry: policy retry bumps generation and creates a new child (simulated by a CAS'd re-dispatch with retryCount=1)
-    await db
-      .update(workflowStepRuns)
-      .set({ status: "pending", retryCount: 1, metadata: {} })
-      .where(eq(workflowStepRuns.id, stepRunId));
-    const childRunsBefore = (await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")))).length;
-    expect(childRunsBefore).toBe(1);
-    await dispatchWorkflowChildStep({
-      db,
-      run,
-      definition,
-      step,
-      stepRun: (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0],
-      now: new Date(),
-    });
-    const childRunsAfter = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
-    expect(childRunsAfter).toHaveLength(2);
+  it("settles a deleted-child tombstone once as child_run_failed, then repeated settlement is a no-op", async () => {
+    const companyId = await createCompanyFixture("Tombstone Co");
+    const { runId, stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "tomb" });
+    // 자식 run 행 삭제 → FK ON DELETE SET NULL → linked+NULL tombstone(D4).
+    await db.delete(workflowRuns).where(eq(workflowRuns.id, childRun.id));
     const [invocation] = await db.select().from(workflowStepInvocations);
-    expect(invocation?.generation).toBe(2);
+    expect(invocation?.state).toBe("linked");
+    expect(invocation?.childRunId).toBeNull();
 
-    // stale hook for generation-1 child must NOT complete the step
+    const settled = await failChildStep(db, {
+      companyId,
+      workflowRunId: runId,
+      stepRunId,
+      stepId: "run-child",
+      errorCode: "child_run_failed",
+      detail: "linked child workflow run was deleted",
+      tombstone: { invocationId: invocation!.id, generation: 1 },
+    });
+    expect(settled.outcome).toBe("settled");
+    const [failedStepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect(failedStepRun?.status).toBe("failed");
+    expect((failedStepRun?.metadata as Record<string, unknown>).toolResult).toEqual(
+      expect.objectContaining({ success: false, error: "child_run_failed" }),
+    );
+
+    // 반복 정산/tombstone 콜백 — 이미 정산된 S 는 no-op 이다(1회 정산 계약).
+    const repeated = await failChildStep(db, {
+      companyId,
+      workflowRunId: runId,
+      stepRunId,
+      stepId: "run-child",
+      errorCode: "child_run_failed",
+      detail: "linked child workflow run was deleted",
+      tombstone: { invocationId: invocation!.id, generation: 1 },
+    });
+    expect(repeated.outcome).toBe("no-op");
+  });
+
+  it("unlinked and tombstone child callbacks are typed no-ops — no plain settlement authority", async () => {
+    const companyId = await createCompanyFixture("Unlinked Co");
+    const { stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "unlinked" });
     await db
       .update(workflowRuns)
       .set({ status: "completed", completedAt: new Date() })
-      .where(eq(workflowRuns.id, childRun1!.id));
-    await runWorkflowChildCompletionHook(db, {
-      id: childRun1!.id,
-      companyId: childRun1!.companyId,
+      .where(eq(workflowRuns.id, childRun.id));
+    // tombstone: 링크를 끊고(자식 삭제) 같은 childRunId 로 훅 재호출 — linked invocation 이 없다.
+    await db.delete(workflowRuns).where(eq(workflowRuns.id, childRun.id));
+    const hook = await runWorkflowChildCompletionHook(db, {
+      id: childRun.id,
+      companyId: childRun.companyId,
       status: "completed",
     });
-    const [pendingStepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
-    expect(pendingStepRun?.status).toBe("pending");
+    expect(hook).toBe(false);
+    // 스텝은 tombstone 정산 전까지 pending 으로 남는다(무링크 완료 권위 없음).
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
+    expect(stepRun?.status).toBe("pending");
+    // plain run — invocation 이 아예 없는 run 의 종말 훅도 no-op 이다.
+    const plainHook = await runWorkflowChildCompletionHook(db, {
+      id: runId2(companyId),
+      companyId,
+      status: "completed",
+    });
+    expect(plainHook).toBe(false);
   });
 
-  it("reconciler heals an orphaned wait: child terminal while parent step pending", async () => {
+  it("reconciler heals an orphaned wait: durable terminal child while parent step pending", async () => {
     const companyId = await createCompanyFixture("Reconcile Co");
-    const childDefId = await insertDefinition({
-      companyId,
-      name: "child-wf",
-      steps: [{ id: "a", name: "A", type: "agent", agentId: "", dependencies: [] }],
-    });
-    const parentDefId = await insertDefinition({
-      companyId,
-      name: "parent-wf",
-      steps: [childStep(childDefId)],
-    });
-    const { runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId: parentDefId });
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, parentDefId));
-    const step = normalizeWorkflowStepsForExecution(definition.stepsJson).find((s) => s.id === "run-child")!;
-    const stepRun = (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0];
-    await dispatchWorkflowChildStep({ db, run, definition, step, stepRun, now: new Date() });
-    const [childRun] = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.triggerSource, "workflow")));
+    const { stepRunId, childRun } = await dispatchAndGetChild({ companyId, parentDefId: randomUUID(), name: "recon" });
     // simulate age for the reconciler cutoff
     await db
       .update(workflowStepRuns)
@@ -246,7 +223,7 @@ describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)"
     await db
       .update(workflowRuns)
       .set({ status: "completed", completedAt: new Date() })
-      .where(eq(workflowRuns.id, childRun!.id));
+      .where(eq(workflowRuns.id, childRun.id));
 
     const results = await reconcileWorkflowChildStepWaits(db, { now: new Date() });
     expect(results.length).toBeGreaterThan(0);
@@ -254,4 +231,7 @@ describeEmbeddedPostgres("workflow-child-execution (completion/recovery/cycles)"
     expect(healedStepRun?.status).toBe("completed");
   });
 
+  function runId2(_companyId: string): string {
+    return randomUUID();
+  }
 });

@@ -1,15 +1,14 @@
 // server/src/services/workflow/workflow-child-start-predicates.ts
 //
-// [purpose] workflow→workflow 자식 시작의 재사용 가능 SQL 술어 전용 모듈(cycle A §1).
-//   대문자명(IDENTITY/CURRENT/AUTO/UNMATERIALIZED/TIME_VALID/OWNER/OWNED_AUTO/DEAD)은 설계가
-//   고정한 기계 술어다. 모든 시간 판정은 DB clock_timestamp() 기준이며, SQL NULL 은 거짓으로
-//   취급해 부정형에는 IS TRUE 계열을 쓴다. 텍스트/JS 시간 권위는 금지(규칙 7/8).
-// [usage] tables 에 drizzle 테이블 또는 alias() 별칭 테이블을 넣으면 된다. bound 값은 파라미터
-//   바인딩된다. 술어는 잠금 하 최종 UPDATE/SELECT 에서 재평가된다(시간은 흐른다).
+// [purpose] descope v1(설계 §3)의 공유 SQL 술어 전용 모듈. 대문자명(BASE_ID/CURRENT/AUTO/
+//   DEAD/OWNER/TOMBSTONE)은 설계가 고정한 기계 술어다. 모든 최종 변이의 WHERE/INSERT SELECT 는
+//   이 술어로 완전 신원(company, parentRun, parentStep, stepId, invocation, generation=1,
+//   child)을 바인딩해야 한다(D5) — 선행 read 의 부분 술어는 권위가 없다.
+// [usage] tables 에 drizzle 테이블 또는 alias() 별칭 테이블을 넣는다. bound 값은 파라미터
+//   바인딩된다. 술어는 잠금 하 최종 UPDATE/INSERT SELECT 에서 재평가된다(시간은 흐른다).
+//   메타데이터 판정은 null-safe(COALESCE)이며, 시간 판정은 DB clock_timestamp() 기준이다.
 import { sql, type SQL } from "drizzle-orm";
 import { workflowRuns, workflowStepInvocations, workflowStepRuns } from "@paperclipai/db";
-
-export type ChildStartIntent = "automatic" | "manual-resume";
 
 /** p=부모 run, i=invocation, s=부모 step-run, c=자식 run (drizzle 테이블/별칭 모두 허용). */
 export type ChildStartTables = {
@@ -19,94 +18,124 @@ export type ChildStartTables = {
   child: typeof workflowRuns;
 };
 
-export type ChildStartIdentityBound = {
+/** 설계 §3의 B — 모든 최종 변이가 바인딩해야 하는 완전 신원. generation 은 항상 1(D2). */
+export type WorkflowChildIdentity = {
   companyId: string;
+  parentRunId: string;
+  parentStepRunId: string;
+  stepId: string;
   invocationId: string;
-  generation: number;
+  childRunId: string;
+  generation: 1;
 };
 
-/** IDENTITY — 회사/링크/부모 연결/세대/자식 ID 전체 정합. */
-export function identityPredicate(t: ChildStartTables, b: ChildStartIdentityBound): SQL {
-  return sql`${t.parent}.company_id = ${t.invocation}.company_id
-    and ${t.child}.company_id = ${t.parent}.company_id
+/** TOMBSTONE 형 — child_run_id IS NULL 인 linked invocation 에 바인딩(C 절 없음). */
+export type WorkflowChildTombstoneIdentity = Omit<WorkflowChildIdentity, "childRunId">;
+
+/** 워크플로 run 의 기존 종말 상태 전체(DEAD 판정에 그대로 사용 — 설계 §3). */
+export const WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL = sql`('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`;
+
+/** BASE_ID(B) — 회사/부모 run/부모 스텝/스텝 ID/invocation/세대/자식 링크 전체 정합. */
+export function baseIdPredicate(t: ChildStartTables, b: WorkflowChildIdentity): SQL {
+  return sql`${t.parent}.id = ${b.parentRunId}::uuid
+    and ${t.parent}.company_id = ${b.companyId}::uuid
+    and ${t.parentStep}.id = ${b.parentStepRunId}::uuid
     and ${t.parentStep}.workflow_run_id = ${t.parent}.id
+    and ${t.parentStep}.step_id = ${b.stepId}
+    and ${t.invocation}.id = ${b.invocationId}::uuid
     and ${t.invocation}.parent_step_run_id = ${t.parentStep}.id
-    and ${t.invocation}.id = ${b.invocationId}
-    and ${t.invocation}.generation = ${b.generation}
+    and ${t.invocation}.company_id = ${b.companyId}::uuid
     and ${t.invocation}.state = 'linked'
+    and ${t.invocation}.generation = ${b.generation}
+    and ${t.child}.id = ${b.childRunId}::uuid
     and ${t.invocation}.child_run_id = ${t.child}.id
+    and ${t.child}.company_id = ${b.companyId}::uuid
     and ${t.child}.parent_run_id = ${t.parent}.id
-    and ${t.child}.parent_step_run_id = ${t.parentStep}.id
-    and ${t.parent}.company_id = ${b.companyId}`;
+    and ${t.child}.parent_step_run_id = ${t.parentStep}.id`;
 }
 
-/** CURRENT — 부모 스텝의 현재 시도(retryCount+1)가 invocation 세대와 일치. */
-export function currentPredicate(t: ChildStartTables): SQL {
-  return sql`${t.parentStep}.retry_count + 1 = ${t.invocation}.generation`;
+/** CURRENT — 세대 1 + retryCount 0 + workflowRetry 키 부재(null 포함, null-safe). */
+export function currentPredicate(
+  t: Pick<ChildStartTables, "invocation" | "parentStep">,
+): SQL {
+  return sql`(${t.invocation}.generation = 1
+    and ${t.parentStep}.retry_count = 0
+    and not (coalesce(${t.parentStep}.metadata, '{}'::jsonb) ? 'workflowRetry'))`;
 }
 
-/** AUTO — 자동 시작/정산 자격 (CURRENT 포함). */
-export function autoPredicate(t: ChildStartTables): SQL {
-  return sql`(${currentPredicate(t)}
-    and coalesce(${t.parentStep}.metadata->'workflowRetry'->>'state', '') <> 'waiting'
-    and (
-      (${t.parent}.status = 'running' and ${t.parentStep}.status = 'pending')
-      or (${t.parent}.status in ('running', 'completed') and ${t.invocation}.wait = false and ${t.parentStep}.status = 'completed')
-    ))`;
+/** AUTO(B) — BASE_ID + CURRENT + running 부모 + pending 부모 스텝. */
+export function autoPredicate(t: ChildStartTables, b: WorkflowChildIdentity): SQL {
+  return sql`(${baseIdPredicate(t, b)}
+    and ${currentPredicate(t)}
+    and ${t.parent}.status = 'running'
+    and ${t.parentStep}.status = 'pending')`;
 }
 
-/** UNMATERIALIZED — 영수증 없음 + 스텝 행 없음. */
-export function unmaterializedPredicate(t: ChildStartTables): SQL {
+/** DEAD(B) — BASE_ID + CURRENT + 종말 부모(모든 기존 종말 run 상태). */
+export function deadPredicate(t: ChildStartTables, b: WorkflowChildIdentity): SQL {
+  return sql`(${baseIdPredicate(t, b)}
+    and ${currentPredicate(t)}
+    and ${t.parent}.status in ${WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL})`;
+}
+
+/** TOMBSTONE(B') — BASE_ID 의 C 절 제거 + linked+NULL + pending S + running/cancelled P. */
+export function tombstonePredicate(
+  t: Pick<ChildStartTables, "parent" | "invocation" | "parentStep">,
+  b: WorkflowChildTombstoneIdentity,
+): SQL {
+  return sql`(${t.parent}.id = ${b.parentRunId}::uuid
+    and ${t.parent}.company_id = ${b.companyId}::uuid
+    and ${t.parentStep}.id = ${b.parentStepRunId}::uuid
+    and ${t.parentStep}.workflow_run_id = ${t.parent}.id
+    and ${t.parentStep}.step_id = ${b.stepId}
+    and ${t.invocation}.id = ${b.invocationId}::uuid
+    and ${t.invocation}.parent_step_run_id = ${t.parentStep}.id
+    and ${t.invocation}.company_id = ${b.companyId}::uuid
+    and ${t.invocation}.state = 'linked'
+    and ${t.invocation}.generation = ${b.generation}
+    and ${t.invocation}.child_run_id is null
+    and ${currentPredicate(t)}
+    and ${t.parentStep}.status = 'pending'
+    and ${t.parent}.status in ('running', 'cancelled'))`;
+}
+
+/** U — 영수증 없음 + 자식 스텝 행 0. */
+export function unmaterializedPredicate(t: Pick<ChildStartTables, "child">): SQL {
   return sql`(${t.child}.child_start_materialized_at is null
     and not exists (select 1 from workflow_step_runs cs where cs.workflow_run_id = ${t.child}.id))`;
 }
 
-/** TIME_VALID — 호출자 토큰 일치 + 임대/마감 모두 미래 (DB 시계). SQL NULL 은 거짓. */
-export function timeValidPredicate(t: ChildStartTables, token: string): SQL {
+/** TIME_VALID — 호출자 토큰 일치 + 임대/마감 모두 미래(DB 시계). SQL NULL 은 거짓. */
+export function timeValidPredicate(t: Pick<ChildStartTables, "child">, token: string): SQL {
   return sql`(${t.child}.child_start_token = ${token}
     and ${t.child}.child_start_lease_expires_at > clock_timestamp()
     and ${t.child}.child_start_deadline_at > clock_timestamp())`;
 }
 
-/** OWNER(intent) — IDENTITY + CURRENT + running + UNMATERIALIZED + TIME_VALID + 의도별 자격. */
+/** OWNER(B, token) — AUTO + running 자식 + U + 정확한 토큰 + 생존 임대/마감. */
 export function ownerPredicate(
   t: ChildStartTables,
-  b: ChildStartIdentityBound,
+  b: WorkflowChildIdentity,
   token: string,
-  intent: ChildStartIntent,
 ): SQL {
-  return sql`(${identityPredicate(t, b)}
-    and ${currentPredicate(t)}
+  return sql`(${autoPredicate(t, b)}
     and ${t.child}.status = 'running'
     and ${unmaterializedPredicate(t)}
-    and ${timeValidPredicate(t, token)}
-    and ${intent === "manual-resume" ? sql`true` : autoPredicate(t)})`;
+    and ${timeValidPredicate(t, token)})`;
 }
 
 /**
- * OWNED_AUTO — OWNER(automatic)에서 토큰 비교를 token IS NOT NULL 로 바꾼 형태.
- * stuck 면제 판정용. NOT UNKNOWN 이 무효 소유자를 남기지 않도록 IS TRUE 로 감싸 반환한다.
+ * LIVE_OWNER(B) — OWNER 에서 토큰 비교를 token IS NOT NULL 로 바꾼 형태(stuck 면제 판정용).
+ * NOT UNKNOWN 이 무효 소유자를 남기지 않도록 IS TRUE 로 감싸 반환한다.
  */
-export function ownedAutoIsTruePredicate(t: ChildStartTables, b: ChildStartIdentityBound): SQL {
-  return sql`(${identityPredicate(t, b)}
-    and ${currentPredicate(t)}
+export function liveOwnerIsTruePredicate(
+  t: ChildStartTables,
+  b: WorkflowChildIdentity,
+): SQL {
+  return sql`(${autoPredicate(t, b)}
     and ${t.child}.status = 'running'
     and ${t.child}.child_start_token is not null
     and ${unmaterializedPredicate(t)}
     and ${t.child}.child_start_lease_expires_at > clock_timestamp()
-    and ${t.child}.child_start_deadline_at > clock_timestamp()
-    and ${autoPredicate(t)}) is true`;
+    and ${t.child}.child_start_deadline_at > clock_timestamp()) is true`;
 }
-
-/** DEAD — 죽은 부모(failed/cancelled/aborted/timed-out, 또는 완료+wait:true). */
-export function deadParentPredicate(t: Pick<ChildStartTables, "parent" | "invocation">): SQL {
-  return sql`(${t.parent}.status in ('failed', 'cancelled', 'aborted', 'timed-out')
-    or (${t.parent}.status = 'completed' and ${t.invocation}.wait = true))`;
-}
-
-/**
- * 수동 의도가 OWNER 검증에서 우회하는 항목 문서화 상수(부모 상태/스텝 상태/retry-wait 만 우회;
- * IDENTITY/CURRENT/company/시간/비종말/미 materialized 는 유지).
- */
-export const MANUAL_BYPASS_DESCRIPTION =
-  "manual-resume bypasses parent status, parent step status and retry-wait restrictions only";
