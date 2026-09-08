@@ -77,6 +77,7 @@ describe("applyRunInputDerivations", () => {
     const result = applyRunInputDerivations(runInputs, { url: "https://example.com/nope" });
     expect(result).toEqual({
       status: "error",
+      key: "videoId",
       message: "videoId could not be derived from url; check the URL format",
     });
   });
