@@ -169,7 +169,7 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
   };
 
   beforeAll(async () => {
-    process.env.PAPERCLIP_SECRETS_MASTER_KEY = Buffer.alloc(32, 13).toString("base64");
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", Buffer.alloc(32, 13).toString("base64"));
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-input-route-errors-");
     db = createDb(tempDb.connectionString);
     companyId = await freshCompany(db);
@@ -199,7 +199,12 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
   }, 60_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
+    try {
+      await db?.$client.end({ timeout: 5 });
+    } finally {
+      vi.unstubAllEnvs();
+      await tempDb?.cleanup();
+    }
   });
 
   beforeEach(() => {

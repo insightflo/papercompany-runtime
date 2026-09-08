@@ -1,47 +1,25 @@
+import { assertAgentAssignments } from "./helpers/workflow-control-node-boundary.js";
+import { useControlNodeFixture } from "./helpers/workflow-control-node-fixture.js";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
-  activityLog,
-  agentRuntimeState,
-  agentTaskSessions,
   agentWakeupRequests,
   agents,
   companies,
-  companySecrets,
-  companySkills,
   createDb,
-  heartbeatRunEvents,
-  heartbeatRunFinalizations,
-  heartbeatRunFinalizationSteps,
-  heartbeatRuns,
-  instanceSettings,
-  issueComments,
   issueWorkProducts,
   issues,
-  missionAgentRuntimes,
   toolDefinitions,
-  missions,
-  workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
-  workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
-  startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-
-const heartbeatWakeup = vi.fn().mockResolvedValue({ id: "queued" });
-
-vi.mock("../services/heartbeat.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
-  return { ...actual, heartbeatService: () => ({ wakeup: heartbeatWakeup }) };
-});
 
 import { issueService } from "../services/issues.js";
 import {
@@ -58,54 +36,9 @@ const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : 
 
 describeEmbeddedPostgres("native workflow control-node execution", () => {
   let db!: ReturnType<typeof createDb>;
-  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let artifactRoot = "";
-
-  beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-control-node-");
-    db = createDb(tempDb.connectionString);
-    artifactRoot = await mkdtemp(path.join(tmpdir(), "paperclip-control-node-artifacts-"));
-    await db.insert(instanceSettings).values({
-      singletonKey: "default",
-      general: {},
-      experimental: { enableHeartbeatFinalizationV1: true },
-    } as never);
-  }, 60_000);
-
-  afterEach(async () => {
-    heartbeatWakeup.mockClear();
-    // Allow async heartbeat side-effects to settle before FK-sensitive deletes.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    await db.delete(heartbeatRunEvents);
-    await db.delete(agentTaskSessions);
-    await db.delete(missionAgentRuntimes);
-    await db.delete(workflowTransitionEvents);
-    await db.delete(activityLog);
-    await db.update(issues).set({ checkoutRunId: null, executionRunId: null });
-    await db.delete(heartbeatRunFinalizationSteps);
-    await db.delete(heartbeatRunFinalizations);
-    await db.delete(heartbeatRuns);
-    // Straggler run events can appear while runs are torn down.
-    await db.delete(heartbeatRunEvents);
-    await db.delete(agentWakeupRequests);
-    await db.delete(issueWorkProducts);
-    await db.delete(workflowStepRuns);
-    await db.delete(workflowRuns);
-    await db.delete(workflowDefinitions);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(missions);
-    await db.delete(agentRuntimeState);
-    await db.delete(companySkills);
-    await db.delete(companySecrets);
-    await db.delete(agents);
-    await db.delete(companies);
-  });
-
-  afterAll(async () => {
-    await tempDb?.cleanup();
-    await rm(artifactRoot, { recursive: true, force: true });
-  });
+  const fixture = useControlNodeFixture();
+  beforeAll(() => { db = fixture.db; artifactRoot = fixture.artifactRoot; });
 
   async function seedRun(status: "selected" | "empty" | "invalid-json") {
     const companyId = randomUUID();
@@ -201,7 +134,7 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     const result = await syncWorkflowRunForIssue(db, producerRun.issueId!);
     const stepRuns = await db.select().from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, runId));
-    return { companyId, runId, artifactPath, result, stepRuns };
+    return { companyId, agentId, runId, artifactPath, result, stepRuns };
   }
 
   it("evaluates IF true synchronously, launches only the true branch, and reuses the persisted result", async () => {
@@ -213,10 +146,13 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     expect(ifRun).toMatchObject({ status: "completed", issueId: null });
     expect(ifRun.dispatchReadyAt).not.toBeNull();
     expect(ifRun.metadata).toMatchObject({ controlNodeResult: { nodeType: "if", outcome: "condition_true" } });
-    // Selected branch is issued and launched (running) on the true edge; false Complete stays skipped.
-    expect(selectedRun).toMatchObject({ status: "running" });
+    // Assignment is requested, but no real heartbeat checks out the todo issue in this fixture.
+    expect(selectedRun).toMatchObject({ status: "pending" });
     expect(selectedRun.issueId).toBeTruthy();
     expect(completeRun).toMatchObject({ status: "skipped", issueId: null });
+    await assertAgentAssignments(db, { companyId: seeded.companyId, agentId: seeded.agentId, runId: seeded.runId,
+      steps: [{ stepId: "producer", issueId: seeded.stepRuns.find((row) => row.stepId === "producer")!.issueId },
+        { stepId: "selected-work", issueId: selectedRun.issueId, mutations: ["create", "workflow_resume"] }] });
 
     await writeFile(seeded.artifactPath, JSON.stringify({ status: "empty" }), "utf8");
     await syncWorkflowRunState(db, seeded.runId);
@@ -239,6 +175,8 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
     const controlRunIds = [byStep.get("if-decision")!.id, byStep.get("complete-empty")!.id];
     const wakeups = await db.select().from(agentWakeupRequests);
     expect(wakeups.filter((row) => controlRunIds.includes(row.workflowStepRunId ?? ""))).toEqual([]);
+    await assertAgentAssignments(db, { companyId: seeded.companyId, agentId: seeded.agentId, runId: seeded.runId,
+      steps: [{ stepId: "producer", issueId: byStep.get("producer")!.issueId }] });
   });
 
   it("fails closed on invalid JSON without persisting raw source content", async () => {
@@ -539,6 +477,10 @@ describeEmbeddedPostgres("native workflow control-node execution", () => {
       const publishRun = reloaded.find((row) => row.stepId === "publish-work")!;
       expect(["pending", "running", "completed"]).toContain(publishRun.status);
       expect(result.status).not.toBe("failed");
+      await assertAgentAssignments(db, { companyId, agentId, runId, steps: [
+        { stepId: "producer", issueId: producerRunRow.issueId },
+        { stepId: "publish-work", issueId: publishRun.issueId },
+      ] });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }
