@@ -10,6 +10,7 @@ import { buttonStyle, dangerButtonStyle, inputStyle, mutedTextStyle, primaryButt
 import { FieldLabel, HelpIcon } from "../shared-controls.js";
 import { WorkflowToolPicker, splitCommaList } from "../workflow-tool-picker.js";
 import { GraphInspectorControlNode } from "./GraphInspectorControlNode.js";
+import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "../workflow-control-nodes.js";
 
 type GraphAgent = { id: string; name: string };
 
@@ -72,6 +73,9 @@ export function GraphInspectorEditStep({
                   const granted = new Set(availableToolGrants.filter((g) => g.agentName === selectedStep.agentName).map((g) => g.toolName));
                   const cleaned = splitCommaList(selectedStep.tools).filter((t) => granted.has(t)).join(", ");
                   updateSelected({ type: newType, tools: cleaned });
+                } else if (newType === "if" && !selectedStep.conditionGroup) {
+                  // IF 로 전환할 때 조건 그룹이 없으면 기본값을 주입한다 — 없으면 검사기가 group.combinator 에서 크래시한다.
+                  updateSelected({ type: newType, conditionGroup: cloneWorkflowConditionGroup(defaultIfConditionGroup) });
                 } else {
                   updateSelected({ type: newType });
                 }

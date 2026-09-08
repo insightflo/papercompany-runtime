@@ -37,6 +37,16 @@ describe("GraphInspectorControlNode helpers", () => {
     ]);
     expect(getWorkflowConditionAncestorOptions(steps, "if").map((step) => step.id)).toEqual(["root", "producer"]);
   });
+
+  it("renders an IF step without a conditionGroup instead of crashing", () => {
+    const step = jsonToSteps([{ id: "if", title: "IF", type: "if" }])[0]!;
+    const bare = { ...step, conditionGroup: undefined } as unknown as typeof step;
+    const markup = renderToStaticMarkup(
+      <GraphInspectorControlNode steps={[bare]} selectedStep={bare} updateSelected={() => undefined} />,
+    );
+    expect(markup).toContain("All conditions");
+    expect(markup).toContain("Any condition");
+  });
 });
 
 describe("GraphInspectorControlNode", () => {
