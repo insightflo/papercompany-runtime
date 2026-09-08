@@ -58,6 +58,13 @@ export function stepsToJson(drafts: StepDraft[]): unknown[] {
       const toolsList = safeCsv(d.tools);
       if (toolsList.length > 0) step.tools = toolsList;
     }
+    // [workflow child step] 대상 정의 id — type==="workflow" 일 때만 emission 한다(공유 검증기
+    //  가 필수로 요구; 값이 없으면 필드 생략 → 저장 시 서버 검증이 거부한다).
+    if (d.type === "workflow" && safeText(d.targetWorkflowId)) step.targetWorkflowId = safeText(d.targetWorkflowId);
+    // [descope v1 D1] workflow 스텝은 wait:true 만 emission 하거나 키를 생략한다.
+    // false 는 1급 필드로 표현 불가이며, extra 의 raw 통과값(wait:false 등)은 침묵
+    // 강등/제거 없이 그대로 남겨 공유 검증기(workflowStepDefinitionSchema)가 거부한다.
+    if (d.wait === true) step.wait = true;
     if (d.onFailure) step.onFailure = d.onFailure;
     const maxRetries = parseOptionalNonNegativeInteger(String(d.maxRetries ?? ""));
     if (maxRetries !== undefined) step.maxRetries = maxRetries;
@@ -174,6 +181,7 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       "agentName",
       "tools",
       "toolNames",
+      "targetWorkflowId",
       "dependsOn",
       "dependencies",
       "onFailure",
@@ -259,7 +267,11 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
       id: s.id,
       title: s.title,
       description: raw.description as string || "",
-      type: s.type === "tool" || s.type === "if" || s.type === "complete" ? s.type : "agent",
+      // [workflow child step] type:"workflow" 도 draft 로 보존 — 저장 시 agent 로 강등되지 않는다.
+      type: s.type === "tool" || s.type === "if" || s.type === "complete" || s.type === "workflow" ? s.type : "agent",
+      // [descope v1 D1] literal true 만 1급 필드로 승격한다. false/문자열 등 invalid 값은
+      // 1급 승격 없이 extra 통과값으로 그대로 남겨 공유 검증기가 거부한다(침묵 강등/제거 금지).
+      wait: raw.wait === true ? true : undefined,
       conditionGroup: cloneWorkflowConditionGroup(raw.conditionGroup),
       completionReason: typeof raw.completionReason === "string" ? raw.completionReason : "",
       toolName: s.toolName || "",
@@ -275,6 +287,8 @@ export function jsonToSteps(steps: WorkflowStepDraftInput): StepDraft[] {
         : Array.isArray(raw.toolNames)
           ? (raw.toolNames as string[]).join(", ")
           : "",
+      // [workflow child step] 하위 워크플로 호출 대상 — 1급 필드로 승격하고 extra 잔존을 막는다.
+      targetWorkflowId: typeof raw.targetWorkflowId === "string" ? raw.targetWorkflowId : "",
       dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.join(", ") : parseDependencies(raw.dependencies).join(", "),
       onFailure: typeof raw.onFailure === "string" ? raw.onFailure : "",
       maxRetries: typeof raw.maxRetries === "number" || typeof raw.maxRetries === "string" ? String(raw.maxRetries) : "",

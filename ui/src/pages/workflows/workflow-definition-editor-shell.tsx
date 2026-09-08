@@ -33,6 +33,7 @@ import {
   workflowSelectedWorkspaceStyle,
 } from "./workflow-layout-styles.js";
 import { WorkflowDefinitionRail } from "./workflow-definition-rail.js";
+import { WorkflowWebhookPanel } from "./workflow-webhook-panel.js";
 
 type WorkflowRunOverlayBannerProps = Parameters<typeof WorkflowRunOverlayBanner>[0];
 
@@ -239,6 +240,8 @@ export function WorkflowDefinitionEditorShell({
               <input style={inputStyle} value={editingTriggerLabels} onChange={(event) => onEditingTriggerLabelsChange(event.target.value)} placeholder="daily-tech-research" />
             </div>
           </div>
+          {/* [B1] 패널 수명을 워크플로 신원에 묶는다 — 신원 변경 시 상태/시크릿 재마운트 초기화. */}
+          <WorkflowWebhookPanel key={editingWorkflow.id} workflowId={editingWorkflow.id} />
           <WorkflowRunOverlayBanner
             runId={inspectedRunId}
             runSummary={inspectedRunSummary}
@@ -281,6 +284,7 @@ export function WorkflowDefinitionEditorShell({
             availableTools={availableTools}
             availableToolGrants={availableToolGrants}
             surface="focus"
+            editingWorkflowId={editingWorkflow.id}
           />
         </div>
       </div>

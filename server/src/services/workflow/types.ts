@@ -98,6 +98,10 @@ export interface WorkflowRun {
   runNumber?: number | null;
   runLabel?: string | null;
   parentIssueId?: string | null;
+  /** workflow→workflow 자식 run 연결(0101). */
+  parentRunId?: string | null;
+  parentStepRunId?: string | null;
+  rootRunId?: string | null;
   scheduledSlotId?: string | null;
   legacyPluginRunEntityId?: string | null;
   metadata?: Record<string, unknown>;
@@ -119,6 +123,10 @@ export interface CreateWorkflowRunInput {
   runNumber?: number | null;
   runLabel?: string | null;
   parentIssueId?: string | null;
+  /** workflow 자식 run 생성 시에만 사용(워크플로우 스텝 dispatch 전용). */
+  parentRunId?: string;
+  parentStepRunId?: string;
+  rootRunId?: string | null;
   scheduledSlotId?: string | null;
   metadata?: Record<string, unknown>;
 }
