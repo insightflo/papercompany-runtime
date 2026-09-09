@@ -24,8 +24,8 @@ export function useWorkflowGraphCanvasViewport({
       return;
     }
     const rect = container.getBoundingClientRect();
-    const offsetX = clientX - rect.left;
-    const offsetY = clientY - rect.top;
+    const offsetX = clientX - rect.left + container.scrollLeft;
+    const offsetY = clientY - rect.top + container.scrollTop;
     const graphX = (-canvasPanX + offsetX) / canvasScale;
     const graphY = (-canvasPanY + offsetY) / canvasScale;
     setCanvasScale(normalizedScale);
@@ -49,8 +49,8 @@ export function useWorkflowGraphCanvasViewport({
   const centerCanvasOnGraphPoint = useCallback((graphX: number, graphY: number): void => {
     const container = graphCanvasRef.current;
     if (!container) return;
-    setCanvasPanX(container.clientWidth / 2 - graphX * canvasScale);
-    setCanvasPanY(container.clientHeight / 2 - graphY * canvasScale);
+    setCanvasPanX(container.scrollLeft + container.clientWidth / 2 - graphX * canvasScale);
+    setCanvasPanY(container.scrollTop + container.clientHeight / 2 - graphY * canvasScale);
   }, [canvasScale]);
 
   const beginCanvasPan = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
