@@ -25,6 +25,40 @@ export const graphWorkbenchMainStyle: CSSProperties = {
   minHeight: 0,
 };
 
+export const graphWorkbenchResizeHandleStyle: CSSProperties = {
+  height: "12px",
+  cursor: "ns-resize",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "color-mix(in srgb, var(--border, #334155) 60%, var(--background, #020617))",
+  borderTop: "1px solid var(--border, #334155)",
+  userSelect: "none",
+};
+
+export const graphDetailsDialogBackdropStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 60,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "24px",
+  background: "color-mix(in srgb, #020617 72%, transparent)",
+};
+
+export const graphDetailsDialogStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateRows: "auto minmax(0, 1fr)",
+  width: "min(960px, 94vw)",
+  maxHeight: "min(760px, 86dvh)",
+  border: "1px solid var(--border, #334155)",
+  borderRadius: "10px",
+  background: "var(--background, #020617)",
+  boxShadow: "0 24px 64px color-mix(in srgb, #000 48%, transparent)",
+  overflow: "hidden",
+};
+
 export const graphInspectorResizeHandleStyle: CSSProperties = {
   width: "8px",
   minWidth: "8px",

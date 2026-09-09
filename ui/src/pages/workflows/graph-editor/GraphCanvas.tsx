@@ -65,11 +65,14 @@ export interface GraphCanvasProps {
   handleCanvasContextMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
   stopGraphControlEvent: (event: React.SyntheticEvent<HTMLElement>) => void;
   handleEdgeClick: (event: React.MouseEvent<Element>, edge: WorkflowGraphEdge) => void;
+  handleEdgeDoubleClick: (event: React.MouseEvent<Element>, edge: WorkflowGraphEdge) => void;
   handleEdgeContextMenu: (event: React.MouseEvent<Element>, edge: WorkflowGraphEdge) => void;
   beginNodeDrag: (event: React.PointerEvent<HTMLButtonElement>, stepId: string, x: number, y: number) => void;
   handleNodePointerMove: (event: React.PointerEvent<HTMLButtonElement>) => void;
   endNodeDrag: (event: React.PointerEvent<HTMLButtonElement>) => void;
   handleNodeClick: (event: React.MouseEvent<HTMLButtonElement>, stepId: string) => void;
+  handleNodeDoubleClick: (event: React.MouseEvent<HTMLButtonElement>, stepId: string) => void;
+  handleNodeKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>, stepId: string) => void;
   handleNodeContextMenu: (event: React.MouseEvent<HTMLElement>, stepId: string) => void;
   beginEdgeConnection: (event: React.PointerEvent<HTMLElement>, connection: PendingWorkflowConnection) => void;
   completeEdgeConnection: (event: React.PointerEvent<HTMLElement> | React.MouseEvent<HTMLElement>, targetId: string) => void;
@@ -115,11 +118,14 @@ export function GraphCanvas({
   handleCanvasContextMenu,
   stopGraphControlEvent,
   handleEdgeClick,
+  handleEdgeDoubleClick,
   handleEdgeContextMenu,
   beginNodeDrag,
   handleNodePointerMove,
   endNodeDrag,
   handleNodeClick,
+  handleNodeDoubleClick,
+  handleNodeKeyDown,
   handleNodeContextMenu,
   beginEdgeConnection,
   completeEdgeConnection,
@@ -326,6 +332,7 @@ export function GraphCanvas({
                       pointerEvents="stroke"
                       style={{ cursor: "pointer" }}
                       onClick={(event) => handleEdgeClick(event, edge)}
+                      onDoubleClick={(event) => handleEdgeDoubleClick(event, edge)}
                       onContextMenu={(event) => handleEdgeContextMenu(event, edge)}
                     />
                     <path
@@ -410,6 +417,8 @@ export function GraphCanvas({
                   onPointerCancel={endNodeDrag}
                   onContextMenu={(event) => handleNodeContextMenu(event, node.step.id)}
                   onClick={(event) => handleNodeClick(event, node.step.id)}
+                  onDoubleClick={(event) => handleNodeDoubleClick(event, node.step.id)}
+                  onKeyDown={(event) => handleNodeKeyDown(event, node.step.id)}
                 >
                   <GraphNodeHandles
                     step={node.step}
