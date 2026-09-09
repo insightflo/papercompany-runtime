@@ -2,12 +2,13 @@ import * as React from "react";
 import { useState, type JSX } from "react";
 import type { StepDraft } from "../step-draft.js";
 import type { PendingWorkflowConnection } from "../workflow-control-nodes.js";
-import type { WorkflowGraphInspectorMode, WorkflowGraphInterfaceInput, WorkflowGraphTriggerSummary } from "../workflow-graph.js";
+import type { WorkflowGraphEdge, WorkflowGraphInspectorMode, WorkflowGraphInterfaceInput, WorkflowGraphTriggerSummary } from "../workflow-graph.js";
 import type { WorkflowToolGrant, WorkflowToolOption } from "../workflow-page-types.js";
 import type { StepWorkspaceGraphEditorProps } from "../step-workspace-editor.js";
 import { WorkflowGraphTestDrawer } from "./GraphTestDrawer.js";
-import { graphShellStyle } from "./graphStyles.js";
-import { GraphDetailsPanel } from "./GraphDetailsPanel.js";
+import { graphShellStyle, graphWorkbenchResizeHandleStyle } from "./graphStyles.js";
+import { GraphDetailsDialog } from "./GraphDetailsDialog.js";
+import { noticeStyle } from "../workflow-page-styles.js";
 import { type GraphContextMenuState, type GraphNodeDragState } from "./graphUiUtils.js";
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
 import { GraphEmptyState } from "./GraphEmptyState.js";
@@ -45,7 +46,11 @@ function WorkflowGraphEditor({
   availableToolGrants: WorkflowToolGrant[];
   surface?: "stacked" | "focus";
 }): JSX.Element {
-  const [detailsExpanded, setDetailsExpanded] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [workbenchHeight, setWorkbenchHeight] = useState<number | null>(null);
+  const graphShellRef = React.useRef<HTMLDivElement | null>(null);
+  const workbenchResizeStartRef = React.useRef<{ pointerY: number; height: number } | null>(null);
+  const workbenchDragCleanupRef = React.useRef<(() => void) | null>(null);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(steps[0]?.id ?? null);
   const [selectedPathStepIds, setSelectedPathStepIds] = useState<string[]>(() => steps[0]?.id ? [steps[0].id] : []);
   const [failureHandlerStepId, setFailureHandlerStepId] = useState<string>("");
@@ -177,13 +182,13 @@ function WorkflowGraphEditor({
     selectedEdgeId,
     selectedEdgeActionAnchor,
     pendingConnection,
-    setSelectedStepId: (value) => { setSelectedStepId(value); if (value !== null) setDetailsExpanded(true); },
+    setSelectedStepId,
     setSelectedPathStepIds,
     setFailureHandlerStepId,
     setGraphError,
     setGraphInspectorMode,
-    setShowGraphDetails,
-    setSelectedEdgeId: (value) => { setSelectedEdgeId(value); if (typeof value === "string") setDetailsExpanded(true); },
+    setShowGraphDetails: (value) => { setShowGraphDetails(value); if (value) setDetailsOpen(true); },
+    setSelectedEdgeId,
     setPendingConnection,
     setGraphContextMenu,
     setCanvasScaleFromPoint,
@@ -243,6 +248,74 @@ function WorkflowGraphEditor({
     selectStep(stepId);
   }
 
+  function handleNodeDoubleClick(event: React.MouseEvent<HTMLButtonElement>, stepId: string): void {
+    event.preventDefault();
+    event.stopPropagation();
+    selectStep(stepId);
+    setDetailsOpen(true);
+  }
+
+  function handleEdgeDoubleClick(event: React.MouseEvent<Element>, edge: WorkflowGraphEdge): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedEdgeId(edge.id);
+    setGraphError("");
+    setDetailsOpen(true);
+  }
+
+  function handleNodeKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, stepId: string): void {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    selectStep(stepId);
+    setDetailsOpen(true);
+  }
+
+  function beginWorkbenchResize(event: React.MouseEvent<HTMLDivElement>): void {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const measured = graphShellRef.current?.offsetHeight ?? 0;
+    workbenchResizeStartRef.current = {
+      pointerY: event.clientY,
+      height: workbenchHeight ?? (measured > 0 ? measured : 480),
+    };
+    const onMove = (moveEvent: MouseEvent): void => {
+      const start = workbenchResizeStartRef.current;
+      if (!start) return;
+      const maxHeight = Math.max(480, window.innerHeight - 140);
+      const next = Math.min(maxHeight, Math.max(380, start.height + (moveEvent.clientY - start.pointerY)));
+      setWorkbenchHeight(next);
+    };
+    const onUp = (): void => {
+      workbenchResizeStartRef.current = null;
+      workbenchDragCleanupRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    workbenchDragCleanupRef.current = onUp;
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "ns-resize";
+  }
+
+  React.useEffect(() => () => { workbenchDragCleanupRef.current?.(); }, []);
+
+  function handleWorkbenchResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault();
+      const maxHeight = Math.max(480, window.innerHeight - 140);
+      const current = workbenchHeight ?? maxHeight;
+      const delta = event.key === "ArrowUp" ? -40 : 40;
+      setWorkbenchHeight(Math.min(maxHeight, Math.max(380, current + delta)));
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      setWorkbenchHeight(null);
+    }
+  }
+
   if (steps.length === 0) {
     return <GraphEmptyState onAddEntry={() => addAfter(null)} onInsertPaletteNode={insertPaletteNode} />;
   }
@@ -250,7 +323,11 @@ function WorkflowGraphEditor({
   return (
     <>
       <GraphTriggerSummaryCard surface={surface} graphTriggerSummary={graphTriggerSummary} />
-      <div style={graphShellStyle}>
+      <div
+        ref={graphShellRef}
+        data-graph-workbench="true"
+        style={{ ...graphShellStyle, ...(workbenchHeight === null ? {} : { height: `${workbenchHeight}px`, minHeight: `${workbenchHeight}px` }) }}
+      >
       <div data-graph-canvas-region style={{ minWidth: 0, minHeight: 0, display: "grid" }}>
       <GraphCanvas
         graph={graph}
@@ -279,11 +356,14 @@ function WorkflowGraphEditor({
         handleCanvasContextMenu={handleCanvasContextMenu}
         stopGraphControlEvent={stopGraphControlEvent}
         handleEdgeClick={handleEdgeClick}
+        handleEdgeDoubleClick={handleEdgeDoubleClick}
         handleEdgeContextMenu={handleEdgeContextMenu}
         beginNodeDrag={beginNodeDrag}
         handleNodePointerMove={handleNodePointerMove}
         endNodeDrag={endNodeDrag}
         handleNodeClick={handleNodeClick}
+        handleNodeDoubleClick={handleNodeDoubleClick}
+        handleNodeKeyDown={handleNodeKeyDown}
         handleNodeContextMenu={handleNodeContextMenu}
         beginEdgeConnection={beginEdgeConnection}
         completeEdgeConnection={completeEdgeConnection}
@@ -298,8 +378,35 @@ function WorkflowGraphEditor({
       />
 
       </div>
-      <GraphDetailsPanel steps={steps} selectedStep={selectedStep} selectedEdge={graph.edges.find((edge) => edge.id === selectedEdgeId)}
-        expanded={detailsExpanded} onExpandedChange={setDetailsExpanded} graphError={graphError}>
+      <div
+        data-graph-resize-handle="true"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="그래프 영역 높이 조절"
+        title="드래그: 높이 조절 · 더블클릭: 기본 높이로"
+        style={graphWorkbenchResizeHandleStyle}
+        aria-valuenow={workbenchHeight ?? undefined}
+        aria-valuemin={380}
+        aria-valuemax={Math.max(480, window.innerHeight - 140)}
+        tabIndex={0}
+        onMouseDown={beginWorkbenchResize}
+        onKeyDown={handleWorkbenchResizeKeyDown}
+        onDoubleClick={() => { setWorkbenchHeight(null); }}
+      >
+        <div style={{ width: "48px", height: "3px", borderRadius: "2px", background: "var(--muted-foreground, #94a3b8)" }} />
+      </div>
+      </div>
+      {!detailsOpen && graphError ? (
+        <p role="alert" style={{ ...noticeStyle("error"), margin: "10px 0 0" }}>{graphError}</p>
+      ) : null}
+      {detailsOpen ? (
+        <GraphDetailsDialog
+          steps={steps}
+          selectedStep={selectedStep}
+          selectedEdge={graph.edges.find((edge) => edge.id === selectedEdgeId)}
+          graphError={graphError}
+          onClose={() => { setDetailsOpen(false); }}
+        >
       <GraphInspector
         steps={steps}
         selectedStep={selectedStep}
@@ -372,8 +479,8 @@ function WorkflowGraphEditor({
         validateRawSelectedStepJson={validateRawSelectedStepJson}
         applyRawSelectedStepJson={applyRawSelectedStepJson}
       />
-      </GraphDetailsPanel>
-      </div>
+      </GraphDetailsDialog>
+      ) : null}
     </>
   );
 }

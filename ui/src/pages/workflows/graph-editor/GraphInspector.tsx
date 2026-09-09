@@ -106,7 +106,7 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
 
 // [목적] 워크플로우 그래프 인스펙터 본문 렌더.
 // [입력] GraphInspectorProps — 코디네이터가 소유한 상태/파생값/핸들러 + 테스트 드로어 슬롯.
-// [출력] GraphDetailsPanel에 담기는 본문 JSX.
+// [출력] GraphDetailsDialog(상세 편집 팝업)에 담기는 본문 JSX.
 // [연결] WorkflowGraphEditor 코디네이터가 렌더.
 // [주의] 동작 변경 없이 props 기반 렌더만 수행. WorkflowGraphTestDrawer는 루트 의존성이 있어 슬롯으로 전달.
 export function GraphInspector({
