@@ -1,403 +1,99 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { randomBytes } from "node:crypto";
+import type { Db } from "@paperclipai/db";
 import type { CoreWorkflowToolExecutionResult } from "./core-tool-executor.js";
-
-const MIN_TIMEOUT_MS = 1;
-const MAX_TIMEOUT_MS = 300_000;
-const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_REMOTE_DIAGNOSTIC_CHARS = 1_000;
+import { consumeHttpToolResponse, nonEmptyString, readObject, redactSecret, resolveResponseContract, result } from "./http-tool-response.js";
+import { fixedHttpTimeout, progressCallbackBase, progressTokenHash, readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
+import { createToolProgressStore } from "../tools/progress-store.js";
+import { withToolProgress } from "../tools/progress-monitor.js";
+export { redactSecret, persistArtifact } from "./http-tool-response.js";
 
 export type HttpWorkflowToolExecutionInput = {
-  companyId: string;
-  toolName: string;
-  parameters: unknown;
-  requestId: string;
-  stepOutputDir?: string | null;
-  adapterConfig: Record<string, unknown>;
+  companyId: string; toolName: string; parameters: unknown; requestId: string;
+  stepOutputDir?: string | null; adapterConfig: Record<string, unknown>;
 };
-
 export type HttpWorkflowToolExecutionDeps = {
   fetchImpl?: typeof fetch;
-  resolveSecretValue: (
-    companyId: string,
-    secretId: string,
-    version: number | "latest",
-  ) => Promise<string>;
+  resolveSecretValue: (companyId: string, secretId: string, version: number | "latest") => Promise<string>;
+  progress?: { db: Db; toolId: string; workflowRunId?: string | null; stepId?: string | null; callbackBaseUrl?: string };
 };
-
-function readObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-const HEADER_NAME_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
-
-function result(
-  toolName: string,
-  status: CoreWorkflowToolExecutionResult["status"],
-  error?: string,
-  extra?: CoreWorkflowToolExecutionResult["body"],
-): CoreWorkflowToolExecutionResult {
-  return { status, body: { tool: toolName, source: "core", error, ...extra } };
-}
-
-function invalidConfig(toolName: string, message: string): CoreWorkflowToolExecutionResult {
-  return result(toolName, 422, message);
-}
-
-function authFailure(toolName: string, message: string): CoreWorkflowToolExecutionResult {
-  return result(toolName, 403, message);
-}
-
-function remoteFailure(toolName: string, message: string): CoreWorkflowToolExecutionResult {
-  return result(toolName, 500, message);
-}
-
-type HeaderAuth = { headerName: string; secretId: string; version: number | "latest" };
-
-function resolveHeaderAuth(auth: unknown): HeaderAuth | null {
+function resolveHeaderAuth(auth: unknown): { headerName: string; secretId: string; version: number | "latest" } | null {
   const cfg = readObject(auth);
-  if (nonEmptyString(cfg.type) !== "header") return null;
   const headerName = nonEmptyString(cfg.headerName);
-  if (!headerName || !HEADER_NAME_RE.test(headerName)) return null;
   const secretId = nonEmptyString(cfg.secretId);
-  if (!secretId) return null;
-  let version: number | "latest";
-  if (cfg.version === "latest") {
-    version = "latest";
-  } else if (typeof cfg.version === "number" && Number.isInteger(cfg.version) && cfg.version > 0) {
-    version = cfg.version;
-  } else {
-    return null;
-  }
+  if (cfg.type !== "header" || !headerName || !/^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(headerName) || !secretId) return null;
+  const version = cfg.version;
+  if (version !== "latest" && !(typeof version === "number" && Number.isInteger(version) && version > 0)) return null;
   return { headerName, secretId, version };
 }
-
-type ResponseContract = {
-  resultField: string;
-  /** Present only for artifact-producing tools. Absent => data-only tool. */
-  artifactField: string | null;
-  artifactFileName: string;
-  artifactPathResultField: string;
-  assertions: ResponseAssertion[];
-};
-
-/** [GAZ 2026-08-28 미션 5c687c6b] Declarative fail-closed checks on the remote
- *   tool's RESULT body. A remote endpoint answering HTTP 200 with a body that
- *   violates its own machine contract (e.g. staging "success" with bytes:null
- *   and no staged file) must fail the step instead of silently completing it. */
-type ResponseAssertion =
-  | { field: string; kind: "equals"; expected: boolean | number | string }
-  | { field: string; kind: "positiveNumber" }
-  | { field: string; kind: "existingFile" };
-
-function resolveResponseAssertions(raw: unknown): ResponseAssertion[] | null {
-  if (raw === undefined) return [];
-  if (!Array.isArray(raw)) return null;
-  const assertions: ResponseAssertion[] = [];
-  for (const item of raw) {
-    const entry = readObject(item);
-    const field = nonEmptyString(entry.field);
-    if (!field) return null;
-    const hasEquals = "equals" in entry;
-    const type = nonEmptyString(entry.type);
-    if (hasEquals && type) return null; // exactly one of equals/type
-    if (hasEquals) {
-      const expected = entry.equals;
-      if (typeof expected !== "boolean" && typeof expected !== "number" && typeof expected !== "string") {
-        return null;
-      }
-      assertions.push({ field, kind: "equals", expected });
-      continue;
-    }
-    if (type === "positiveNumber" || type === "existingFile") {
-      assertions.push({ field, kind: type });
-      continue;
-    }
-    return null;
-  }
-  return assertions;
+async function withFixedDeadline<T>(timeoutMs: number, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new ToolProgressError(500, "tool_http_timeout");
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try { return await Promise.race([operation(controller.signal), deadline]); }
+  finally { clearTimeout(timer!); }
 }
-
-function describeExpectation(assertion: ResponseAssertion): string {
-  if (assertion.kind === "equals") return `must equal ${JSON.stringify(assertion.expected)}`;
-  if (assertion.kind === "positiveNumber") return "must be a finite number > 0";
-  return "must be an absolute path to an existing non-empty file";
-}
-
-async function isExistingNonEmptyFile(value: string): Promise<boolean> {
-  if (!path.isAbsolute(value)) return false;
-  try {
-    const info = await stat(value);
-    return info.isFile() && info.size > 0;
-  } catch {
-    return false;
-  }
-}
-
-function resolveResponseContract(response: unknown): ResponseContract | null {
-  const cfg = readObject(response);
-  const resultField = nonEmptyString(cfg.resultField);
-  const artifactField = nonEmptyString(cfg.artifactField);
-  const artifactFileName = nonEmptyString(cfg.artifactFileName);
-  const artifactPathResultField = nonEmptyString(cfg.artifactPathResultField);
-  const assertions = resolveResponseAssertions(cfg.assertions);
-  if (!resultField || assertions === null) return null;
-  if (artifactField !== null) {
-    // Artifact-producing tool: all artifact fields are required together.
-    if (
-      !artifactFileName ||
-      !artifactPathResultField ||
-      path.basename(artifactFileName) !== artifactFileName ||
-      artifactFileName.includes(path.sep)
-    ) {
-      return null;
-    }
-    return { resultField, artifactField, artifactFileName, artifactPathResultField, assertions };
-  }
-  // Data-only tool: no artifact fields declared, no artifact handling.
-  if (artifactFileName || artifactPathResultField) return null;
-  return { resultField, artifactField: null, artifactFileName: "", artifactPathResultField: "", assertions };
-}
-
-export async function executeHttpWorkflowTool(
-  input: HttpWorkflowToolExecutionInput,
-  deps: HttpWorkflowToolExecutionDeps,
-): Promise<CoreWorkflowToolExecutionResult> {
+export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionInput, deps: HttpWorkflowToolExecutionDeps): Promise<CoreWorkflowToolExecutionResult> {
   const { toolName } = input;
   const config = readObject(input.adapterConfig);
-
+  const invalid = (message: string) => result(toolName, 422, message);
   const url = nonEmptyString(config.url);
-  if (!url || !isAbsoluteHttpUrl(url)) {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" requires an absolute http(s) url`);
+  let protocol: string;
+  try { protocol = url ? new URL(url).protocol : ""; } catch { protocol = ""; }
+  if (!url || !["http:", "https:"].includes(protocol)) return invalid(`Workflow tool "${toolName}" requires an absolute http(s) url`);
+  if (config.allowInsecureUrl !== true && protocol !== "https:") {
+    return invalid(`Workflow tool "${toolName}" requires an absolute https url (set adapterConfig "allowInsecureUrl" to true to allow http)`);
   }
-  // allowInsecureUrl is an explicit operator opt-in recorded in the tool's adapterConfig:
-  // the tool definition author must set it to true to permit plain http targets.
-  if (config.allowInsecureUrl !== true && !isAbsoluteHttpsUrl(url)) {
-    return invalidConfig(
-      toolName,
-      `Workflow tool "${toolName}" requires an absolute https url (set adapterConfig "allowInsecureUrl" to true to allow http)`,
-    );
-  }
-
-  const method = nonEmptyString(config.method)?.toUpperCase();
-  if (method !== "POST") {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" only supports POST requests`);
-  }
-
+  if (nonEmptyString(config.method)?.toUpperCase() !== "POST") return invalid(`Workflow tool "${toolName}" only supports POST requests`);
   const auth = resolveHeaderAuth(config.auth);
-  if (!auth) {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" has an invalid header auth configuration`);
-  }
-
+  if (!auth) return invalid(`Workflow tool "${toolName}" has an invalid header auth configuration`);
   const responseContract = resolveResponseContract(config.response);
-  if (!responseContract) {
-    return invalidConfig(toolName, `Workflow tool "${toolName}" has an invalid response configuration`);
-  }
-
-  const rawTimeout = typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs)
-    ? config.timeoutMs
-    : DEFAULT_TIMEOUT_MS;
-  const timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(rawTimeout)));
-
-  let headerValue: string;
+  if (!responseContract) return invalid(`Workflow tool "${toolName}" has an invalid response configuration`);
+  let token = "";
+  let headerValue = "";
   try {
-    headerValue = await deps.resolveSecretValue(input.companyId, auth.secretId, auth.version);
-  } catch {
-    return authFailure(toolName, `Workflow tool "${toolName}" auth secret could not be resolved`);
-  }
-  if (!headerValue) {
-    return authFailure(toolName, `Workflow tool "${toolName}" auth secret could not be resolved`);
-  }
-
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
-  let res: Response;
-  try {
-    res = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        [auth.headerName]: headerValue,
-        "X-Papercompany-Request-Id": input.requestId,
-      },
-      body: JSON.stringify(input.parameters ?? {}),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const errorName = (err as { name?: string } | null)?.name;
-    const isTimeout = errorName === "TimeoutError" || errorName === "AbortError";
-    const detail = isTimeout
-      ? `request timed out`
-      : `request failed`;
-    return remoteFailure(
-      toolName,
-      `Workflow tool "${toolName}" ${detail} (request id: ${input.requestId})`,
-    );
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (res.status === 401 || res.status === 403) {
-    return authFailure(toolName, `Workflow tool "${toolName}" was rejected by the remote endpoint`);
-  }
-  if (!res.ok) {
-    const remoteText = await readRemoteDiagnostic(res, headerValue);
-    return remoteFailure(
-      toolName,
-      `Workflow tool "${toolName}" remote endpoint returned status ${res.status}${remoteText ? `: ${remoteText}` : ""}`,
-    );
-  }
-
-  let envelope: unknown;
-  try {
-    envelope = await res.json();
-  } catch {
-    return remoteFailure(toolName, `Workflow tool "${toolName}" remote endpoint returned a non-JSON response`);
-  }
-
-  const envRecord = readObject(envelope);
-  const resultValue = envRecord[responseContract.resultField];
-  if (resultValue === undefined) {
-    return remoteFailure(toolName, `Workflow tool "${toolName}" remote response is missing required fields`);
-  }
-  const baseResult = readObject(resultValue);
-
-  if (responseContract.artifactField === null) {
-    // Data-only tool: the declared result body IS the machine result. No artifact
-    // persistence and no step output directory are involved.
-    const assertionFailure = await checkResponseAssertions(toolName, responseContract.assertions, baseResult, input.requestId);
-    if (assertionFailure) return remoteFailure(toolName, assertionFailure);
-    return {
-      status: 200,
-      body: {
-        content: JSON.stringify(baseResult),
-        data: baseResult,
-        tool: toolName,
-        source: "core",
-      },
+    const policy = readToolProgressPolicy(config);
+    const timeoutMs = fixedHttpTimeout(config.timeoutMs);
+    if (policy && !deps.progress) throw new ToolProgressError(422, "tool_progress_missing_context");
+    const callbackBase = policy ? progressCallbackBase(deps.progress?.callbackBaseUrl) : undefined;
+    try { headerValue = await deps.resolveSecretValue(input.companyId, auth.secretId, auth.version); }
+    catch { /* same bounded auth failure for unavailable/empty secrets */ }
+    if (!headerValue) return result(toolName, 403, `Workflow tool "${toolName}" auth secret could not be resolved`);
+    const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json",
+      [auth.headerName]: headerValue, "X-Papercompany-Request-Id": input.requestId };
+    // Serialize/validate transport input before creating a durable execution record.
+    const body = JSON.stringify(input.parameters ?? {});
+    const operation = async (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      const res = await (deps.fetchImpl ?? fetch)(url, { method: "POST", headers, body, signal, ...(policy ? { redirect: "error" as const } : {}) });
+      signal.throwIfAborted();
+      const response = await consumeHttpToolResponse(res, input, responseContract, [headerValue, token], signal);
+      if (response.body.error) response.body.error = redactSecret(redactSecret(response.body.error, token), headerValue);
+      return response;
     };
-  }
-
-  const artifactValue = envRecord[responseContract.artifactField];
-  if (artifactValue === undefined) {
-    return remoteFailure(toolName, `Workflow tool "${toolName}" remote response is missing required fields`);
-  }
-
-  const stepOutputDir = typeof input.stepOutputDir === "string" ? input.stepOutputDir.trim() : "";
-  if (!stepOutputDir) {
-    return remoteFailure(
-      toolName,
-      `Workflow tool "${toolName}" could not resolve a step output directory for the artifact`,
-    );
-  }
-
-  let artifactPath: string;
-  try {
-    artifactPath = await persistArtifact(stepOutputDir, responseContract.artifactFileName, artifactValue);
-  } catch {
-    return remoteFailure(
-      toolName,
-      `Workflow tool "${toolName}" could not persist the response artifact`,
-    );
-  }
-
-  // Fail-closed result contract: assert the remote tool's declared machine
-  // checks AFTER persisting the raw artifact so violated responses keep their
-  // evidence for diagnosis while the step fails instead of falsely completing.
-  const assertionFailure = await checkResponseAssertions(toolName, responseContract.assertions, baseResult, input.requestId);
-  if (assertionFailure) {
-    return remoteFailure(toolName, `${assertionFailure}; raw response retained at ${artifactPath}`);
-  }
-
-  const data = { ...baseResult, [responseContract.artifactPathResultField]: artifactPath };
-  return {
-    status: 200,
-    body: {
-      content: JSON.stringify(data),
-      data,
-      tool: toolName,
-      source: "core",
-    },
-  };
-}
-
-/** Applies the tool's declared fail-closed machine checks to its result body. */
-async function checkResponseAssertions(
-  toolName: string,
-  assertions: ResponseAssertion[],
-  baseResult: Record<string, unknown>,
-  requestId: string,
-): Promise<string | null> {
-  for (const assertion of assertions) {
-    const actual = baseResult[assertion.field];
-    let passed = false;
-    if (assertion.kind === "equals") {
-      passed = actual === assertion.expected;
-    } else if (assertion.kind === "positiveNumber") {
-      passed = typeof actual === "number" && Number.isFinite(actual) && actual > 0;
-    } else {
-      const candidate = nonEmptyString(actual);
-      passed = candidate !== null && await isExistingNonEmptyFile(candidate);
-    }
-    if (!passed) {
-      return `Workflow tool "${toolName}" response contract violated: field "${assertion.field}" ${describeExpectation(assertion)} (request id: ${requestId})`;
-    }
-  }
-  return null;
-}
-
-export function redactSecret(value: string, secret: string): string {
-  if (!secret || secret.length === 0 || !value.includes(secret)) return value;
-  return value.split(secret).join("");
-}
-
-export async function persistArtifact(stepOutputDir: string, fileName: string, artifactValue: unknown): Promise<string> {
-  const dir = path.resolve(stepOutputDir);
-  const finalPath = path.join(dir, fileName);
-  const tempPath = path.join(dir, `.${fileName}.${randomUUID()}.tmp`);
-  await mkdir(dir, { recursive: true });
-  await writeFile(tempPath, JSON.stringify(artifactValue), { mode: 0o600 });
-  try {
-    await rename(tempPath, finalPath);
-  } catch (err) {
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw err;
-  }
-  return finalPath;
-}
-
-function isAbsoluteHttpsUrl(value: string): boolean {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-function isAbsoluteHttpUrl(value: string): boolean {
-  try {
-    const protocol = new URL(value).protocol;
-    return protocol === "https:" || protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-async function readRemoteDiagnostic(res: Response, secret: string): Promise<string> {
-  try {
-    const text = await res.text();
-    return redactSecret(text, secret).slice(0, MAX_REMOTE_DIAGNOSTIC_CHARS);
-  } catch {
-    return "";
+    if (!policy) return await withFixedDeadline(timeoutMs, operation);
+    const context = deps.progress!;
+    const store = createToolProgressStore(context.db);
+    token = randomBytes(32).toString("hex");
+    const heartbeat = await store.start({ companyId: input.companyId, toolId: context.toolId, requestId: input.requestId,
+      adapterType: "http", workflowRunId: context.workflowRunId, stepId: context.stepId }, policy, progressTokenHash(token));
+    headers["X-Papercompany-Progress-Version"] = "1";
+    headers["X-Papercompany-Execution-Id"] = heartbeat.id;
+    headers["X-Papercompany-Progress-Url"] = `${callbackBase}/api/companies/${input.companyId}/tool-executions/${heartbeat.id}/progress`;
+    headers["X-Papercompany-Progress-Token"] = token;
+    return await withToolProgress({ store, heartbeat, operation, succeeded: (value) => value.status === 200 });
+  } catch (error) {
+    if (error instanceof ToolProgressError && error.status === 422) return invalid(error.reason);
+    const timeout = error instanceof ToolProgressError && error.reason === "tool_http_timeout" ||
+      error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name);
+    const detail = error instanceof ToolProgressError && error.reason.startsWith("tool_progress_")
+      ? error.reason : timeout ? "request timed out" : "request failed";
+    return result(toolName, 500, `Workflow tool "${toolName}" ${detail} (request id: ${input.requestId})`);
   }
 }

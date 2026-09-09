@@ -36,6 +36,15 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ) {
+  if (req.method === "POST" &&
+    /^\/api\/companies\/[^/]+\/tool-executions\/[^/]+\/progress\/?$/i.test(req.path) &&
+    typeof err === "object" && err !== null && "type" in err && "status" in err &&
+    ((err.type === "entity.parse.failed" && err.status === 400) ||
+      (err.type === "entity.too.large" && err.status === 413))) {
+    res.status(400).json({ error: "tool_progress_invalid_event" });
+    return;
+  }
+
   if (err instanceof HttpError) {
     if (err.status >= 500) {
       attachErrorContext(

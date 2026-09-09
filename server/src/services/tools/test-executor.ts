@@ -32,6 +32,7 @@ export type ToolTestExecutor = typeof executeToolTest;
 
 export type ToolTestDeps = {
   fetchImpl?: typeof fetch;
+  callbackBaseUrl?: string;
   resolveSecretValue?: (
     companyId: string,
     secretId: string,
@@ -215,7 +216,8 @@ export async function executeToolTest(input: ToolTestInput): Promise<ToolTestOut
       stepOutputDir: tempDir,
       adapterConfig: readObject(tool.adapterConfig),
     };
-    const adapterDeps = { fetchImpl: deps?.fetchImpl, resolveSecretValue };
+    const adapterDeps = { fetchImpl: deps?.fetchImpl, resolveSecretValue,
+      progress: { db, toolId: tool.id, callbackBaseUrl: deps?.callbackBaseUrl } };
     const result =
       tool.adapterType === "http"
         ? await executeHttpWorkflowTool(adapterInput, adapterDeps)
