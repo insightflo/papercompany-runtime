@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { toolProgressRoutes } from "./tool-progress.js";
 import type { Db } from "@paperclipai/db";
 import {
   createToolDefinitionSchema,
@@ -48,6 +49,7 @@ function throwToolNameConflict(error: unknown, name: string): never {
 export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOptions = {}) {
   const { toolDispatcher, executeTest = executeToolTest } = options;
   const router = Router();
+  router.use(toolProgressRoutes(db));
 
   router.get("/companies/:companyId/tools", async (req, res) => {
     const companyId = req.params.companyId as string;

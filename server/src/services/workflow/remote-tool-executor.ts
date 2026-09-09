@@ -13,6 +13,7 @@ import { isPathInsideOrEqual } from "../work-products/output-paths.js";
 
 export type CoreWorkflowToolRemoteDeps = {
   fetchImpl?: typeof fetch;
+  callbackBaseUrl?: string;
   resolveSecretValue?: (
     companyId: string,
     secretId: string,
@@ -42,6 +43,7 @@ function artifactPathFromResult(
 export async function executeRemoteWorkflowTool(input: {
   db: Db;
   companyId: string;
+  toolId: string;
   toolName: string;
   parameters: unknown;
   requestId: string;
@@ -67,6 +69,8 @@ export async function executeRemoteWorkflowTool(input: {
   const deps = {
     fetchImpl: input.remoteDeps?.fetchImpl,
     resolveSecretValue,
+    progress: { db: input.db, toolId: input.toolId, workflowRunId: input.workflowRunId,
+      stepId: input.stepId, callbackBaseUrl: input.remoteDeps?.callbackBaseUrl },
   };
 
   const result = input.adapterType === "http"
