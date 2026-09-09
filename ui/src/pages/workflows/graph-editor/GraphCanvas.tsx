@@ -134,10 +134,9 @@ export function GraphCanvas({
 }: GraphCanvasProps): JSX.Element {
   return (
     <div key="graph-workbench-main" style={graphWorkbenchMainStyle}>
-      <div
-        key="graph-canvas"
-        ref={graphCanvasRef}
-        style={{ ...graphCanvasStyle, cursor: isCanvasPanning ? "grabbing" : "grab" }}
+      <div style={{ position: "relative", minHeight: 0 }}>
+      <div key="graph-canvas" ref={graphCanvasRef}
+        style={{ ...graphCanvasStyle, minHeight: 0, overflow: "auto", cursor: isCanvasPanning ? "grabbing" : "grab" }}
         onPointerDown={beginCanvasPan}
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={endCanvasPan}
@@ -145,13 +144,6 @@ export function GraphCanvas({
         onContextMenu={handleCanvasContextMenu}
         onClick={handleCanvasClick}
       >
-        <GraphCanvasEditTools
-          selectedStep={selectedStep}
-          selectedEdgeActionAnchor={selectedEdgeActionAnchor}
-          addAfter={addAfter}
-          handleDeleteGraphObjectPointerDown={handleDeleteGraphObjectPointerDown}
-          stopGraphControlEvent={stopGraphControlEvent}
-        />
         <GraphCanvasContextMenu
           graphContextMenu={graphContextMenu}
           availableTools={availableTools}
@@ -174,8 +166,8 @@ export function GraphCanvas({
             position: "absolute",
             left: 0,
             top: 0,
-            width: `${canvasWidth}px`,
-            height: `${canvasHeight}px`,
+            width: "100%", minWidth: `${canvasWidth}px`,
+            height: "100%", minHeight: `${canvasHeight}px`,
             overflow: "visible",
             transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasScale})`,
             transformOrigin: "0 0",
@@ -301,8 +293,8 @@ export function GraphCanvas({
           <svg
             key="graph-edges"
             aria-hidden="true"
-            width={canvasWidth}
-            height={canvasHeight}
+            width="100%"
+            height="100%"
             style={{ position: "absolute", inset: 0, overflow: "visible", pointerEvents: "auto" }}
           >
             <defs>
@@ -539,6 +531,14 @@ export function GraphCanvas({
           </div>
         </div>
         </div>
+      </div>
+        <GraphCanvasEditTools
+          selectedStep={selectedStep}
+          selectedEdgeActionAnchor={selectedEdgeActionAnchor}
+          addAfter={addAfter}
+          handleDeleteGraphObjectPointerDown={handleDeleteGraphObjectPointerDown}
+          stopGraphControlEvent={stopGraphControlEvent}
+        />
         <GraphCanvasViewTools
           canvasScale={canvasScale}
           selectedStep={selectedStep}

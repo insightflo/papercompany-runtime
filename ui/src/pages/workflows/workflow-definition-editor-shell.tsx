@@ -143,7 +143,7 @@ export function WorkflowDefinitionEditorShell({
   onDeleteWorkflow: (workflow: WorkflowOverviewData["workflows"][number]) => void;
 }): JSX.Element {
   return (
-    <div id="wf-editor" key="selected-workflow-shell" style={{ ...workflowManagementShellStyle, gridTemplateColumns: railCollapsed ? "36px minmax(640px, 1fr)" : "280px minmax(640px, 1fr)" }}>
+    <div id="wf-editor" key="selected-workflow-shell" style={{ ...workflowManagementShellStyle, overflow: editStepMode === "graph" ? "visible" : "hidden", gridTemplateColumns: railCollapsed ? "36px minmax(640px, 1fr)" : "280px minmax(640px, 1fr)" }}>
       <WorkflowDefinitionRail
         collapsed={railCollapsed}
         onCollapsedChange={onRailCollapsedChange}
@@ -256,7 +256,7 @@ export function WorkflowDefinitionEditorShell({
             <Fragment key="run-debug-placeholder" />
           )}
         </div>
-        <div key="selected-step-workspace" style={workflowSelectedWorkspaceStyle}>
+        <div key="selected-step-workspace" style={{ ...workflowSelectedWorkspaceStyle, ...(editStepMode === "graph" ? { overflow: "visible" } : {}) }}>
           <StepWorkspaceEditor
             renderGraphEditor={renderGraphEditor}
             steps={editingSteps}

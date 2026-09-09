@@ -6,7 +6,8 @@ import type { WorkflowGraphInspectorMode, WorkflowGraphInterfaceInput, WorkflowG
 import type { WorkflowToolGrant, WorkflowToolOption } from "../workflow-page-types.js";
 import type { StepWorkspaceGraphEditorProps } from "../step-workspace-editor.js";
 import { WorkflowGraphTestDrawer } from "./GraphTestDrawer.js";
-import { graphInspectorResizeHandleStyle, graphShellStyle } from "./graphStyles.js";
+import { graphShellStyle } from "./graphStyles.js";
+import { GraphDetailsPanel } from "./GraphDetailsPanel.js";
 import { type GraphContextMenuState, type GraphNodeDragState } from "./graphUiUtils.js";
 import { GraphTriggerSummaryCard } from "./GraphTriggerSummaryCard.js";
 import { GraphEmptyState } from "./GraphEmptyState.js";
@@ -44,6 +45,7 @@ function WorkflowGraphEditor({
   availableToolGrants: WorkflowToolGrant[];
   surface?: "stacked" | "focus";
 }): JSX.Element {
+  const [detailsExpanded, setDetailsExpanded] = useState(true);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(steps[0]?.id ?? null);
   const [selectedPathStepIds, setSelectedPathStepIds] = useState<string[]>(() => steps[0]?.id ? [steps[0].id] : []);
   const [failureHandlerStepId, setFailureHandlerStepId] = useState<string>("");
@@ -122,7 +124,6 @@ function WorkflowGraphEditor({
     canvasScale,
     canvasPanX,
     canvasPanY,
-    graphInspectorWidth,
     graphCanvasRef,
     isCanvasPanning,
     setCanvasScaleFromPoint,
@@ -130,7 +131,6 @@ function WorkflowGraphEditor({
     beginCanvasPan,
     handleCanvasPointerMove,
     endCanvasPan,
-    beginGraphInspectorResize,
   } = useWorkflowGraphCanvasViewport({ closeGraphContextMenu });
 
   const {
@@ -177,13 +177,13 @@ function WorkflowGraphEditor({
     selectedEdgeId,
     selectedEdgeActionAnchor,
     pendingConnection,
-    setSelectedStepId,
+    setSelectedStepId: (value) => { setSelectedStepId(value); if (value !== null) setDetailsExpanded(true); },
     setSelectedPathStepIds,
     setFailureHandlerStepId,
     setGraphError,
     setGraphInspectorMode,
     setShowGraphDetails,
-    setSelectedEdgeId,
+    setSelectedEdgeId: (value) => { setSelectedEdgeId(value); if (typeof value === "string") setDetailsExpanded(true); },
     setPendingConnection,
     setGraphContextMenu,
     setCanvasScaleFromPoint,
@@ -248,8 +248,10 @@ function WorkflowGraphEditor({
   }
 
   return (
-    <div style={{ ...graphShellStyle, gridTemplateColumns: `minmax(620px, 1fr) 8px ${graphInspectorWidth}px` }}>
+    <>
       <GraphTriggerSummaryCard surface={surface} graphTriggerSummary={graphTriggerSummary} />
+      <div style={graphShellStyle}>
+      <div data-graph-canvas-region style={{ minWidth: 0, minHeight: 0, display: "grid" }}>
       <GraphCanvas
         graph={graph}
         canvasWidth={canvasWidth}
@@ -295,17 +297,9 @@ function WorkflowGraphEditor({
         handleDeleteGraphObjectPointerDown={handleDeleteGraphObjectPointerDown}
       />
 
-      <div
-        key="graph-inspector-resize"
-        aria-label="Resize graph inspector"
-        role="separator"
-        style={graphInspectorResizeHandleStyle}
-        title="Drag to resize Inspector"
-        onPointerDown={beginGraphInspectorResize}
-      >
-        <span style={{ width: "2px", height: "42px", borderRadius: "2px", background: "var(--muted-foreground, #94a3b8)", opacity: 0.55 }} />
       </div>
-
+      <GraphDetailsPanel steps={steps} selectedStep={selectedStep} selectedEdge={graph.edges.find((edge) => edge.id === selectedEdgeId)}
+        expanded={detailsExpanded} onExpandedChange={setDetailsExpanded} graphError={graphError}>
       <GraphInspector
         steps={steps}
         selectedStep={selectedStep}
@@ -318,7 +312,6 @@ function WorkflowGraphEditor({
         evidenceSummary={evidenceSummary}
         repairPlan={repairPlan}
         diagnostics={diagnostics}
-        graphError={graphError}
         graphInspectorMode={graphInspectorMode}
         inspectorAccent={inspectorAccent}
         showOverviewInspector={showOverviewInspector}
@@ -379,7 +372,9 @@ function WorkflowGraphEditor({
         validateRawSelectedStepJson={validateRawSelectedStepJson}
         applyRawSelectedStepJson={applyRawSelectedStepJson}
       />
-    </div>
+      </GraphDetailsPanel>
+      </div>
+    </>
   );
 }
 

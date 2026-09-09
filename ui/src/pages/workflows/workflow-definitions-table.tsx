@@ -57,7 +57,7 @@ export function DefinitionsTable({
   const deleteWorkflow = usePluginAction("delete-workflow");
   const runWorkflow = usePluginAction("start-workflow");
   const [editingWorkflowId, setEditingWorkflowId] = useState<string | null>(null);
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(false);
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(true);
   const [editingName, setEditingName] = useState<string>("");
   const [editingDescription, setEditingDescription] = useState<string>("");
   const [editingStatus, setEditingStatus] = useState<string>("active");
