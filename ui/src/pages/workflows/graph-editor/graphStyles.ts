@@ -7,20 +7,20 @@ import type { WorkflowGraphFocusLensTone, WorkflowGraphPaletteNodeKind } from ".
 
 export const graphShellStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(620px, 1fr) 8px 420px",
-  gap: "0",
+  gridTemplateColumns: "minmax(0, 1fr)",
+  gridTemplateRows: "minmax(0, 1fr) auto",
   alignItems: "stretch",
-  minHeight: 0,
-  height: "100%",
+  minHeight: "480px",
+  height: "calc(100dvh - 140px)",
   border: "1px solid var(--border, #334155)",
   borderRadius: "8px",
-  overflow: "hidden",
+  overflow: "visible",
   background: "var(--background, #020617)",
 };
 
 export const graphWorkbenchMainStyle: CSSProperties = {
   display: "grid",
-  gridTemplateRows: "minmax(360px, 1fr) auto",
+  gridTemplateRows: "minmax(0, 1fr) auto",
   minWidth: 0,
   minHeight: 0,
 };

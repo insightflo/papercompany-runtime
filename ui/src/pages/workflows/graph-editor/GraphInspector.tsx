@@ -1,7 +1,7 @@
-// [파일 목적] 워크플로우 그래프 에디터의 인스펙터(우측 사이드 패널)를 렌더링하는 프레젠테이션 컴포넌트.
+// [파일 목적] 워크플로우 그래프 에디터의 하단 인스펙터 본문을 렌더링하는 프레젠테이션 컴포넌트.
 // 선택된 스텝의 메타데이터 편집기, 승인/테스트/실행/데이터플로우 필드를 표시한다.
-// [주요 흐름] (1) 인스펙터 모드 탭, (2) overview 블록, (3) 그래프 에러,
-// (4) edit/policy/raw 모드별 선택 스텝 편집 필드.
+// [주요 흐름] (1) 인스펙터 모드 탭, (2) overview 블록,
+// (3) edit/policy/raw 모드별 선택 스텝 편집 필드. 그래프 에러는 상위 패널에서 표시한다.
 // [외부 연결] ../workflow-graph.js, ./graphStyles.js, ./GraphInspectorOverview.js,
 // ../workflow-page-styles.js, ../workflow-page-types.js, ../shared-controls.js, ../workflow-tool-picker.js,
 // ../step-editor.js, react.
@@ -32,7 +32,6 @@ import {
   graphPolicyBadgeStyle,
   inputStyle,
   mutedTextStyle,
-  noticeStyle,
   selectStyle,
   textareaStyle,
 } from "../workflow-page-styles.js";
@@ -64,7 +63,6 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
   selectedGroup: { title: string; color: string; collapsed?: boolean; collapsedByDefault?: boolean } | null;
   inspectorSummary: WorkflowGraphInspectorSummary;
   activeInspectorSection: WorkflowGraphInspectorSummary["sections"][number];
-  graphError: string;
   graphInspectorMode: WorkflowGraphInspectorMode;
   inspectorAccent: string;
   showEditInspector: boolean;
@@ -106,9 +104,9 @@ export interface GraphInspectorProps extends Omit<GraphInspectorOverviewProps, "
   applyRawSelectedStepJson: () => void;
 }
 
-// [목적] 워크플로우 그래프 인스펙터 사이드 패널 렌더.
+// [목적] 워크플로우 그래프 인스펙터 본문 렌더.
 // [입력] GraphInspectorProps — 코디네이터가 소유한 상태/파생값/핸들러 + 테스트 드로어 슬롯.
-// [출력] <aside key="graph-sidebar"> JSX.
+// [출력] GraphDetailsPanel에 담기는 본문 JSX.
 // [연결] WorkflowGraphEditor 코디네이터가 렌더.
 // [주의] 동작 변경 없이 props 기반 렌더만 수행. WorkflowGraphTestDrawer는 루트 의존성이 있어 슬롯으로 전달.
 export function GraphInspector({
@@ -123,7 +121,6 @@ export function GraphInspector({
   evidenceSummary,
   repairPlan,
   diagnostics,
-  graphError,
   graphInspectorMode,
   inspectorAccent,
   showOverviewInspector,
@@ -180,7 +177,7 @@ export function GraphInspector({
 
 
   return (
-    <aside key="graph-sidebar" style={graphSidebarStyle}>
+    <div key="graph-sidebar" style={graphSidebarStyle}>
         <div key="graph-inspector-mode" style={{ display: "grid", gap: "8px", paddingBottom: "8px", borderBottom: "1px solid var(--border, #334155)" }}>
           <div key="inspector-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
             <p style={{ ...mutedTextStyle, fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.04em" }}>
@@ -233,7 +230,6 @@ export function GraphInspector({
           duplicateSelectedContainer={duplicateSelectedContainer}
           clearSelectedContainer={clearSelectedContainer}
         />
-        {graphError ? <p key="graph-error" style={noticeStyle("error")}>{graphError}</p> : <Fragment key="graph-error-placeholder" />}
         {selectedStep ? (
           <div key="selected-step-editor" style={{ display: "contents" }}>
             <GraphInspectorEditStep
@@ -357,6 +353,6 @@ export function GraphInspector({
         ) : (
           <Fragment key="selected-step-editor-placeholder" />
         )}
-    </aside>
+    </div>
   );
 }
