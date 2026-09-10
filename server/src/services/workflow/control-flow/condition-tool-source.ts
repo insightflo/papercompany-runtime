@@ -81,6 +81,7 @@ export async function executeWorkflowConditionToolSource(input: {
             ? tool.adapterConfig as Record<string, unknown>
             : {}),
           timeoutMs: CONDITION_SOURCE_TOOL_TIMEOUT_MS,
+          progress: undefined,
         },
       },
       {

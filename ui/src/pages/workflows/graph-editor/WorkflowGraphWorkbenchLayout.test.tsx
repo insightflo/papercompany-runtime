@@ -44,36 +44,84 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("Workflow graph fixed-height workbench", () => {
-  it.each(["focus", "stacked"] as const)("reserves only canvas and details rows in the %s workspace", async (surface) => {
+function workbench(): HTMLElement {
+  const shell = container.querySelector<HTMLElement>("[data-graph-workbench='true']")!;
+  expect(shell, "graph workbench shell must exist").not.toBeNull();
+  return shell;
+}
+function resizeHandle(shell: HTMLElement): HTMLElement {
+  const handle = shell.querySelector<HTMLElement>("[data-graph-resize-handle='true']")!;
+  expect(handle, "workbench must expose a vertical resize handle").not.toBeNull();
+  return handle;
+}
+
+describe("Workflow graph resizable workbench", () => {
+  it.each(["focus", "stacked"] as const)("reserves the canvas and resize-handle rows without the bottom details panel in the %s workspace", async (surface) => {
     await mountWorkspace(surface);
-    const panel = container.querySelector("aside")!;
-    const workbench = panel.parentElement!;
-    const canvas = workbench.querySelector<HTMLElement>("[data-graph-canvas-region]")!;
-    // A trigger card inside this grid would displace details into an implicit third row.
-    expect(workbench.children).toHaveLength(2);
-    expect(workbench.firstElementChild).toBe(canvas);
-    expect(workbench.lastElementChild).toBe(panel);
-    expect(workbench.style.display).toBe("grid");
-    expect(workbench.style.height).toBe("calc(100dvh - 140px)");
-    expect(workbench.style.minHeight).toBe("480px");
-    expect(workbench.style.gridTemplateRows).toBe("minmax(0, 1fr) auto");
-    expect(workbench.style.alignContent).not.toBe("start");
-    expect(workbench.style.overflow).toBe("visible");
-    expect(workbench.textContent).not.toContain("Flow triggers");
+    const shell = workbench();
+    const canvas = shell.querySelector<HTMLElement>("[data-graph-canvas-region]")!;
+    const handle = resizeHandle(shell);
+    // 상세 편집은 더블클릭 팝업으로 이동: 캔버스와 리사이즈 핸들만 남는다.
+    expect(shell.children).toHaveLength(2);
+    expect(shell.firstElementChild).toBe(canvas);
+    expect(shell.lastElementChild).toBe(handle);
+    expect(handle.getAttribute("role")).toBe("separator");
+    expect(handle.getAttribute("aria-orientation")).toBe("horizontal");
+    expect(shell.style.display).toBe("grid");
+    expect(shell.style.height).toBe("calc(100dvh - 140px)");
+    expect(shell.style.minHeight).toBe("480px");
+    expect(shell.style.gridTemplateRows).toBe("minmax(0, 1fr) auto");
+    expect(shell.style.alignContent).not.toBe("start");
+    expect(shell.style.overflow).toBe("visible");
+    expect(shell.querySelector("aside")).toBeNull();
+    expect(container.querySelector("[data-graph-details-dialog]"), "details moved to the popup").toBeNull();
+    expect(shell.textContent).not.toContain("Flow triggers");
     expect(container.textContent!.includes("Flow triggers")).toBe(surface === "stacked");
-    expect(workbench.parentElement).toBe(container.firstElementChild); // Real StepWorkspaceEditor wrapper.
-    if (surface === "focus") expect(parseFloat(workbench.parentElement!.style.minHeight)).toBe(0);
-    const button = panel.querySelector<HTMLButtonElement>("button[aria-controls]")!;
-    const body = document.getElementById(button.getAttribute("aria-controls")!)!;
-    const height = workbench.style.height;
-    for (const expanded of [false, true]) {
-      await act(async () => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-      expect(body.hidden).toBe(!expanded);
-      expect(workbench.style.height).toBe(height);
-      expect(workbench.lastElementChild).toBe(panel);
-      expect(panel.lastElementChild).toBe(button.parentElement);
-    }
+    expect(shell.parentElement).toBe(container.firstElementChild); // Real StepWorkspaceEditor wrapper.
+    if (surface === "focus") expect(parseFloat(shell.parentElement!.style.minHeight)).toBe(0);
+  });
+
+  it("grows and shrinks the workbench by dragging the handle and restores the default height on double-click", async () => {
+    await mountWorkspace("focus");
+    const shell = workbench();
+    const handle = resizeHandle(shell);
+    const maxH = Math.max(480, window.innerHeight - 140);
+    await act(async () => handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientY: 500 })));
+    expect(document.body.style.cursor).toBe("ns-resize");
+    await act(async () => window.dispatchEvent(new MouseEvent("mousemove", { clientY: 700 })));
+    // jsdom offsetHeight is 0 → the 480 fallback seeds the drag: 480 + 200, capped at the default height.
+    expect(shell.style.height).toBe(`${Math.min(maxH, 680)}px`);
+    expect(shell.style.minHeight).toBe(`${Math.min(maxH, 680)}px`); // Explicit size overrides the static 480px guard.
+    await act(async () => window.dispatchEvent(new MouseEvent("mousemove", { clientY: 100 })));
+    expect(shell.style.height).toBe("380px"); // Minimum clamp keeps the canvas usable.
+    expect(shell.style.minHeight).toBe("380px");
+    await act(async () => window.dispatchEvent(new MouseEvent("mouseup", { clientY: 100 })));
+    expect(document.body.style.cursor).toBe("");
+    expect(shell.style.height).toBe("380px");
+    await act(async () => handle.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    expect(shell.style.height).toBe("calc(100dvh - 140px)");
+    expect(shell.style.minHeight).toBe("480px");
+  });
+
+  it("resizes with ArrowUp/ArrowDown/Home keys on the handle", async () => {
+    await mountWorkspace("focus");
+    const shell = workbench();
+    const handle = resizeHandle(shell);
+    const maxH = Math.max(480, window.innerHeight - 140);
+    const key = (k: string, shiftKey = false) => act(async () => handle.dispatchEvent(
+      new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, shiftKey }),
+    ));
+    expect(handle.tabIndex).toBe(0);
+    await key("ArrowUp");
+    expect(shell.style.height).toBe(`${maxH - 40}px`);
+    await key("ArrowUp");
+    expect(shell.style.height).toBe(`${maxH - 80}px`);
+    await key("ArrowDown");
+    expect(shell.style.height).toBe(`${maxH - 40}px`);
+    await key("Home");
+    expect(shell.style.height).toBe("calc(100dvh - 140px)");
+    for (let i = 0; i < 20; i += 1) await key("ArrowUp");
+    expect(shell.style.height).toBe("380px"); // Keyboard resizing honors the same clamp.
   });
 
   it("lets the drawing shrink into the remaining row while its graph bounds stay scrollable", async () => {

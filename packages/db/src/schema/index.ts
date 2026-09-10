@@ -117,6 +117,7 @@ export { workflowStepRuns } from "./workflow_step_runs.js";
 export { workflowDelegations } from "./workflow_delegations.js";
 export { workflowResyncJobs } from "./workflow_resync_jobs.js";
 export { toolDefinitions } from "./tool_definitions.js";
+export { toolExecutionHeartbeats } from "./tool_execution_heartbeats.js";
 export { toolAuditLog } from "./tool_audit_log.js";
 export { agentToolGrants } from "./agent_tool_grants.js";
 export { knowledgeBases } from "./knowledge_bases.js";

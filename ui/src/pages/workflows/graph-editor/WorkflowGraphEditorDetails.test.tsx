@@ -55,22 +55,23 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function disclosure() {
-  const button = container.querySelector<HTMLButtonElement>("button[aria-controls][aria-expanded]");
-  expect(button, "selected details must have a persistent disclosure button").not.toBeNull();
-  return button!;
+function dialog(): HTMLElement {
+  const el = container.querySelector<HTMLElement>("[data-graph-details-dialog='true']");
+  expect(el, "double-click must open the details popup").not.toBeNull();
+  return el!;
 }
-function bodyFor(button: HTMLButtonElement) {
-  const body = document.getElementById(button.getAttribute("aria-controls")!);
-  expect(body).not.toBeNull();
-  return body!;
+function nodeButtons(): NodeListOf<HTMLButtonElement> {
+  return container.querySelectorAll<HTMLButtonElement>("button[data-graph-node='true']");
 }
 async function click(element: Element) {
   await act(async () => element.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 }
+async function dblclick(element: Element) {
+  await act(async () => element.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+}
 
-describe("WorkflowGraphEditor bottom details", () => {
-  it("starts canvas-first with the definition rail collapsed but still available", async () => {
+describe("WorkflowGraphEditor details popup", () => {
+  it("starts canvas-first with the definition rail collapsed and no popup open", async () => {
     await mountEditor(true);
     const expand = container.querySelector("button[aria-label='Expand sidebar']");
     expect(expand, "B layout reserves width for the graph by default").not.toBeNull();
@@ -79,117 +80,120 @@ describe("WorkflowGraphEditor bottom details", () => {
     const buttons = [...container.querySelectorAll("button")].map((button) => button.textContent);
     expect(buttons).toEqual(expect.arrayContaining(["Graph", "Form", "JSON", "Save", "Run"]));
     expect(container.textContent).toContain("웹훅");
-    expect(disclosure().getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector("[data-graph-details-dialog]"), "details stay hidden until double-click").toBeNull();
+    const shell = container.querySelector<HTMLElement>("[data-graph-workbench='true']")!;
+    expect(shell.querySelector("aside"), "the bottom details panel is gone").toBeNull();
   });
 
-  it("keeps the same fixed-width native button and selected identity while hiding only the body", async () => {
+  it("opens on node double-click with the selected step identity and inspector body", async () => {
     await mountEditor();
-    const button = disclosure();
-    const body = bodyFor(button);
-    const header = button.parentElement!;
-    const panel = header.closest("aside")!;
-    // Structural dock invariant: changing body height cannot add space below the header.
-    expect(panel.lastElementChild).toBe(header);
-    expect(body.compareDocumentPosition(header) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const headerStyle = header.getAttribute("style");
-    const buttonStyle = button.getAttribute("style");
-    const field = body.querySelector("input");
-    expect(button.type).toBe("button"); // Native Enter/Space activation, no custom keyboard shim.
-    expect(button.style.width).toBe("160px");
-    expect(button.style.flexShrink).toBe("0");
-    expect(button.getAttribute("aria-expanded")).toBe("true");
-    expect(header.textContent).toContain("자료 수집");
-    expect(header.textContent).toContain("agent");
-    button.focus();
-    await click(button);
-    expect(disclosure()).toBe(button);
-    expect(button.parentElement).toBe(header);
-    expect(header.getAttribute("style")).toBe(headerStyle);
-    expect(button.getAttribute("style")).toBe(buttonStyle);
-    expect(button.getAttribute("aria-expanded")).toBe("false");
-    expect(button.textContent).toContain("펼치기");
-    expect(body.hidden).toBe(true);
-    expect(panel.lastElementChild).toBe(header);
-    expect(header.closest("[hidden]")).toBeNull();
-    expect(header.textContent).toContain("자료 수집");
-    expect(header.textContent).toContain("agent");
-    expect(document.activeElement).toBe(button);
-    expect(body.querySelector("input")).toBe(field);
-    await click(button);
-    expect(disclosure()).toBe(button);
-    expect(body.hidden).toBe(false);
-    expect(panel.lastElementChild).toBe(header);
-    expect(button.textContent).toContain("접기");
+    const nodes = nodeButtons();
+    await click(nodes[1]!);
+    expect(container.querySelector("[data-graph-details-dialog]"), "single click only selects").toBeNull();
+    await dblclick(nodes[1]!);
+    const popup = dialog();
+    expect(popup.getAttribute("role")).toBe("dialog");
+    expect(popup.getAttribute("aria-modal")).toBe("true");
+    expect(popup.textContent).toContain("기준 충족?");
+    expect(popup.textContent).toContain("if");
+    expect(popup.textContent).toContain("All conditions");
+    expect(document.activeElement).toBe(popup);
   });
 
-  it("opens for node/edge selection, including reselecting the current target", async () => {
+  it("opens for edge double-click with the relationship identity", async () => {
     await mountEditor();
-    const button = disclosure();
-    const nodes = container.querySelectorAll("button[data-graph-node='true']");
     const edge = container.querySelector("[data-graph-edge='true']")!;
-    for (const target of [nodes[1]!, nodes[1]!, edge, edge]) {
-      await click(button);
-      expect(bodyFor(button).hidden).toBe(true);
-      await click(target);
-      expect(disclosure()).toBe(button);
-      expect(button.getAttribute("aria-expanded")).toBe("true");
-      expect(bodyFor(button).hidden).toBe(false);
-      if (target !== edge) {
-        expect(button.parentElement!.textContent).toContain("기준 충족?");
-        expect(button.parentElement!.textContent).toContain("if");
-        expect(bodyFor(button).textContent).toContain("All conditions");
-      }
-    }
-    expect(button.parentElement!.textContent).toContain("자료 수집 → 기준 충족?");
-    expect(button.parentElement!.textContent).toContain("연결");
+    await dblclick(edge);
+    const popup = dialog();
+    expect(popup.textContent).toContain("자료 수집 → 기준 충족?");
+    expect(popup.textContent).toContain("연결");
   });
 
-  it("shows self-connection errors while details stay manually collapsed", async () => {
+  it("closes via Escape, backdrop click, and the close button", async () => {
     await mountEditor();
-    const button = disclosure();
-    const header = button.parentElement!;
-    const buttonStyle = button.getAttribute("style");
-    const headerStyle = header.getAttribute("style");
+    const nodes = nodeButtons();
+    await dblclick(nodes[1]!);
+    let popup = dialog();
+    await act(async () => popup.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(container.querySelector("[data-graph-details-dialog]")).toBeNull();
+
+    await dblclick(nodes[1]!);
+    const backdrop = container.querySelector<HTMLElement>("[data-graph-details-backdrop='true']")!;
+    expect(backdrop).not.toBeNull();
+    await click(backdrop);
+    expect(container.querySelector("[data-graph-details-dialog]")).toBeNull();
+
+    await dblclick(nodes[1]!);
+    await click(container.querySelector("button[aria-label='상세 편집 닫기']")!);
+    expect(container.querySelector("[data-graph-details-dialog]")).toBeNull();
+  });
+
+  it("keeps self-connection errors visible next to the canvas while the popup is closed", async () => {
+    await mountEditor();
     const output = container.querySelector("[data-graph-handle-kind='output'][data-step-id='collect']")!;
     const input = container.querySelector("[data-graph-handle-kind='input'][data-step-id='collect']")!;
     const startConnection = () => act(async () => {
       output.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     });
-    await click(button);
     await startConnection();
     await click(input);
     const error = [...container.querySelectorAll("p")].find((p) => p.textContent === "Cannot connect a step to itself.");
     expect(error, "the real connection handler must reject the self-edge").toBeDefined();
-    expect(error!.closest("[hidden]"), "canvas errors must not be inside the collapsed body").toBeNull();
-    expect(bodyFor(button).hidden).toBe(true);
-    expect(button.getAttribute("aria-expanded")).toBe("false");
-    for (const expanded of [true, false]) {
-      await click(button);
-      expect(disclosure()).toBe(button);
-      expect(button.parentElement).toBe(header);
-      expect(button.getAttribute("style")).toBe(buttonStyle);
-      expect(header.getAttribute("style")).toBe(headerStyle);
-      expect(bodyFor(button).hidden).toBe(!expanded);
-      expect(error!.closest("[hidden]")).toBeNull();
-      expect(header.closest("aside")!.lastElementChild).toBe(header);
-    }
+    expect(error!.closest("[data-graph-details-dialog]"), "closed-state errors render outside the popup").toBeNull();
+    expect(error!.getAttribute("role")).toBe("alert");
     await startConnection();
     expect(container.textContent).not.toContain("Cannot connect a step to itself.");
-    expect(bodyFor(button).hidden).toBe(true);
   });
 
-  it("places the full-width canvas before the details without a horizontal resize rail", async () => {
+  it("places the full-width canvas above the resize handle without a horizontal rail", async () => {
     await mountEditor();
-    const button = disclosure();
-    const panel = button.closest("aside")!;
-    const shell = panel.parentElement!;
+    const shell = container.querySelector<HTMLElement>("[data-graph-workbench='true']")!;
     const canvas = shell.querySelector<HTMLElement>("[data-graph-canvas-region]")!;
-    expect(canvas).not.toBeNull();
+    const handle = shell.querySelector<HTMLElement>("[data-graph-resize-handle='true']")!;
     expect(shell.style.gridTemplateColumns).toBe("minmax(0, 1fr)");
-    expect(canvas.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(canvas.compareDocumentPosition(handle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(container.querySelector("[aria-label='Resize graph inspector']")).toBeNull();
-    await click(button);
-    expect(shell.lastElementChild).toBe(panel);
+  });
+
+  it("renders the details popup as a fixed overlay above the workspace", async () => {
+    await mountEditor(true);
+    await dblclick(nodeButtons()[0]!);
+    const backdrop = container.querySelector<HTMLElement>("[data-graph-details-backdrop='true']")!;
+    expect(backdrop.style.position).toBe("fixed");
+    expect(parseFloat(backdrop.style.zIndex)).toBeGreaterThanOrEqual(40);
+    const popup = dialog();
+    // jsdom drops CSS min() values, so width is asserted via the style source instead.
+    expect(popup.getAttribute("style") ?? "").not.toContain("position");
+    expect(document.activeElement).toBe(popup);
+  });
+
+  it("opens with the keyboard (Enter) and restores focus to the node on close", async () => {
+    await mountEditor();
+    const node = nodeButtons()[1]!;
+    node.focus();
+    await act(async () => node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    const popup = dialog();
+    expect(popup.textContent).toContain("기준 충족?");
+    expect(document.body.style.overflow).toBe("hidden");
+    await act(async () => popup.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(container.querySelector("[data-graph-details-dialog]")).toBeNull();
+    expect(document.activeElement).toBe(node);
+    expect(document.body.style.overflow).not.toBe("hidden");
+  });
+
+  it("traps Tab focus inside the popup", async () => {
+    await mountEditor();
+    await dblclick(nodeButtons()[1]!);
+    const popup = dialog();
+    const focusables = [...popup.querySelectorAll<HTMLElement>("button, [href], input, select, textarea")];
+    expect(focusables.length).toBeGreaterThan(1);
+    const last = focusables[focusables.length - 1]!;
+    const first = focusables[0]!;
+    last.focus();
+    await act(async () => popup.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+    expect(document.activeElement).toBe(first);
+    await act(async () => popup.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true })));
+    expect(document.activeElement).toBe(last);
   });
 
   it.each([[0, "360px"], [1000, "1132px"]] as const)("fills the SVG and retains graph bounds at node y=%i", async (y, minHeight) => {
@@ -258,29 +262,5 @@ describe("WorkflowGraphEditor bottom details", () => {
     viewport.scrollTop = 80;
     await click(container.querySelector("button[aria-label='Center selected']")!);
     expect(content.style.transform).toBe("translate(414px, 292px) scale(1)");
-  });
-
-  it("keeps normal-flow details and visible graph ancestors", async () => {
-    await mountEditor(true);
-    const button = disclosure();
-    const panel = button.closest("aside")!;
-    const body = bodyFor(button);
-    expect(panel.style.position).toBe("");
-    expect(panel.style.bottom).toBe("");
-    expect(panel.style.zIndex).toBe("");
-    expect(panel.style.background).toBe("var(--background, #020617)");
-    expect(body.style.maxHeight).toBe("45vh");
-    expect(body.style.overflowY).toBe("auto");
-    expect(container.querySelector<HTMLElement>("#wf-editor")!.style.overflow).toBe("visible");
-    expect(panel.parentElement!.style.overflow).toBe("visible");
-    for (let ancestor = panel.parentElement; ancestor && ancestor !== container; ancestor = ancestor.parentElement) {
-      expect(["hidden", "auto", "scroll", "clip"], ancestor.outerHTML.slice(0, 220)).not.toContain(ancestor.style.overflow);
-    }
-    const panelStyle = panel.getAttribute("style");
-    await click(button);
-    expect(disclosure().closest("aside")).toBe(panel);
-    expect(panel.getAttribute("style")).toBe(panelStyle);
-    expect(body.hidden).toBe(true);
-    expect(panel.children.length).toBe(2); // Header only when the retained body is hidden.
   });
 });

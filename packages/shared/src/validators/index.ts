@@ -487,3 +487,4 @@ export {
   resumeBlockerCodeSchema,
   type ResumeBlockerCode,
 } from "./workflow-resume.js";
+export { toolProgressPolicySchema, toolProgressEventSchema, type ToolProgressPolicy, type ToolProgressEvent } from "./tool-progress.js";

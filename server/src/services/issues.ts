@@ -1199,9 +1199,18 @@ export function issueService(db: Db) {
           .then((rows) => rows[0]?.id ?? null);
       }
     }
+    // Self-heal against rows that bypassed the counter (imports/manual inserts):
+    // align to the company's max existing issue_number before incrementing, so a
+    // lagging counter can never mint a duplicate identifier (issues_identifier_idx)
+    // and wedge every future issue creation behind a rolling-back 500.
     const [company] = await dbOrTx
       .update(companies)
-      .set({ issueCounter: sql`${companies.issueCounter} + 1` })
+      .set({
+        issueCounter: sql`GREATEST(
+          ${companies.issueCounter},
+          (SELECT COALESCE(MAX(${issues.issueNumber}), 0) FROM ${issues} WHERE ${issues.companyId} = ${companies.id})
+        ) + 1`,
+      })
       .where(eq(companies.id, companyId))
       .returning({ issueCounter: companies.issueCounter, issuePrefix: companies.issuePrefix });
 

@@ -168,6 +168,10 @@ Inline secret migration command:
 ```sh
 pnpm secrets:migrate-inline-env --apply
 ```
+## Workflow tool progress (0102)
+
+`tool_execution_heartbeats` stores company-scoped invocation identity, a frozen policy, stage/counter values, optional workflow attempt bindings, and first-wins terminal evidence for opt-in builtin/HTTP tool progress. The runtime uses row locks and the DB clock for expiry; state changes and `tool_progress.*` activity entries commit together. HTTP capabilities are stored only as `token_hash`, excluded from reader DTOs and diagnostic queries. Progress is not workflow completion or proof of dispatch. Migration `0102_tool_execution_heartbeats.sql` adds this table and its indexes; do not rebaseline historical migration metadata. See the [tool progress runbook](./runbooks/tool-progress.md#diagnose-without-reading-secrets) for company-filtered queries and rollback boundaries.
+
 ## Workflow step-status provenance (observability)
 
 `workflow_transition_events` rows with `event_type='workflow_step_status_transition'`, `layer='workflow_sync'`, and `reason_code=<caller source>` are appended whenever a `workflow_step_runs.status` physically changes to a terminal value (`completed`/`failed`/`skipped`). The recorder is savepoint-isolated so an observability insert failure can never roll back the authoritative transaction. Idempotency key: `wf-step-status:<stepRunId>:<toStatus>:<statusTransitionVersion>` (the trigger-maintained `workflow_step_runs.status_transition_version` monotonic column dedupes concurrent/different-source observers to exactly one row per physical transition). The originating caller source is threaded into the first mutation/sync (e.g. `issues_service`, `plugin_host`, `heartbeat_promotion`, `workflow_retry`). See `doc/runbooks/workflow-step-status-provenance.md` for the attribution query. These rows are audit/observability only and are never execution authority.

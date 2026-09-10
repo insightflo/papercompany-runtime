@@ -239,6 +239,10 @@ This is the full adapter contract. `invoke` starts the agent, `status` lets pape
 - What the agent does during its cycle
 - Whether the agent is task-scoped, time-windowed, or continuous
 
+### Workflow tool real-progress deadlines
+
+Builtin and HTTP workflow tools may opt into versioned, measured progress counters with a frozen DB policy, idle deadline, and immutable total deadline. Progress does not authorize completion or downstream execution. Opaque tools remain fixed-timeout; MCP and plugin dispatch are unchanged. See [V1 workflow tool contract](./SPEC-implementation.md#116-workflow-tool-adapters) and the [producer/operations runbook](./runbooks/tool-progress.md).
+
 ### Pause Behavior
 
 When the board (or system) pauses an agent:
