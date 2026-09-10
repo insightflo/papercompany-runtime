@@ -473,5 +473,18 @@ export {
   type ListPluginState,
 } from "./plugin.js";
 
-export { humanReviewEvidenceRefSchema, humanReviewPacketSchema, readHumanReviewPacket, type HumanReviewPacketInput } from "./human-review.js";
+export {
+  humanReviewEvidenceRefSchema,
+  humanReviewPacketSchema,
+  readHumanReviewPacket,
+  type HumanReviewPacketInput,
+} from "./human-review.js";
+
+export {
+  resumeRequestSchema,
+  type ResumeRequestBody,
+  resumeBlockerCodes,
+  resumeBlockerCodeSchema,
+  type ResumeBlockerCode,
+} from "./workflow-resume.js";
 export { toolProgressPolicySchema, toolProgressEventSchema, type ToolProgressPolicy, type ToolProgressEvent } from "./tool-progress.js";

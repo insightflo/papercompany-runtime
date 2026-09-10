@@ -13,7 +13,8 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, isNull, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
-import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import type { SourceIssueNativeResumeOutcome } from "./source-issue-native-resume.js";
 import { validateOwnerDecisionComment } from "./source-issue-cap-override-authority.js";
@@ -79,7 +80,9 @@ export async function applyOwnerCapOverrideRetry(db: Db, input: { companyId: str
   if (!run || run.status !== "failed") return report({ kind: "report_only", reason: "cap_override_under_cap", workflowRunId: stepRun.workflowRunId, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, stepRun.workflowRunId, stepRun.id, stepRun.stepId);
   if (stepRun.status !== "completed") return report({ kind: "report_only", reason: "cap_override_under_cap", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, run.id, stepRun.id, stepRun.stepId);
   const [definition] = await db.select().from(workflowDefinitions).where(and(eq(workflowDefinitions.id, run.workflowId), eq(workflowDefinitions.companyId, companyId))).limit(1);
-  const steps: WorkflowStep[] = definition ? buildWorkflowExecutionSteps(definition) : [];
+  // [task5a2b] producer 그래프는 frozen snapshot 에서만 읽는다(실시간 편집이 cap/backedge 권한을 못 바꾼다).
+  //   corrupt/missing snapshot 은 422 로 전파 — source state/CAS/audit mutation 전 단계.
+  const steps: WorkflowStep[] = definition ? (await loadExecutionDefinition(db, run.id, { requireHistorical: false })).steps : [];
   const producerStep = steps.find((s) => s.id === stepRun.stepId) ?? null;
   if (!producerStep || !definition) return report({ kind: "report_only", reason: "cap_override_no_back_edge", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, run.id, stepRun.id, stepRun.stepId);
 

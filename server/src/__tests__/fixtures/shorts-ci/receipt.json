@@ -1,0 +1,42 @@
+{
+  "claim_id": "77777777-7777-4777-8777-777777777777",
+  "clips": [
+    {
+      "file_sha256": "cadf3f649a46ba73d12dbabe58f8a0610066bca800ac5b5a4092ecb8beea7186",
+      "frame": 1,
+      "path": "/repo/shots/sc001/frame.png",
+      "source_object": "shorts/runs/44444444-4444-4444-8444-444444444444/frames/0001.png",
+      "stored_object": "clips/frames/0001.png",
+      "stored_sha256": "cadf3f649a46ba73d12dbabe58f8a0610066bca800ac5b5a4092ecb8beea7186"
+    },
+    {
+      "file_sha256": "aad5dd23a1fa63db9aef8b6fa40b114e39ba3236cff975db97703c901a6aff81",
+      "frame": 2,
+      "path": "/repo/shots/sc002/frame.png",
+      "source_object": "shorts/runs/44444444-4444-4444-8444-444444444444/frames/0002.png",
+      "stored_object": "clips/frames/0002.png",
+      "stored_sha256": "aad5dd23a1fa63db9aef8b6fa40b114e39ba3236cff975db97703c901a6aff81"
+    }
+  ],
+  "credits": [
+    {
+      "amount": 5,
+      "event_id": "ev-local-sketch-0001",
+      "evidence_record": "ledger-ev-local-sketch-0001"
+    }
+  ],
+  "mode": "local-sketch",
+  "schema": "shorts.local-reuse-receipt.v1",
+  "scope": {
+    "attempt": 1,
+    "company_id": "22222222-2222-4222-8222-222222222222",
+    "execution_generation": 2,
+    "issue_id": "66666666-6666-4666-8666-666666666666",
+    "job_id": "11111111-1111-4111-8111-111111111111",
+    "mission_id": "33333333-3333-4333-8333-333333333333",
+    "spec_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "step_id": "flow-clips",
+    "step_run_id": "55555555-5555-4555-8555-555555555555",
+    "workflow_run_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

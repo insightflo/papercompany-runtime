@@ -1,31 +1,11 @@
-/**
- * [purpose] Resolve IF condition sources to parsed JSON roots, scoped to the current
- *   company + workflow run and restricted to forward-ancestor producer steps whose
- *   current completed attempt produced the artifact. Reuses the canonical local-file
- *   path resolver and the existing workflowStepRuns↔issue work-product join, then reads
- *   a bounded JSON file without logging its contents.
- * [safety] Fail-closed: a source step that is not a forward ancestor, a foreign run,
- *   an archived product, a stale prior-attempt artifact, an ambiguous equal-rank
- *   duplicate, an oversized/growing file, or invalid UTF-8/JSON throws — missing data
- *   must never silently route a run to completion. No raw work-product content is logged.
- * [links] Consumed by control-node-executor.ts. Depends on work-products.ts (path resolver),
- *   control-flow/types (ConditionalEdge), and the shared condition contract.
- */
-import { open as fsOpen } from "node:fs/promises";
-import { and, desc, eq, not } from "drizzle-orm";
+/** Company/run scoped IF sources: forward ancestors, current producer, bounded same-byte JSON. */
 import type { Db } from "@paperclipai/db";
-import { issueWorkProducts, workflowStepRuns } from "@paperclipai/db";
 import type { WorkflowConditionSource, WorkflowToolJsonSource } from "@paperclipai/shared";
 import type { ConditionalEdge } from "./types.js";
-import { resolveWorkProductLocalFilePath } from "../../work-products.js";
-import { secretService } from "../../secrets.js";
-import { WorkProductConditionWaitableError } from "./waitable-condition-error.js";
-
-export const WORKFLOW_IF_CONDITION_ERROR_PREFIX = "Workflow IF condition failed:";
-const ERROR_PREFIX = WORKFLOW_IF_CONDITION_ERROR_PREFIX;
-const MAX_CONDITION_SOURCE_BYTES = 1024 * 1024; // 1 MiB hard cap.
-const READ_CHUNK_SIZE = Math.min(64 * 1024, MAX_CONDITION_SOURCE_BYTES);
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+import { readBoundedJsonFile, workflowConditionFailure as fail } from "./condition-source-file.js";
+import { selectAttemptWorkProduct, type CurrentWorkProductCandidate } from "./condition-source-candidate.js";
+export { WORKFLOW_IF_CONDITION_ERROR_PREFIX, workflowConditionFailure } from "./condition-source-file.js";
+export type { CurrentWorkProductCandidate } from "./condition-source-candidate.js";
 
 export type ConditionResolverStep = {
   id: string;
@@ -33,15 +13,6 @@ export type ConditionResolverStep = {
   dependsOn?: string[];
   conditionalDependencies?: ConditionalEdge[];
 };
-
-function fail(message: string): never {
-  throw new Error(`${ERROR_PREFIX} ${message}`);
-}
-
-/** Builds the fail-closed error every IF condition failure must carry. */
-export function workflowConditionFailure(message: string): never {
-  fail(message);
-}
 
 /** Stable internal key for a source so the executor can look up the resolved root. */
 export function workflowConditionSourceKey(source: WorkflowConditionSource): string {
@@ -98,67 +69,7 @@ function collectForwardAncestors(startId: string, steps: ReadonlyArray<Condition
   return ancestors;
 }
 
-/**
- * Reads up to MAX_CONDITION_SOURCE_BYTES using position-based chunked reads (handles
- * short reads), rejects growth beyond the cap observed after the initial stat, validates
- * UTF-8 fatally, and parses JSON. Never logs file contents.
- */
-async function readBoundedJsonFile(filePath: string, title: string): Promise<unknown> {
-  let handle: Awaited<ReturnType<typeof fsOpen>> | null = null;
-  try {
-    handle = await fsOpen(filePath, "r");
-    const stat = await handle.stat();
-    if (stat.size > MAX_CONDITION_SOURCE_BYTES) {
-      fail(`work product "${title}" (${stat.size} bytes) exceeds the ${MAX_CONDITION_SOURCE_BYTES}-byte limit`);
-    }
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for (;;) {
-      const buf = Buffer.alloc(READ_CHUNK_SIZE);
-      const { bytesRead } = await handle.read(buf, 0, READ_CHUNK_SIZE, total);
-      if (bytesRead === 0) break; // EOF
-      total += bytesRead;
-      if (total > MAX_CONDITION_SOURCE_BYTES) {
-        fail(`work product "${title}" grew beyond the ${MAX_CONDITION_SOURCE_BYTES}-byte limit during read`);
-      }
-      chunks.push(buf.subarray(0, bytesRead));
-    }
-    const buffer = Buffer.concat(chunks);
-    let text: string;
-    try {
-      text = UTF8_DECODER.decode(buffer);
-    } catch {
-      fail(`work product "${title}" is not valid UTF-8`);
-    }
-    try {
-      return JSON.parse(text);
-    } catch {
-      fail(`work product "${title}" is not valid JSON`);
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith(ERROR_PREFIX)) throw err;
-    fail(`work product "${title}" could not be read`);
-  } finally {
-    await handle?.close().catch(() => {});
-  }
-}
-
-type CandidateRow = {
-  id: string;
-  isPrimary: boolean;
-  updatedAt: Date;
-  path: string;
-};
-
-export type CurrentWorkProductCandidate = { path: string; updatedAt: Date };
-
-/**
- * Resolves the single current-attempt local work-product candidate for one
- * (stepId, title) condition source, applying the freshness/ranking rules used at
- * gate evaluation. Fail-closed: a foreign run, non-ancestor step, archived product,
- * stale prior-attempt artifact, or ambiguous equal-rank duplicate throws.
- * Shared by IF evaluation and resume-time verdict staleness checks.
- */
+/** Shared by IF evaluation and resume-time verdict staleness checks. */
 export async function selectCurrentWorkProductCandidate(input: {
   db: Db;
   run: { id: string; companyId: string };
@@ -167,10 +78,9 @@ export async function selectCurrentWorkProductCandidate(input: {
   stepId: string;
   title: string;
 }): Promise<CurrentWorkProductCandidate> {
-  const { stepId, title } = input;
+  const { stepId } = input;
   const knownStepIds = new Set(input.workflowSteps.map((step) => step.id));
   const ancestors = collectForwardAncestors(input.ifStepId, input.workflowSteps);
-
   if (stepId === input.ifStepId) {
     fail(`IF step "${input.ifStepId}" cannot read its own output as a condition source`);
   }
@@ -180,88 +90,10 @@ export async function selectCurrentWorkProductCandidate(input: {
   if (!ancestors.has(stepId)) {
     fail(`condition source step "${stepId}" is not a forward ancestor of IF step "${input.ifStepId}"`);
   }
-
-  const rows = await input.db
-    .select({
-      startedAt: workflowStepRuns.startedAt,
-      id: issueWorkProducts.id,
-      isPrimary: issueWorkProducts.isPrimary,
-      updatedAt: issueWorkProducts.updatedAt,
-      provider: issueWorkProducts.provider,
-      metadata: issueWorkProducts.metadata,
-      url: issueWorkProducts.url,
-    })
-    .from(workflowStepRuns)
-    .innerJoin(issueWorkProducts, eq(workflowStepRuns.issueId, issueWorkProducts.issueId))
-    .where(and(
-      eq(workflowStepRuns.workflowRunId, input.run.id),
-      eq(workflowStepRuns.stepId, stepId),
-      eq(workflowStepRuns.status, "completed"),
-      eq(issueWorkProducts.companyId, input.run.companyId),
-      eq(issueWorkProducts.title, title),
-      not(eq(issueWorkProducts.status, "archived")),
-    ))
-    .orderBy(
-      desc(issueWorkProducts.isPrimary),
-      desc(issueWorkProducts.updatedAt),
-      desc(issueWorkProducts.id),
-    );
-
-  if (rows.length === 0) {
-    throw new WorkProductConditionWaitableError(
-      `${ERROR_PREFIX} no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`,
-      { stepId, title },
-    );
-  }
-  const attemptStartedAt = rows[0]!.startedAt;
-  if (!attemptStartedAt) {
-    // A completed producer without an attempt start time cannot establish artifact
-    // freshness; fail closed rather than accept every (possibly stale) artifact.
-    fail(`producer step "${stepId}" is completed but has no attempt start time; cannot establish work-product freshness`);
-  }
-
-  // Keep only current-attempt, local, path-resolvable candidates. Prior-attempt artifacts
-  // (updatedAt before the current completed attempt started) are stale and ignored.
-  const candidates: CandidateRow[] = [];
-  for (const row of rows) {
-    if (row.provider !== "local" && row.provider !== "local_file") continue;
-    if (row.updatedAt.getTime() < attemptStartedAt.getTime()) continue;
-    const localPath = resolveWorkProductLocalFilePath({ metadata: row.metadata, url: row.url });
-    if (!localPath) continue;
-    candidates.push({ id: row.id, isPrimary: row.isPrimary, updatedAt: row.updatedAt, path: localPath });
-  }
-
-  if (candidates.length === 0) {
-    throw new WorkProductConditionWaitableError(
-      `${ERROR_PREFIX} no completed-attempt local work product "${title}" found for ancestor step "${stepId}"`,
-      { stepId, title },
-    );
-  }
-
-  candidates.sort((a, b) => (
-    Number(b.isPrimary) - Number(a.isPrimary)
-    || b.updatedAt.getTime() - a.updatedAt.getTime()
-    || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
-  ));
-  const chosen = candidates[0]!;
-  const tiedAtTop = candidates.some(
-    (row, index) => index > 0
-      && row.isPrimary === chosen.isPrimary
-      && row.updatedAt.getTime() === chosen.updatedAt.getTime(),
-  );
-  if (tiedAtTop) {
-    fail(`ambiguous work product "${title}" for step "${stepId}": multiple equally ranked current candidates`);
-  }
-
-  return { path: chosen.path, updatedAt: chosen.updatedAt };
+  return selectAttemptWorkProduct(input);
 }
 
-/**
- * Resolves each condition source to its parsed JSON root. `work_product_json` sources
- * are read from the server-local work-product file; `tool_json` sources are measured
- * live through the injected tool executor (server-side execution). Returns a Map keyed
- * by workflowConditionSourceKey(source).
- */
+/** Resolves work-product JSON locally and tool JSON through the injected executor. */
 export async function resolveWorkflowConditionSources(input: {
   db: Db;
   run: { id: string; companyId: string };
@@ -280,18 +112,11 @@ export async function resolveWorkflowConditionSources(input: {
     const pairKey = `${source.stepId}\u0000${source.title}`;
     if (!uniquePairs.has(pairKey)) uniquePairs.set(pairKey, { stepId: source.stepId, title: source.title });
   }
-
   for (const { stepId, title } of uniquePairs.values()) {
     const chosen = await selectCurrentWorkProductCandidate({
-      db: input.db,
-      run: input.run,
-      ifStepId: input.ifStep.id,
-      workflowSteps: input.workflowSteps,
-      stepId,
-      title,
+      db: input.db, run: input.run, ifStepId: input.ifStep.id, workflowSteps: input.workflowSteps, stepId, title,
     });
-    const parsed = await readBoundedJsonFile(chosen.path, title);
-
+    const parsed = await readBoundedJsonFile(chosen.path, title, chosen.expectedHash);
     for (const source of input.sources) {
       if (source.kind !== "tool_json" && source.stepId === stepId && source.title === title) {
         out.set(workflowConditionSourceKey(source), parsed);
@@ -299,8 +124,7 @@ export async function resolveWorkflowConditionSources(input: {
     }
   }
 
-  // Group tool sources by (toolName, canonical parameters): equal groups execute once,
-  // then the measured root is stored under every member's own key (paths may differ).
+  // Equal tool groups execute once; store roots under every member's own key (paths may differ).
   const toolGroups = new Map<string, WorkflowToolJsonSource[]>();
   for (const source of input.sources) {
     if (source.kind !== "tool_json") continue;
@@ -309,21 +133,15 @@ export async function resolveWorkflowConditionSources(input: {
     if (group) group.push(source);
     else toolGroups.set(groupKey, [source]);
   }
-
   for (const groupSources of toolGroups.values()) {
     const representative = groupSources[0]!;
     if (!ancestors.has(representative.stepId)) {
       fail(`condition source step "${representative.stepId}" is not a forward ancestor of IF step "${input.ifStep.id}"`);
     }
     const executor = input.resolveToolJsonSource;
-    if (!executor) {
-      fail(`tool source "${representative.toolName}" cannot be executed in this context`);
-    }
+    if (!executor) fail(`tool source "${representative.toolName}" cannot be executed in this context`);
     const data = await executor(representative);
-    for (const source of groupSources) {
-      out.set(workflowConditionSourceKey(source), data);
-    }
+    for (const source of groupSources) out.set(workflowConditionSourceKey(source), data);
   }
-
   return out;
 }

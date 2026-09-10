@@ -19,6 +19,7 @@ import {
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import { resolveProducerStepIdFromDag } from "./workflow-qa-rework.js";
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 import { recordWorkflowStepStatusTransition } from "../workflow/workflow-sync-source.js";
 
 export const RECOVERY_CLOSEOUT_MARKER_KEY = "recoveryCloseout";
@@ -98,8 +99,10 @@ async function resolveProducer(db: Db, input: RecoveryCloseoutInput): Promise<Pr
 
   if (!qaStepRow) return null;
   const workflowRunId = qaStepRow.run.id;
-  const steps = qaStepRow.definition.stepsJson as Parameters<typeof resolveProducerStepIdFromDag>[1] | null;
-  if (!steps) return null;
+  // 캡처된 실행정의(loader 검증+해시 대조, corrupt/미인증 snapshot 은 422)를 사용한다.
+  // live stepsJson 재판단/정규화 없음 — 어떤 쓰기보다 먼저 로드한다.
+  const execution = await loadExecutionDefinition(db, workflowRunId, { requireHistorical: false });
+  const steps = execution.steps;
   const producerStepId = resolveProducerStepIdFromDag(qaStepRow.stepRun.stepId, steps);
   if (!producerStepId) return null;
   const producerStepRow = await db

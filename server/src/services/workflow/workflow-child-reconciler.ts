@@ -10,7 +10,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepInvocations } from "@paperclipai/db";
-import { normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { isWorkflowChildStep } from "./workflow-child-guards.js";
 import {
   isAdopted,
@@ -140,7 +140,7 @@ async function actOnRefreshedRow(
       if (!row.definition) {
         return [{ stepRunId: row.stepRun.id, action: "skipped", reason: "workflow definition no longer available" }];
       }
-      const steps = normalizeWorkflowStepsForExecution(row.definition.stepsJson);
+      const steps = (await loadExecutionDefinition(db, row.stepRun.workflowRunId, { requireHistorical: false })).steps;
       const step = steps.find((candidateStep) => candidateStep.id === row.stepRun.stepId);
       if (!step || !isWorkflowChildStep(step)) {
         return [{ stepRunId: row.stepRun.id, action: "skipped", code: "not_workflow_type_step", reason: "not a workflow-type step" }];

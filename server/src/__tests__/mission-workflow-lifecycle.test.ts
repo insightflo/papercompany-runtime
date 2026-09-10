@@ -3,7 +3,6 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
-  agentWakeupRequests,
   agents,
   companies,
   createDb,
@@ -119,6 +118,7 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
     });
 
     const result = await executeWorkflowRun(db, workflowRunId);
+    await Promise.all(heartbeatWakeup.mock.results.map((result) => result.value));
     const [storedMission] = await db
       .select({ status: missions.status, startedAt: missions.startedAt, completedAt: missions.completedAt })
       .from(missions)
@@ -140,10 +140,6 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       .select({ stepId: workflowStepRuns.stepId, issueId: workflowStepRuns.issueId, status: workflowStepRuns.status })
       .from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, workflowRunId));
-    const wakeups = await db
-      .select({ agentId: agentWakeupRequests.agentId, reason: agentWakeupRequests.reason, issueId: agentWakeupRequests.issueId })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.companyId, companyId));
 
     expect(result.status).toBe("running");
     expect(storedRun?.status).toBe("running");
@@ -152,12 +148,16 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       startedAt: storedRun?.startedAt,
       completedAt: null,
     });
-    // Durable launch evidence: first agent step is issued and a same-company assignee wakeup exists.
-    // (heartbeatService.wakeup may be mocked or go through durable queue paths; assert durable records.)
     expect(stepRuns).toEqual(expect.arrayContaining([
       expect.objectContaining({ stepId: "work", issueId: expect.any(String) }),
     ]));
-    expect(wakeups.some((row) => row.agentId === agentId && row.issueId != null)).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1); // dispatch proven at MOCKED boundary; vi.fn writes no durable row
+    expect(heartbeatWakeup).toHaveBeenCalledWith(agentId, expect.objectContaining({ reason: "issue_assigned",
+      payload: expect.objectContaining({
+        issueId: stepRuns.find((row) => row.stepId === "work")!.issueId,
+        workflowRunId, workflowDefinitionId: workflowId, workflowStepId: "work",
+      }),
+    }));
     expect(lifecycleActivities).toHaveLength(1);
     expect(lifecycleActivities[0]).toMatchObject({
       companyId,

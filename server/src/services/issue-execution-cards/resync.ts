@@ -1,8 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import type { Db, issues } from "@paperclipai/db";
-import { activityLog, workflowDefinitions } from "@paperclipai/db";
+import { activityLog, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import { getIssueExecutionCard } from "./store.js";
 import { upsertWorkflowIssueExecutionCard } from "./workflow-upsert.js";
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 
 type IssueRow = Pick<
   typeof issues.$inferSelect,
@@ -15,12 +16,6 @@ type ActorContext = {
   agentId?: string | null;
   runId?: string | null;
 };
-
-type WorkflowCardStep = {
-  id: string;
-  dependencies: string[];
-  graphWorkProductRequired?: boolean;
-} & Record<string, unknown>;
 
 export async function resyncIssueExecutionCardAfterIssueUpdate(input: {
   db: Db;
@@ -37,15 +32,26 @@ export async function resyncIssueExecutionCardAfterIssueUpdate(input: {
   const stepId = existingCard?.cardJson.workflow?.stepId ?? null;
   if (!existingCard || !workflowRunId || !workflowDefinitionId || !stepId) return null;
 
-  const [definition] = await input.db
-    .select({ stepsJson: workflowDefinitions.stepsJson })
-    .from(workflowDefinitions)
+  // [Task5a2c] definition 단독 조회 대신 run-definition identity join 으로 scope 를 확정한다:
+  //   run.id === workflowRunId, run.companyId === issue.companyId, run.workflowId ===
+  //   workflowDefinitionId, definition.id === workflowDefinitionId, definition.companyId ===
+  //   issue.companyId. 한 run 을 로드하고 다른 definition 정체성으로 카드를 쓰는 오류를 원천
+  //   차단하고, malformed legacy card 참조는 더 이상 resync 되지 않는다.
+  const [run] = await input.db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(
-      eq(workflowDefinitions.companyId, input.issue.companyId),
+      eq(workflowRuns.id, workflowRunId),
+      eq(workflowRuns.companyId, input.issue.companyId),
+      eq(workflowRuns.workflowId, workflowDefinitionId),
       eq(workflowDefinitions.id, workflowDefinitionId),
+      eq(workflowDefinitions.companyId, input.issue.companyId),
     ))
     .limit(1);
-  const step = readWorkflowCardStep(definition?.stepsJson, stepId);
+  if (!run) return null;
+  const execution = await loadExecutionDefinition(input.db, run.id, { requireHistorical: false });
+  const step = execution.steps.find((candidate) => candidate.id === stepId) ?? null;
   if (!step) return null;
 
   const nextCard = await upsertWorkflowIssueExecutionCard({
@@ -84,29 +90,6 @@ export async function resyncIssueExecutionCardAfterIssueUpdate(input: {
     },
   });
   return { previousHash: existingCard.contentHash, nextHash: nextCard.contentHash };
-}
-
-function readWorkflowCardStep(rawSteps: unknown, stepId: string): WorkflowCardStep | null {
-  if (!Array.isArray(rawSteps)) return null;
-  for (const rawStep of rawSteps) {
-    if (!isRecord(rawStep) || rawStep.id !== stepId) continue;
-    return {
-      ...rawStep,
-      id: stepId,
-      dependencies: readStringArray(rawStep.dependencies),
-      graphWorkProductRequired: rawStep.graphWorkProductRequired === true,
-    };
-  }
-  return null;
-}
-
-function readStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function findQaRubricPath(refs: Array<{ type: string; path?: string }>): string | null {

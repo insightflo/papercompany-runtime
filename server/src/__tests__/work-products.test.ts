@@ -37,6 +37,21 @@ function createWorkProductRow(overrides: Partial<Record<string, unknown>> = {}) 
   };
 }
 
+/**
+ * Ordinary-issue identity query mock for createForIssue: the resume fence
+ * (assertIssueResumeScopeIdentity) runs select(fields).from(workflowStepRuns)
+ * .innerJoin(workflowRuns, ...).where(...) on the service db and must resolve to no rows
+ * for an ordinary issue. The mock asserts the guard queried the service db; the production
+ * guard itself is neither replaced nor weakened. Transaction behavior stays explicit.
+ */
+function ordinaryIssueIdentityDb(transaction: ReturnType<typeof vi.fn>) {
+  const where = vi.fn(async () => [] as unknown[]);
+  const innerJoin = vi.fn(() => ({ where }));
+  const from = vi.fn(() => ({ innerJoin }));
+  const select = vi.fn(() => ({ from }));
+  return { db: { select, transaction } as any, select, from, innerJoin, where };
+}
+
 describe("workProductService", () => {
   it("resolves local file work products to their metadata path", () => {
     const target = resolveWorkProductOpenTarget(createWorkProductRow({
@@ -127,8 +142,9 @@ describe("workProductService", () => {
       insert: txInsert,
     };
     const transaction = vi.fn(async (callback: (input: typeof tx) => Promise<unknown>) => await callback(tx));
+    const guard = ordinaryIssueIdentityDb(transaction);
 
-    const svc = workProductService({ transaction } as any);
+    const svc = workProductService(guard.db);
     const result = await svc.createForIssue("issue-1", "company-1", {
       type: "pull_request",
       provider: "github",
@@ -138,6 +154,10 @@ describe("workProductService", () => {
       isPrimary: true,
     });
 
+    expect(guard.select).toHaveBeenCalledTimes(1);
+    expect(guard.from).toHaveBeenCalledTimes(1);
+    expect(guard.innerJoin).toHaveBeenCalledTimes(1);
+    expect(guard.where).toHaveBeenCalledTimes(1);
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(txUpdate).toHaveBeenCalledTimes(1);
     expect(txInsert).toHaveBeenCalledTimes(1);
@@ -186,7 +206,8 @@ describe("workProductService", () => {
         insert: txInsert,
       };
       const transaction = vi.fn(async (callback: (input: typeof tx) => Promise<unknown>) => await callback(tx));
-      const svc = workProductService({ transaction } as any);
+      const guard = ordinaryIssueIdentityDb(transaction);
+      const svc = workProductService(guard.db);
 
       const result = await svc.createForIssue("issue-1", "company-1", {
         type: "document",
@@ -199,6 +220,8 @@ describe("workProductService", () => {
       });
 
       expect(result?.metadata).toEqual({ path: reportPath });
+      expect(guard.select).toHaveBeenCalledTimes(1);
+      expect(guard.where).toHaveBeenCalledTimes(1);
       expect(transaction).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });

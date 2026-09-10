@@ -10,11 +10,10 @@ import {
 import { and, eq, inArray, lt } from "drizzle-orm";
 import { classifyStepActivation } from "./control-flow/edge-condition.js";
 import {
-  buildWorkflowExecutionSteps,
   getWorkflowLaunchSteps,
-  isDynamicOwnerPlanWorkflowDefinition,
   wakeExistingWorkflowStepIssue,
 } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { buildPredFactsMap, buildStepRunMap } from "./reconciler-edge-helpers.js";
 import type { ReconciliationResult } from "./reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
@@ -49,15 +48,13 @@ export async function reconcileRunnableWorkflowStepWakeups(
         .then((rows) => rows[0] ?? null);
       if (!definition) continue;
 
-      const steps = buildWorkflowExecutionSteps(definition);
+      // [task5a2b] frozen graph: wake 가능성/launch 제한은 snapshot 이 결정한다. corrupt/missing 은
+      //   어떤 wake 도 유발하지 않으며 기존 per-run catch 가 action:'failed' 로 보고한다.
+      const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
+      const steps = execution.steps;
       const stepById = new Map(steps.map((step) => [step.id, step]));
       const predsByStepId = buildPredFactsMap(steps, buildStepRunMap(runSteps));
-      const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition({
-        name: definition.name,
-        executionMode: definition.executionMode,
-        dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
-        steps,
-      });
+      const dynamicOwnerPlan = execution.executionMode === "dynamic_owner_plan";
       const launchStepIds = dynamicOwnerPlan
         ? new Set(getWorkflowLaunchSteps(steps, { dynamicOwnerPlan }).map((step) => step.id))
         : undefined;

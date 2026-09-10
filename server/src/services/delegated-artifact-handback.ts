@@ -7,7 +7,7 @@ import {
 } from "./issue-assignment-wakeup.js";
 import { findExistingWorkflowResumeWake } from "./workflow-resume-wake.js";
 import { evaluateSemanticStructuralReadiness } from "./workflow/control-flow/structural-semantic-readiness.js";
-import type { WorkflowStep } from "./workflow/dag-engine.js";
+import { loadExecutionDefinition } from "./workflow/execution-definition.js";
 import {
   hasExistingHandbackDispatch,
   loadActiveChildWorkProduct,
@@ -129,9 +129,13 @@ export async function handleDelegatedArtifactHandback(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!workflowContext) return { status: "skipped", reason: "parent_workflow_step_run_not_found" };
-  const workflowSteps = Array.isArray(workflowContext.definition.stepsJson)
-    ? workflowContext.definition.stepsJson as WorkflowStep[]
-    : [];
+  // [Task5a2c] parent step / structural-gate readiness are evaluated against the frozen
+  //   execution definition only. Removing the gate (or editing the parent step) in the live
+  //   graph cannot bypass the frozen structural-PASS requirement, and a missing/corrupt
+  //   expected snapshot throws 422 before any comment/activity/wakeup write.
+  const workflowSteps = (
+    await loadExecutionDefinition(input.db, workflowContext.run.id, { requireHistorical: false })
+  ).steps;
   const parentStep = workflowSteps.find((step) => step.id === parentStepRun.stepId);
   if (!parentStep) return { status: "skipped", reason: "parent_workflow_step_run_not_found" };
   const structuralReadiness = await evaluateSemanticStructuralReadiness({

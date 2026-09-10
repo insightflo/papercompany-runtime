@@ -14,6 +14,8 @@ import {
 import { notFound } from "../../errors.js";
 import { listMissionExecutionSourceSnapshots, type MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { listMissionGovernanceThread, type MissionGovernanceThread } from "./governance-thread.js";
+import { loadExecutionDefinition } from "../workflow/execution-definition.js";
+import { projectExecutionDefinition } from "../workflow/execution-definition-view.js";
 import { loadMissionRuntimeSnapshot, type MissionRuntimeSnapshot } from "./mission-runtime-snapshot.js";
 // live wakeup 상태 집합은 unblock handback guard 와 단일 source-of-truth 로 공유한다(드리프트 방지).
 import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
@@ -122,7 +124,7 @@ export async function buildMissionSupervisionContext(
     if (row.issueId) liveWakeupIssueIds.add(row.issueId);
   }
 
-  const stepRows = await db
+  const rawStepRows = await db
     .select({
       stepRun: workflowStepRuns,
       run: workflowRuns,
@@ -133,6 +135,18 @@ export async function buildMissionSupervisionContext(
     .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
     .where(and(eq(workflowRuns.companyId, mission.companyId), eq(workflowRuns.missionId, mission.id)))
     .orderBy(asc(workflowRuns.createdAt), asc(workflowStepRuns.stepId));
+  // 각 run 의 definition 을 캡처된 실행정의(loader 검증+해시 대조, legacy 만 current fallback)로 1회 투영한다.
+  // corrupt/미인증 snapshot 은 여기서 422 로 실패하고, live rows 재정규화/합성은 없다.
+  const projectedDefinitionByRunId = new Map<string, typeof rawStepRows[number]["definition"]>();
+  for (const row of rawStepRows) {
+    if (projectedDefinitionByRunId.has(row.run.id)) continue;
+    const execution = await loadExecutionDefinition(db, row.run.id, { requireHistorical: false });
+    projectedDefinitionByRunId.set(row.run.id, projectExecutionDefinition(row.definition, execution));
+  }
+  const stepRows = rawStepRows.map((row) => ({
+    ...row,
+    definition: projectedDefinitionByRunId.get(row.run.id)!,
+  }));
   const stepRowsByIssueId = new Map<string, MissionSupervisionWorkflowStepRow[]>();
   for (const row of stepRows) {
     if (!row.stepRun.issueId) continue;

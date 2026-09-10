@@ -2,17 +2,10 @@ import { randomUUID } from "node:crypto";
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
-import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
-import {
-  findAcceptedWakeProof,
-  hasCurrentCapOverrideAuthority,
-  validateOwnerDecisionComment,
-} from "./source-issue-cap-override-authority.js";
-import {
-  casRestoreCapOverrideSnapshot,
-  parseCapOverridePriorSnapshot,
-  restoreCapOverrideSnapshotInTransaction,
-} from "./source-issue-cap-override-snapshot.js";
+import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
+import { findAcceptedWakeProof, hasCurrentCapOverrideAuthority, validateOwnerDecisionComment } from "./source-issue-cap-override-authority.js";
+import { casRestoreCapOverrideSnapshot, parseCapOverridePriorSnapshot, restoreCapOverrideSnapshotInTransaction } from "./source-issue-cap-override-snapshot.js";
 import { enqueueCapOverrideWake } from "./source-issue-cap-override-wake.js";
 import type { SourceIssueNativeResumeOutcome } from "./source-issue-native-resume.js";
 
@@ -65,6 +58,9 @@ export async function dispatchCapOverrideWake(
     dispatchStartedAt: new Date().toISOString(),
   };
   const observedStatus = str(payload.status) ?? "pending";
+  // [task5a2b] preclaim 검증: audit lease UPDATE 전에 expected snapshot 을 1회 검증한다.
+  //   corrupt/missing 은 422 로 전파되어 claim/audit/run/step/issue/wake 어디도 건드리지 않는다.
+  if (runId) await loadExecutionDefinition(db, runId, { requireHistorical: false });
   const claimWhere = observedStatus === "dispatching"
     ? and(
         eq(workflowTransitionEvents.id, ctx.auditId),
@@ -165,7 +161,9 @@ export async function dispatchCapOverrideWake(
         eq(issues.id, producerIssueId),
         eq(issues.companyId, ctx.companyId),
       )).limit(1) : [];
-      const steps: WorkflowStep[] = definition ? buildWorkflowExecutionSteps(definition) : [];
+      // [task5a2b] fenced tx 안에서 1회 재검증: immutable snapshot(route: historical-or-legacy)의 steps 로
+      //   producer identity 를 확인한다. throw 시 기존 catch 경로(restore/releaseLease) 가 그대로 적용된다.
+      const steps: WorkflowStep[] = run ? (await loadExecutionDefinition(tx, run.id, { requireHistorical: false })).steps : [];
       const producerStep = steps.find((step) => step.id === (stepRun?.stepId ?? "")) ?? null;
       const forwardedAt = forwardedIssueUpdatedAt ? new Date(forwardedIssueUpdatedAt) : null;
       const fromIteration = num(payload.fromIteration);

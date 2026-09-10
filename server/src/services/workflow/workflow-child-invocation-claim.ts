@@ -27,6 +27,7 @@ import {
   isChildStartContention,
 } from "./workflow-child-start-contention.js";
 import { TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
+import { captureExecutionDefinition } from "./execution-definition.js";
 
 export type InvocationClaim =
   | { outcome: "created"; invocationId: string; childRunId: string; generation: 1 }
@@ -218,6 +219,8 @@ export async function claimChildInvocation(
       if (insertedChild !== 1) {
         throw new Error("child run CREATE lost under parent/definition lock — fail-closed");
       }
+      // Preserve atomic run-creation snapshots inside the existing fenced claim transaction.
+      await captureExecutionDefinition(tx, childRunId);
 
       // (j) construction 링크(설계 §4 row 5) — claimed/NULL → linked. 0행은 전체 클레임 롤백.
       const linked = await linkInvocationToCreatedChildRow(tx as unknown as Db, {

@@ -41,6 +41,7 @@ import {
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { badRequest, conflict, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { workflowResumeRoutes } from "./workflow-resume.js";
 import { QA_REWORK_CAP_BOOST_KEY } from "../services/workflow/control-flow/types.js";
 
 function serializeValue(value: unknown): unknown {
@@ -236,13 +237,11 @@ async function workflowDomainCall<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-function actorForActivity(req: Request) {
-  return getActorInfo(req);
-}
+const actorForActivity = getActorInfo;
 
 export function workflowRoutes(db: Db) {
   const router = Router();
-
+  router.use(workflowResumeRoutes(db));
   router.get("/companies/:companyId/workflows/overview", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

@@ -8,6 +8,7 @@
 // [authority] 내구 DB 레코드만이 권위(규칙 7/8). 모든 문장은 파라미터 바인딩 raw SQL 이다.
 import { sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { EXECUTION_DEFINITION_CREATION_MARKER_VERSION } from "./execution-definition.js";
 
 /** CREATE 형 입력 — invocation/자식 행이 아직 없는 생성 지점의 완전 바인딩(설계 §3/§4). */
 export type ChildCreateBinding = {
@@ -84,7 +85,9 @@ export async function insertChildWorkflowRunRow(
     select ${input.childRunId}::uuid, ${input.targetWorkflowId}::uuid, ${input.companyId}::uuid,
            null, 'pending', 'workflow-step', 'workflow',
            p.id, s.id, coalesce(p.root_run_id, p.id),
-           jsonb_build_object('workflowChildInputs', ${JSON.stringify(input.renderedInputs)}::jsonb),
+           jsonb_build_object(
+             'workflowChildInputs', ${JSON.stringify(input.renderedInputs)}::jsonb,
+             'executionDefinitionVersion', ${EXECUTION_DEFINITION_CREATION_MARKER_VERSION}::integer),
            ${input.now.toISOString()}::timestamptz
     from workflow_runs p
     join workflow_step_runs s on s.workflow_run_id = p.id and s.id = ${input.parentStepRunId}::uuid

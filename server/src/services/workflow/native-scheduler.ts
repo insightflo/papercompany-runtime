@@ -7,6 +7,7 @@ import {
 } from "./scheduler-candidates.js";
 import { workflowService } from "./engine.js";
 import { processQueuedWorkflowToolStepRuns, type WorkflowToolStepQueueDispatchResult } from "./dag-engine.js";
+import { dispatchAcceptedResumeWork, type ResumeDispatchResult } from "./resume/dispatcher.js";
 import {
   AGENT_FIT_REFRESH_INTERVAL_MS,
   refreshAgentFitProfiles,
@@ -15,6 +16,7 @@ import { logger as defaultLogger } from "../../middleware/logger.js";
 
 const DEFAULT_TICK_INTERVAL_MS = 60_000;
 const DEFAULT_TOOL_STEP_QUEUE_INTERVAL_MS = 10_000;
+const DEFAULT_RESUME_DISPATCH_INTERVAL_MS = 30_000;
 const DEFAULT_FIT_PROFILE_INTERVAL_MS = AGENT_FIT_REFRESH_INTERVAL_MS;
 
 export type NativeWorkflowSchedulerMode = "shadow" | "active";
@@ -36,6 +38,9 @@ export interface NativeWorkflowSchedulerState {
   lastToolStepClaimedCount: number;
   lastToolStepExecutedCount: number;
   lastToolStepFailedCount: number;
+  lastResumeClaimedCount: number;
+  lastResumeCompletedCount: number;
+  lastResumeFailedCount: number;
   fitProfileArmed: boolean;
 }
 
@@ -70,6 +75,12 @@ export interface CreateNativeWorkflowSchedulerOptions {
     db: Db,
     options?: { limit?: number; now?: Date },
   ) => Promise<WorkflowToolStepQueueDispatchResult>;
+  /** [Task6b-2] durable resume delivery dispatcher tick. default: dispatchAcceptedResumeWork. */
+  dispatchResumeWork?: (
+    db: Db,
+    options?: { now?: Date; maxItems?: number },
+  ) => Promise<ResumeDispatchResult>;
+  resumeDispatchIntervalMs?: number;
   refreshFitProfiles?: (db: Db, options?: { now?: Date }) => Promise<{ updatedCount: number; skippedFreshCount: number }>;
   /** [agent fit activity gate] 런 활동 지표(저렴한 프로브). 기본: heartbeat_runs count+max(updated_at). */
   readRunActivitySignature?: (db: Db) => Promise<string>;
@@ -96,11 +107,15 @@ export function createNativeWorkflowScheduler(
   const listCandidates = options.listCandidates ?? listDueScheduledWorkflowCandidates;
   const claimScheduledRun = options.claimScheduledRun ?? workflowService.claimScheduledRun;
   const dispatchQueuedToolSteps = options.dispatchQueuedToolSteps ?? processQueuedWorkflowToolStepRuns;
+  const dispatchResumeWork = options.dispatchResumeWork ?? dispatchAcceptedResumeWork;
+  const resumeDispatchIntervalMs = options.resumeDispatchIntervalMs ?? DEFAULT_RESUME_DISPATCH_INTERVAL_MS;
   const refreshFitProfiles = options.refreshFitProfiles ?? refreshAgentFitProfiles;
   const readRunActivitySignature = options.readRunActivitySignature ?? defaultReadRunActivitySignature;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
   let toolStepQueueInterval: ReturnType<typeof setInterval> | null = null;
+  let resumeDispatchInterval: ReturnType<typeof setInterval> | null = null;
+  let resumeDispatchTickInFlight = false;
   let fitProfileInterval: ReturnType<typeof setInterval> | null = null;
   let fitProfileTickInFlight = false;
   // [activity-driven fit scheduler] 런 활동 서명 — 런이 있으면 10분 스케줄 유지,
@@ -117,6 +132,9 @@ export function createNativeWorkflowScheduler(
   let lastToolStepClaimedCount = 0;
   let lastToolStepExecutedCount = 0;
   let lastToolStepFailedCount = 0;
+  let lastResumeClaimedCount = 0;
+  let lastResumeCompletedCount = 0;
+  let lastResumeFailedCount = 0;
 
   async function dispatchToolStepQueue(now = new Date()): Promise<WorkflowToolStepQueueDispatchResult> {
     if (options.mode !== "active") {
@@ -145,6 +163,37 @@ export function createNativeWorkflowScheduler(
       return { claimedCount: 0, executedCount: 0, failedCount: 1, skippedCount: 0 };
     } finally {
       toolStepQueueTickInFlight = false;
+    }
+  }
+
+  async function dispatchResumeWorkTick(now = new Date()): Promise<ResumeDispatchResult> {
+    const idle: ResumeDispatchResult = {
+      claimedCount: 0, acceptedCount: 0, completedCount: 0,
+      blockedCount: 0, cancelledCount: 0, failedCount: 0, skippedCount: 0,
+    };
+    if (options.mode !== "active") return idle;
+    if (resumeDispatchTickInFlight) {
+      log.warn({ mode: options.mode }, "Native workflow resume dispatch tick skipped because previous tick is still running");
+      return { ...idle, skippedCount: 1 };
+    }
+    resumeDispatchTickInFlight = true;
+    try {
+      const result = await dispatchResumeWork(options.db, { now });
+      lastResumeClaimedCount = result.claimedCount;
+      lastResumeCompletedCount = result.completedCount;
+      lastResumeFailedCount = result.failedCount;
+      return result;
+    } catch (error) {
+      lastResumeClaimedCount = 0;
+      lastResumeCompletedCount = 0;
+      lastResumeFailedCount = 1;
+      log.error({
+        mode: options.mode,
+        err: error instanceof Error ? error.message : String(error),
+      }, "Native workflow scheduler failed to dispatch accepted resume work");
+      return { ...idle, failedCount: 1 };
+    } finally {
+      resumeDispatchTickInFlight = false;
     }
   }
 
@@ -266,6 +315,7 @@ export function createNativeWorkflowScheduler(
         }
 
         toolStepQueueResult = await dispatchToolStepQueue(now);
+        const resumeResult = await dispatchResumeWorkTick(now);
 
         // [agent fit re-arm] 런 활동이 생겼는데 fit 스케줄이 꺼져 있으면 다시 켠다.
         //   (fit 틱 자신은 조용한 주기에 자기자신을 끈다 — 런이 스케줄을 켜고 끈다.)
@@ -287,6 +337,9 @@ export function createNativeWorkflowScheduler(
         lastToolStepClaimedCount = toolStepQueueResult.claimedCount;
         lastToolStepExecutedCount = toolStepQueueResult.executedCount;
         lastToolStepFailedCount = toolStepQueueResult.failedCount;
+        lastResumeClaimedCount = resumeResult.claimedCount;
+        lastResumeCompletedCount = resumeResult.completedCount;
+        lastResumeFailedCount = resumeResult.failedCount;
         log.info({
           mode: options.mode,
           candidateCount: candidates.length,
@@ -297,6 +350,9 @@ export function createNativeWorkflowScheduler(
           toolStepExecutedCount: toolStepQueueResult.executedCount,
           toolStepFailedCount: toolStepQueueResult.failedCount,
           toolStepSkippedCount: toolStepQueueResult.skippedCount,
+          resumeClaimedCount: resumeResult.claimedCount,
+          resumeCompletedCount: resumeResult.completedCount,
+          resumeFailedCount: resumeResult.failedCount,
           candidates: candidates.map(serializeCandidate),
         }, "Native workflow scheduler active tick");
         return;
@@ -354,6 +410,32 @@ export function createNativeWorkflowScheduler(
           });
         }, toolStepQueueIntervalMs);
         toolStepQueueInterval.unref?.();
+        // [Task6b-2] durable resume delivery tick — pending 요청/만료 실행 임대 → accept → sync.
+        //   tool 큐와 동일한 interval+in-flight guard 패턴, active 전용, 자체 로그 라인.
+        resumeDispatchInterval = setInterval(() => {
+          void dispatchResumeWorkTick().then((result) => {
+            if (
+              result.claimedCount === 0
+              && result.acceptedCount === 0
+              && result.completedCount === 0
+              && result.blockedCount === 0
+              && result.cancelledCount === 0
+              && result.failedCount === 0
+              && result.skippedCount === 0
+            ) return;
+            log.info({
+              mode: options.mode,
+              claimedCount: result.claimedCount,
+              acceptedCount: result.acceptedCount,
+              completedCount: result.completedCount,
+              blockedCount: result.blockedCount,
+              cancelledCount: result.cancelledCount,
+              failedCount: result.failedCount,
+              skippedCount: result.skippedCount,
+            }, "Native workflow resume dispatch tick");
+          });
+        }, resumeDispatchIntervalMs);
+        resumeDispatchInterval.unref?.();
         // [agent fit observation] 런 종료 후 수 분 내 자동 누계·제안 계산 (metadata 관찰 전용,
         //   실패해도 어떤 실행 경로에도 영향 없음). 활동 구동: 조용하면 자기중단.
         armFitProfileInterval();
@@ -369,13 +451,17 @@ export function createNativeWorkflowScheduler(
         clearInterval(toolStepQueueInterval);
         toolStepQueueInterval = null;
       }
+      if (resumeDispatchInterval) {
+        clearInterval(resumeDispatchInterval);
+        resumeDispatchInterval = null;
+      }
       disarmFitProfileInterval();
       log.info({ mode: options.mode }, "Native workflow scheduler stopped");
     },
     tick,
     getState() {
       return {
-        running: interval !== null || toolStepQueueInterval !== null,
+        running: interval !== null || toolStepQueueInterval !== null || resumeDispatchInterval !== null,
         tickCount,
         lastTickAt,
         lastCandidateCount,
@@ -385,6 +471,9 @@ export function createNativeWorkflowScheduler(
         lastToolStepClaimedCount,
         lastToolStepExecutedCount,
         lastToolStepFailedCount,
+        lastResumeClaimedCount,
+        lastResumeCompletedCount,
+        lastResumeFailedCount,
         fitProfileArmed: fitProfileInterval !== null,
       };
     },

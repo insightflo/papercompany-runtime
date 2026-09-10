@@ -4,10 +4,9 @@ import { heartbeatRuns, issueComments, issues, workflowDefinitions, workflowRuns
 import { and, eq, inArray, like, lt, sql } from "drizzle-orm";
 import { classifyStepActivation, workflowHasConditionalEdges } from "./control-flow/edge-condition.js";
 import {
-  buildWorkflowExecutionSteps,
   getWorkflowLaunchSteps,
-  isDynamicOwnerPlanWorkflowDefinition,
 } from "./dag-engine.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { buildPredFactsMap, buildStepRunMap } from "./reconciler-edge-helpers.js";
 import type { ReconciliationResult } from "./reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
@@ -57,17 +56,16 @@ export async function reconcileDeadlockedWorkflowRuns(
         .then((rows) => rows[0] ?? null);
       if (!definition) continue;
 
-      const steps = buildWorkflowExecutionSteps(definition);
+      // [task5a2b] frozen graph: launch/skip 판정은 1회 normalized snapshot 에서만 읽는다.
+      //   corrupt/missing snapshot 은 아래 writes 전에 여기서 throw 되어 per-run catch 가
+      //   기존 action:'failed' 결과로 수렴시킨다(row mutation 없음).
+      const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
+      const steps = execution.steps;
       const stepById = new Map(steps.map((step) => [step.id, step]));
       const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
       const predsByStepId = buildPredFactsMap(steps, buildStepRunMap(runSteps), undefined, v1Enforcement);
       const hasConditionalEdges = workflowHasConditionalEdges(steps);
-      const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition({
-        name: definition.name,
-        executionMode: definition.executionMode,
-        dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
-        steps,
-      });
+      const dynamicOwnerPlan = execution.executionMode === "dynamic_owner_plan";
       const launchStepIds = dynamicOwnerPlan
         ? new Set(getWorkflowLaunchSteps(steps, { dynamicOwnerPlan }).map((step) => step.id))
         : undefined;

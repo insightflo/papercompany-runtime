@@ -52,6 +52,8 @@ import type {
 } from "./types.js";
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 import type { WorkflowSyncSource } from "./workflow-sync-source.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
+import { ensureCreatedRunOversight } from "./workflow-created-run-oversight.js";
 
 type WorkflowStepLike = WorkflowStep & {
   title?: unknown;
@@ -368,15 +370,9 @@ export const workflowService = {
     await assertNoImplicitDuplicateScheduledWorkflowRun(db, input, workflow, runDate);
     const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
     const run = await createWorkflowRun(db, runInput);
-    if (run.missionId) {
-      const mission = await missionService(db).getById(run.missionId);
-      if (mission) {
-        await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
-          sourceRunId: run.id,
-          workflowStepIds: workflow.steps.map((step) => step.id),
-        });
-      }
-    }
+    // [Task5a2a] post-create oversight 는 캡처 실행정의(이름/step ids)로 구성된다 — 정의가
+    //   이후 바뀌어도 oversight 가 캡처 그래프와 일치한다. legacy run 은 기존 current-name 동작.
+    await ensureCreatedRunOversight(db, run);
     return executeWorkflowRun(db, run.id);
   },
 
@@ -510,7 +506,10 @@ export const workflowService = {
     if (!workflow || workflow.companyId !== input.companyId) {
       throw new Error(`Workflow definition not found: ${existingRun.workflowId}`);
     }
-    await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
+    // [Task5a2a] run/workflow scope guards 후·readiness/status mutation 전에 실행정의를 1회 로드한다.
+    //   missing/corrupt snapshot 은 run 상태/startedAt/reset 이 전혀 없이 422 로 거절된다.
+    const execution = await loadExecutionDefinition(db, existingRun.id, { requireHistorical: false });
+    await assertWorkflowToolReadiness(db, input.companyId, execution.steps);
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
     if (!run) {
       throw new Error(`Workflow run not found: ${input.runId}`);
@@ -521,7 +520,7 @@ export const workflowService = {
     await resetFailedControlNodesForResume({
       db,
       workflowRunId: run.id,
-      steps: normalizeWorkflowStepsForExecution(workflow.steps),
+      steps: execution.steps,
     });
     // [run9 RCA] 완료된 IF 노드도 verdict 입력(소스 work product)이 평가 시점보다 새로 갱신됐으면
     //   stale 로 보고 pending 리셋 후 재평가한다 — producer 수정 후에도 skip 스티키가 영구화되지 않게.
@@ -530,7 +529,7 @@ export const workflowService = {
       db,
       companyId: input.companyId,
       workflowRunId: run.id,
-      steps: normalizeWorkflowStepsForExecution(workflow.steps),
+      steps: execution.steps,
     });
     return executeWorkflowRun(db, run.id);
   },

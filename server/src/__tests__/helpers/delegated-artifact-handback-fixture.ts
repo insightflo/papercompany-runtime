@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -14,6 +15,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import type { IssueAssignmentWakeupDeps } from "../../services/issue-assignment-wakeup.js";
+import { createWorkflowRun } from "../../services/workflow/workflow-store.js";
 
 const CHILD_ARTIFACT_PATH =
   "/srv/papercompany/projects/gazua-addon/produced_work/missions/m/runs/r/steps/strategy/report.md";
@@ -27,6 +29,7 @@ export type DelegatedArtifactSeed = {
   readonly companyId: string;
   readonly parentIssueId: string;
   readonly parentStepRunId: string;
+  readonly workflowDefinitionId: string;
   readonly workflowRunId: string;
 };
 
@@ -34,6 +37,11 @@ type DelegatedArtifactSeedOptions = {
   readonly parentOriginKind?: string;
   readonly parentHasWorkProduct?: boolean;
   readonly parentStatus?: string;
+  /** [Task5a2c] 제공 시 run 을 실제 store.createWorkflowRun 으로 생성해 실행정의 스냅샷을 캡처하고
+   *  이후 테스트 상태(status)만 복원한다. 생략 시 기존 legacy raw insert 동작이 그대로 유지된다. */
+  readonly frozenSteps?: unknown[];
+  /** frozenSteps 사용 시 parent issue 가 바인딩될 captured parent step id(기본 legacy "strategy"). */
+  readonly parentStepId?: string;
 };
 
 type WakeupOptions = Parameters<IssueAssignmentWakeupDeps["wakeup"]>[1];
@@ -60,7 +68,7 @@ export async function seedDelegatedArtifactCase(
   const assigneeAgentId = randomUUID();
   const missionId = randomUUID();
   const workflowDefinitionId = randomUUID();
-  const workflowRunId = randomUUID();
+  let workflowRunId = randomUUID();
   const parentIssueId = randomUUID();
   const childIssueId = randomUUID();
   const childWorkProductId = randomUUID();
@@ -94,16 +102,29 @@ export async function seedDelegatedArtifactCase(
     id: workflowDefinitionId,
     companyId,
     name: "gazua-morning",
-    stepsJson: [{ id: "strategy", name: "Strategy", dependencies: [] }],
+    stepsJson: input.frozenSteps ?? [{ id: "strategy", name: "Strategy", dependencies: [] }],
   });
-  await db.insert(workflowRuns).values({
-    id: workflowRunId,
-    workflowId: workflowDefinitionId,
-    companyId,
-    missionId,
-    status: "failed",
-    triggeredBy: "system",
-  });
+  if (input.frozenSteps) {
+    // [Task5a2c] 원자적 run+스냅샷 캡처(실제 store 경로, mock/hash 위조 없음). 생성은 pending 이므로
+    //  테스트가 요구하는 기존 상태값(failed)만 복원한다. 이후 모든 참조는 반환된 id 를 쓴다.
+    const created = await createWorkflowRun(db, {
+      workflowId: workflowDefinitionId,
+      companyId,
+      missionId,
+      triggeredBy: "system",
+    });
+    workflowRunId = created.id;
+    await db.update(workflowRuns).set({ status: "failed" }).where(eq(workflowRuns.id, workflowRunId));
+  } else {
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId: workflowDefinitionId,
+      companyId,
+      missionId,
+      status: "failed",
+      triggeredBy: "system",
+    });
+  }
   await db.insert(issues).values([
     {
       id: parentIssueId,
@@ -132,7 +153,7 @@ export async function seedDelegatedArtifactCase(
   await db.insert(workflowStepRuns).values({
     id: parentStepRunId,
     workflowRunId,
-    stepId: "strategy",
+    stepId: input.parentStepId ?? "strategy",
     issueId: parentIssueId,
     status: "failed",
     startedAt: new Date("2026-07-07T22:20:00.000Z"),
@@ -175,6 +196,7 @@ export async function seedDelegatedArtifactCase(
     companyId,
     parentIssueId,
     parentStepRunId,
+    workflowDefinitionId,
     workflowRunId,
   };
 }
