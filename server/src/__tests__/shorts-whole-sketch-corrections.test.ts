@@ -1,12 +1,12 @@
 // shorts whole-sketch CORRECTION regressions (production 아님). 부모 확정 결함 4종(재전송 없는
-// publish 불확정성, 수락된 시작 step 선택, video bytes 바인딩, 버전 마커) 회귀. 로컬 fake 포트만.
+// publish 불확정성, 수락된 시작 step 선택, video bytes 바인딩, 버전 마커) 회귀. receipt fixture + 로컬 fake 포트만.
 import { describe, expect, it } from "vitest";
 import { LOCAL_SKETCH_TOOL_RESULT_SCHEMA } from "../services/workflow/resume/local-sketch-types.js";
 import {
   LOCAL_SKETCH_CONDITIONS, SYNTHETIC_MANIFEST_SHA256, SYNTHETIC_RUN_ID, SYNTHETIC_SCOPE,
   SYNTHETIC_VIDEO_BYTES, SYNTHETIC_VIDEO_SHA256, createLocalSketchFakes,
 } from "./helpers/shorts-local-sketch-fixture.js";
-import { approve, makeCoordinator, runPythonIntake, sketch, type IntakeResult } from "./helpers/shorts-local-sketch-test-setup.js";
+import { approve, makeCoordinator, createFixtureIntake, sketch, type IntakeResult } from "./helpers/shorts-local-sketch-test-setup.js";
 
 const VIDEO_OBJECT = `shorts/runs/${SYNTHETIC_RUN_ID}/stage8/final.mp4`;
 type Fakes = ReturnType<typeof sketch>["fakes"];
@@ -28,7 +28,7 @@ function predecessorEvidence(over: Record<string, unknown> = {}): Record<string,
 
 /** clips-gate 전체 흐름을 사람 승인 대기까지 실행한다. */
 async function flowAwaitingApproval(options?: Record<string, unknown>) {
-  const intake = runPythonIntake();
+  const intake = createFixtureIntake();
   const { fakes, coordinator } = sketch(intake, options as never);
   const request = await coordinator.apply(coordinator.preview("clips-gate").previewId);
   const waiting = await coordinator.deliver(request.requestId);
@@ -141,7 +141,7 @@ describe("whole-sketch corrections: publish uncertainty never resends", () => {
 
 describe("whole-sketch corrections: accepted selected start is honored", () => {
   it("publish start with prior decision makes only the upload call after resolve", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     // 결정은 coordinator 조립 전에 같은 fakes 에 준비한다(증거 snapshot 전 id 확정).
     const fakes = createLocalSketchFakes();
     fakes.seedObject(VIDEO_OBJECT, SYNTHETIC_VIDEO_BYTES); // publish 시작은 assemble 을 실행하지 않음
@@ -171,7 +171,7 @@ describe("whole-sketch corrections: accepted selected start is honored", () => {
   });
 
   it("rejects publish start missing the decision prerequisite before any mutation", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes, coordinator } = sketch(intake, undefined, {
       predecessors: predecessorEvidence({ __receiptSha256: intake.receiptSha256, decisionId: undefined }),
     });
@@ -189,7 +189,7 @@ describe("whole-sketch corrections: accepted selected start is honored", () => {
     ["clips-blocked", { clipsGateOk: false, assembleGateOk: undefined }, ["shorts-clips-verify"]],
     ["assemble-blocked", { clipsGateOk: true, assembleGateOk: false }, ["shorts-clips-verify", "shorts-assemble", "shorts-storage-list"]],
   ] as const)("later start %s runs none of the already-satisfied earlier tools", async (start, evidenceOver, forbidden) => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes, coordinator, requestId } = await acceptedAt(
       intake, start, predecessorEvidence({ __receiptSha256: intake.receiptSha256, ...evidenceOver }),
     );
@@ -264,7 +264,7 @@ describe("whole-sketch corrections: approval binds video bytes", () => {
 
 describe("whole-sketch corrections: explicit version markers and scope binding", () => {
   it("stores schema/mode on the accepted request and delivery state readback", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes, coordinator } = sketch(intake);
     const request = await coordinator.apply(coordinator.preview("clips-gate").previewId);
     const storedRequest = fakes.store.getAcceptedRequest(request.previewId);
@@ -278,7 +278,7 @@ describe("whole-sketch corrections: explicit version markers and scope binding",
   });
 
   it("rejects an expectedScope that does not match the receipt scope at construction", () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes } = sketch(intake);
     const build = () => makeCoordinator(intake, fakes, {
       conditions: LOCAL_SKETCH_CONDITIONS, expectedScope: { ...SYNTHETIC_SCOPE, attempt: 2 },
@@ -289,7 +289,7 @@ describe("whole-sketch corrections: explicit version markers and scope binding",
   });
 
   it("rejects predecessor evidence whose scope or receipt hash mismatches", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const badScope = predecessorEvidence(
       { __receiptSha256: intake.receiptSha256, scope: { ...SYNTHETIC_SCOPE, attempt: 9 } });
     await expect(acceptedAt(intake, "publish", badScope)).rejects.toThrow(/predecessor_scope_mismatch/);

@@ -1,11 +1,20 @@
+// Ordinary-CI shorts CU evidence failures (production 아님). CI proves the CONSUMER contract only:
+// durable DB/FS/readback rejections driven by the checked-in producer TEST DOUBLE (receiver.mjs)
+// plus explicitly configured Node wrappers. Real producer semantics — a real receiver never
+// inventing success and snapshot-mutation refusal — are proven solely by the opt-in external
+// suite (tests/external/shorts-receivers.external.ts via pnpm test:shorts-external).
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { bindCuJob } from "../services/workflow-resume-cu-evidence.js";
 import { createCuObjectReader } from "../services/workflow-resume-cu-objects.js";
 import { cuDatabase, cuCase, cuApp, configureCu, boardMembership, encode, digest, type CuCase } from "./workflow-resume-cu-fixture.js";
+
+// Checked-in producer test double; ordinary CI never requires Python, ffmpeg or a sibling checkout.
+const RECEIVER_FIXTURE = fileURLToPath(new URL("./fixtures/shorts-ci/receiver.mjs", import.meta.url));
 
 let fixture: Awaited<ReturnType<typeof cuDatabase>>;
 beforeAll(async () => { fixture = await cuDatabase(); }, 120_000);
@@ -34,7 +43,59 @@ async function expectNonSuccess(c: CuCase, reply: Awaited<ReturnType<typeof admi
   if (invoked) expect(JSON.parse(await readFile(`${c.evidence}/${row.id}/result/receiver-status.v1.json`, "utf8"))).toHaveProperty("schema", "shorts.cu-receiver-status.v1");
   return row;
 }
-test.each(["missing-comparison", "false-comparison", "missing-budget", "incomplete-budget", "missing-complete", "missing-credit"])("real receiver never invents success: %s", async kind => {
+
+// Explicitly configured PRODUCER-REJECTION test double (clearly flagged, intentionally small):
+// a CONSTANT rejection mode — parses only the output directory and unconditionally persists a
+// literal non-verified status with nonzero exit, never a result, with no conditional fallback.
+// It deliberately does NOT verify missing/false snapshot semantics; the real receiver's refusal
+// logic is proven solely by the external suite.
+const REJECTION_RECEIVER = `// PRODUCER-REJECTION TEST DOUBLE — ordinary CI only, not the real receiver.
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+const argv = process.argv.slice(2);
+const arg = (name) => argv[argv.indexOf(name) + 1];
+writeFileSync(path.join(arg("--output-dir"), "receiver-status.v1.json"), JSON.stringify({
+  schema: "shorts.cu-receiver-status.v1", status: "needs_submission", code: "needs_submission" }), { mode: 0o600 });
+process.exit(2);
+`;
+
+// Fault wrappers invoke the checked-in fixture double, then deliberately corrupt its LITERAL
+// output files — proving the runtime judges durable bytes, never exit status or stdout.
+const FAULT_MUTATIONS: Record<string, string> = {
+  nonzero: "process.exit(7);",
+  missing: "await unlink(result);",
+  malformed: 'await writeFile(result, "{}");',
+  "wrong-scope": `const raw = await readFile(result);
+  const value = JSON.parse(raw.toString()); value.scope.step_id = "foreign";
+  const mutated = Buffer.from(JSON.stringify(value)); await writeFile(result, mutated);
+  const statusValue = JSON.parse((await readFile(status)).toString());
+  statusValue.result_sha256 = sha256(mutated); await writeFile(status, JSON.stringify(statusValue));`,
+  "mutated-bytes": "const raw = await readFile(result); await writeFile(result, Buffer.concat([raw, Buffer.from(' ')]));",
+  "wrong-hash": `const statusValue = JSON.parse((await readFile(status)).toString());
+  statusValue.result_sha256 = "0".repeat(64); await writeFile(status, JSON.stringify(statusValue));`,
+  "affirmative-stdout": `await unlink(result);
+  console.log('{"status":"verified","all_expected_clips_present":true}');`,
+};
+function faultReceiver(kind: string): string {
+  return `// Fixture-invoking fault wrapper (ordinary CI): runs the checked-in producer test double,
+// then corrupts its output files on purpose (${kind}); stdout/exit are never authority.
+import { spawn } from "node:child_process";
+import { readFile, writeFile, unlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import path from "node:path";
+const argv = process.argv.slice(2);
+const arg = (name) => argv[argv.indexOf(name) + 1];
+const child = spawn(process.execPath, [${JSON.stringify(RECEIVER_FIXTURE)}, ...argv], { stdio: "inherit" });
+if (await new Promise((resolve) => child.once("close", resolve)) !== 0) process.exit(1);
+const out = arg("--output-dir");
+const result = path.join(out, "clips-result.v1.json");
+const status = path.join(out, "receiver-status.v1.json");
+const sha256 = (raw) => createHash("sha256").update(raw).digest("hex");
+${FAULT_MUTATIONS[kind]}
+`;
+}
+
+test.each(["missing-comparison", "false-comparison", "missing-budget", "incomplete-budget", "missing-complete", "missing-credit"])("configured producer rejection is persisted (does NOT verify missing/false semantics — external suite does): %s", async kind => {
   await connected(async c => {
     const observations = c.observations as any[];
     if (kind === "missing-comparison") delete observations[0].fields.comparison;
@@ -43,12 +104,19 @@ test.each(["missing-comparison", "false-comparison", "missing-budget", "incomple
     if (kind === "incomplete-budget") observations[2].fields.complete = false;
     if (kind === "missing-complete") delete observations[2].fields.complete;
     if (kind === "missing-credit") observations.splice(1, 1);
+    const wrapper = path.join(c.root, "rejection-receiver.mjs");
+    await writeFile(wrapper, REJECTION_RECEIVER);
+    // Fixed trusted test configuration via explicit fixture-double arguments, never env-switched.
+    configureCu(c, { executable: process.execPath, script: wrapper });
     const row = await expectNonSuccess(c, await admit(c));
+    // Deficient observations stay retained verbatim in the frozen snapshot (audit boundary).
     const snapshot = JSON.parse(Buffer.from(row.cu_snapshot_base64, "base64").toString());
     if (kind === "missing-comparison") expect(snapshot.records[0]).not.toHaveProperty("comparison");
     if (kind === "false-comparison") expect(snapshot.records[0].comparison.source_matches).toBe(false);
     if (kind === "missing-budget") expect(snapshot.budget).toBeNull();
     if (kind === "incomplete-budget") expect(snapshot.budget.complete).toBe(false);
+    if (kind === "missing-complete") expect(snapshot.budget).not.toHaveProperty("complete");
+    if (kind === "missing-credit") expect(snapshot.records.some((record: any) => record.schema === "shorts.cu-credit.v1")).toBe(false);
   });
 });
 test.each(["source", "spec", "media", "manifest", "terminal-scope", "terminal-uri", "claim-scope", "manifest-unknown", "manifest-clips-cap"])("hydration validates actual bytes and exact versioned references: %s", async kind => {
@@ -77,21 +145,11 @@ test.each(["source", "spec", "media", "manifest", "terminal-scope", "terminal-ur
     await expectNonSuccess(c, await admit(c), false);
   });
 });
-test.each(["nonzero", "missing", "malformed", "wrong-scope", "mutated-bytes", "wrong-hash", "affirmative-stdout", "snapshot-mutation"])("known-path independent readback rejects receiver/byte failure: %s", async kind => {
+test.each(["nonzero", "missing", "malformed", "wrong-scope", "mutated-bytes", "wrong-hash", "affirmative-stdout"])("known-path independent readback rejects corrupted fixture output: %s", async kind => {
   await connected(async c => {
-    const originalScript = process.env.PAPERCLIP_CU_RECEIVER_SCRIPT!;
-    const wrapper = path.join(c.root, "fault-receiver.py");
-    const mutations: Record<string, string> = {
-      nonzero: "sys.exit(7)", missing: "result.unlink()", malformed: "result.write_text('{}')",
-      "wrong-scope": "value=json.loads(result.read_bytes()); value['scope']['step_id']='foreign'; result.write_text(json.dumps(value)); status_value=json.loads(status.read_bytes()); status_value['result_sha256']=hashlib.sha256(result.read_bytes()).hexdigest(); status.write_text(json.dumps(status_value))",
-      "mutated-bytes": "result.write_bytes(result.read_bytes()+b' ')",
-      "wrong-hash": "value=json.loads(status.read_bytes()); value['result_sha256']='0'*64; status.write_text(json.dumps(value))",
-      "affirmative-stdout": "result.unlink(); print('{\"status\":\"verified\",\"all_expected_clips_present\":true}')",
-    };
-    const before = kind === "snapshot-mutation" ? "snapshot=pathlib.Path(sys.argv[sys.argv.index('--snapshot')+1]); snapshot.write_bytes(snapshot.read_bytes()+b' ')\n" : "";
-    await writeFile(wrapper, `import sys,runpy,pathlib,json,hashlib\nsys.path.insert(0,${JSON.stringify(path.dirname(originalScript))})\n${before}try:\n runpy.run_path(${JSON.stringify(originalScript)},run_name='__main__')\nexcept SystemExit as e:\n if e.code != 0: raise\nroot=pathlib.Path(sys.argv[sys.argv.index('--output-dir')+1])\nresult=root/'clips-result.v1.json'\nstatus=root/'receiver-status.v1.json'\n${mutations[kind] ?? "pass"}\n`);
-    // Fixed trusted test configuration, not a request executable override. Actual Task1 runs first.
-    process.env.PAPERCLIP_CU_RECEIVER_SCRIPT = wrapper;
+    const wrapper = path.join(c.root, "fault-receiver.mjs");
+    await writeFile(wrapper, faultReceiver(kind));
+    configureCu(c, { executable: process.execPath, script: wrapper });
     await expectNonSuccess(c, await admit(c));
   });
 });

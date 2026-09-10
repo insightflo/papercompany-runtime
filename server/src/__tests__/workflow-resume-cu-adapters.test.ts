@@ -12,7 +12,6 @@ import { secretService } from "../services/secrets.js";
 import { createCompanyWorkProductStorageService } from "../services/company-work-product-storage.js";
 import { cuDatabase } from "./workflow-resume-cu-fixture.js";
 import { seedCompanyOnly } from "./helpers/workflow-execution-definition-fixture.js";
-import { execFileSync } from "node:child_process";
 
 let fixture: Awaited<ReturnType<typeof cuDatabase>>, root: string;
 beforeAll(async () => {
@@ -81,8 +80,8 @@ test("actual S3 SDK reads configured company secrets, prefixes once, bounds a st
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 test("real subprocess bounded combined diagnostics are killed without parsing stdout", async () => {
-  const script = path.join(root, "noisy.py");
-  await writeFile(script, "import sys\nwhile True: sys.stdout.write('x'*65536); sys.stdout.flush()\n");
-  const python = execFileSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
-  expect(await runCuReceiver({ python, script, root }, root, "0".repeat(64))).toBe(-1);
+  const script = path.join(root, "noisy.mjs");
+  await writeFile(script, "import {writeSync} from \"node:fs\"; const chunk=Buffer.alloc(65536,120); while(true) writeSync(1,chunk);\n");
+  // Real flood process, real kill; the configured executable is the explicit Node test config.
+  expect(await runCuReceiver({ python: process.execPath, script, root }, root, "0".repeat(64))).toBe(-1);
 });

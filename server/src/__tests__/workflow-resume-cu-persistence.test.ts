@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { bindCuJob } from "../services/workflow-resume-cu-evidence.js";
 import { createCuObjectReader } from "../services/workflow-resume-cu-objects.js";
 import { cuDatabase, cuCase, cuApp, configureCu, boardMembership, type CuCase } from "./workflow-resume-cu-fixture.js";
@@ -52,13 +54,29 @@ test("DB immutable tables reject mutation, not merely HTTP upsert avoidance", as
   await expect(fixture.sql`UPDATE workflow_cu_observations SET screenshot_sha256=${"0".repeat(64)} WHERE job_id=${c.job.job_id}`).rejects.toThrow();
   await expect(fixture.sql`DELETE FROM workflow_cu_observations WHERE job_id=${c.job.job_id}`).rejects.toThrow();
 });
-test("intake replay never changes its pinned snapshot, new explicit budget revision uses a new submission", async () => {
+test("intake replay never changes its pinned snapshot under explicit producer rejection, new explicit budget revision uses a new submission", async () => {
   const app = cuApp(fixture, c), observer = (body: unknown) => request(app).post(c.observerUrl).set("Authorization", "Bearer observer-secret").send(body);
   expect((await observer(c.observations[1])).status).toBe(201);
   const incomplete = { ...c.observations[2], fields: { events: c.manifest.credits.events } };
   expect((await observer(incomplete)).status).toBe(201);
   const board = (body: unknown) => request(app).post(c.intakeUrl).set("x-fixture-board", "1").set("Origin", "http://localhost:3100").send(body);
+  // Explicit CONSTANT producer-rejection double for the first intake only: proves the existing
+  // pinned blocked result cannot become success merely because the producer later returns success.
+  const wrapper = path.join(c.root, "rejection-receiver.mjs");
+  await writeFile(wrapper, `// PRODUCER-REJECTION TEST DOUBLE — ordinary CI only, not the real receiver.
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+const argv = process.argv.slice(2);
+const arg = (name) => argv[argv.indexOf(name) + 1];
+writeFileSync(path.join(arg("--output-dir"), "receiver-status.v1.json"), JSON.stringify({
+  schema: "shorts.cu-receiver-status.v1", status: "needs_submission", code: "needs_submission" }), { mode: 0o600 });
+process.exit(2);
+`);
+  configureCu(c, { executable: process.execPath, script: wrapper });
   const first = await board(c.intake); expect(first.body.state).toBe("blocked");
+  // Restore the default success fixture BEFORE replay/revision checks; the new idempotency key
+  // below admits the valid fixture.
+  configureCu(c);
   const [before] = await fixture.sql`SELECT * FROM workflow_late_evidence_submissions WHERE id=${first.body.id}`;
   expect(JSON.parse(Buffer.from(before.cu_snapshot_base64, "base64").toString()).budget).not.toHaveProperty("complete");
   expect((await observer(c.observations[2])).status).toBe(409);

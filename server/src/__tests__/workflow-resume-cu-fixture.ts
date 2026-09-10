@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { mkdtemp, realpath, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import { actorMiddleware } from "../middleware/auth.js";
 import { boardMutationGuard } from "../middleware/board-mutation-guard.js";
@@ -31,11 +31,9 @@ export async function cuCase(fixture: ExecutionDefinitionFixtureDb) {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), "cu-connected-"));
   const objects = path.join(root, "objects"), evidence = path.join(root, "evidence");
   await mkdir(objects, { mode: 0o700 }); await mkdir(evidence, { mode: 0o700 });
-  const videoPath = path.join(root, "portrait.mp4"), imagePath = path.join(root, "screen.png");
-  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=90x160:r=25", "-t", "2",
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", videoPath]);
-  execFileSync("ffmpeg", ["-v", "error", "-i", videoPath, "-frames:v", "1", imagePath]);
-  const video = await readFile(videoPath), screenshot = await readFile(imagePath);
+  // Checked-in valid media; ordinary tests never execute ffmpeg or Python.
+  const video = await readFile(new URL("./fixtures/shorts-ci/portrait.mp4", import.meta.url));
+  const screenshot = await readFile(new URL("./fixtures/shorts-ci/screen.png", import.meta.url));
   const runRoot = `shorts/runs/${workflowRunId}/`;
   const specObject = runRoot + "spec.json", planObject = runRoot + "plan.json", sourceObject = runRoot + "source.png";
   const spec = encode({ schema: "shorts.flow-clip-spec.v1", run_id: workflowRunId,
@@ -105,13 +103,13 @@ export async function boardMembership(fixture: ExecutionDefinitionFixtureDb, c: 
   await fixture.sql`INSERT INTO company_memberships (company_id,principal_type,principal_id,status,membership_role)
     VALUES (${c.companyId},'user','cu-board','active','owner')`;
 }
-export function configureCu(c: CuCase) {
+export function configureCu(c: CuCase, receiver?: { executable: string; script: string }) {
   process.env.PAPERCLIP_CU_OBSERVERS_JSON = JSON.stringify([c.principal]);
   process.env.PAPERCLIP_CU_LOCAL_OBJECT_ROOT = c.objects;
   process.env.PAPERCLIP_CU_EVIDENCE_ROOT = c.evidence;
-  process.env.PAPERCLIP_CU_RECEIVER_PYTHON = execFileSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
-  // External Task1 checkout is test configuration too: no developer-home fallback or silent skip.
-  const script = process.env.CU_TEST_RECEIVER_SCRIPT;
-  if (!script || !path.isAbsolute(script)) throw new Error("CU_TEST_RECEIVER_SCRIPT must name the absolute Task1 CLI");
-  process.env.PAPERCLIP_CU_RECEIVER_SCRIPT = script;
+  // PYTHON is the legacy production key for an arbitrary configured executable.
+  // Default is explicitly a producer TEST DOUBLE; external tests must opt in via arguments.
+  process.env.PAPERCLIP_CU_RECEIVER_PYTHON = receiver?.executable ?? process.execPath;
+  process.env.PAPERCLIP_CU_RECEIVER_SCRIPT = receiver?.script
+    ?? fileURLToPath(new URL("./fixtures/shorts-ci/receiver.mjs", import.meta.url));
 }

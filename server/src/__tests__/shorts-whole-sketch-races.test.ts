@@ -1,13 +1,13 @@
 // shorts whole-sketch LATE-READER race regressions (production 아님). 느린 resolveReview /
 // deliver decision-read 가 다른 deliver 의 upload 완료 뒤에 재개될 때 저장된 uploadAttempted
 // 센티널과 uploadResult 를 지우지 못함(재전송 없음)을 증명한다. sleep 없는 제어된 promise
-// 게이트와 로컬 fake 포트만 사용한다(단일 프로세스 로컬 메모리 store 순서 증명일 뿐이다).
+// 게이트, receipt fixture, 로컬 fake 포트만 사용한다(단일 프로세스 로컬 메모리 store 순서 증명일 뿐이다).
 import { expect, it } from "vitest";
 import {
   SYNTHETIC_MANIFEST_SHA256, SYNTHETIC_RUN_ID, SYNTHETIC_SCOPE, SYNTHETIC_VIDEO_BYTES,
   SYNTHETIC_VIDEO_SHA256, createLocalSketchFakes,
 } from "./helpers/shorts-local-sketch-fixture.js";
-import { approve, makeCoordinator, runPythonIntake, sketch } from "./helpers/shorts-local-sketch-test-setup.js";
+import { approve, makeCoordinator, createFixtureIntake, sketch } from "./helpers/shorts-local-sketch-test-setup.js";
 
 const VIDEO_OBJECT = `shorts/runs/${SYNTHETIC_RUN_ID}/stage8/final.mp4`;
 type Fakes = ReturnType<typeof sketch>["fakes"];
@@ -42,7 +42,7 @@ function gateReadDecision(fakes: Fakes, skip = 0) {
 
 /** clips-gate 전체 흐름을 사람 승인 대기(final-review)까지 실행하고 구조화 승인을 기록한다. */
 async function flowAwaitingApproval(options?: { youtubeChannelId?: string }) {
-  const intake = runPythonIntake();
+  const intake = createFixtureIntake();
   const { fakes, coordinator } = sketch(intake, options);
   const requestId = (await coordinator.apply(coordinator.preview("clips-gate").previewId)).requestId;
   expect((await coordinator.deliver(requestId)).waitingHumanReview).toBe(true);
@@ -136,7 +136,7 @@ it.each([
 
 /** publish 선택 시작 + 이전 결정 문서 — 느린 decision read 가 성공 upload 뒤에 재개된다. */
 it("delayed selected-publish decision read resuming after deliver preserves the upload", async () => {
-  const intake = runPythonIntake();
+  const intake = createFixtureIntake();
   const fakes = createLocalSketchFakes();
   fakes.seedObject(VIDEO_OBJECT, SYNTHETIC_VIDEO_BYTES); // publish 시작은 assemble 을 실행하지 않음
   const decision = await fakes.ports.decisions.createDecision(

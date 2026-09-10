@@ -7,7 +7,7 @@ let fixture: Awaited<ReturnType<typeof cuDatabase>>, c: CuCase;
 beforeAll(async () => { fixture = await cuDatabase(); c = await cuCase(fixture); configureCu(c); await boardMembership(fixture, c); }, 120_000);
 afterAll(async () => { await c?.cleanup(); await fixture?.cleanup(); });
 
-test("connected controller bind -> observer HTTP persisted screenshots -> board HTTP -> actual Python -> independent durable DB result", async () => {
+test("connected controller bind -> observer HTTP persisted screenshots -> board HTTP -> producer test-double subprocess -> independent durable DB result", async () => {
   const { bindCuJob } = await import("../services/workflow-resume-cu-evidence.js");
   const { createCuObjectReader } = await import("../services/workflow-resume-cu-objects.js");
   await bindCuJob(fixture.db, { job: c.job, planObject: c.planObject },

@@ -499,3 +499,27 @@ pnpm workflow:migrate:concept-radar-branch -- --apply --expected-updated-at=<upd
 
 Apply mode rechecks workflow identity, timestamp, and active-run status immediately
 before the update. It never starts a workflow run.
+
+## Shorts CU Receiver Testing (Ordinary CI vs External)
+
+Ordinary CI (`pnpm test:run`) proves the shorts CU **consumer contract** only. It reads
+checked-in assets from `server/src/__tests__/fixtures/shorts-ci/` (captured receipt bytes,
+tiny valid media) and drives the flow through an explicit Node **producer test double**
+(`receiver.mjs`), verifying durable DB/FS state and readback. Ordinary tests never require
+Python, ffmpeg, or a sibling checkout.
+
+Real producer semantics — the Python receiver refusing to invent success, snapshot-byte
+verification, and actual `cu_reuse_sketch.py` intake — are covered only by the explicit
+external suite and are **not** silently verified on CI:
+
+```sh
+OPERATIONS_ROOT=/path/to/papercompany-operations/shorts-cu-resume
+CU_TEST_PYTHON="$(python3 -c 'import sys; print(sys.executable)')" \
+CU_TEST_RECEIVER_SCRIPT="$OPERATIONS_ROOT/scripts/shorts-flow-runner/cu_receiver_cli.py" \
+SHORTS_OPERATIONS_ROOT="$OPERATIONS_ROOT" \
+pnpm test:shorts-external
+```
+
+The external suite (`tests/external/*.external.ts` via `vitest.external.config.ts`) is
+deliberately outside default test discovery and fails loudly when configuration is
+missing; it never skips silently.

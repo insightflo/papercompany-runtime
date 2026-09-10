@@ -1,30 +1,24 @@
 // shorts whole-flow LOCAL SKETCH integration test (production 아님).
-// 하나의 로컬 명령이 Python 재사용 intake → receipt readback → TS 코디네이터
+// checked-in receipt fixture → receipt readback → TS 코디네이터
 // preview/apply/deliver → 사람 결정 경계 → upload 결과를 잇는다.
 // 포트는 명시적 로컬 fake(helpers/shorts-local-sketch-fixture.ts)이고 그래프/적격성은 실제 구현이다.
-import { readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseLocalSketchReceipt } from "../services/workflow/resume/local-sketch.js";
 import {
   LOCAL_SKETCH_DELIVERY_SCHEMA,
   LOCAL_SKETCH_MODE,
   LOCAL_SKETCH_PREVIEW_SCHEMA,
-  LOCAL_SKETCH_RECEIPT_SCHEMA,
   LOCAL_SKETCH_RECEIPT_TITLE,
 } from "../services/workflow/resume/local-sketch-types.js";
 import {
   SYNTHETIC_CLAIM_ID,
   SYNTHETIC_SCOPE,
-  buildFixtureInputDocument,
   localSketchHistories,
 } from "./helpers/shorts-local-sketch-fixture.js";
 import {
   approve,
-  runPythonIntake,
-  runSketchBridge,
+  createFixtureIntake,
   sketch,
-  tempDir,
 } from "./helpers/shorts-local-sketch-test-setup.js";
 
 const AFFECTED: readonly string[] = [
@@ -38,8 +32,8 @@ const AFFECTED: readonly string[] = [
 ];
 
 describe("shorts whole local sketch", () => {
-  it("runs intake → preview → apply → deliver → human approval → publish", async () => {
-    const intake = runPythonIntake();
+  it("runs fixture receipt → preview → apply → deliver → human approval → publish", async () => {
+    const intake = createFixtureIntake();
     const { fakes, coordinator, nodes, histories } = sketch(intake);
     // 보존 증명: coordinator 에 실제로 전달한 동일 객체 참조를 가장 이른 preview 전에
     // 직렬화하고, deliver 후 같은 객체를 다시 직렬화해 비교한다(새 사본 비교 금지).
@@ -92,7 +86,7 @@ describe("shorts whole local sketch", () => {
   });
 
   it("a false gate records the blocked branch and stops before assembly", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes, coordinator } = sketch(intake, { clipsGateOk: false });
     const request = await coordinator.apply(coordinator.preview("clips-gate").previewId);
     const view = await coordinator.deliver(request.requestId);
@@ -103,7 +97,7 @@ describe("shorts whole local sketch", () => {
   });
 
   it("rejects an upload whose channel mismatches the approved binding", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const { fakes, coordinator } = sketch(intake, { youtubeChannelId: "not-the-approved-channel" });
     const request = await coordinator.apply(coordinator.preview("clips-gate").previewId);
     await coordinator.deliver(request.requestId);
@@ -113,7 +107,7 @@ describe("shorts whole local sketch", () => {
   });
 
   it("rejects apply when a reachable step has a per-step eligibility blocker", async () => {
-    const intake = runPythonIntake();
+    const intake = createFixtureIntake();
     const histories = localSketchHistories().map((history) =>
       history.stepId === "clips-gate" ? { ...history, hasOwner: true } : history);
     const { coordinator } = sketch(intake, undefined, { histories });
@@ -122,21 +116,11 @@ describe("shorts whole local sketch", () => {
     await expect(coordinator.apply(view.previewId)).rejects.toThrow(/blocked_step/);
   });
 
-  it("rejects tampered synthetic intake bytes via the python bridge exit status", () => {
-    const dir = tempDir();
-    const doc = buildFixtureInputDocument();
-    doc.clip_bytes["1"] = Buffer.from("tampered synthetic frame bytes").toString("base64");
-    const inputPath = path.join(dir, "input.json");
-    writeFileSync(inputPath, JSON.stringify(doc));
-    let failed = false;
-    try {
-      runSketchBridge(inputPath, path.join(dir, "out"));
-    } catch (error) {
-      failed = true;
-      expect((error as { status?: number }).status).not.toBe(0);
-    }
-    expect(failed).toBe(true);
-    expect(() => readFileSync(path.join(dir, "out", "receipt.json"))).toThrow();
+  it("receipt parser rejects an empty clip digest in fixture bytes (structure only)", () => {
+    const doc = JSON.parse(Buffer.from(createFixtureIntake().receiptBytes).toString());
+    // The parser enforces nonempty text, not raw intake media or digest correctness.
+    doc.clips[0].file_sha256 = "";
+    expect(() => parseLocalSketchReceipt(Buffer.from(JSON.stringify(doc)))).toThrow(/invalid:receipt/);
   });
 
   it("receipt parser rejects a document without the fixture schema/mode", () => {

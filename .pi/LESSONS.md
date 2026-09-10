@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-09-10 — async stdout flood starved the loop instead of flooding the pipe
+- Date: 2026-09-10
+- Task: PR219 noisy-child subprocess-kill fixture (workflow-resume-cu-adapters).
+- What failed: Generated `noisy.mjs` used `while(true) process.stdout.write(...)`; the child timed out at 10s instead of being killed by the 1MB diagnostic, reproduced twice.
+- Root cause: Async `stdout.write` in a tight sync loop never yields, so backpressure callbacks never run; bytes pile into Node's internal buffer instead of reliably flooding the pipe.
+- Category: test / process fixture
+- Fix: Emit with blocking `writeSync(1, chunk)` on a preallocated 64KB buffer — each write reaches the kernel pipe before the loop continues, so the parent's diagnostic sees the flood and SIGKILLs.
+- Prevention rule: A flood generator must actually deliver bytes to the pipe: prefer blocking writes (or await drain) over fire-and-forget async writes in unyielding loops; verify the kill path fires, not just that the child is loud.
+- Reuse trigger: Subprocess-kill fixtures, output-size guards, or any `while(true)` writer feeding a pipe under test.
+- Evidence: /tmp/pr219-parent-combined.log; /tmp/pr219-parent-adapters-isolated.log; /tmp/pr219-noisy-tests.log.
+
+### 2026-09-10 — ordinary CI fixtures depended on developer-machine paths
+- Date: 2026-09-10
+- Task: PR219 bounded CI correction (mission-resume shorts CU evidence suites).
+- What failed: Ordinary CI shorts tests executed sibling-checkout Python (`SHORTS_OPERATIONS_ROOT`, `CU_TEST_RECEIVER_SCRIPT`) and ffmpeg from the local machine, so CI could not run them at all, and the tests conflated two boundaries: consumer contract (durable DB/FS/readback) and producer semantics (real Python receiver/intake refusals).
+- Root cause: Test fixtures reached outside the repo for producer executables and generated media at test time; the checked-in consumer boundary was never isolated from producer behavior.
+- Category: test / dependency boundary
+- Fix: Check in tiny valid media and an independently captured receipt under `server/src/__tests__/fixtures/shorts-ci/`; replace the Python receiver in ordinary tests with an explicit Node producer TEST DOUBLE emitting the literal consumer contract; configure the executable/script explicitly per test instead of env-implicit switches. Moved real producer semantics (never inventing success, snapshot-mutation refusal, actual sketch intake) to an opt-in external suite (`pnpm test:shorts-external`, `vitest.external.config.ts`) that fails loudly without configuration.
+- Prevention rule: Ordinary tests must run with only repo assets and the runtime under test; any dependency on sibling checkouts, language toolchains, or PATH tools is a separate, explicitly configured suite that fails when absent. A test double may emit the contract but must not reimplement or fake producer verification.
+- Reuse trigger: Tests spawning sibling-workspace scripts, ffmpeg/Python in CI, or asserting producer semantics through consumer-side fixtures.
+- Evidence: /tmp/pr219-ci-red.log; /tmp/pr219-ci-green.log.
+
 ### 2026-09-08 — provider limit hidden by worker exit zero
 - Date: 2026-09-08
 - Task: Real mission-resume mutation-core delivery.
