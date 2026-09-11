@@ -180,6 +180,7 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
+import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
   countSessionFileMessages,
   hasSessionCompactionThresholds,
@@ -6118,6 +6119,8 @@ export function heartbeatService(db: Db) {
             eq(heartbeatRuns.agentId, agent.id),
             inFlightClause,
             sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForWake}`,
+            // [oversight exemption] 정기 점검(리뷰) 실행은 같은 미션 단계 실행의 승격을 막지 않는다.
+            missionDedupExemptOversightReviewClause,
           ))
           .limit(1);
         if (existingMissionRun.length > 0) {
@@ -9919,6 +9922,8 @@ export function heartbeatService(db: Db) {
                 eq(heartbeatRuns.agentId, agentId),
                 inFlightClause,
                 sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForDedup}`,
+                // [oversight exemption] 정기 점검(리뷰) 실행은 같은 미션의 새 단계 실행 등록을 막지 않는다.
+                missionDedupExemptOversightReviewClause,
               ),
             )
             .limit(1);
