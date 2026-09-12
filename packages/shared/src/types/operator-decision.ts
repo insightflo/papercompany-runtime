@@ -49,8 +49,16 @@ export interface OperatorDecisionAction {
   requiresSelection: boolean;
 }
 
+export interface OperatorDecisionOptionGroup {
+  id: string;
+  label: string | null;
+  optionIds: string[];
+  selection: { min: number; max: number } | null;
+}
+
 export interface OperatorDecisionDefinition {
   options: OperatorDecisionOption[];
+  optionGroups?: OperatorDecisionOptionGroup[] | null;
   actions: OperatorDecisionAction[];
   selection: { min: number; max: number } | null;
   comment: {

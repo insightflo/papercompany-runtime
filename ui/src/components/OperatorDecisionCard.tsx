@@ -36,6 +36,9 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
   const descriptionId = `operator-decision-${decision.id}-description`;
   const errorId = `operator-decision-${decision.id}-error`;
   const commentId = `operator-decision-${decision.id}-comment`;
+  const optionGroups = decision.definition.optionGroups ?? null;
+  const groupOf = (optionId: string) =>
+    optionGroups?.find((group) => group.optionIds.includes(optionId)) ?? null;
 
   useEffect(() => {
     if (error) errorRef.current?.focus();
@@ -43,8 +46,19 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
 
   function toggleOption(id: string) {
     setError(null);
-    if (decision.interactionType === "single_select") {
-      setSelectedOptionIds([id]);
+    const group = groupOf(id);
+    const groupSingle = group !== null && group.selection !== null && group.selection.max === 1;
+    if (decision.interactionType === "single_select" || groupSingle) {
+      // 이 옵션이 속한 그룹(max=1)에서는 그 그룹 선택을 이 옵션으로 교체한다.
+      setSelectedOptionIds((current) => [
+        ...current.filter((candidate) => {
+          const candidateGroup = groupOf(candidate);
+          return groupSingle
+            ? candidateGroup?.id !== group?.id
+            : decision.interactionType === "single_select";
+        }),
+        id,
+      ]);
       return;
     }
     setSelectedOptionIds((current) => current.includes(id)
@@ -56,6 +70,17 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     if (action.requiresSelection) {
       const bounds = decision.definition.selection;
       if (!bounds) return "This action cannot accept a selection.";
+      // 그룹별 안내를 먼저 — 무엇을 더 골라야 하는지 구체적이다.
+      for (const group of optionGroups ?? []) {
+        if (!group.selection) continue;
+        const groupSelected = selectedOptionIds.filter((id) => group.optionIds.includes(id)).length;
+        if (groupSelected < group.selection.min || groupSelected > group.selection.max) {
+          const want = group.selection.min === group.selection.max
+            ? `${group.selection.min}`
+            : `${group.selection.min}~${group.selection.max}`;
+          return `${group.label ?? group.id}: ${want}개를 선택하세요.`;
+        }
+      }
       if (selectedOptionIds.length < bounds.min || selectedOptionIds.length > bounds.max) {
         return bounds.min === bounds.max
           ? `Select ${bounds.min} option${bounds.min === 1 ? "" : "s"}.`
@@ -147,47 +172,76 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
         ))}
       </div>
 
-      {decision.interactionType !== "action" && (
-        <fieldset className="mt-4 space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
-          <legend className="text-sm font-medium">Options</legend>
-          {decision.definition.options.map((option) => {
-            const checked = selectedOptionIds.includes(option.id);
-            return (
-              <label key={option.id} className="block cursor-pointer border border-border p-3 has-[:checked]:border-primary">
-                <span className="flex items-start gap-2">
-                  <input
-                    type={decision.interactionType === "single_select" ? "radio" : "checkbox"}
-                    name={`operator-decision-${decision.id}-options`}
-                    value={option.id}
-                    checked={checked}
-                    onChange={() => toggleOption(option.id)}
-                    disabled={submittingActionId !== null}
-                    aria-describedby={`${descriptionId} ${errorId}`}
-                  />
-                  <span>
-                    <span className="block text-sm font-medium">{option.label}</span>
-                    {option.description && <span className="block text-xs text-muted-foreground">{option.description}</span>}
-                  </span>
+      {decision.interactionType !== "action" && (() => {
+        const renderOption = (option: OperatorDecisionView["definition"]["options"][number], nameSuffix: string, asRadio: boolean) => {
+          const checked = selectedOptionIds.includes(option.id);
+          return (
+            <label key={option.id} className="block cursor-pointer border border-border p-3 has-[:checked]:border-primary">
+              <span className="flex items-start gap-2">
+                <input
+                  type={asRadio ? "radio" : "checkbox"}
+                  name={`operator-decision-${decision.id}-${nameSuffix}`}
+                  value={option.id}
+                  checked={checked}
+                  onChange={() => toggleOption(option.id)}
+                  disabled={submittingActionId !== null}
+                  aria-describedby={`${descriptionId} ${errorId}`}
+                />
+                <span>
+                  <span className="block text-sm font-medium">{option.label}</span>
+                  {option.description && <span className="block text-xs text-muted-foreground">{option.description}</span>}
                 </span>
-                {option.facts.length > 0 && (
-                  <dl className="mt-2 grid gap-1 text-xs">
-                    {option.facts.map((fact) => (
-                      <div key={`${fact.label}:${fact.value}`} className="flex gap-2">
-                        <dt>{fact.label}</dt><dd>{fact.value} ({fact.status})</dd>
-                      </div>
-                    ))}
-                  </dl>
-                )}
-                {option.evidenceRefs.map((ref) => (
-                  <a key={ref.href} className="mt-2 block text-xs" href={ref.href} target="_blank" rel="noreferrer">
-                    {ref.label}
-                  </a>
-                ))}
-              </label>
-            );
-          })}
-        </fieldset>
-      )}
+              </span>
+              {option.facts.length > 0 && (
+                <dl className="mt-2 grid gap-1 text-xs">
+                  {option.facts.map((fact) => (
+                    <div key={`${fact.label}:${fact.value}`} className="flex gap-2">
+                      <dt>{fact.label}</dt><dd>{fact.value} ({fact.status})</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {option.evidenceRefs.map((ref) => (
+                <a key={ref.href} className="mt-2 block text-xs" href={ref.href} target="_blank" rel="noreferrer">
+                  {ref.label}
+                </a>
+              ))}
+            </label>
+          );
+        };
+        if (optionGroups && optionGroups.length > 0) {
+          const grouped = new Set(optionGroups.flatMap((group) => group.optionIds));
+          const ungrouped = decision.definition.options.filter((option) => !grouped.has(option.id));
+          return (
+            <div className="mt-4 space-y-4">
+              {optionGroups.map((group) => (
+                <fieldset key={group.id} className="space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
+                  <legend className="text-sm font-medium">{group.label ?? group.id}
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      {group.selection?.min === group.selection?.max && group.selection?.max === 1 ? "(1개 선택)" : ""}
+                    </span>
+                  </legend>
+                  {decision.definition.options
+                    .filter((option) => group.optionIds.includes(option.id))
+                    .map((option) => renderOption(option, `group-${group.id}`, group.selection?.max === 1))}
+                </fieldset>
+              ))}
+              {ungrouped.length > 0 && (
+                <fieldset className="space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
+                  <legend className="text-sm font-medium">Options</legend>
+                  {ungrouped.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
+                </fieldset>
+              )}
+            </div>
+          );
+        }
+        return (
+          <fieldset className="mt-4 space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
+            <legend className="text-sm font-medium">Options</legend>
+            {decision.definition.options.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
+          </fieldset>
+        );
+      })()}
 
       {(decision.definition.approvedScope.length > 0 || decision.definition.forbiddenScope.length > 0) && (
         <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">

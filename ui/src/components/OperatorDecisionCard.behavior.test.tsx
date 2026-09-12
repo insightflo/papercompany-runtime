@@ -178,4 +178,51 @@ describe("OperatorDecisionCard behavior", () => {
     expect(document.activeElement).toBe(alert);
     expect((host.querySelector('input[value="one"]') as HTMLInputElement).checked).toBe(true);
   });
+
+describe("OperatorDecisionCard option groups", () => {
+  const opt = (id: string, label: string) => ({ id, label, description: null, facts: [], evidenceRefs: [] });
+  const groupedDecision: OperatorDecisionView = {
+    ...baseDecision,
+    interactionType: "multi_select",
+    definition: {
+      ...baseDecision.definition,
+      options: [opt("cand-1", "소재1"), opt("cand-2", "소재2"), opt("style-vox", "이미지: vox"), opt("style-auto", "이미지: 자동")],
+      optionGroups: [
+        { id: "material", label: "소재 후보", optionIds: ["cand-1", "cand-2"], selection: { min: 1, max: 1 } },
+        { id: "image_style", label: "이미지 유형", optionIds: ["style-vox", "style-auto"], selection: { min: 1, max: 1 } },
+      ],
+      selection: { min: 2, max: 2 },
+    },
+  };
+
+  it("renders separate radio groups per option group", async () => {
+    await renderCard(groupedDecision);
+    const legends = [...host.querySelectorAll("legend")].map((el) => el.textContent);
+    expect(legends).toContain("소재 후보(1개 선택)");
+    expect(legends).toContain("이미지 유형(1개 선택)");
+    const radios = [...host.querySelectorAll('input[type="radio"]')];
+    const checkboxes = [...host.querySelectorAll('input[type="checkbox"]')];
+    expect(radios.length).toBe(4);
+    expect(checkboxes.length).toBe(0);
+  });
+
+  it("replaces the selection within a group but keeps other groups", async () => {
+    const onResolve = await renderCard(groupedDecision);
+    click(host.querySelector('input[value="cand-1"]')!);
+    click(host.querySelector('input[value="cand-2"]')!);
+    click(host.querySelector('input[value="style-vox"]')!);
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
+    expect(onResolve).toHaveBeenCalledWith("decision-1", {
+      actionId: "choose", selectedOptionIds: ["cand-2", "style-vox"], comment: null,
+    });
+  });
+
+  it("blocks submit while a group has no selection", async () => {
+    const onResolve = await renderCard(groupedDecision);
+    click(host.querySelector('input[value="cand-1"]')!);
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("이미지 유형: 1개를 선택하세요");
+  });
+});
 });

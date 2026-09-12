@@ -115,3 +115,73 @@ describe("operator decision result", () => {
     expect(retryOperatorDecisionContinuationSchema.safeParse({ force: true }).success).toBe(false);
   });
 });
+
+describe("operator decision option groups", () => {
+  const material = (id: string) => ({
+    id, label: id, description: null, facts: [], evidenceRefs: [],
+  });
+  const groupedDefinition = {
+    options: [material("cand-1"), material("cand-2"), material("style-vox"), material("style-auto")],
+    optionGroups: [
+      { id: "material", label: "소재", optionIds: ["cand-1", "cand-2"], selection: { min: 1, max: 1 } },
+      { id: "image_style", label: "이미지 유형", optionIds: ["style-vox", "style-auto"], selection: { min: 1, max: 1 } },
+    ],
+    actions: [{ id: "submit", label: "제출", outcome: "submit" as const, tone: "primary" as const, requiresSelection: true }],
+    selection: { min: 2, max: 2 },
+    comment: { mode: "optional" as const, label: "Comment", placeholder: null, maxLength: 200 },
+    approvedScope: [], forbiddenScope: [],
+  };
+
+  it("accepts one selection per group", () => {
+    const result = deriveOperatorDecisionResult(groupedDefinition, {
+      actionId: "submit", selectedOptionIds: ["cand-2", "style-vox"], comment: null,
+    });
+    expect(result.selectedOptionIds).toEqual(["cand-2", "style-vox"]);
+  });
+
+  it("rejects two selections in a max-1 group", () => {
+    let message = "";
+    try {
+      deriveOperatorDecisionResult({
+        ...groupedDefinition, selection: { min: 1, max: 4 },
+      }, { actionId: "submit", selectedOptionIds: ["cand-1", "cand-2", "style-vox"], comment: null });
+    } catch (error) {
+      message = String((error as Error).message);
+    }
+    expect(message).toContain("group material");
+  });
+
+  it("rejects a group with no selection", () => {
+    let message = "";
+    try {
+      deriveOperatorDecisionResult({
+        ...groupedDefinition, selection: { min: 1, max: 4 },
+      }, { actionId: "submit", selectedOptionIds: ["cand-1"], comment: null });
+    } catch (error) {
+      message = String((error as Error).message);
+    }
+    expect(message).toContain("group image_style");
+  });
+
+  it("rejects a definition where an option belongs to two groups", () => {
+    expect(() => deriveOperatorDecisionResult({
+      ...groupedDefinition,
+      optionGroups: [
+        groupedDefinition.optionGroups[0],
+        { ...groupedDefinition.optionGroups[1], optionIds: ["style-vox", "cand-1"] },
+      ],
+    }, { actionId: "submit", selectedOptionIds: ["cand-1", "style-vox"], comment: null })
+    ).toThrow(/at most one group/);
+  });
+
+  it("rejects a group referencing an unknown option", () => {
+    expect(() => deriveOperatorDecisionResult({
+      ...groupedDefinition,
+      optionGroups: [
+        { ...groupedDefinition.optionGroups[0], optionIds: ["cand-1", "ghost"] },
+        groupedDefinition.optionGroups[1],
+      ],
+    }, { actionId: "submit", selectedOptionIds: ["cand-1", "style-vox"], comment: null })
+    ).toThrow(/unknown option/);
+  });
+});
