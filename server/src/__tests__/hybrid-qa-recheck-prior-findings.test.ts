@@ -24,6 +24,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -65,6 +66,7 @@ describeEP("validation recheck — prior findings injection", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
     await db.delete(missionAgentRuntimes);
     await db.delete(heartbeatRunFinalizationSteps);
     await db.delete(heartbeatRunFinalizations);
