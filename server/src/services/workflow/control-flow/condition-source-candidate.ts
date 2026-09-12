@@ -48,7 +48,29 @@ export async function selectAttemptWorkProduct(input: {
   if (!attempt.startedAt) fail(`producer step "${stepId}" has no attempt start time; cannot establish work-product freshness`);
   if (attempts.slice(1).some(({ step }) => step.iterationIndex === attempt.iterationIndex
     && step.startedAt?.getTime() === attempt.startedAt!.getTime())) fail(`ambiguous current attempt for producer step "${stepId}"`);
-  if (attempt.status !== "completed" || !attempt.issueId) return unavailable();
+  if (attempt.status !== "completed") return unavailable();
+  if (!attempt.issueId) {
+    // Issue-less tool steps (e.g., scheduler-triggered collect-tech-blog-posts) store the artifact
+    // directly in workflow_step_runs metadata (toolResult.artifactPath / data.rawPath) without an
+    // associated issue. Fall back to that local file so IF conditions can evaluate without requiring
+    // an issue_work_product. This preserves the grace-window path and avoids "no completed-attempt" failures.
+    const meta = attempt.metadata as Record<string, unknown> | null | undefined;
+    const toolResult = (meta as { toolResult?: { artifactPath?: unknown; data?: { rawPath?: unknown } } } | null)?.toolResult;
+    const candidatePaths: string[] = [];
+    if (typeof toolResult?.artifactPath === "string") candidatePaths.push(toolResult.artifactPath);
+    const rawPath = (toolResult?.data as { rawPath?: unknown } | undefined)?.rawPath;
+    if (typeof rawPath === "string") candidatePaths.push(rawPath);
+    // Also check top-level artifactPath for backwards compatibility
+    const topArtifact = (meta as { artifactPath?: unknown } | null)?.artifactPath;
+    if (typeof topArtifact === "string") candidatePaths.push(topArtifact);
+    for (const p of candidatePaths) {
+      if (p.endsWith(title)) {
+        const updatedAt = attempt.completedAt ?? attempt.startedAt ?? new Date();
+        return { path: p, updatedAt };
+      }
+    }
+    return unavailable();
+  }
   const products = await db.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.issueId, attempt.issueId),
     eq(issueWorkProducts.companyId, input.run.companyId), eq(issueWorkProducts.title, title), not(eq(issueWorkProducts.status, "archived"))));
   const candidates: Array<CurrentWorkProductCandidate & { id: string; isPrimary: boolean }> = [];
