@@ -8921,6 +8921,60 @@ export function heartbeatService(db: Db) {
       }
 
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
+        // [2026-09-11 run08a86baf incident] 폴링성 실행(새 산출물·검증 기록 없음)의 자동 완료 차단.
+        // 워크플로 단계 이슈는 산출물/버딕트 등록이 완료 계약이므로, 이번 실행이 아무 기록도
+        // 남기지 않았다면 done 전환이 아니라 명시적 완료 안내만 남긴다(상태 불변).
+        if (shouldAutoCompleteSuccessfulIssue && !shouldAutoCaptureMissionChildOutput) {
+          const linkedStepRun = await tx
+            .select({ id: workflowStepRuns.id })
+            .from(workflowStepRuns)
+            .where(eq(workflowStepRuns.issueId, issue.id))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (linkedStepRun) {
+            const runCompletionEvidence = await tx
+              .select({ id: issueWorkProducts.id, createdByRunId: issueWorkProducts.createdByRunId })
+              .from(issueWorkProducts)
+              .where(and(
+                eq(issueWorkProducts.companyId, issue.companyId),
+                eq(issueWorkProducts.issueId, issue.id),
+              ))
+              .limit(2)
+              .then((rows) => rows);
+            const hasAnyProduct = runCompletionEvidence.length > 0;
+            const thisRunRegistered = runCompletionEvidence.some(
+              (row) => row.createdByRunId === run.id,
+            );
+            // 후속 무변화 실행 차단: 이슈에 산출물이 있어 완료 계약이 성립했는데 이번 실행이
+            // 새로 등록한 것이 없다면(폴링성 실행) 자동 완료하지 않는다. 산출물이 아직 없는
+            // 첫 완료는 기존 자동 완료 동작을 그대로 유지한다.
+            if (hasAnyProduct && !thisRunRegistered) {
+              await tx.insert(issueComments).values({
+                companyId: issue.companyId,
+                issueId: issue.id,
+                authorAgentId: run.agentId,
+                body: "실행은 성공적으로 종료됐지만 이번 실행이 등록한 산출물/검증 기록이 없어 자동 완료를 보류합니다 (폴링성 실행 자동완료 차단). 실제 완료 시 워크플로 계약대로 산출물을 등록하고 workflow/complete 를 호출하세요.",
+              });
+              await tx.insert(activityLog).values({
+                companyId: issue.companyId,
+                actorType: "system",
+                actorId: "heartbeat",
+                action: "issue.auto_complete_deferred_no_evidence",
+                entityType: "issue",
+                entityId: issue.id,
+                agentId: run.agentId,
+                runId: run.id,
+                details: {
+                  reason: "successful_run_without_completion_evidence",
+                  previousStatus: issue.status,
+                  nextStatus: issue.status,
+                },
+              });
+              queuePostTransactionWorkflowIssueSync(issue.id);
+              return { promotedRun: null };
+            }
+          }
+        }
         // [Task6c-C] resume run settlement fence: acting run 의 기록 링크(stepRunId, generation)
         //   이 현재 행과 정확히 일치할 때만 issue→done / step closeout 로 진행한다. 불일치면
         //   mutation 을 건너뛰고 구조화 진단 activity log(workflow.resume_stale_result_rejected)
