@@ -58,6 +58,13 @@ const selectionSchema = z.object({
   max: boundedInteger(1, 50),
 }).strict();
 
+const optionGroupSchema = z.object({
+  id: normalized(1, 80, stableIdPattern),
+  label: nullableNormalized(1, 160),
+  optionIds: z.array(normalized(1, 80, stableIdPattern)).min(1).max(50),
+  selection: selectionSchema.nullable(),
+}).strict();
+
 const commentSchema = z.object({
   mode: z.enum(["disabled", "optional", "required"]),
   label: nullableNormalized(1, 120),
@@ -81,6 +88,7 @@ const scopeSchema = z.array(normalized(1, 300)).max(20).superRefine((values, ctx
 
 export const operatorDecisionDefinitionSchema = z.object({
   options: z.array(optionSchema).max(50),
+  optionGroups: z.array(optionGroupSchema).max(8).nullable().optional(),
   actions: z.array(actionSchema).min(1).max(8),
   selection: selectionSchema.nullable(),
   comment: commentSchema,
@@ -93,6 +101,32 @@ export const operatorDecisionDefinitionSchema = z.object({
   }
   if (!unique(definition.actions.map((item) => item.id))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Action IDs must be unique", path: ["actions"] });
+  }
+  const groupList = definition.optionGroups ?? null;
+  if (groupList) {
+    const optionIds = new Set(definition.options.map((item) => item.id));
+    if (!unique(groupList.map((group) => group.id))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Option group IDs must be unique", path: ["optionGroups"] });
+    }
+    const membership: string[] = [];
+    for (const group of groupList) {
+      if (!unique(group.optionIds)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Group ${group.id} has duplicate option IDs`, path: ["optionGroups"] });
+      }
+      for (const optionId of group.optionIds) {
+        if (!optionIds.has(optionId)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Group ${group.id} references unknown option ${optionId}`, path: ["optionGroups"] });
+        }
+      }
+      membership.push(...group.optionIds);
+      if (group.selection && (group.selection.min > group.selection.max
+          || group.selection.max > group.optionIds.length)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Group ${group.id} has invalid selection bounds`, path: ["optionGroups"] });
+      }
+    }
+    if (!unique(membership)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "An option may belong to at most one group", path: ["optionGroups"] });
+    }
   }
   if (definition.options.length === 0) {
     if (definition.selection !== null || definition.actions.some((action) => action.requiresSelection)) {
@@ -195,6 +229,13 @@ export function deriveOperatorDecisionResult(
     const bounds = definition.selection;
     if (!bounds || selected.size < bounds.min || selected.size > bounds.max) {
       resolutionError("Selection cardinality is invalid", ["selectedOptionIds"]);
+    }
+    for (const group of definition.optionGroups ?? []) {
+      if (!group.selection) continue;
+      const groupSelected = group.optionIds.filter((id) => selected.has(id)).length;
+      if (groupSelected < group.selection.min || groupSelected > group.selection.max) {
+        resolutionError(`Selection for group ${group.id} is invalid`, ["selectedOptionIds"]);
+      }
     }
   } else if (selected.size !== 0) {
     resolutionError("This action does not accept selection", ["selectedOptionIds"]);
