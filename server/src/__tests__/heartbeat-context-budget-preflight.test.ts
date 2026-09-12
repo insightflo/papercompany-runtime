@@ -14,6 +14,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   activityLog,
+  assets,
   companies,
   companySecretVersions,
   companySecrets,
@@ -490,6 +491,8 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(companySecrets);
     await db.delete(projects);
     await db.delete(companySkills);
+    // [T7 fixture] PLAN-QA manifest attachments create assets rows (company FK cascade 없음).
+    await db.delete(assets);
     await db.delete(companies);
   });
 

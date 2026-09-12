@@ -16,6 +16,7 @@ export const missionPlanTemplates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityCompanyIdUq: uniqueIndex("mission_plan_templates_quality_company_id_uq").on(table.companyId, table.id),
     companyKeyUniqueIdx: uniqueIndex("mission_plan_templates_company_key_uq").on(table.companyId, table.key),
     companyIdx: index("mission_plan_templates_company_idx").on(table.companyId),
   }),

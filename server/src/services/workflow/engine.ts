@@ -6,10 +6,8 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { agents,
-  companies,
-} from "@paperclipai/db";
-import { and, eq, asc, ne } from "drizzle-orm";
+import { companies } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
@@ -20,6 +18,8 @@ import { validateStructuralGateReadinessForSteps } from "./control-flow/structur
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
 import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
+import { resolveWorkflowMissionOwnerAgentId } from "../missions/mission-create-records.js";
+import { assertDefinitionNotQualityOwned } from "../quality/native-definition.js";
 import {
   createWorkflowDefinition,
   claimWorkflowRunSlot,
@@ -126,31 +126,6 @@ function formatWorkflowMissionTitle(
   const base = `${yyyyMmDd} ${workflowName}`;
   if (!runLabel) return base;
   return `${base} — ${runLabel.slice(0, 120)}`;
-}
-
-async function resolveWorkflowMissionOwnerAgentId(
-  db: Db,
-  companyId: string,
-  workflow: WorkflowDefinition,
-): Promise<string> {
-  const stepAgentId = workflow.steps.find((step) => typeof step.agentId === "string" && step.agentId.trim())?.agentId;
-  if (stepAgentId) return stepAgentId;
-
-  const [agent] = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(and(
-      eq(agents.companyId, companyId),
-      ne(agents.status, "terminated"),
-      ne(agents.status, "pending_approval"),
-    ))
-    .orderBy(asc(agents.createdAt))
-    .limit(1);
-
-  if (!agent) {
-    throw new Error("Cannot create workflow mission: no agent exists for company");
-  }
-  return agent.id;
 }
 
 async function ensureMissionForWorkflowRun(
@@ -307,6 +282,7 @@ export const workflowService = {
     id: string,
     updates: Partial<Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt">>,
   ): Promise<WorkflowDefinition | null> {
+    await assertDefinitionNotQualityOwned(db, id);
     if (updates.steps) {
       const steps = normalizeWorkflowSteps(updates.steps as unknown[], {
         executionMode: updates.executionMode,
@@ -334,6 +310,7 @@ export const workflowService = {
    * Delete a workflow definition.
    */
   async deleteDefinition(db: Db, id: string): Promise<boolean> {
+    await assertDefinitionNotQualityOwned(db, id);
     return deleteWorkflowDefinition(db, id);
   },
 

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { qualityActions } from "./quality_actions.js";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { issues } from "./issues.js";
@@ -51,6 +52,8 @@ export const operatorDecisions = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    qualityActionId: uuid("quality_action_id"),
+    qualityBinding: jsonb("quality_binding").$type<Record<string, unknown>>(),
     requestKey: text("request_key").notNull(),
     requestHash: text("request_hash").notNull(),
     schemaVersion: integer("schema_version").notNull().default(1),
@@ -75,6 +78,8 @@ export const operatorDecisions = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityActionFk: foreignKey({ columns: [table.companyId, table.qualityActionId], foreignColumns: [qualityActions.companyId, qualityActions.id] }),
+    qualityContinuationCheck: check("operator_decisions_quality_continuation_check", sql`${table.qualityActionId} is null or ${table.continuationMode} = 'none'`),
     companyRequestUq: uniqueIndex("operator_decisions_company_request_uq").on(table.companyId, table.requestKey),
     companyStatusPriorityCreatedIdx: index("operator_decisions_company_status_priority_created_idx")
       .on(table.companyId, table.status, table.priority, table.createdAt),

@@ -15,7 +15,17 @@ export async function runtimeContextFixture() {
   const { generateDrizzleJson, generateMigration } = dbRequire("drizzle-kit/api");
   const client = new PGlite();
   const statements = await generateMigration(generateDrizzleJson({}), generateDrizzleJson(schema));
-  await client.exec(statements.join(";\n"));
+  // drizzle-kit 은 복합 UNIQUE INDEX(FK 대상)를 모든 ALTER TABLE 보다 나중에 내보내므로
+  // PGlite 는 FK 추가 시 대상 인덱스를 찾지 못한다. 생성된 DDL 의 문 순서만 재배열한다:
+  // 테이블·타입 생성 → 인덱스 DDL 전부 → 나머지(FK 등 ALTER) 순. 스키마/마이그레이션 변경 없음.
+  const firstAlter = statements.findIndex((statement: string) => /^ALTER TABLE /i.test(statement.trim()));
+  const isIndexDdl = (statement: string) => /^CREATE (UNIQUE )?INDEX /i.test(statement.trim());
+  const ordered = firstAlter === -1 ? statements : [
+    ...statements.slice(0, firstAlter).filter((statement: string) => !isIndexDdl(statement)),
+    ...statements.filter(isIndexDdl),
+    ...statements.slice(firstAlter).filter((statement: string) => !isIndexDdl(statement)),
+  ];
+  await client.exec(ordered.join(";\n"));
   // Services use the common Drizzle PostgreSQL query/transaction API, not postgres-js internals.
   const db = drizzle(client, { schema }) as unknown as Db;
   return { db, close: () => client.close() };

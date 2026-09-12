@@ -67,6 +67,12 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
     const context = await store.getDispatchContext(continuationId);
     if (!context || context.continuation.state !== "leased" || context.continuation.leaseOwner !== workerId) return;
     const { continuation, decision } = context;
+    // [T5] 전달 직전 실제 DB 연결 재검사: Quality 연결 결정은 continuationMode=none 계약이므로
+    //   이런 행이 보이면 계약 위반이다 — 절대 깨우지 않고 실패 닫힘(유한 재시도 후 종말).
+    if (decision.qualityActionId) {
+      await store.failDispatch(continuation.id, workerId, now);
+      return;
+    }
     if (!continuation.issueId) {
       await store.block(continuation.id, workerId, "issue_missing", now);
       return;

@@ -1,4 +1,5 @@
-import { boolean, index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, foreignKey, uniqueIndex, index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { qualityActions } from "./quality_actions.js";
 import { companies } from "./companies.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 import { qualityReviewItems } from "./quality_review_items.js";
@@ -9,6 +10,8 @@ export const qualityEvidenceRefs = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     reviewItemId: uuid("review_item_id").notNull().references(() => qualityReviewItems.id, { onDelete: "cascade" }),
+    qualityActionId: uuid("quality_action_id"),
+    qualityContract: jsonb("quality_contract").$type<Record<string, unknown>>(),
     surface: text("surface").notNull(),
     expected: jsonb("expected").$type<Record<string, unknown>>().notNull().default({}),
     actual: jsonb("actual").$type<Record<string, unknown>>().notNull().default({}),
@@ -24,6 +27,8 @@ export const qualityEvidenceRefs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityCompanyIdUq: uniqueIndex("quality_evidence_refs_quality_company_id_uq").on(table.companyId, table.id),
+    qualityActionFk: foreignKey({ columns: [table.companyId, table.qualityActionId], foreignColumns: [qualityActions.companyId, qualityActions.id] }),
     reviewItemIdx: index("quality_evidence_refs_review_item_idx").on(table.reviewItemId, table.surface),
     companyStatusIdx: index("quality_evidence_refs_company_status_idx").on(table.companyId, table.status, table.surface),
   }),

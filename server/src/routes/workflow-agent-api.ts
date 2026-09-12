@@ -3,13 +3,11 @@ import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, issues, missions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import {
-  missionPlanQaVerdictSubmitSchema,
   missionOwnerPlanDecisionSubmitSchema,
   workflowArtifactRegisterSchema,
   workflowIssueCompleteSchema,
   workflowVerdictSubmitSchema,
   missionOwnerDecisionSubmitSchema,
-  type MissionPlanQaVerdictSubmit,
   type MissionOwnerPlanDecisionSubmit,
   type WorkflowArtifactRegister,
   type WorkflowIssueComplete,
@@ -24,10 +22,11 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { logActivity } from "../services/activity-log.js";
-import { submitMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-agent-api.js";
+import { registerMissionPlanQaAgentRoutes } from "../services/missions/mission-plan-qa-agent-api.js";
+import { assertNotPlanQaWorkflowVerdict } from "../services/workflow/agent-verdict-api.js";
 import { submitMissionOwnerPlanDecision } from "../services/missions/mission-plan-decision-agent-api.js";
 import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
-import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
+import { createPlanQaResubmissionWakeupHandler, createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import {
   completeWorkflowIssue,
   submitWorkflowVerdict,
@@ -121,19 +120,6 @@ async function authorizeWorkflowApi(
   throw conflict("Workflow API requires either the checked-out workflow issue run or a checked-out mission-owner unblock issue whose originId is this workflow issue");
 }
 
-async function authorizeMissionPlanQaApi(req: Request, db: Db, issue: Awaited<ReturnType<typeof loadIssue>>) {
-  assertCompanyAccess(req, issue.companyId);
-  if (issue.originKind !== "mission_plan_qa") {
-    throw conflict("Mission PLAN-QA verdict API can only be used for mission_plan_qa issues");
-  }
-  const actor = getActorInfo(req);
-  if (req.actor.type !== "agent") return actor;
-  if (!actor.agentId) throw forbidden("Agent authentication required");
-  if (!actor.runId) throw unauthorized("Agent run id required");
-  await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
-  return actor;
-}
-
 async function authorizeMissionOwnerPlanDecisionApi(req: Request, db: Db, issue: Awaited<ReturnType<typeof loadIssue>>) {
   assertCompanyAccess(req, issue.companyId);
   if (issue.originKind !== "mission_main_executor_plan") {
@@ -162,14 +148,12 @@ async function authorizeMissionOwnerPlanDecisionApi(req: Request, db: Db, issue:
 export function workflowAgentApiRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);
-  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
-    heartbeat,
-    { requestedByActorId: "workflow-agent-api-plan-qa", contextSource: "workflow_agent_api_plan_qa" },
-  );
-  const enqueuePlanningIssueWakeup = createPlanningIssueWakeupHandler(
-    heartbeat,
-    { requestedByActorId: "workflow-agent-api-plan-qa", contextSource: "workflow_agent_api_plan_rework" },
-  );
+  const enqueuePlanQaWakeup = createPlanQaWakeupHandler(heartbeat,
+    { requestedByActorId: "workflow-agent-api-plan-qa", contextSource: "workflow_agent_api_plan_qa" });
+  const enqueuePlanningIssueWakeup = createPlanningIssueWakeupHandler(heartbeat,
+    { requestedByActorId: "workflow-agent-api-plan-qa", contextSource: "workflow_agent_api_plan_rework" });
+  const enqueuePlanQaResubmissionWakeup = createPlanQaResubmissionWakeupHandler(heartbeat,
+    { requestedByActorId: "workflow-agent-api-plan-qa", contextSource: "workflow_agent_api_plan_qa" });
 
   router.post("/issues/:id/workflow/artifacts", hermesOpsMutationGuard("workflow.artifacts.register"), validate(workflowArtifactRegisterSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
@@ -198,6 +182,8 @@ export function workflowAgentApiRoutes(db: Db) {
 
   router.post("/issues/:id/workflow/verdict", hermesOpsMutationGuard("workflow.verdict.submit"), validate(workflowVerdictSubmitSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    assertCompanyAccess(req, issue.companyId);
+    await assertNotPlanQaWorkflowVerdict(db, issue);
     const { actor } = await authorizeWorkflowApi(req, db, issue);
     const data: WorkflowVerdictSubmit = req.body;
     const verdict = await submitWorkflowVerdict({ db, issue, actor, data });
@@ -221,35 +207,9 @@ export function workflowAgentApiRoutes(db: Db) {
     res.json(verdict);
   });
 
-  router.post("/issues/:id/mission-plan-qa/verdict", hermesOpsMutationGuard("mission.plan_qa.verdict.submit"), validate(missionPlanQaVerdictSubmitSchema), async (req, res) => {
-    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
-    const actor = await authorizeMissionPlanQaApi(req, db, issue);
-    const data: MissionPlanQaVerdictSubmit = req.body;
-    const verdict = await submitMissionPlanQaVerdict({
-      db,
-      issue,
-      actor,
-      data,
-      enqueuePlanQaWakeup,
-      enqueuePlanningIssueWakeup,
-    });
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "issue.mission_plan_qa_verdict_submitted",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        identifier: issue.identifier,
-        verdict: verdict.verdict,
-        decisionHash: verdict.decisionHash,
-        planDecisionStatus: verdict.planDecisionStatus,
-      },
-    });
-    res.json(verdict);
+  registerMissionPlanQaAgentRoutes(router, {
+    db, guard: hermesOpsMutationGuard, validate, enqueuePlanQaWakeup, enqueuePlanningIssueWakeup,
+    enqueuePlanQaResubmissionWakeup,
   });
 
   router.post("/issues/:id/mission-plan-decision", hermesOpsMutationGuard("mission.plan_decision.submit"), validate(missionOwnerPlanDecisionSubmitSchema), async (req, res) => {

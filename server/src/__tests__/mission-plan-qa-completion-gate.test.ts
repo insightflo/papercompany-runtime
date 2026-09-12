@@ -23,8 +23,8 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { heartbeatService } from "../services/heartbeat.ts";
-import { issueService } from "../services/issues.ts";
+import { heartbeatService } from "../services/heartbeat.js";
+import { issueService } from "../services/issues.js";
 
 const executeSpy = vi.fn();
 

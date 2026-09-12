@@ -17,6 +17,7 @@ import {
   type WorkflowRetryAttemptSummary,
 } from "./retry-policy.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
+import { readQualityStepActionId, reserveQualityRetryUsage } from "../quality/retry-budget.js";
 import {
   appendWorkflowAuthorityTransition,
   supersedeWorkflowDelegationsForGeneration,
@@ -141,6 +142,14 @@ export async function scheduleWorkflowStepRetry(
         return { result: "already_changed" as const, stepRunId: input.stepRunId };
       }
 
+      // [T4 quality] quality-owned step 는 이 retry tx 안에서 group+policy 실행 사용량을
+      // 예약한다. 한도 초과면 예외로 전체 tx(이벤트 포함)가 롤백된다.
+      const qualityActionId = readQualityStepActionId(input.observedMetadataSnapshot);
+      if (qualityActionId) {
+        await reserveQualityRetryUsage(tx, { companyId: input.companyId, actionId: qualityActionId, now });
+      }
+      const qualityOwned = qualityActionId !== null;
+
       // Step 2: CAS-update the step run. Scope by workflowRunId in addition
       // to stepRunId/status/retryCount/timestamps/metadata so a cross-run
       // collision or unrelated metadata mutation can never match.
@@ -162,7 +171,9 @@ export async function scheduleWorkflowStepRetry(
         casConditions.push(isNull(workflowStepRuns.lastDispatchRequestId));
       }
       casConditions.push(eq(workflowStepRuns.metadata, input.observedMetadataSnapshot));
-      if (finalizationV1Enabled) {
+      // [T4 quality] 전역 finalization flag 와 무관하게 quality step 은 실제 generation
+      // CAS 로 확정한다(플래그를 자동으로 켜지 않는다).
+      if (finalizationV1Enabled || qualityOwned) {
         casConditions.push(eq(workflowStepRuns.executionGeneration, observedExecutionGeneration));
       }
 
@@ -179,7 +190,7 @@ export async function scheduleWorkflowStepRetry(
           lastDispatchErrorAt: null,
           lastDispatchErrorSummary: null,
           metadata: metadataPatch,
-          ...(finalizationV1Enabled
+          ...(finalizationV1Enabled || qualityOwned
             ? {
                 executionGeneration: sql`${workflowStepRuns.executionGeneration} + 1`,
                 dispatchOwnerWakeupRequestId: null,

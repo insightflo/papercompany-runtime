@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentToolGrants, agents, companies, createDb, issues, missions, toolDefinitions,
 } from "@paperclipai/db";
@@ -17,6 +20,19 @@ const describeEP = support.supported ? describe : describe.skip;
 if (!support.supported) {
   console.warn(`Skipping PLAN-side-effect rejection tests: ${support.reason ?? "unsupported"}`);
 }
+
+// [T7 격리] recordLatest 가 PLAN-QA manifest 를 StorageService 에 기록하므로 기본 인스턴스
+// storage(~/.paperclip) 대신 suite 전용 임시 디렉터리로 돌린다(T12 전역 주입 전 임시 차단).
+let planQaStorageRoot: string | null = null;
+beforeAll(async () => {
+  planQaStorageRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-hybridqa-storage-"));
+  vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk");
+  vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", planQaStorageRoot);
+});
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  if (planQaStorageRoot) await rm(planQaStorageRoot, { recursive: true, force: true });
+});
 
 // [ purpose ] Before PLAN-QA issue/wakeup/materialization, an invalid declared
 //   structural plan is rejected with public status:"invalid" and reason

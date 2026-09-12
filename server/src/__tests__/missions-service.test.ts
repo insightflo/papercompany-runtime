@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -9,6 +10,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   activityLog,
+  assets,
   companySecrets,
   companySkills,
   companies,
@@ -51,6 +53,19 @@ import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+// [T7 격리] supervision materialize 경로의 recordLatest 가 PLAN-QA manifest 를 StorageService 에
+// 기록하므로 기본 인스턴스 storage(~/.paperclip) 대신 suite 전용 임시 디렉터리로 돌린다.
+let planQaStorageRoot: string | null = null;
+beforeAll(async () => {
+  planQaStorageRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-msvc-storage-"));
+  vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk");
+  vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", planQaStorageRoot);
+});
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  if (planQaStorageRoot) await rm(planQaStorageRoot, { recursive: true, force: true });
+});
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -129,6 +144,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.delete(agentRuntimeState);
     await db.delete(companySecrets);
     await db.delete(companySkills);
+    // assets 는 companies(company_id) 와 agents(created_by_agent_id) 를 참조하므로
+    // 두 부모 테이블보다 먼저 비운다(첨부 FK teardown 누락 수정).
+    await db.delete(assets);
     await db.delete(agents);
     await db.delete(companies);
   });

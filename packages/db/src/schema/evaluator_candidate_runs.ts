@@ -1,4 +1,5 @@
-import { index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { foreignKey, index, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { qualityActions } from "./quality_actions.js";
 import { companies } from "./companies.js";
 import { evaluatorAnchorCases } from "./evaluator_anchor_cases.js";
 import { evaluatorVersions } from "./evaluator_versions.js";
@@ -9,6 +10,8 @@ export const evaluatorCandidateRuns = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    qualityActionId: uuid("quality_action_id"),
+    qualityContract: jsonb("quality_contract").$type<Record<string, unknown>>(),
     evaluatorVersionId: uuid("evaluator_version_id").notNull().references(() => evaluatorVersions.id, { onDelete: "cascade" }),
     anchorCaseId: uuid("anchor_case_id").references(() => evaluatorAnchorCases.id, { onDelete: "set null" }),
     reviewItemId: uuid("review_item_id").references(() => qualityReviewItems.id, { onDelete: "set null" }),
@@ -21,6 +24,7 @@ export const evaluatorCandidateRuns = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityActionFk: foreignKey({ columns: [table.companyId, table.qualityActionId], foreignColumns: [qualityActions.companyId, qualityActions.id] }),
     companyStatusIdx: index("evaluator_candidate_runs_company_status_idx").on(table.companyId, table.status, table.createdAt),
     evaluatorIdx: index("evaluator_candidate_runs_evaluator_idx").on(table.evaluatorVersionId, table.status),
     anchorIdx: index("evaluator_candidate_runs_anchor_idx").on(table.anchorCaseId),

@@ -17,6 +17,11 @@ export type MissionPlanTemplateSelectionResult =
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/** 기존 template instructions SHA256 계산 규칙(T7 고정 명세도 동일 규칙을 재사용한다). */
+export function missionPlanTemplateContentHash(instructions: string): string {
+  return createHash("sha256").update(instructions).digest("hex");
+}
+
 export function resolveMissionPlanTemplateSelection(input: {
   readonly decision: Record<string, unknown>;
   readonly enabledTemplates: readonly SelectableMissionPlanTemplate[];
@@ -50,7 +55,7 @@ export function resolveMissionPlanTemplateSelection(input: {
     selectionSource: explicit ? "agent" : "code_fallback",
     templates: selected.map((template) => ({
       ...template,
-      contentHash: createHash("sha256").update(template.instructions).digest("hex"),
+      contentHash: missionPlanTemplateContentHash(template.instructions),
     })),
   };
 }

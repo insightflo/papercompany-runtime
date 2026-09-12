@@ -80,6 +80,11 @@ export async function reconcileRunnableWorkflowStepWakeups(
         // the due-retry reconciler / normal DAG sync — never wake it here.
         const rawMeta = stepRun.metadata as Record<string, unknown> | null;
         if (rawMeta?.workflowRetry !== undefined && rawMeta.workflowRetry !== null) continue;
+        // [T4 quality] quality-owned step(metadata.qualityActionId) 은 generic 재깨우기 금지:
+        //   quality wake 이 skip/삼켜져 살아 있는 행이 없어도 acceptance 없는 generic 실행이
+        //   되면 안 된다(fail-closed). 복구는 reconcileQualityIntents(native-reconciler tick
+        //   연결)가 같은 delivery 함수로 수행한다.
+        if (rawMeta?.qualityActionId !== undefined && rawMeta.qualityActionId !== null) continue;
         if (await hasActiveHeartbeat(db, stepRun.issueId)) continue;
         if (await hasActiveWakeup(db, run.companyId, stepRun.issueId, run.id)) continue;
 

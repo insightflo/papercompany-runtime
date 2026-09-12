@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createDb,
   issueComments,
@@ -31,6 +34,19 @@ import {
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+// [T7 격리] recordLatest 가 PLAN-QA manifest 를 StorageService 에 기록하므로 기본 인스턴스
+// storage(~/.paperclip) 대신 suite 전용 임시 디렉터리로 돌린다(T12 전역 주입 전 임시 차단).
+let planQaStorageRoot: string | null = null;
+beforeAll(async () => {
+  planQaStorageRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-paqo-lrd-storage-"));
+  vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk");
+  vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", planQaStorageRoot);
+});
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  if (planQaStorageRoot) await rm(planQaStorageRoot, { recursive: true, force: true });
+});
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
