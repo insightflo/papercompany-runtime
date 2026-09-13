@@ -69,6 +69,16 @@ import {
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
 import { writeQualityFinding } from "./quality-finding-writer.js";
+import {
+  buildQualityWakeAcceptancePatch,
+  findExistingQualityWakeRow,
+  mergeableWakeupKeyCondition,
+  nextPlanQaResubmissionExecutionEpoch,
+  planQaResubmissionPromotionAcceptancePatch,
+  queuePausedAgentWakeupRequest,
+  writeSkippedWakeupRequest,
+} from "./quality/heartbeat-admission.js";
+import { isBoundedExecutionWakeKey } from "./quality/native-wake.js";
 import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
 import {
   formatKnowledgePatternCards,
@@ -6179,6 +6189,10 @@ export function heartbeatService(db: Db) {
       const sessionBefore = await resolveSessionBeforeForWakeup(agent, promotedTaskKey, {
         missionId: missionIdForWake,
       });
+      // [T8 bounded resubmission] 재제출 승격 run 은 실제 새 execution epoch 로 시작한다(이전 시도 epoch 재사용 금지).
+      const resubmissionExecutionEpoch = await nextPlanQaResubmissionExecutionEpoch(tx as unknown as Db, {
+        idempotencyKey: request.idempotencyKey, companyId: agent.companyId, issueId: promotedIssueId,
+      });
       const now = new Date();
       const newRun = await tx
         .insert(heartbeatRuns)
@@ -6192,6 +6206,7 @@ export function heartbeatService(db: Db) {
           wakeupRequestId: request.id,
           contextSnapshot: promotedContextSnapshot,
           sessionIdBefore: sessionBefore,
+          ...(resubmissionExecutionEpoch !== null ? { executionEpoch: resubmissionExecutionEpoch } : {}),
         })
         .returning()
         .then((rows) => rows[0]);
@@ -6204,6 +6219,17 @@ export function heartbeatService(db: Db) {
           finishedAt: null,
           error: null,
           updatedAt: now,
+          // [T4 quality] 대기 행이 실행으로 승격되는 시점이 곧 수락 시점이다 —
+          // 승격 tx 안에서 수락 원문을 기록한다.
+          ...(await buildQualityWakeAcceptancePatch(tx as unknown as Db, {
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: promotedIssueId,
+            workflowRunId: request.workflowRunId,
+            idempotencyKey: request.idempotencyKey,
+            runId: newRun.id,
+            acceptedAt: now,
+          })),
         })
         .where(eq(agentWakeupRequests.id, request.id));
 
@@ -8261,15 +8287,49 @@ export function heartbeatService(db: Db) {
           // The inner catch did not fire, so we must record the failure here.
           const message = outerErr instanceof Error ? outerErr.message : "Unknown setup failure";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
-          await setRunStatus(runId, "failed", {
-            error: message,
-            errorCode: resolveHeartbeatFailureCode(outerErr, "adapter_failed"),
-            finishedAt: new Date(),
-          }).catch(() => undefined);
-          await setWakeupStatus(run.wakeupRequestId, "failed", {
-            finishedAt: new Date(),
-            error: message,
-          }).catch(() => undefined);
+          // [quality-cancel race] 비종말→failed 원자 전이만 시도한다. 외부 취소/reap/finalize 가 이미
+          // 종말 상태를 쓴 경우(판독→기록 사이에 끼어드는 창 포함) 그 상태를 되찾지 않는다. 완료
+          // 경로의 외부 종말 계약(외부 종말 시 증거만 backfill, :7951)과 동일 규칙이지만 여기서는
+          // 단일 조건부 UPDATE 로 원자적으로 판정하고, 판정 결과로 run/wakeup 후속 기록을 파생한다.
+          // 재시도/대체 쓰기는 없다(판정 실패면 종말 기록을 건너뛰고 아래 증거 이벤트로 계속한다).
+          const setupFailedRun = await db
+            .update(heartbeatRuns)
+            .set({
+              status: "failed",
+              error: message,
+              errorCode: resolveHeartbeatFailureCode(outerErr, "adapter_failed"),
+              finishedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(and(eq(heartbeatRuns.id, runId), inArray(heartbeatRuns.status, ["queued", "running"])))
+            .returning()
+            .then((rows) => rows[0] ?? null)
+            .catch(() => null);
+          if (setupFailedRun) {
+            await setWakeupStatus(run.wakeupRequestId, "failed", {
+              finishedAt: new Date(),
+              error: message,
+            }).catch(() => undefined);
+            // setRunStatus 가 종말 전이 직후 수행하는 관측 파생 기록을 동일하게 유지한다.
+            await recordHeartbeatTerminalOutcomeShadow(db, setupFailedRun).catch(() => undefined);
+            publishLiveEvent({
+              companyId: setupFailedRun.companyId,
+              type: "heartbeat.run.status",
+              payload: {
+                runId: setupFailedRun.id,
+                agentId: setupFailedRun.agentId,
+                status: setupFailedRun.status,
+                invocationSource: setupFailedRun.invocationSource,
+                triggerDetail: setupFailedRun.triggerDetail,
+                error: setupFailedRun.error ?? null,
+                errorCode: setupFailedRun.errorCode ?? null,
+                startedAt: setupFailedRun.startedAt ? new Date(setupFailedRun.startedAt).toISOString() : null,
+                finishedAt: setupFailedRun.finishedAt ? new Date(setupFailedRun.finishedAt).toISOString() : null,
+              },
+            });
+            await recordHeartbeatRunTerminalTransitionEvent(db, setupFailedRun).catch(() => undefined);
+            await maybeRecordTerminalFinalization(db, setupFailedRun, new Date()).catch(() => undefined);
+          }
           const failedRun = await getRun(runId).catch(() => null);
           if (failedRun) {
             // Emit a run-log event so the failure is visible in the run timeline,
@@ -8332,9 +8392,32 @@ export function heartbeatService(db: Db) {
       // 정상 run 종료 경로(skipLocked=false) 는 기존 FOR UPDATE 동작 유지 — 락 획득 실패는
       // 예외로 전파되어 호출부가 재처리 근거를 가진다.
       const skipLocked = options.skipLocked === true;
+      // [D2 lock-order] 이 release 트랜잭션은 issues FOR UPDATE → activity_log(run_id FK →
+      // heartbeat_runs KEY SHARE) 순서로 잠금을 요구한다. 러너 세팅의 resume 직렬화 트랜잭션
+      // (withResumeSerialization → readProducer(lock=true))은 heartbeat_runs FOR UPDATE 를 먼저
+      // 잡고 mission_agent_runtimes(current_issue_id FK → issues KEY SHARE)를 나중에 요구한다.
+      // 순서가 반대여서 취소×세팅 동시 창에서 AB-BA 교착(40P01)이 실증됐다. 양 레인 모두
+      // run 행을 먼저 잡도록 첫 잠금 문장으로 run 행 선점을 추가한다.
+      // 선점은 FOR UPDATE 가 아니라 FOR KEY SHARE 로 한다(실측 근거: FOR UPDATE 선점은 run 행을
+      // 트랜잭션 전체 기간 배타적으로 붙잡아 heartbeat_run_events/activity_log 의 run_id FK
+      // KEY SHARE 수요와 종말 상태 UPDATE 를 전부 대기시키고, 대기가 연결을 붙잡은 채 쌓이면
+      // 풀 고갈로 release 트랜잭션 자체가 진행 불능이 된다 — 2026-09-12 라이브 샘플러 관찰).
+      // FOR KEY SHARE 는 교착 상대(readProducer 의 FOR UPDATE)와만 충돌하고 KEY SHARE 수요와는
+      // 양립하므로, 이후 activity_log 의 run_id FK 검사는 자기 잠금으로 충족되어 대기 없이 통과된다.
+      //   - 정상 레인: 행이 없어도 그대로 진행한다(기존 동작 보존 — 없는 행은 사이클에 참여할 수
+      //     없고, activity_log run_id FK 위반은 종전과 같은 지점에서 같게 발화한다).
+      //   - 복구 레인: 기존 issues SKIP LOCKED 의 조기 반환 계약과 동일하게, run 행이 강한 잠금에
+      //     잡혀 있으면 null 조기 반환(다음 recovery tick 재시도). 기존 lock_timeout GUC 가 이
+      //     선점 대기도 함께 bound 한다(기존 issues SKIP LOCKED 문장 자체는 변경하지 않는다).
       if (skipLocked) {
         await tx.execute(sql`set local lock_timeout = '8s'`);
         await tx.execute(sql`set local statement_timeout = '30s'`);
+        const prelockedRunRow = await tx.execute(
+          sql`select id from heartbeat_runs where id = ${run.id} and company_id = ${run.companyId} for key share skip locked`,
+        );
+        if (!((Array.isArray(prelockedRunRow) ? prelockedRunRow : []).length > 0)) {
+          return null;
+        }
         const lockedRows = await tx.execute(
           sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id} or id = ${run.issueId}) for update skip locked`,
         );
@@ -8343,6 +8426,9 @@ export function heartbeatService(db: Db) {
           return null;
         }
       } else {
+        await tx.execute(
+          sql`select id from heartbeat_runs where id = ${run.id} and company_id = ${run.companyId} for key share`,
+        );
         await tx.execute(
           sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
         );
@@ -9302,6 +9388,14 @@ export function heartbeatService(db: Db) {
             finishedAt: null,
             error: null,
             updatedAt: now,
+            // [T8 bounded resubmission] PLAN-QA 재제출 키는 대기 행이 실제 run 으로 승격되는
+            //   이 시점이 수락 시점이다 — admission 원문을 같은 tx 에 기록한다(품질 조치 키의
+            //   기존 deferred 동작은 의도적으로 변경하지 않는다).
+            ...(await planQaResubmissionPromotionAcceptancePatch(tx as unknown as Db, {
+              companyId: deferredAgent.companyId, agentId: deferredAgent.id, issueId: issue.id,
+              workflowRunId: deferred.workflowRunId, idempotencyKey: deferred.idempotencyKey,
+              runId: newRun.id, acceptedAt: now,
+            }) ?? {}),
           })
           .where(eq(agentWakeupRequests.id, deferred.id));
 
@@ -9444,41 +9538,24 @@ export function heartbeatService(db: Db) {
       }
     }
 
-    const writeSkippedRequest = async (skipReason: string) => {
-      await db.insert(agentWakeupRequests).values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason: skipReason,
-        payload,
-        status: "skipped",
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-        finishedAt: new Date(),
-        // [Task 1C] typed queue columns — payload JSON 의존 축소.
-        requestKind: readNonEmptyString((payload as Record<string, unknown> | null)?.kind as string) ?? readNonEmptyString((payload as Record<string, unknown> | null)?.mutation as string) ?? skipReason,
-        issueId: issueId ?? null,
-        missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
-        workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
-        workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
-      });
-      // [Task 6C] mirror queue_rejected transition event (all skip paths covered via writeSkippedRequest)
-      await recordQueueTransitionEvent({
-        companyId: agent.companyId,
-        missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
-        issueId: issueId ?? null,
-        workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
-        workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
-        eventType: "queue_rejected",
-        layer: "queue",
-        decision: "rejected",
-        reason: skipReason,
-        reasonCode: skipReason,
-        idempotencyKey: `queue-rejected:${agent.companyId}:${agentId}:${skipReason}:${issueId ?? "no-issue"}`,
-      });
-    };
+    // [T8 추출] skip 원문 기록은 heartbeat-admission 로 이동했다(같은 의미, 순수 이동).
+    const writeSkippedRequest = (skipReason: string) => writeSkippedWakeupRequest(db, {
+      companyId: agent.companyId,
+      agentId,
+      source,
+      triggerDetail,
+      skipReason,
+      payload,
+      requestedByActorType: opts.requestedByActorType ?? null,
+      requestedByActorId: opts.requestedByActorId ?? null,
+      idempotencyKey: opts.idempotencyKey ?? null,
+      requestKind: readNonEmptyString((payload as Record<string, unknown> | null)?.kind as string) ?? readNonEmptyString((payload as Record<string, unknown> | null)?.mutation as string) ?? skipReason,
+      issueId: issueId ?? null,
+      missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
+      workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
+      workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
+      recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
+    });
 
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
     if (!projectId && issueId) {
@@ -9530,71 +9607,20 @@ export function heartbeatService(db: Db) {
       workflowStepRunId: workflowStepRunIdForWake,
       ...(workflowExecutionGeneration !== null ? { workflowExecutionGeneration } : {}),
     };
-    const queuePausedAgentWakeup = async () => {
-      let wakeupRequestId: string | null = null;
-      if (issueId) {
-        const existingQueuedWake = await db
-          .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount })
-          .from(agentWakeupRequests)
-          .where(and(
-            eq(agentWakeupRequests.companyId, agent.companyId),
-            eq(agentWakeupRequests.agentId, agentId),
-            eq(agentWakeupRequests.status, "queued"),
-            eq(agentWakeupRequests.issueId, issueId),
-            sql`${agentWakeupRequests.runId} is null`,
-          ))
-          .orderBy(asc(agentWakeupRequests.requestedAt))
-          .limit(1)
-          .then((rows) => rows[0] ?? null);
-        if (existingQueuedWake) {
-          await db
-            .update(agentWakeupRequests)
-            .set({
-              payload,
-              coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(agentWakeupRequests.id, existingQueuedWake.id));
-          wakeupRequestId = existingQueuedWake.id;
-        }
-      }
-
-      if (!wakeupRequestId) {
-        const inserted = await db
-          .insert(agentWakeupRequests)
-          .values({
-            companyId: agent.companyId,
-            agentId,
-            source,
-            triggerDetail,
-            reason,
-            payload,
-            ...typedQueueColumns,
-            status: "queued",
-            requestedByActorType: opts.requestedByActorType ?? null,
-            requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
-          })
-          .returning({ id: agentWakeupRequests.id })
-          .then((rows) => rows[0] ?? null);
-        wakeupRequestId = inserted?.id ?? null;
-      }
-
-      await recordQueueTransitionEvent({
-        companyId: agent.companyId,
-        missionId: missionIdForWake,
-        issueId: issueId ?? null,
-        wakeupRequestId,
-        workflowRunId: typedQueueColumns.workflowRunId,
-        workflowStepRunId: typedQueueColumns.workflowStepRunId,
-        eventType: "queue_waiting",
-        layer: "queue",
-        decision: "waiting",
-        reason: "agent.paused",
-        reasonCode: "agent.paused",
-        idempotencyKey: `queue-waiting:${agent.companyId}:${agentId}:agent.paused:${issueId ?? wakeupRequestId ?? "no-issue"}`,
-      });
-    };
+    const queuePausedAgentWakeup = () => queuePausedAgentWakeupRequest(db, {
+      companyId: agent.companyId,
+      agentId,
+      source,
+      triggerDetail,
+      reason,
+      payload,
+      typedQueueColumns,
+      requestedByActorType: opts.requestedByActorType ?? null,
+      requestedByActorId: opts.requestedByActorId ?? null,
+      idempotencyKey: opts.idempotencyKey ?? null,
+      missionIdForWake,
+      recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
+    });
     if (missionIdForWake) {
       try {
         await assertMissionRuntimeAcceptsWork(db, {
@@ -9730,6 +9756,16 @@ export function heartbeatService(db: Db) {
           return { kind: "skipped" as const };
         }
 
+        // [T4 quality] 같은 quality wake 키의 기존 행이 있으면 새 행을 만들지 않고 그 상태를
+        // 그대로 반환한다(통신 재전송 멱등 — 수락 원문은 최초 admission tx 에만 존재).
+        const existingQualityWake = await findExistingQualityWakeRow(tx as unknown as Db, {
+          companyId: agent.companyId,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        });
+        if (existingQualityWake) {
+          return { kind: "quality_existing" as const, row: existingQualityWake };
+        }
+
         let activeExecutionRun = issue.executionRunId
           ? await tx
             .select()
@@ -9792,15 +9828,15 @@ export function heartbeatService(db: Db) {
         }
 
         if (activeExecutionRun) {
-          // [PLAN-QA rework serialization] mission_owner_plan_rework_requested must not
-          // coalesce into the active same-agent run and must not use deferred_issue_execution.
-          // Persist one queued agent_wakeup_requests row (runId=null) so the queue runner
-          // owns promotion after the active run ends. Dedupe by the exact idempotency key
-          // (mission-owner-plan-rework:{issueId}:{decisionHash}) so distinct decisionHash
-          // requests are never silently merged. Store the full enriched context snapshot so
-          // the promoted follow-up retains forceFreshSession, missionId, issueId, wakeReason,
-          // planQaIssueId, and decisionHash.
-          if (reason === "mission_owner_plan_rework_requested" && opts.idempotencyKey) {
+          // [PLAN-QA rework serialization] mission_owner_plan_rework_requested and the T8
+          // plan_qa_evidence_resubmission wake must not coalesce into the active same-agent
+          // run and must not use deferred_issue_execution: the mission_plan_qa completion gate
+          // auto-blocks the issue before the deferred-promotion loop runs, which would strand
+          // the wake forever. Persist one queued agent_wakeup_requests row (runId=null) so the
+          // queue runner owns promotion after the active run ends. Dedupe by the exact
+          // idempotency key so distinct keys are never silently merged. Store the full enriched
+          // context snapshot so the promoted follow-up retains its wake context.
+          if ((reason === "mission_owner_plan_rework_requested" || reason === "plan_qa_evidence_resubmission") && opts.idempotencyKey) {
             const planReworkQueuedPayload = {
               ...(payload ?? {}),
               issueId,
@@ -9857,7 +9893,9 @@ export function heartbeatService(db: Db) {
             activeExecutionRun.status === "running" &&
             isSameExecutionAgent;
 
-          if (isSameExecutionAgent && !shouldQueueFollowupForCommentWake) {
+          // [T4 quality] quality wake 는 다른 실행(동일 이름의 다른 agent 포함)에 절대
+          // 병합·coalesce 되지 않는다 — 아래 deferred 경로로 별도 대기시킨다.
+          if (isSameExecutionAgent && !shouldQueueFollowupForCommentWake && !isBoundedExecutionWakeKey(opts.idempotencyKey)) {
             const mergedContextSnapshot = mergeCoalescedContextSnapshot(
               activeExecutionRun.contextSnapshot,
               enrichedContextSnapshot,
@@ -9908,6 +9946,7 @@ export function heartbeatService(db: Db) {
                 eq(agentWakeupRequests.agentId, agentId),
                 eq(agentWakeupRequests.status, "deferred_issue_execution"),
                 sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                mergeableWakeupKeyCondition(opts.idempotencyKey),
               ),
             )
             .orderBy(asc(agentWakeupRequests.requestedAt))
@@ -9997,6 +10036,7 @@ export function heartbeatService(db: Db) {
                   eq(agentWakeupRequests.status, "queued"),
                   sql`${agentWakeupRequests.runId} is null`,
                   sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+                  mergeableWakeupKeyCondition(opts.idempotencyKey),
                 ),
               )
               .orderBy(asc(agentWakeupRequests.requestedAt))
@@ -10089,6 +10129,17 @@ export function heartbeatService(db: Db) {
           .set({
             runId: newRun.id,
             updatedAt: new Date(),
+            // [T4 quality] 수락 원문은 이 admission tx 안에 기록된다(§3.1). quality 키가
+            // 아니면 patch 가 null 이 되어 아무 변화가 없다.
+            ...(await buildQualityWakeAcceptancePatch(tx as unknown as Db, {
+              companyId: agent.companyId,
+              agentId,
+              issueId,
+              workflowRunId: typedQueueColumns.workflowRunId,
+              idempotencyKey: opts.idempotencyKey ?? null,
+              runId: newRun.id,
+              acceptedAt: new Date(),
+            })),
           })
           .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
@@ -10164,6 +10215,7 @@ export function heartbeatService(db: Db) {
       }
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped") return null;
+      if (outcome.kind === "quality_existing") return null;
       if (outcome.kind === "coalesced") return outcome.run;
 
       const newRun = outcome.run;

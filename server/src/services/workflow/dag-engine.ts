@@ -35,6 +35,8 @@ import {
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
+import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
+import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
@@ -117,6 +119,7 @@ import { retryIssueLessToolWorkflowStepInternal } from "./retry-issue-less-manua
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
 import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
 import {
+  buildWorkflowExecutionSteps,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
   type PersistedWorkflowStep,
@@ -513,13 +516,6 @@ async function syncStepRunExecutionControlMetadata(
 
   if (!changed) return stepRuns;
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
-}
-
-function desiredStepRunStatusFromIssueStatus(issueStatus: string): "pending" | "running" | "completed" | "failed" {
-  if (issueStatus === "done") return "completed";
-  if (issueStatus === "blocked" || issueStatus === "cancelled") return "failed";
-  if (issueStatus === "in_progress" || issueStatus === "in_review") return "running";
-  return "pending";
 }
 
 function isValidationGateCandidate(input: {
@@ -1294,17 +1290,6 @@ async function resetUnlaunchedTerminalStepRuns(
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
 }
 
-function uniqueIssueRowsByIssueId<T extends { issueId: string }>(rows: T[]): T[] {
-  const seen = new Set<string>();
-  const unique: T[] = [];
-  for (const row of rows) {
-    if (seen.has(row.issueId)) continue;
-    seen.add(row.issueId);
-    unique.push(row);
-  }
-  return unique;
-}
-
 function collectGateValidatedProducerStepIds(
   directDependencyStepIds: string[],
   workflowStepsById: Map<string, WorkflowStep>,
@@ -1344,13 +1329,15 @@ async function createWorkflowStepIssue(input: {
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
   step: WorkflowStep;
-  /** [Task5a2a] 캡처된 실행 steps(loader 결과) — 로컬 builder 로 다시 정규화하지 않는다. */
-  steps: WorkflowStep[];
+  /** [Task5a2a] 캡처된 실행 steps(loader 결과) — 로컬 builder 로 다시 정규화하지 않는다. 미지정 시 정의 기반 재구성(T3 quality 내부 경로). */
+  steps?: WorkflowStep[];
+  /** [T3 Quality DAG 계약] 지정하면 생성 부작용(깨우기·로그)을 미루고 apply 클로저를 호출자에게 넘긴다(연결 commit 후 apply). sideEffectsDb 는 커밋 뒤 부작용에 쓸 연결이다. */
+  deferredSideEffectsDb?: Db;
+  captureDeferredSideEffects?: (apply: () => Promise<void>) => void;
 }): Promise<string | null> {
   const issueSvc = issueService(input.db);
-  const heartbeat = heartbeatService(input.db);
 
-  const executionSteps = input.steps;
+  const executionSteps = input.steps ?? buildWorkflowExecutionSteps(input.definition);
   const structuralReadiness = await evaluateSemanticStructuralReadiness({
     db: input.db,
     companyId: input.run.companyId,
@@ -1756,9 +1743,10 @@ async function createWorkflowStepIssue(input: {
     ? { acceptedQaLimitations: capAcceptanceContext }
     : {};
 
-  await applyIssueCreatedSideEffects({
-    db: input.db,
-    heartbeat,
+  const sideEffectsDb = input.deferredSideEffectsDb ?? input.db;
+  const applyCreatedSideEffects = () => applyIssueCreatedSideEffects({
+    db: sideEffectsDb,
+    heartbeat: heartbeatService(sideEffectsDb),
     issue: createdIssue,
     actor: {
       actorType: "system",
@@ -1788,6 +1776,9 @@ async function createWorkflowStepIssue(input: {
     },
     waitForWakeCompletion: true,
   });
+  // [T3] 지정 시 부작용 apply 를 호출자에게 넘긴다(연결 commit 후), 아니면 기존대로 즉시 적용.
+  if (input.captureDeferredSideEffects) input.captureDeferredSideEffects(applyCreatedSideEffects);
+  else await applyCreatedSideEffects();
 
   return createdIssue.id;
 }
@@ -3973,6 +3964,13 @@ export async function syncWorkflowRunStateWithOutcome(
           continue;
         }
 
+        if (context.definition.sourceKind === "quality") {
+          // [T3 Quality DAG 계약] 생성+step 연결 commit 후 깨우기(native-records 코어).
+          //   일반 경로는 아래 기존 순서(생성 중 깨우기 → 연결)를 그대로 유지한다.
+          await syncQualityStepIssueCommitBeforeWake(
+            db, { run: context.run, definition: context.definition, step, stepRunId: stepRun.id }, createWorkflowStepIssue);
+          continue;
+        }
         const issueId = await createWorkflowStepIssue({
           db,
           run: context.run,

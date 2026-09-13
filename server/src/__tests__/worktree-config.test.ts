@@ -197,6 +197,9 @@ describe("worktree config repair", () => {
     process.env.PAPERCLIP_IN_WORKTREE = "true";
     process.env.PAPERCLIP_WORKTREE_NAME = "PAP-880-thumbs-capture-for-evals-feature";
     process.env.PAPERCLIP_WORKTREES_DIR = isolatedHome;
+    // 외부 러너 환경의 PAPERCLIP_HOME 이 WORKTREES_DIR 보다 우선해 형제 포트 스캔을
+    // 잘못된 홈에서 읽는 것을 차단한다. afterEach 가 원래 값으로 복원한다.
+    delete process.env.PAPERCLIP_HOME;
 
     const result = maybeRepairLegacyWorktreeConfigAndEnvFiles();
     const repairedConfig = JSON.parse(await fs.readFile(configPath, "utf8"));

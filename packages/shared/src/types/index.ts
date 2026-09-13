@@ -313,3 +313,8 @@ export type {
   ResumePreview,
   ResumeRequestView,
 } from "./workflow-resume.js";
+
+export type {
+  QualityActionDisplayState,
+  QualityActionView,
+} from "./quality-action-view.js";

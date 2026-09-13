@@ -16,6 +16,8 @@ export type PlanQaReviewDescriptionInput = {
     readonly name: string;
     readonly instructions: string;
   }[];
+  /** 신형(고정 binding) 검토에만 채운다: 전용 제출 안내로 교체되고 세대가 명시된다. */
+  readonly reviewGeneration?: number;
 };
 
 function renderSelectedPlanTemplateLines(input: PlanQaReviewDescriptionInput): string[] {
@@ -82,6 +84,14 @@ export function buildPlanQaReviewDescription(input: PlanQaReviewDescriptionInput
     "Official verdict API (required before completing):",
     "POST `/api/issues/<this PLAN-QA issue id>/mission-plan-qa/verdict` with `{ \"verdict\": \"pass\", \"diagnostics\": [] }` or `{ \"verdict\": \"request_changes\", \"diagnostics\": [...] }`.",
     "Use the API result as the official verdict. Do not use `/workflow/verdict`; this is a mission_plan_qa issue, not a workflow_execution issue.",
-    "Fallback/parser compatibility: also finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific blocking gaps>`.",
+    ...(input.reviewGeneration === undefined
+      ? [
+        "Fallback/parser compatibility: also finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific blocking gaps>`.",
+      ]
+      : [
+        "## Submission contract (pinned review)",
+        `- This review is generation ${input.reviewGeneration}: the pinned manifest attachment is the only authoritative review input. Do not review against newer template bodies.`,
+        "Submit your verdict ONLY through the official verdict API above; a final PASS/REQUEST_CHANGES output line is not a submission channel for this review.",
+      ]),
   ].join("\n");
 }

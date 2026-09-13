@@ -5,7 +5,6 @@ import { and, count, eq, inArray, ne } from "drizzle-orm";
 import type {
   WorkflowArtifactRegister,
   WorkflowIssueComplete,
-  WorkflowVerdictSubmit,
 } from "@paperclipai/shared/validators/workflow-agent-api";
 import { conflict, notFound, unprocessable } from "../../errors.js";
 import { issueService } from "../issues.js";
@@ -13,9 +12,8 @@ import { toIssueWorkProduct, workProductService } from "../work-products.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { workflowService } from "./engine.js";
 import { canonicalLocalArtifactTitle, reconcileExistingLocalArtifactTitle } from "./local-artifact-title.js";
-import { recordWorkflowValidationVerdict } from "./validation-verdict-ledger.js";
-import { reconcileRecoveredWorkflowStep } from "../missions/recovery-closeout.js";
-import { logger } from "../../middleware/logger.js";
+export { submitWorkflowVerdict } from "./agent-verdict-api.js";
+import { assertQualityStepCompletionAllowed } from "../quality/evaluation-candidates.js";
 
 type IssueRow = typeof issues.$inferSelect;
 
@@ -240,55 +238,6 @@ export async function registerWorkflowArtifact(input: {
   return product;
 }
 
-export async function submitWorkflowVerdict(input: {
-  readonly db: Db;
-  readonly issue: WorkflowApiIssue;
-  readonly actor: WorkflowApiActor;
-  readonly data: WorkflowVerdictSubmit;
-}) {
-  const result = await recordWorkflowValidationVerdict({
-    db: input.db,
-    issue: input.issue,
-    verdict: input.data.verdict,
-    source: "workflow_api",
-    actorAgentId: input.actor.agentId,
-    heartbeatRunId: input.actor.runId,
-    sourceText: input.data.reason ?? input.data.verdict,
-    // [qa-cap acceptance] 공식 request_changes body 만 nonblockingAcceptance 를 carry 한다(schema refine 보장).
-    nonblockingAcceptance: input.data.nonblockingAcceptance ?? null,
-    // [qa defect layer] 공식 request_changes body 의 구조화 결함 계층 태그 — 계층 라우팅의 유일한 원천.
-    findings: input.data.findings ?? null,
-    // [qa mechanical remediation] 공식 request_changes body 의 기계적 수정 지시 — remediation pass 의 유일한 원천.
-    remediations: input.data.remediations ?? null,
-  });
-  if (!result.isCandidate) {
-    throw unprocessable("Workflow verdict API can only be used on workflow execution issues linked to a workflow step run");
-  }
-  if (!result.satisfied) {
-    throw unprocessable("Workflow verdict ledger was not recorded");
-  }
-  // [P5 recovery closeout] official QA PASS via the structured verdict API → guarded producer failed-step
-  //   closeout. reconcileRecoveredWorkflowStep reads the durable workflow_validation_verdict event itself
-  //   (no text/stdout parsing) and only mutates when evidence is current-generation; missionId-gated.
-  if (result.verdict === "pass" && input.issue.missionId) {
-    try {
-      const closeout = await reconcileRecoveredWorkflowStep(input.db, {
-        companyId: input.issue.companyId,
-        missionId: input.issue.missionId,
-        qaGateIssueId: input.issue.id,
-        source: "workflow_api_qa_pass",
-      });
-      if ("reconciled" in closeout && closeout.reconciled) {
-        await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
-      }
-    } catch (err) {
-      logger.warn({ err, issueId: input.issue.id }, "recovery closeout failed after workflow verdict");
-    }
-  }
-  await workflowService.syncRunStatusForIssue(input.db, input.issue.id, "workflow_agent_api");
-  return result;
-}
-
 // [QA rework closeout guard] 이 run이 rework 계약을 가진 run인지(시작 시 contextSnapshot에
 //   paperclipWorkflowReworkContract.kind=workflow_qa_rework 가 있었는지) 확인.
 export async function isWorkflowReworkRun(db: Db, runId: string): Promise<boolean> {
@@ -326,6 +275,9 @@ export async function completeWorkflowIssue(input: {
   readonly actor: WorkflowApiActor;
   readonly data: WorkflowIssueComplete;
 }) {
+  // [T6 quality gate] Quality 소유 author/verifier 단계는 전용 구조 근거(저장 후보/판정 영수증) 없이는
+  //   generic 완료로 끝낼 수 없다. Quality 소유가 아닌 이슈는 그대로 통과한다.
+  await assertQualityStepCompletionAllowed(input.db, { companyId: input.issue.companyId, issueId: input.issue.id });
   // [QA rework closeout guard] rework run이 관측 가능한 진행 없이 complete 시도하면 차단
   //   (producer가 rework 무시하고 complete 하는 GAZ-265 사고 방지). 진행 증거 = 이 run의 artifact 등록/댓글.
   const reworkRunId = input.actor.runId;

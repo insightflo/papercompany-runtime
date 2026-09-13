@@ -7,6 +7,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issues,
@@ -20,6 +21,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -62,7 +64,9 @@ describeEP("validation recheck — transitive producer freshness", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issueComments);

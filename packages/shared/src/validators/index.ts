@@ -488,3 +488,55 @@ export {
   type ResumeBlockerCode,
 } from "./workflow-resume.js";
 export { toolProgressPolicySchema, toolProgressEventSchema, type ToolProgressPolicy, type ToolProgressEvent } from "./tool-progress.js";
+
+// Quality 구조 개선(2026-09-09) 공용 계약·정책·평가·실행 검증기.
+export {
+  finiteCount,
+  QUALITY_NATIVE_OWNERSHIP_VALUES,
+  uuidSchema,
+  sha256HexSchema,
+  artifactRefSchema,
+  qualityKeySchema,
+  qualityAgentActorSchema,
+  qualityHumanActorSchema,
+  sourceAttemptSchema,
+  qualityTargetSchema,
+  qualityEffectSchema,
+  retryEnvelopeSchema,
+  nativeBindingSchema,
+  applicabilitySchema,
+  addendumCheckSchema,
+  qualityPolicyTargetSchema,
+  qualityPolicySchema,
+  type QualityNativeOwnership,
+  type ArtifactRef,
+  type QualityKey,
+  type QualityAgentActor,
+  type QualityHumanActor,
+  type SourceAttempt,
+  type QualityTarget,
+  type QualityEffect,
+  type RetryEnvelope,
+  type NativeBinding,
+  type Applicability,
+  type AddendumCheck,
+  type QualityPolicyTarget,
+  type QualityPolicy,
+} from "./quality-automation.js";
+export {
+  evaluationScopeSchema,
+  checkResultStatusSchema,
+  checkResultSchema,
+  type EvaluationScope,
+  type CheckResultStatus,
+  type CheckResult,
+} from "./quality-evaluation.js";
+export * from "./quality-plan-qa.js";
+export {
+  outputCorrectionScopeSchema,
+  evidenceScopeSchema,
+  missingEvidenceSchema,
+  type OutputCorrectionScope,
+  type EvidenceScope,
+  type MissingEvidence,
+} from "./quality-execution.js";

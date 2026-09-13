@@ -12,6 +12,7 @@ import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/oper
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
+import { guardQualityWrite } from "./quality/write-guard.js";
 import {
   sameOperatorDecisionResult,
   validateAndHashOperatorDecisionCreate,
@@ -183,6 +184,8 @@ export function operatorDecisionWriteService(db: Db) {
     const before = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id))
       .then((rows) => rows[0] ?? null);
     if (!before) throw notFound("Operator decision not found");
+    // [T5] Quality 연결 결정은 전용 경로로만: 실제 컬럼 연결(qualityActionId) 기준.
+    await guardQualityWrite(db, { companyId: before.companyId, subject: "decision", subjectId: id, operation: "resolve" });
     const result = validateOperatorDecisionResult(before.definition, rawInput);
     if (before.status === "pending" && !before.definition.humanReview) {
       throw unprocessable(
@@ -258,6 +261,8 @@ export function operatorDecisionWriteService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!before) throw notFound("Operator decision not found");
     if (actor.type === "agent" && before.requestedByAgentId !== actor.id) throw forbidden("Only the requester can cancel this decision");
+    // [T5] Quality 연결 결정의 취소도 전용 경로로(sourceType 아닌 실제 연결 기준).
+    await guardQualityWrite(db, { companyId: before.companyId, subject: "decision", subjectId: id, operation: "cancel" });
     if (before.status === "cancelled") return { decision: await read.getRequired(id), applied: false };
     if (before.status !== "pending") throw conflictFor(id, before.status);
     await db.transaction(async (tx) => {

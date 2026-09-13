@@ -12,6 +12,7 @@ export const agentWakeupRequests = pgTable(
     source: text("source").notNull(),
     triggerDetail: text("trigger_detail"),
     reason: text("reason"),
+    qualityAcceptance: jsonb("quality_acceptance").$type<Record<string, unknown>>(),
     payload: jsonb("payload").$type<Record<string, unknown>>(),
     status: text("status").notNull().default("queued"),
     coalescedCount: integer("coalesced_count").notNull().default(0),
@@ -35,6 +36,9 @@ export const agentWakeupRequests = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityActionWakeUq: uniqueIndex("agent_wakeup_requests_quality_action_wake_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} like 'quality-action-wake:%'`),
     companyAgentStatusIdx: index("agent_wakeup_requests_company_agent_status_idx").on(
       table.companyId,
       table.agentId,

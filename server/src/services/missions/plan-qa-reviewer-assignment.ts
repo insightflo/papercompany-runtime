@@ -1,9 +1,10 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { agents, issues, type Db } from "@paperclipai/db";
+import type { ArtifactRef } from "@paperclipai/shared";
 import { logActivity } from "../activity-log.js";
-import { issueService } from "../issues.js";
 import { RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES } from "./agent-role-boundaries.js";
-import { buildPlanQaReviewDescription } from "./mission-plan-review-description.js";
+import { blockedPlanQaTemplates, readPlanQaManifestForIssue } from "./plan-qa-addendum-manifest.js";
+import { ensurePlanQaReviewBinding, planQaReviewBindingMarkerSchema } from "./plan-qa-review-binding.js";
 
 const RUNNABLE_STATUSES = RUNNABLE_MISSION_EXECUTION_ASSIGNEE_STATUSES;
 export const PLAN_QA_VERDICT_AGENT_ROLES = new Set(["qa", "reviewer", "validator"]);
@@ -191,6 +192,13 @@ async function wake(input: {
   });
 }
 
+export type PlanQaReviewIssueBinding = {
+  id: string;
+  reviewGeneration: number | null;
+  manifestRef: ArtifactRef | null;
+  blockedTemplateIds: string[] | null;
+};
+
 export async function ensurePlanQaReviewIssue(input: {
   db: Db;
   companyId: string;
@@ -200,57 +208,56 @@ export async function ensurePlanQaReviewIssue(input: {
   planningIssueId: string | null;
   decisionHash: string;
   missionGoal?: string | null;
-  selectedPlanTemplates?: readonly { id: string; name: string; instructions: string }[];
   preferredReviewerAgentId?: string | null;
   enqueuePlanQaWakeup?: PlanQaWakeupHandler;
-}): Promise<{ id: string }> {
-  const originId = `plan-qa:${input.missionId}:${input.decisionHash}`;
-  const [existing] = await input.db
+  planArtifactId: string;
+  existingIssueId?: string | null;
+}): Promise<PlanQaReviewIssueBinding> {
+  // [T7] 검토 issue 생성·서버 표식·명세 연결은 binding tx 안에서 확정된 뒤에만 실행 요청(wake)한다.
+  const reviewerUnavailableHint = (await findReviewer(input.db, input.companyId, input.preferredReviewerAgentId)) === null;
+  const binding = await ensurePlanQaReviewBinding({
+    db: input.db,
+    companyId: input.companyId,
+    missionId: input.missionId,
+    planArtifactId: input.planArtifactId,
+    decisionHash: input.decisionHash,
+    missionTitle: input.missionTitle,
+    missionDescription: input.missionDescription,
+    missionGoal: input.missionGoal,
+    planningIssueId: input.planningIssueId,
+    reviewerUnavailableHint,
+    existingIssueId: input.existingIssueId,
+  });
+  if (binding.kind === "completed") {
+    return { id: binding.issueId, reviewGeneration: null, manifestRef: null, blockedTemplateIds: null };
+  }
+  if (binding.blockedTemplateIds.length) {
+    // base_changed(required): 신규 실행 차단 — 배정/실행 요청을 하지 않는다.
+    return { id: binding.issueId, reviewGeneration: binding.reviewGeneration, manifestRef: binding.manifestRef, blockedTemplateIds: binding.blockedTemplateIds };
+  }
+  const [issue] = await input.db
     .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
     .from(issues)
     .where(and(
       eq(issues.companyId, input.companyId),
+      eq(issues.id, binding.issueId),
       eq(issues.originKind, "mission_plan_qa"),
-      eq(issues.originId, originId),
       isNull(issues.hiddenAt),
     ))
     .limit(1);
-  if (existing) {
-    const assignment = await resolveAssignment({
-      db: input.db,
-      companyId: input.companyId,
-      issue: existing,
-      missionId: input.missionId,
-      planningIssueId: input.planningIssueId,
-      preferredReviewerAgentId: input.preferredReviewerAgentId,
-    });
-    await wake({ enqueue: input.enqueuePlanQaWakeup, companyId: input.companyId, assignment, issueId: existing.id, missionId: input.missionId, planningIssueId: input.planningIssueId });
-    return { id: existing.id };
+  if (!issue) {
+    return { id: binding.issueId, reviewGeneration: binding.reviewGeneration, manifestRef: binding.manifestRef, blockedTemplateIds: [] };
   }
-
-  const assigneeAgentId = await findReviewer(input.db, input.companyId, input.preferredReviewerAgentId);
-  const description = buildPlanQaReviewDescription(input);
-  const created = await issueService(input.db).create(input.companyId, {
-    missionId: input.missionId,
-    originKind: "mission_plan_qa",
-    originId,
-    title: `[PLAN-QA] ${input.missionTitle}`,
-    description: assigneeAgentId
-      ? description
-      : `${description}\n\nQA reviewer assignment required (no runnable plan-selected QA or qa/reviewer/validator agent on this mission yet).`,
-    status: "todo",
-    priority: "high",
-    ...(assigneeAgentId ? { assigneeAgentId } : {}),
-  });
-  await wake({
-    enqueue: input.enqueuePlanQaWakeup,
+  const assignment = await resolveAssignment({
+    db: input.db,
     companyId: input.companyId,
-    assignment: created.assigneeAgentId ? { agentId: created.assigneeAgentId, issueStatus: created.status } : null,
-    issueId: created.id,
+    issue,
     missionId: input.missionId,
     planningIssueId: input.planningIssueId,
+    preferredReviewerAgentId: input.preferredReviewerAgentId,
   });
-  return { id: created.id };
+  await wake({ enqueue: input.enqueuePlanQaWakeup, companyId: input.companyId, assignment, issueId: issue.id, missionId: input.missionId, planningIssueId: input.planningIssueId });
+  return { id: binding.issueId, reviewGeneration: binding.reviewGeneration, manifestRef: binding.manifestRef, blockedTemplateIds: [] };
 }
 
 export async function ensurePlanQaWakeupForIssue(input: {
@@ -263,7 +270,7 @@ export async function ensurePlanQaWakeupForIssue(input: {
   preferredReviewerAgentId?: string | null;
 }): Promise<void> {
   const [issue] = await input.db
-    .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+    .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status, marker: issues.qualityPlanQaBinding })
     .from(issues)
     .where(and(
       eq(issues.companyId, input.companyId),
@@ -273,6 +280,14 @@ export async function ensurePlanQaWakeupForIssue(input: {
     ))
     .limit(1);
   if (!issue) return;
+  // [T7 fix] base_changed(required) 로 차단된 검토는 같은 decisionHash 재진입에서도 배정/기상하지
+  // 않는다. 신형 binding marker(기계 계약)에서 고정 명세를 읽어 차단 여부를 확인한다.
+  // marker 없는 구형 이슈는 기존 동작을 유지한다.
+  const marker = planQaReviewBindingMarkerSchema.safeParse(issue.marker);
+  if (marker.success) {
+    const manifest = await readPlanQaManifestForIssue(input.db, input.companyId, issue.id, marker.data.manifestRef);
+    if (blockedPlanQaTemplates(manifest).length) return;
+  }
   const assignment = await resolveAssignment({
     db: input.db,
     companyId: input.companyId,
