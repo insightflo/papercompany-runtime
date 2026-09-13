@@ -15,7 +15,22 @@ export async function progressDatabase() {
   const temp = await startEmbeddedPostgresTestDatabase("tool-progress-test-");
   const db = createDb(temp.connectionString);
   const reader = createDb(temp.connectionString);
-  return { db, reader, cleanup: temp.cleanup };
+  return {
+    db,
+    reader,
+    // [flake fix] End both postgres.js pools (drizzle $client) BEFORE the embedded server teardown.
+    // Without this, instance.stop() kills pooled connections whose per-connection type bootstrap
+    // ("select b.oid, b.typarray ...") may still be in flight, surfacing as an unhandled rejection
+    // after the run (CI ~50% exit 1, all tests green). Mirrors the sibling pattern
+    // (db.$client.end({ timeout: 5 }) before tempDb.cleanup) used by non-leaking suites.
+    cleanup: async () => {
+      await Promise.all([
+        db.$client.end({ timeout: 5 }).catch(() => undefined),
+        reader.$client.end({ timeout: 5 }).catch(() => undefined),
+      ]);
+      await temp.cleanup();
+    },
+  };
 }
 export async function progressTool(db: ReturnType<typeof createDb>, adapterType = "builtin", adapterConfig = {}) {
   const [company] = await db.insert(companies).values({ name: "Progress fixture", issuePrefix: `P${randomUUID().slice(0, 7)}` }).returning();

@@ -16,7 +16,7 @@ export function result(toolName: string, status: CoreWorkflowToolExecutionResult
 }
 type ResponseAssertion =
   | { field: string; kind: "equals"; expected: boolean | number | string }
-  | { field: string; kind: "positiveNumber" | "existingFile" };
+  | { field: string; kind: "positiveNumber" | "existingFile" | "boolean" };
 export type ResponseContract = {
   resultField: string; artifactField: string | null; artifactFileName: string; artifactPathResultField: string;
   assertions: ResponseAssertion[];
@@ -36,7 +36,7 @@ function resolveResponseAssertions(raw: unknown): ResponseAssertion[] | null {
       const expected = entry.equals;
       if (typeof expected !== "boolean" && typeof expected !== "number" && typeof expected !== "string") return null;
       assertions.push({ field, kind: "equals", expected });
-    } else if (type === "positiveNumber" || type === "existingFile") assertions.push({ field, kind: type });
+    } else if (type === "positiveNumber" || type === "existingFile" || type === "boolean") assertions.push({ field, kind: type });
     else return null;
   }
   return assertions;
@@ -56,9 +56,20 @@ export function resolveResponseContract(response: unknown): ResponseContract | n
   if (artifactFileName || artifactPathResultField) return null;
   return { resultField, artifactField: null, artifactFileName: "", artifactPathResultField: "", assertions };
 }
+/** Dotted-path field read (e.g. "stateToken.version") over plain objects only; any missing
+ *  segment resolves to undefined so the assertion kind fails closed with a named-field error. */
+function readAssertionField(base: Record<string, unknown>, field: string): unknown {
+  if (!field.includes(".")) return base[field];
+  let current: unknown = base;
+  for (const segment of field.split(".")) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
 async function checkResponseAssertions(toolName: string, assertions: ResponseAssertion[], baseResult: Record<string, unknown>, requestId: string) {
   for (const assertion of assertions) {
-    const actual = baseResult[assertion.field];
+    const actual = readAssertionField(baseResult, assertion.field);
     let passed = false;
     let expectation: string;
     if (assertion.kind === "equals") {
@@ -67,6 +78,9 @@ async function checkResponseAssertions(toolName: string, assertions: ResponseAss
     } else if (assertion.kind === "positiveNumber") {
       passed = typeof actual === "number" && Number.isFinite(actual) && actual > 0;
       expectation = "must be a finite number > 0";
+    } else if (assertion.kind === "boolean") {
+      passed = typeof actual === "boolean";
+      expectation = "must be a boolean";
     } else {
       const candidate = nonEmptyString(actual);
       if (candidate && path.isAbsolute(candidate)) {
