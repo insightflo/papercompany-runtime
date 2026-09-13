@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
@@ -18,10 +19,12 @@ import {
   documents,
   issueComments,
   issueDocuments,
+  issueExecutionCards,
   issueWorkProducts,
   issues,
   missionSessions,
   missions,
+  operatorDecisions,
   projects,
   projectWorkspaces,
   workflowStepRuns,
@@ -8385,6 +8388,16 @@ export function heartbeatService(db: Db) {
       childWorkProductId: string;
       sourceRunId: string;
     }> = [];
+    // [slice-4 closeout evidence gate] post-tx bounded re-dispatch / exception card for runs that
+    //   succeeded without the completion evidence their issue contract requires. Budget-capped:
+    //   attempts 1..MISSING_EVIDENCE_REDISPATCH_BUDGET re-dispatch (when no live wake coverage),
+    //   beyond that a single operator_decisions exception card (requestKey missing-evidence:<issueId>).
+    const MISSING_EVIDENCE_REDISPATCH_BUDGET = 2;
+    const MISSING_EVIDENCE_REQUIRED_ACTION = "register the required work product via the official Workflow API and call workflow/complete";
+    const postTransactionMissingEvidenceRedispatches: Array<{
+      companyId: string; issueId: string; agentId: string; missionId: string | null;
+      attempt: number; requiredAction: string;
+    }> = [];
     const transactionResult = await db.transaction(async (tx) => {
       // [recovery liveness hardening] recovery lane(skipLocked=true) 에서만 행 락 대기가 lane 을
       // 막지 않도록 bounded 한다: lock_timeout/statement_timeout + FOR UPDATE SKIP LOCKED 로
@@ -9006,6 +9019,111 @@ export function heartbeatService(db: Db) {
         };
       }
 
+      // [slice-4 closeout evidence gate] Shared structured outcome for successful runs that
+      //   produced none of the completion evidence their issue contract requires: clear the four
+      //   execution-lock fields (status stays as-is — defer, not block), write the structured
+      //   issue.completion_evidence_missing activity, and queue a bounded post-tx follow-up.
+      const applyMissingCompletionEvidenceOutcome = async (opts: {
+        requiredAction: string;
+        requiredEvidence?: string[];
+      }): Promise<void> => {
+        const priorAttempts = await tx
+          .select({ id: activityLog.id })
+          .from(activityLog)
+          .where(and(
+            eq(activityLog.companyId, issue.companyId),
+            eq(activityLog.entityId, issue.id),
+            eq(activityLog.action, "issue.completion_evidence_missing"),
+          ))
+          .then((rows) => rows.length);
+        const attempt = priorAttempts + 1;
+        const outcomeNow = new Date();
+        await tx
+          .update(issues)
+          .set({
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: outcomeNow,
+          })
+          .where(eq(issues.id, issue.id));
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "heartbeat",
+          action: "issue.completion_evidence_missing",
+          entityType: "issue",
+          entityId: issue.id,
+          agentId: run.agentId,
+          runId: run.id,
+          details: {
+            previousStatus: issue.status,
+            reason: "missing_evidence_redispatch",
+            requiredAction: opts.requiredAction,
+            attempt,
+            budget: MISSING_EVIDENCE_REDISPATCH_BUDGET,
+            ...(opts.requiredEvidence ? { requiredEvidence: opts.requiredEvidence } : {}),
+          },
+        });
+        postTransactionMissingEvidenceRedispatches.push({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          agentId: run.agentId,
+          missionId: issue.missionId ?? null,
+          attempt,
+          requiredAction: opts.requiredAction,
+        });
+      };
+
+      // [slice-4 MISMATCH B] Standalone execution cards declare completionContract.requiredEvidence;
+      //   until now nothing consumed it at closeout — a manual issue auto-completed on run success
+      //   with zero registered evidence. Only scoped work-product DB records count (same authority
+      //   rule as the produced-nothing guard); comments/stdout never do.
+      if (shouldAutoCompleteSuccessfulIssue && issue.originKind === "manual") {
+        const card = await tx
+          .select({ cardVersion: issueExecutionCards.cardVersion, cardJson: issueExecutionCards.cardJson })
+          .from(issueExecutionCards)
+          .where(and(
+            eq(issueExecutionCards.companyId, issue.companyId),
+            eq(issueExecutionCards.issueId, issue.id),
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        const cardJson = (card?.cardJson ?? null) as {
+          version?: unknown;
+          executionMode?: unknown;
+          completionContract?: { requiredEvidence?: unknown } | null;
+        } | null;
+        const requiredEvidence = card
+          && card.cardVersion === 2
+          && cardJson?.version === 2
+          && cardJson.executionMode === "standalone"
+          && Array.isArray(cardJson.completionContract?.requiredEvidence)
+          ? (cardJson.completionContract!.requiredEvidence as unknown[])
+            .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+          : [];
+        if (requiredEvidence.length > 0) {
+          const registeredEvidence = await tx
+            .select({ id: issueWorkProducts.id })
+            .from(issueWorkProducts)
+            .where(and(
+              eq(issueWorkProducts.companyId, issue.companyId),
+              eq(issueWorkProducts.issueId, issue.id),
+            ))
+            .limit(1)
+            .then((rows) => rows.length);
+          if (registeredEvidence === 0) {
+            await applyMissingCompletionEvidenceOutcome({
+              requiredAction: `${MISSING_EVIDENCE_REQUIRED_ACTION} (standalone card requiredEvidence: ${requiredEvidence.join(", ")})`,
+              requiredEvidence,
+            });
+            queuePostTransactionWorkflowIssueSync(issue.id);
+            return { promotedRun: null };
+          }
+        }
+      }
+
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
         // [2026-09-11 run08a86baf incident] 폴링성 실행(새 산출물·검증 기록 없음)의 자동 완료 차단.
         // 워크플로 단계 이슈는 산출물/버딕트 등록이 완료 계약이므로, 이번 실행이 아무 기록도
@@ -9055,6 +9173,13 @@ export function heartbeatService(db: Db) {
                   previousStatus: issue.status,
                   nextStatus: issue.status,
                 },
+              });
+              // [slice-4 MISMATCH A] The defer used to stop here, leaving the issue holding a
+              //   terminal run's execution locks with no re-dispatch — a silent failure. Apply the
+              //   shared structured outcome: clear the lock fields, write the structured
+              //   issue.completion_evidence_missing activity, queue the bounded post-tx follow-up.
+              await applyMissingCompletionEvidenceOutcome({
+                requiredAction: MISSING_EVIDENCE_REQUIRED_ACTION,
               });
               queuePostTransactionWorkflowIssueSync(issue.id);
               return { promotedRun: null };
@@ -9458,6 +9583,121 @@ export function heartbeatService(db: Db) {
         }).catch((err: unknown) => {
           logger.warn({ err, issueId: entry.issueId }, "failed to close mission_main_executor_unblock via handback guard");
         });
+      }
+    }
+
+    // [slice-4 closeout evidence gate] Bounded post-tx follow-up for successful runs that registered
+    //   none of the required completion evidence. Within budget: re-dispatch once via enqueueWakeup
+    //   when no live wake coverage exists for the issue. Beyond budget: raise ONE operator_decisions
+    //   exception card (idempotent requestKey); card failure must never break closeout.
+    if (postTransactionMissingEvidenceRedispatches.length > 0) {
+      const { hasLiveWakeCoverage } = await import("./missions/qa-rework-cap-oversight-wake.js");
+      for (const entry of postTransactionMissingEvidenceRedispatches) {
+        try {
+          if (entry.attempt > MISSING_EVIDENCE_REDISPATCH_BUDGET) {
+            const requestKey = `missing-evidence:${entry.issueId}`;
+            const requestHash = createHash("sha256")
+              .update(JSON.stringify({ requestKey, issueId: entry.issueId, requiredAction: entry.requiredAction }), "utf8")
+              .digest("hex");
+            const inserted = await db
+              .insert(operatorDecisions)
+              .values({
+                companyId: entry.companyId,
+                requestKey,
+                requestHash,
+                schemaVersion: 1,
+                status: "pending",
+                priority: "high",
+                interactionType: "single_select",
+                title: "Completion evidence missing after successful runs",
+                description: entry.requiredAction,
+                sourceType: "issue",
+                sourceId: entry.issueId,
+                sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
+                issueId: entry.issueId,
+                requestedByAgentId: entry.agentId,
+                definition: {
+                  options: [
+                    {
+                      id: "redispatch-once",
+                      label: "Re-dispatch once more",
+                      description: "Queue one more execution attempt for the assignee.",
+                      facts: [
+                        { label: "Required action", value: entry.requiredAction, status: "known" },
+                        { label: "Attempts already made", value: String(entry.attempt), status: "known" },
+                      ],
+                      evidenceRefs: [],
+                    },
+                    {
+                      id: "block-issue",
+                      label: "Block the issue",
+                      description: "Keep the issue blocked until a human unblocks it.",
+                      facts: [
+                        { label: "Required action", value: entry.requiredAction, status: "known" },
+                      ],
+                      evidenceRefs: [],
+                    },
+                    {
+                      id: "cancel-issue",
+                      label: "Cancel the issue",
+                      description: "Cancel the issue as unfinishable.",
+                      facts: [
+                        { label: "Required action", value: entry.requiredAction, status: "known" },
+                      ],
+                      evidenceRefs: [],
+                    },
+                  ],
+                  actions: [
+                    { id: "apply", label: "Apply selected option", outcome: "submit", tone: "primary", requiresSelection: true },
+                  ],
+                  selection: { min: 1, max: 1 },
+                  comment: { mode: "optional", label: null, placeholder: null, maxLength: 2000 },
+                  approvedScope: [],
+                  forbiddenScope: [],
+                  humanReview: {
+                    schemaVersion: "human-review-v1",
+                    decisionSubject: `Issue ${entry.issueId} repeatedly finished runs without registering the required completion evidence`,
+                    evidence: [],
+                    interpretation: `The assignee succeeded ${entry.attempt} runs but registered none of the required work products. Auto re-dispatch stopped after the budget (${MISSING_EVIDENCE_REDISPATCH_BUDGET}).`,
+                    impact: {
+                      ifApproved: "The selected option is applied by an operator-driven flow.",
+                      ifRejected: "The issue stays as-is (not auto-completed) until a human acts.",
+                      ifWrong: "A wrong option could cancel or block work that only needed a different evidence format.",
+                    },
+                    unresolvedFacts: ["Why the assignee does not register the required work product"],
+                    questions: ["Is the required evidence list still accurate for this issue?"],
+                    recommendedNextStep: entry.requiredAction,
+                    requiredReviewer: "operator",
+                  },
+                },
+              })
+              .onConflictDoNothing({ target: [operatorDecisions.companyId, operatorDecisions.requestKey] })
+              .returning({ id: operatorDecisions.id });
+            if (inserted.length === 0) {
+              logger.info({ issueId: entry.issueId }, "missing-evidence exception card already exists; skipped");
+            }
+          } else {
+            const covered = await hasLiveWakeCoverage(db, entry.companyId, entry.issueId);
+            if (!covered) {
+              await enqueueWakeup(entry.agentId, {
+                reason: "missing_evidence_redispatch",
+                triggerDetail: "closeout evidence missing after successful run",
+                contextSnapshot: {
+                  issueId: entry.issueId,
+                  ...(entry.missionId ? { missionId: entry.missionId } : {}),
+                  requiredAction: entry.requiredAction,
+                  attempt: entry.attempt,
+                },
+                source: "on_demand",
+                requestedByActorType: "system",
+                requestedByActorId: "heartbeat",
+                idempotencyKey: `missing-evidence-redispatch:${entry.issueId}:${entry.attempt}`,
+              });
+            }
+          }
+        } catch (err) {
+          logger.warn({ err, ...entry }, "missing-evidence closeout follow-up failed");
+        }
       }
     }
 
