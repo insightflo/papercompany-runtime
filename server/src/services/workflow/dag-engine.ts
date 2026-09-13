@@ -3156,6 +3156,20 @@ export async function completeWorkflowToolStepFromResult(
     : {};
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
+  // [silent-failure prevention] A non-empty artifact-path candidate that is not absolute is a malformed
+  //   result: the canonical reader below would silently DROP it (toolResult.artifactPath omitted) while
+  //   data.rawPath keeps the relative string, which the issue-less IF fallback later resolves against the
+  //   server cwd (wrong-file risk). Reject the whole completion write loudly instead. Containment stays
+  //   where it already lives (remote-tool-executor stepOutputDir check); this guard only enforces absoluteness.
+  const artifactDataRecord = normalizeRecord(input.data);
+  const relativeArtifactCandidate = [
+    typeof input.artifactPath === "string" ? input.artifactPath.trim() : "",
+    readMetadataString(artifactDataRecord.rawPath) ?? "",
+    readMetadataString(artifactDataRecord.artifactPath) ?? "",
+  ].find((candidate) => candidate.length > 0 && !path.isAbsolute(candidate));
+  if (relativeArtifactCandidate) {
+    throw new Error(`workflow_tool_result_rejected: artifact path is not absolute (${relativeArtifactCandidate})`);
+  }
   const artifactPath = readWorkflowToolArtifactPath({
     artifactPath: input.artifactPath,
     data: input.data,
