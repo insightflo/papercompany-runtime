@@ -14,6 +14,7 @@ import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-pla
 import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
+import { runMissionTerminalCleanup } from "./terminal-cleanup-fence.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
 import { buildMissionPlanningDescription } from "./mission-planning-description.js";
@@ -170,15 +171,19 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
               completedAt,
               updatedAt: new Date(),
             };
-            await db.update(missions).set(updates).where(eq(missions.id, mission.id));
-            await db
-              .update(issues)
-              .set({ status: "cancelled", cancelledAt: completedAt, updatedAt: new Date() })
-              .where(and(
-                eq(issues.missionId, mission.id),
-                isNull(issues.hiddenAt),
-                sql`${issues.status} not in ('done', 'cancelled')`,
-              ));
+            // [slice-5 MISMATCH C] Terminal writes must finalize mission resources atomically
+            //   (runs cancelled with reason, wakeups settled, locks cleared, runtimes stopped,
+            //   non-terminal issues cancelled) instead of a bare missions update.
+            const settled = await runMissionTerminalCleanup(db, {
+              companyId: mission.companyId,
+              missionId: mission.id,
+              status: "cancelled",
+              now: completedAt,
+              completedAt,
+              missionSnapshot: mission,
+              pendingMissionUpdates: updates,
+            });
+            if (settled.aborted) return mission;
             return { ...mission, ...updates };
           }
         }
@@ -249,15 +254,23 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       if (mission.completedAt?.getTime() !== completedAt.getTime()) updates.completedAt = completedAt;
       if (Object.keys(updates).length === 0) return mission;
       updates.updatedAt = new Date();
-      await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+      // [slice-5 MISMATCH C] latestRun-terminal path: same atomic finalization requirement.
+      const settledLatest = await runMissionTerminalCleanup(db, {
+        companyId: mission.companyId,
+        missionId: mission.id,
+        status: nextStatus,
+        now: updates.updatedAt,
+        completedAt,
+        missionSnapshot: mission,
+        pendingMissionUpdates: updates,
+        completeOpenMissionOversightIfSettled,
+      });
+      if (settledLatest.aborted) return mission;
 
       const updatedMission = {
         ...mission,
         ...updates,
       };
-      if (nextStatus === "completed") {
-        await completeOpenMissionOversightIfSettled(updatedMission, completedAt);
-      }
       return updatedMission;
     }
 
@@ -301,15 +314,23 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       completedAt,
       updatedAt: new Date(),
     };
-    await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+    // [slice-5 MISMATCH C] all-terminal path: same atomic finalization requirement.
+    const settledAll = await runMissionTerminalCleanup(db, {
+      companyId: mission.companyId,
+      missionId: mission.id,
+      status: nextStatus,
+      now: updates.updatedAt ?? new Date(),
+      completedAt,
+      missionSnapshot: mission,
+      pendingMissionUpdates: updates,
+      completeOpenMissionOversightIfSettled,
+    });
+    if (settledAll.aborted) return mission;
 
     const updatedMission = {
       ...mission,
       ...updates,
     };
-    if (nextStatus === "completed") {
-      await completeOpenMissionOversightIfSettled(updatedMission, completedAt);
-    }
     return updatedMission;
   }
 
