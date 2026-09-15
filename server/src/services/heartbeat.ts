@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { withTxTimeout } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
 import {
   agents,
@@ -4576,7 +4577,7 @@ export function heartbeatService(db: Db) {
       retryReason: retryReasonValue,
     };
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withTxTimeout(db, async (tx) => {
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -4736,7 +4737,7 @@ export function heartbeatService(db: Db) {
       missionId: fallbackMissionId,
     });
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withTxTimeout(db, async (tx) => {
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -5975,7 +5976,7 @@ export function heartbeatService(db: Db) {
     agent: typeof agents.$inferSelect,
     wakeupRequestId: string,
   ) {
-    return db.transaction(async (tx) => {
+    return withTxTimeout(db, async (tx) => {
       await tx.execute(sql`select id from agent_wakeup_requests where id = ${wakeupRequestId} for update`);
       const request = await tx
         .select()
@@ -8398,7 +8399,7 @@ export function heartbeatService(db: Db) {
       companyId: string; issueId: string; agentId: string; missionId: string | null;
       attempt: number; requiredAction: string;
     }> = [];
-    const transactionResult = await db.transaction(async (tx) => {
+    const transactionResult = await withTxTimeout(db, async (tx) => {
       // [recovery liveness hardening] recovery lane(skipLocked=true) 에서만 행 락 대기가 lane 을
       // 막지 않도록 bounded 한다: lock_timeout/statement_timeout + FOR UPDATE SKIP LOCKED 로
       // 이미 잠긴 issue 는 건너뛴다(빈 결과 → 조기 반환, 다음 recovery tick 에 재시도).
@@ -9961,7 +9962,7 @@ export function heartbeatService(db: Db) {
         contextSnapshot: enrichedContextSnapshot,
       });
 
-      const outcome = await db.transaction(async (tx) => {
+      const outcome = await withTxTimeout(db, async (tx) => {
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );

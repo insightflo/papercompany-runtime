@@ -26,3 +26,4 @@ export {
   type RunDatabaseRestoreOptions,
 } from "./backup-lib.js";
 export * from "./schema/index.js";
+export { withTxTimeout, TxTimeoutError, DEFAULT_TX_TIMEOUT_MS } from "./tx-timeout.js";
