@@ -8,6 +8,7 @@ import {
   operatorDecisions,
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
+import { guardQualityWrite } from "./quality/write-guard.js";
 import { loadOperatorDecisionProjection } from "./operator-decision-view.js";
 import { operatorDecisionReadService } from "./operator-decisions-read.js";
 
@@ -22,6 +23,8 @@ export function operatorDecisionContinuationRetryService(db: Db) {
     const decision = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, decisionId))
       .then((rows) => rows[0] ?? null);
     if (!decision) throw notFound("Operator decision not found");
+    // [T5] Quality 연결 결정의 continuation 재시도도 전용 경로로(실제 연결 기준).
+    await guardQualityWrite(db, { companyId: decision.companyId, subject: "decision", subjectId: decisionId, operation: "retry_continuation" });
     const continuation = await db.select().from(operatorDecisionContinuations)
       .where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId))
       .then((rows) => rows[0] ?? null);

@@ -1,4 +1,6 @@
 import type { PlanQaWakeupHandler, PlanningIssueWakeupHandler } from "../mission-owner-plan-decisions.js";
+import type { PlanQaResubmissionWakeDispatcher } from "./plan-qa-resubmission.js";
+export type { PlanQaResubmissionWakeDispatcher } from "./plan-qa-resubmission.js";
 
 type WakeupDeps = {
   wakeup: (agentId: string, opts: {
@@ -68,6 +70,37 @@ export function createPlanningIssueWakeupHandler(
       planQaIssueId: input.planQaIssueId,
       decisionHash: input.decisionHash,
       forceFreshSession: true,
+    },
+  });
+}
+
+/** [T8 bounded resubmission] 소명 누락 재제출 전용 wake. 초기 배정 콜백(mutation=create)과
+ *  다른 idempotencyKey 를 쓰고, 예약 원장의 정확한 키로만 발행된다. 반환값은 수락 증거가 아니다. */
+export function createPlanQaResubmissionWakeupHandler(
+  heartbeat: WakeupDeps,
+  opts: { requestedByActorId?: string; contextSource?: string } = {},
+): PlanQaResubmissionWakeDispatcher {
+  return (input) => heartbeat.wakeup(input.agentId, {
+    source: "automation",
+    triggerDetail: "system",
+    reason: "plan_qa_evidence_resubmission",
+    idempotencyKey: input.intentKey,
+    payload: {
+      issueId: input.issueId,
+      missionId: input.missionId,
+      mutation: "plan_qa_evidence_resubmission",
+      originKind: "mission_plan_qa",
+      attempt: input.attempt,
+    },
+    requestedByActorType: "system",
+    requestedByActorId: opts.requestedByActorId ?? "mission-plan-qa",
+    contextSnapshot: {
+      issueId: input.issueId,
+      missionId: input.missionId,
+      source: opts.contextSource ?? "plan_qa_evidence_resubmission",
+      originKind: "mission_plan_qa",
+      wakeReason: "plan_qa_evidence_resubmission",
+      attempt: input.attempt,
     },
   });
 }

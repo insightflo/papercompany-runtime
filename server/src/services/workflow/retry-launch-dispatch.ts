@@ -7,6 +7,8 @@ import {
 } from "./retry-execution-state.js";
 import { markRetryDispatching } from "./retry-dispatch-state.js";
 import { isWorkflowRetryDue, readWorkflowRetryMetadata } from "./retry-policy.js";
+import { nextQualityRetryWakeKey } from "../quality/native-wake.js";
+import { readQualityStepActionId } from "../quality/retry-budget.js";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -105,9 +107,25 @@ export async function wakeIssueBackedRetryAndMarkDispatching<TRun, TDefinition, 
 }): Promise<void> {
   const retryMeta = readWorkflowRetryMetadata(record(input.stepRunMetadata).workflowRetry);
   const isRetry = retryMeta !== null;
-  const retryWakeIdempotencyKey = isRetry
-    ? `workflow-step-retry:${input.stepRunId}:${retryMeta.retryNumber}`
-    : null;
+  // [T4 quality] quality-owned step 의 새 기술 시도는 유한 예약 후 새 quality wake 키
+  // (generation 증가 후 attempt 1부터)로 전달된다. generic step 은 기존
+  // workflow-step-retry 키를 그대로 쓴다.
+  const qualityActionId = readQualityStepActionId(input.stepRunMetadata);
+  let retryWakeIdempotencyKey: string | null;
+  if (qualityActionId) {
+    const [stepRunRow] = await input.db.select({ executionGeneration: workflowStepRuns.executionGeneration })
+      .from(workflowStepRuns).where(eq(workflowStepRuns.id, input.stepRunId)).limit(1);
+    retryWakeIdempotencyKey = await nextQualityRetryWakeKey(input.db, {
+      companyId: input.companyId,
+      actionId: qualityActionId,
+      stepRunId: input.stepRunId,
+      generation: stepRunRow?.executionGeneration ?? 0,
+    });
+  } else {
+    retryWakeIdempotencyKey = isRetry
+      ? `workflow-step-retry:${input.stepRunId}:${retryMeta.retryNumber}`
+      : null;
+  }
   await input.wakeExistingWorkflowStepIssue({
     db: input.db,
     run: input.run,

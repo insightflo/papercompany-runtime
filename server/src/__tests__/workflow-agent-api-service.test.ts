@@ -26,6 +26,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { clearWorkflowAgentApiTestDb } from "./helpers/workflow-agent-api-cleanup.js";
 import { errorHandler } from "../middleware/index.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { completeWorkflowIssue, registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
@@ -39,7 +40,9 @@ type AgentActor = {
   source: "agent_jwt";
   companyId: string;
   agentId: string;
-  runId: string;
+  // 러너(req.actor.runId?: string)와 동일한 선택 필드. 활성 실행 없는 에이전트 컨텍스트도
+  // 표현한다(런타임의 no-run 표현은 undefined 이며 null 이 아니다).
+  runId?: string;
 };
 
 if (!embeddedPostgresSupport.supported) {
@@ -71,20 +74,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
   afterEach(async () => {
     for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
     tempDirs.clear();
-    await db.delete(activityLog);
-    await db.delete(workflowTransitionEvents);
-    await db.delete(issueWorkProducts);
-    await db.delete(issueComments);
-    await db.delete(missionPlanQaVerdicts);
-    await db.delete(heartbeatRuns);
-    await db.delete(workflowStepRuns);
-    await db.delete(workflowRuns);
-    await db.delete(workflowDefinitions);
-    await db.delete(issues);
-    await db.delete(missionPlanArtifacts);
-    await db.delete(missions);
-    await db.delete(agents);
-    await db.delete(companies);
+    await clearWorkflowAgentApiTestDb(db);
   });
 
   afterAll(async () => {
@@ -388,7 +378,6 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       source: "agent_jwt",
       companyId: issue.companyId,
       agentId: "agent-1",
-      runId: null,
     });
 
     const missingReason = await request(app)

@@ -137,10 +137,8 @@ export const ISSUE_ORIGIN_KINDS = [
 ] as const;
 export type IssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 
-// Core Quality Board: company-scoped review queue for purpose-fitness failures,
-// evidence gaps, and human verdicts. See packages/db/src/schema/quality_*.ts +
-// evaluator_anchor_cases.ts. Values must stay in sync with the DB default text
-// columns (no enum constraint), so these lists are the single source of truth.
+// Company-scoped Quality reviews: failures, evidence gaps, human verdicts, and closed PLAN-QA evidence.
+// Vocabulary for the quality_*.ts text columns (no DB enum constraint).
 export const QUALITY_REVIEW_ITEM_STATUSES = [
   "detected",
   "awaiting_review",
@@ -163,6 +161,7 @@ export const QUALITY_TRIGGER_SOURCES = [
   "post_completion_audit",
   "oversight_stall",
   "plan_qa_failure",
+  "plan_qa_review",
   "final_qa_failure",
   "user_feedback",
   "manual",

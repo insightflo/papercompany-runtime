@@ -21,6 +21,7 @@ export const missionPlanQaVerdicts = pgTable(
     sourceCommentId: uuid("source_comment_id").references(() => issueComments.id, { onDelete: "set null" }),
     decisionHash: text("decision_hash").notNull(),
     verdict: text("verdict").notNull(),
+    qualityContract: jsonb("quality_contract").$type<Record<string, unknown>>(),
     diagnostics: jsonb("diagnostics").$type<Array<Record<string, unknown>>>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

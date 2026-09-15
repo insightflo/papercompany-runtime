@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "declaration": false, "declarationMap": false },
+  "include": ["src"],
+  "files": [
+    "src/__tests__/plan-qa-addendum-gate.test.ts",
+    "src/__tests__/plan-qa-addendum-approval.test.ts",
+    "src/__tests__/plan-qa-addendum-completion.test.ts",
+    "src/__tests__/plan-qa-consumer-boundaries.test.ts",
+    "src/__tests__/plan-qa-evidence-registry.test.ts",
+    "src/__tests__/plan-qa-addendum-core-boundaries.test.ts",
+    "src/__tests__/plan-qa-addendum-evidence.test.ts",
+    "src/__tests__/helpers/plan-qa-addendum.ts",
+    "src/__tests__/plan-qa-agent-api.test.ts",
+    "src/__tests__/plan-qa-agent-api-boundaries.test.ts",
+    "src/__tests__/helpers/plan-qa-api.ts",
+    "src/__tests__/plan-qa-resubmission.test.ts",
+    "src/__tests__/plan-qa-resubmission-dispatch.test.ts"
+  ]
+}

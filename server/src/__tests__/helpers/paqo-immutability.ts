@@ -1,3 +1,4 @@
+// [T7 fixture] PLAN-QA manifest attachments create assets rows (company FK 없음) → 정리 추가.
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -6,6 +7,7 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   agents,
+  assets,
   companies,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -39,6 +41,7 @@ export async function cleanupPaqoImmutabilityTables(db: Db): Promise<void> {
   await db.delete(plugins);
   await db.delete(missions);
   await db.delete(agents);
+  await db.delete(assets);
   await db.delete(companies);
 }
 

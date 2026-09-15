@@ -9,6 +9,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { insertActivityRecord } from "./activity-log-records.js";
 
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 
@@ -42,17 +43,8 @@ export async function logActivity(db: Db, input: LogActivityInput) {
   const redactedDetails = sanitizedDetails
     ? redactCurrentUserValue(sanitizedDetails, currentUserRedactionOptions)
     : null;
-  await db.insert(activityLog).values({
-    companyId: input.companyId,
-    actorType: input.actorType,
-    actorId: input.actorId,
-    action: input.action,
-    entityType: input.entityType,
-    entityId: input.entityId,
-    agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
-    details: redactedDetails,
-  });
+  // [T3 추출] insert 는 DB 전용 insertActivityRecord(트랜잭션 안에서도 안전)가 담당한다.
+  await insertActivityRecord(db, input);
 
   publishLiveEvent({
     companyId: input.companyId,

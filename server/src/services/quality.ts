@@ -14,6 +14,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
+import { guardQualityWrite } from "./quality/write-guard.js";
 import { issueService } from "./issues.js";
 import { applyIssueCreatedSideEffects } from "./issue-create-side-effects.js";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
@@ -727,6 +728,8 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
     reviewItem: QualityReviewItemListItemWithEvidence;
   }> {
     const item = await loadReviewItem(input.reviewItemId);
+    // [T5] 신형 발생(occurrence)이 연결된 리뷰 항목은 구형 판정이 실행·검증을 만들 수 없다.
+    await guardQualityWrite(db, { companyId: item.companyId, subject: "review", subjectId: item.id, operation: "record_verdict" });
     const nextStatus = resolveVerdictStatus(input.verdict);
     const routing = resolveQualityVerdictRouting({
       verdict: input.verdict,
@@ -823,6 +826,10 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
 
   // [목적] human 판정 → anchor case 승격 + evaluator candidate version/replay/improvement job 까지 한 트랜잭션.
   async function promoteVerdictToAnchor(input: PromoteAnchorInput) {
+    // [T5] 신형 발생이 연결된 항목의 승격도 전용 경로로(구형 승격이 신형 권위를 만들지 못한다).
+    const ownership = await getReviewItemOwnership(input.reviewItemId);
+    if (!ownership) throw notFound("Quality review item not found");
+    await guardQualityWrite(db, { companyId: ownership.companyId, subject: "review", subjectId: input.reviewItemId, operation: "promote_anchor" });
     return db.transaction(async (tx) => {
       const anchor = await promoteVerdictToAnchorRaw(tx, input);
       await seedEvaluatorCandidateFromAnchor(tx, anchor);
@@ -961,6 +968,8 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
   // [목적] verdict 없이 독립적으로 evidence 수집 요청(plan 8.3). 상태를 evidence_collecting 으로.
   async function requestEvidence(input: RequestEvidenceInput): Promise<{ reviewItem: QualityReviewItemListItemWithEvidence }> {
     const item = await loadReviewItem(input.reviewItemId);
+    // [T5] 신형 조치가 연결된 항목의 무제한 재요청 우회 차단(재요청은 그룹 계수 아래).
+    await guardQualityWrite(db, { companyId: item.companyId, subject: "review", subjectId: item.id, operation: "request_evidence" });
     const surfaces = input.requiredEvidenceSurfaces.map((s) => s.trim()).filter(Boolean);
     await db.transaction(async (tx) => {
       await tx
@@ -976,6 +985,8 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
   // [목적] 증거 수집 결과 기록. 모든 blocking/unresolved 해소되면 awaiting_review 로 복귀(폐루프 8.3).
   async function recordEvidence(input: RecordEvidenceInput): Promise<{ reviewItem: QualityReviewItemListItemWithEvidence }> {
     const item = await loadReviewItem(input.reviewItemId);
+    // [T5] 신형 조치가 연결된 항목의 자가 검증 우회 차단(검증은 전용 영수증 경로).
+    await guardQualityWrite(db, { companyId: item.companyId, subject: "review", subjectId: item.id, operation: "record_evidence" });
     await db.transaction(async (tx) => {
       const [existing] = await tx
         .select({ id: qualityEvidenceRefs.id })
@@ -1113,6 +1124,8 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
 
   // [목적] candidate evaluator replay 실행(v1 결정론적). regression 없으면 passed.
   async function runCandidateReplay(companyId: string, runId: string, input: { regressions?: number; resultSummary?: string }) {
+    // [T5] Quality 연결 평가 실행은 신형 검증 경로에서만(구형 replay 가 신형 성공을 만들지 못한다).
+    await guardQualityWrite(db, { companyId, subject: "candidate_run", subjectId: runId, operation: "run_candidate_replay" });
     const [run] = await db
       .select()
       .from(evaluatorCandidateRuns)
@@ -1135,6 +1148,8 @@ export function qualityService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
 
   // [목적] candidate → production 승격. passed replay 가 있어야만(폐루프 8.4 가드).
   async function promoteEvaluatorVersion(companyId: string, versionId: string) {
+    // [T5] Quality 연결 버전의 승격도 전용 경로로(연결 없는 과거 승격은 열람만 유지).
+    await guardQualityWrite(db, { companyId, subject: "evaluator_version", subjectId: versionId, operation: "promote_evaluator_version" });
     const [version] = await db
       .select()
       .from(evaluatorVersions)

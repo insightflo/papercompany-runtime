@@ -10,6 +10,7 @@ import { validate } from "../middleware/validate.js";
 import { conflict, notFound } from "../errors.js";
 import { logActivity } from "../services/activity-log.js";
 import { toolService } from "../services/tools/registry.js";
+import { assertHttpArtifactAssertionFloor } from "../services/tools/response-contract-floor.js";
 import { executeToolTest, type ToolTestDispatcher, type ToolTestExecutor } from "../services/tools/test-executor.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
@@ -62,6 +63,7 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
+    assertHttpArtifactAssertionFloor(req.body);
     let tool;
     try {
       tool = await toolService.createDefinition(db, { ...req.body, companyId });
@@ -100,6 +102,12 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
       && (req.body.adapterConfig.source === undefined || req.body.adapterConfig.source === "");
     if (!detachesSourceOwnership) {
       assertMutableTool(existing);
+    }
+    if (req.body.adapterConfig !== undefined) {
+      assertHttpArtifactAssertionFloor({
+        adapterType: req.body.adapterType ?? existing.adapterType,
+        adapterConfig: req.body.adapterConfig,
+      });
     }
     let tool;
     try {

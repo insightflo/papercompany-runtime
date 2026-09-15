@@ -52,6 +52,7 @@ export const issues = pgTable(
     executionWorkspaceId: uuid("execution_workspace_id")
       .references((): AnyPgColumn => executionWorkspaces.id, { onDelete: "set null" }),
     executionWorkspacePreference: text("execution_workspace_preference"),
+    qualityPlanQaBinding: jsonb("quality_plan_qa_binding").$type<Record<string, unknown>>(),
     executionWorkspaceSettings: jsonb("execution_workspace_settings").$type<Record<string, unknown>>(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),

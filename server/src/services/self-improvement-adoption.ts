@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { activityLog, adoptionGateVerdicts, companySkills } from "@paperclipai/db";
 import { unprocessable } from "../errors.js";
+import { assertAdoptionCandidatesNotQualityLinked } from "./quality/write-guard.js";
 import { companySkillService, parseFrontmatterMarkdown } from "./company-skills.js";
 import {
   knowledgePatternAdoptionRegistryEntries,
@@ -295,6 +296,10 @@ export function selfImprovementAdoptionService(db: Db) {
       }
       const actorId = input.actor.type === "agent" ? input.actor.agentId ?? "agent-adoption" : "operator-adoption";
       const { candidates } = validateInputs(input.candidates, input.actor.type === "board" ? input.gateVerdicts : [{ gateOwner: "registry", verdict: "PASS" }]);
+      // [T5] 후보가 주장하는 Quality 생산 관계(evaluator_version/quality_action)를 실제 DB 로 확인해
+      //   addendum 적용 우회를 막는다. board inline PASS 는 Quality 독립 평가가 아니다. 관계 없는
+      //   회사 스킬 채택 동작은 바꾸지 않는다.
+      await assertAdoptionCandidatesNotQualityLinked(db, input.companyId, candidates);
       const candidateHashes = hashCandidates(candidates);
 
       let gateVerdicts: AdoptionGateVerdict[];

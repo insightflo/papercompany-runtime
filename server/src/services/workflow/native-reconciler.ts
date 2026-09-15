@@ -3,6 +3,8 @@ import { logger as defaultLogger } from "../../middleware/logger.js";
 import { reconcileWorkflow } from "./reconciler.js";
 import { recoverTerminalUnsettledRuns } from "../heartbeat-finalization/recovery.js";
 import { reconcileProvider403LadderWakeups } from "../heartbeat-provider403-ladder.js";
+import { reconcileQualityIntents } from "../quality/native-reconcile.js";
+import { sweepTerminalMissionOrphanRuns } from "../missions/terminal-mission-orphan-sweep.js";
 
 export interface NativeWorkflowReconcilerLogger {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -95,6 +97,35 @@ export function createNativeWorkflowReconciler(
         log.warn(
           { err: error instanceof Error ? error.message : String(error) },
           "Provider 403 backoff ladder scan failed",
+        );
+      }
+      // [T4 quality] 같은 delivery 함수로 quality intent 복구. 실패해도 tick 은 깨지지 않는다.
+      try {
+        const quality = await reconcileQualityIntents(options.db, {
+          ownership: "native-active-plugin-disabled",
+          now,
+        });
+        if (quality.visited > 0) {
+          log.info(quality, "Quality intent reconciliation completed");
+        }
+      } catch (error) {
+        log.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "Quality intent reconciliation failed",
+        );
+      }
+      // [slice-5 MISMATCH D] Terminal missions must not keep owning live work: sweep orphan
+      //   queued/running runs and active runtimes through the atomic terminal-cleanup fence.
+      //   A failure here must never break the reconciler tick.
+      try {
+        const swept = await sweepTerminalMissionOrphanRuns(options.db, now);
+        if (swept.sweptMissions > 0) {
+          log.info({ ...swept }, "Terminal mission orphan cleanup sweep settled stranded work");
+        }
+      } catch (error) {
+        log.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "Terminal mission orphan cleanup sweep failed",
         );
       }
     } catch (error) {

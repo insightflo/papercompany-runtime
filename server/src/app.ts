@@ -48,6 +48,9 @@ import { hermesChatRoutes } from "./routes/hermes-chat.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { qualityRoutes } from "./routes/quality.js";
+import { qualityPolicyRoutes } from "./routes/quality-policies.js";
+import { qualityActionsRoutes } from "./routes/quality-actions.js";
+import { qualityEvaluationRoutes } from "./routes/quality-evaluations.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { llmRoutes } from "./routes/llms.js";
@@ -403,6 +406,8 @@ export async function createApp(
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
   api.use(qualityRoutes(db));
+  api.use(qualityActionsRoutes(db));
+  api.use(qualityEvaluationRoutes(db));
   api.use(sidebarBadgeRoutes(db));
   api.use(instanceSettingsRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
@@ -412,6 +417,7 @@ export async function createApp(
   setPluginEventBus(eventBus);
   registerNativeWorkflowToolResultEventHandlers(db, eventBus);
   const workflowSchedulerOwnership = resolveWorkflowSchedulerOwnership();
+  api.use(qualityPolicyRoutes(db, workflowSchedulerOwnership.mode));
   const agentWikiEvolutionOwnership = resolveAgentWikiEvolutionOwnership();
   logger.info({
     mode: workflowSchedulerOwnership.mode,

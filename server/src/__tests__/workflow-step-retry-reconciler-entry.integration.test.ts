@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+// [T4 quality] RED 단계(스킵 누락)에 generic wake 가 실제 어댑터를 건드리지 않도록만 막는다.
+// 스킵이 동작하면 wake 자체가 일어나지 않는다(기존 두 테스트는 tool executor 경로라 무관).
+const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
+vi.mock("../adapters/index.js", () => ({
+  getServerAdapter: vi.fn(() => ({ supportsLocalAgentJwt: false, execute: executeSpy })),
+  runningProcesses: new Map(),
+}));
 import {
   agents, agentWakeupRequests, companies, createDb, issues, workflowDefinitions, workflowRuns,
   workflowStepRuns,
@@ -143,6 +151,43 @@ describeEP("generic runnable-step wakeup reconciler skips workflowRetry", () => 
     expect(results).toEqual([]);
 
     // Zero wakeup rows created — the step was skipped wholesale.
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.issueId, issueId));
+    expect(wakes.length).toBe(0);
+  });
+
+  it("skips quality-owned steps (metadata.qualityActionId) from generic re-wake", async () => {
+    const agentId = randomUUID();
+    const stepId = `agent-${randomUUID().slice(0, 6)}`;
+    const wfId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId, companyId, name: `Agent-${stepId}`, role: "worker",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(workflowDefinitions).values({
+      id: wfId, companyId, name: "WakeSkipQualityWF",
+      stepsJson: [{ id: stepId, name: "Worker", agentId }],
+    });
+    await db.insert(workflowRuns).values({ id: runId, companyId, workflowId: wfId, status: "running", triggeredBy: "test", startedAt: new Date(Date.now() - 120_000) });
+    await db.insert(issues).values({
+      id: issueId, companyId, status: "todo", title: "quality-step", body: "",
+      source: "workflow", originRunId: runId,
+    });
+    // Pending issue-backed step owned by a quality action — e.g. its quality wake was
+    // skipped (agent paused) or swallowed (race loser), so no live quality row exists.
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: runId, stepId, issueId, status: "pending",
+      startedAt: new Date(Date.now() - 120_000),
+      metadata: { qualityActionId: randomUUID() },
+    });
+
+    const results = await reconcileRunnableWorkflowStepWakeups(db, 1);
+    expect(results).toEqual([]);
+
+    // No generic wakeup row: quality-owned recovery belongs to reconcileQualityIntents
+    // (same delivery function, acceptance-recorded), never to a key-less generic wake.
     const wakes = await db.select().from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.issueId, issueId));
     expect(wakes.length).toBe(0);

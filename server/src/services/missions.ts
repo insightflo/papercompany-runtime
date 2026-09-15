@@ -60,6 +60,7 @@ import { runMissionTerminalCleanup } from "./missions/terminal-cleanup-fence.js"
 import { captureMissionTerminalAuthority } from "./missions/terminal-cleanup-authority.js";
 import { createOwnerActions } from "./missions/owner-actions.js";
 import { createSupervision } from "./missions/supervision.js";
+import { addMissionAgentRecord, createMissionRecord } from "./missions/mission-create-records.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 // [목적] mission 생성 시점에 working.md를 미리 provisioning 하기 위해 import.
 // [외부 연결] create()에서 호출 → 첫 PLAN 런이 working.md를 발견하지 못해 실패하던 gap을 닫는다.
@@ -489,27 +490,20 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     //   workflow trigger now gets its own mission.
 
     // Create mission
-    const [mission] = await db
-      .insert(missions)
-      .values({
-        companyId: input.companyId,
-        ownerAgentId: input.ownerAgentId,
-        title: input.title,
-        description: input.description ?? null,
-        goalId: input.goalId ?? null,
-        projectId: input.projectId ?? null,
-        status: input.status ?? "planning",
-      })
-      .returning();
+    const mission = await createMissionRecord(db, {
+      companyId: input.companyId,
+      ownerAgentId: input.ownerAgentId,
+      title: input.title,
+      description: input.description ?? null,
+      goalId: input.goalId ?? null,
+      projectId: input.projectId ?? null,
+      status: input.status ?? "planning",
+    });
 
     // Add owner as the initial executor in mission_agents. Mission ownership is
     // tracked on missions.ownerAgentId; mission_agents.role is constrained to
     // executor/reviewer/observer by the database.
-    await db.insert(missionAgents).values({
-      missionId: mission.id,
-      agentId: input.ownerAgentId,
-      role: "executor",
-    });
+    await addMissionAgentRecord(db, { missionId: mission.id, agentId: input.ownerAgentId, role: "executor" });
 
     // Add additional agents if provided
     if (input.agentIds && input.agentIds.length > 0) {
@@ -517,11 +511,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         validateRole(role ?? "executor");
         // Don't add owner again
         if (agentId === input.ownerAgentId) continue;
-        await db.insert(missionAgents).values({
-          missionId: mission.id,
-          agentId,
-          role: role ?? "executor",
-        }).onConflictDoNothing();
+        await addMissionAgentRecord(db, { missionId: mission.id, agentId, role: role ?? "executor", skipDuplicate: true });
       }
     }
 

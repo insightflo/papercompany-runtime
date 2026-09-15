@@ -1,6 +1,6 @@
 // server/src/services/workflow/control-flow/qa-remediation.ts
 //
-// [purpose] QA 기계적 재작업 루프의 근본 완화 — "문구 교체" 수준의 기계적 반려에 생산자 에이전트를
+// [purpose] QA 기계적 재작업 루프의 근본 완화 — "문구 교체" 수준의 기계적 반별에 생산자 에이전트를
 //   재실행(수십 분)하는 대신, 공식 request_changes verdict 에 동봉된 schema-validated
 //   `remediations`(string_replace 항목들)을 결정론적으로 적용하고 QA 스텝만 재실행한다.
 //
@@ -12,13 +12,16 @@
 //   - boundary: remediation file 은 생산자의 active workProduct 절대경로 또는 그 디렉터리 내부로 한정.
 //   - determinism: find 는 대상 파일(현재까지 적용된 시뮬레이션 내용 기준)에서 정확히 한 번 나타나야 한다.
 //   - idempotency: qa_remediation_applied 이벤트의 idempotencyKey 가 원천 verdict event id 를 물고 있어
-//     같은 verdict 를 두 번 적용하지 않는다(재평가 시 "waiting" 홀드).
+//     같은 verdict 를 두 번 적용하지 않는다(재평가 시 "waiting" 홀드). Quality current_output 경로도
+//     같은 이벤트/키 계약을 쓴다(T3 연결).
 //   - bounded: QA stepRun 당 remediation 시도(이벤트 수) 상한. 초과/실패 시 기존 생산자 재작업 경로로 폴백.
 //   - fail-closed: 어떤 조건이든 증명되지 않으면 not_applicable — caller(loop-driver)는 기존 재작업 경로 유지.
 //
-// [ordering] wake(QA 재실행) 먼저 → 파일 기록 → 이벤트 기록. wake 가 거부되면 아무것도 쓰지 않는다.
-//   파일 기록 실패 시 write_failed 이벤트를 남기고 폴백한다(생산자 재실행이 산출물을 재생성해 치유).
+// [ordering] 일반 경로: wake(QA 재실행) 먼저 → 파일 기록 → 이벤트 기록. wake 가 거부되면 아무것도 쓰지 않는다.
+//   파일 기록 실패 시 write_failed 이벤트를 남기고 폴백한다. Quality current_output 경로
+//   (services/quality/current-output.ts)는 아래 export 된 자격검사/기록 코어를 재사용하되 깨우지 않는다.
 
+import { createHash } from "node:crypto";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, count, eq } from "drizzle-orm";
@@ -76,15 +79,11 @@ export interface TryQaRemediationInput {
   readonly refireQaStep: (qa: { stepId: string; stepRunId: string; issueId: string }) => Promise<boolean>;
 }
 
-interface QualifiedQa {
-  readonly qaRun: StepRun;
-  readonly remediations: WorkflowQaRemediations;
-  readonly heartbeatRunId: string | null;
-  readonly sourceVerdictEventId: string;
-}
+export type QualifiedQa = { readonly qaRun: StepRun; readonly remediations: WorkflowQaRemediations; readonly heartbeatRunId: string | null; readonly sourceVerdictEventId: string };
+
+export type PreparedFile = { content: string; itemCount: number; beforeHash: string };
 
 function isHardBlockedQaStep(def: EdgeBearingStep | undefined): boolean {
-  // 구조/납품 확정 게이트는 결정론적 검증 자체가 목적 — 기계적 패치로 우회 불가(fail-closed).
   if (!def) return true;
   return isStructuralGateStep(def as never) || isDeliveryReadbackStep(def as never);
 }
@@ -95,7 +94,7 @@ function isFreshRemediation(observedAt: Date | null, producerCompletedAt: Date |
   return observedAt.getTime() >= producerCompletedAt.getTime();
 }
 
-async function remediationAttemptCount(db: Db, companyId: string, qaStepRunId: string): Promise<number> {
+export async function remediationAttemptCount(db: Db, companyId: string, qaStepRunId: string): Promise<number> {
   const [row] = await db
     .select({ n: count() })
     .from(workflowTransitionEvents)
@@ -107,7 +106,7 @@ async function remediationAttemptCount(db: Db, companyId: string, qaStepRunId: s
   return Number(row?.n ?? 0);
 }
 
-async function remediationAlreadyApplied(
+export async function remediationAlreadyApplied(
   db: Db,
   companyId: string,
   qaStepRunId: string,
@@ -120,14 +119,19 @@ async function remediationAlreadyApplied(
       eq(workflowTransitionEvents.companyId, companyId),
       eq(workflowTransitionEvents.workflowStepRunId, qaStepRunId),
       eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE),
-      eq(workflowTransitionEvents.idempotencyKey, `qa-remediation-applied:${companyId}:${qaStepRunId}:${sourceVerdictEventId}`),
+      eq(workflowTransitionEvents.idempotencyKey, remediationIdempotencyKey(companyId, qaStepRunId, sourceVerdictEventId)),
     ))
     .limit(1);
   return Boolean(row);
 }
 
+/** 이벤트 idempotency 키 — Quality current_output 경로가 같은 계약으로 중복 적용을 막는다. */
+export function remediationIdempotencyKey(companyId: string, qaStepRunId: string, sourceVerdictEventId: string): string {
+  return `qa-remediation-applied:${companyId}:${qaStepRunId}:${sourceVerdictEventId}`;
+}
+
 /** 생산자 active workProduct 절대경로 → (정확 파일 허용집, 디렉터리 허용집). */
-async function loadProducerArtifactBoundary(input: TryQaRemediationInput): Promise<{
+async function loadProducerArtifactBoundary(input: Pick<TryQaRemediationInput, "db" | "run" | "producerStep" | "producerRun">): Promise<{
   allowedFiles: Set<string>;
   allowedDirs: string[];
 } | null> {
@@ -151,7 +155,7 @@ async function loadProducerArtifactBoundary(input: TryQaRemediationInput): Promi
   return allowedDirs.length > 0 ? { allowedFiles, allowedDirs } : null;
 }
 
-function isInsideBoundary(file: string, boundary: { allowedFiles: Set<string>; allowedDirs: string[] }): boolean {
+export function isInsideBoundary(file: string, boundary: { allowedFiles: Set<string>; allowedDirs: string[] }): boolean {
   if (!path.isAbsolute(file)) return false;
   const resolved = path.resolve(file);
   if (boundary.allowedFiles.has(resolved)) return true;
@@ -161,44 +165,45 @@ function isInsideBoundary(file: string, boundary: { allowedFiles: Set<string>; a
   });
 }
 
-/**
- * [purpose] fresh 반려 QA 전원이 기계 remediable 이면 결정론적 패치 + QA 재실행, 아니면 not_applicable.
- *   "waiting" = 이 verdict 들은 이미 remediation 이 적용된 상태(재실행 대기 중) — caller 는 재작업도 스킵.
- */
-export async function tryQaRemediationPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {
+export type QualificationResult =
+  | { status: "qualified"; qualified: QualifiedQa[]; fileBuffers: Map<string, PreparedFile> }
+  | { status: "waiting" | "not_applicable"; detail: string };
+
+/** [T3 추출] 자격검사+경계+two-phase 검증까지만 — 깨우기/기록은 하지 않는다(두 경로 공유). */
+export async function collectQualifiableQaRemediations(input: TryQaRemediationInput): Promise<QualificationResult> {
   const { db, run } = input;
-  if (run.status === "cancelled") return { outcome: "not_applicable", detail: "run cancelled" };
-  if (input.rejectedQas.length === 0) return { outcome: "not_applicable", detail: "no rejected qas" };
+  if (run.status === "cancelled") return { status: "not_applicable", detail: "run cancelled" };
+  if (input.rejectedQas.length === 0) return { status: "not_applicable", detail: "no rejected qas" };
 
   const qualified: QualifiedQa[] = [];
   let waitingCount = 0;
   for (const q of input.rejectedQas) {
     const qaRun = q.qaRun;
-    if (!qaRun || !qaRun.issueId) return { outcome: "not_applicable", detail: "rejected qa missing issue binding" };
+    if (!qaRun || !qaRun.issueId) return { status: "not_applicable", detail: "rejected qa missing issue binding" };
 
     // 구조/납품 게이트 하드 블록(fail-closed) — 결정론적 게이트를 패치로 우회할 수 없다.
     const qaStepDef = input.steps.find((s) => s.id === q.edge.stepId);
-    if (isHardBlockedQaStep(qaStepDef)) return { outcome: "not_applicable", detail: `hard-blocked qa step ${q.edge.stepId}` };
+    if (isHardBlockedQaStep(qaStepDef)) return { status: "not_applicable", detail: `hard-blocked qa step ${q.edge.stepId}` };
 
     // 원천 데이터 결함이 섞여 있으면 기계적 산출물 수정으로 해결 불가 — 생산자 재작업/오너 라우팅에 맡긴다.
     const findings = input.findingsByQaStepId.get(q.edge.stepId) ?? null;
     if (findings?.some((finding) => finding.layer === "source_data")) {
-      return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} carries source_data findings` };
+      return { status: "not_applicable", detail: `qa ${q.edge.stepId} carries source_data findings` };
     }
 
     const loaded = await loadLatestQaRemediations({ db, companyId: run.companyId, issueId: qaRun.issueId });
-    if (!loaded) return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} has no applicable remediations` };
+    if (!loaded) return { status: "not_applicable", detail: `qa ${q.edge.stepId} has no applicable remediations` };
     // exact current QA step-run binding: 이전 세대 verdict 의 remediation 은 절대 적용하지 않는다.
     if (!loaded.workflowStepRunId || loaded.workflowStepRunId !== qaRun.id) {
-      return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} remediation bound to foreign step run` };
+      return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation bound to foreign step run` };
     }
     // current producer generation 판정(unknown 시 fail-closed).
     if (!isFreshRemediation(loaded.observedAt, input.producerRun.completedAt ?? null)) {
-      return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} remediation not fresh for producer generation` };
+      return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation not fresh for producer generation` };
     }
     // [execution freshness] verdict heartbeat 가 이 QA step 의 최신 실행이어야 한다(재발행 이후 판정 스킵).
     if (!(await isLatestQaExecution(db, qaRun.issueId, qaRun.id, loaded.heartbeatRunId))) {
-      return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} verdict superseded by newer execution` };
+      return { status: "not_applicable", detail: `qa ${q.edge.stepId} verdict superseded by newer execution` };
     }
     // [idempotency] 이 verdict event 에 대한 remediation 이 이미 적용됐다면 재적용/재작업 모두 스킵(홀드).
     if (await remediationAlreadyApplied(db, run.companyId, qaRun.id, loaded.sourceVerdictEventId)) {
@@ -208,7 +213,7 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
     // [bounded] QA stepRun 당 시도 상한 — 초과 시 생산자 재작업 경로로 폴백.
     const attempts = await remediationAttemptCount(db, run.companyId, qaRun.id);
     if (attempts >= QA_REMEDIATION_MAX_ATTEMPTS) {
-      return { outcome: "not_applicable", detail: `qa ${q.edge.stepId} remediation attempt cap exhausted` };
+      return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation attempt cap exhausted` };
     }
 
     qualified.push({
@@ -220,19 +225,19 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
   }
 
   if (qualified.length === 0 && waitingCount === input.rejectedQas.length) {
-    return { outcome: "waiting", detail: "all rejected qa verdicts already remediated; awaiting fresh QA verdict" };
+    return { status: "waiting", detail: "all rejected qa verdicts already remediated; awaiting fresh QA verdict" };
   }
 
   // boundary: 생산자 등록 산출물 경로/디렉터리 외부 파일은 절대 건드리지 않는다.
   const boundary = await loadProducerArtifactBoundary(input);
-  if (!boundary) return { outcome: "not_applicable", detail: "producer has no absolute-path active work products" };
+  if (!boundary) return { status: "not_applicable", detail: "producer has no absolute-path active work products" };
 
   // two-phase validate: 파일 읽기 + 순차 find 검증(정확히 한 번). 하나라도 실패하면 전체 폴백.
-  const fileBuffers = new Map<string, { content: string; itemCount: number }>();
+  const fileBuffers = new Map<string, PreparedFile>();
   for (const qa of qualified) {
     for (const item of qa.remediations.items) {
       if (!isInsideBoundary(item.file, boundary)) {
-        return { outcome: "not_applicable", detail: `remediation file outside producer artifact boundary: ${item.file}` };
+        return { status: "not_applicable", detail: `remediation file outside producer artifact boundary: ${item.file}` };
       }
       const resolved = path.resolve(item.file);
       let entry = fileBuffers.get(resolved);
@@ -241,39 +246,41 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
         try {
           size = (await stat(resolved)).size;
         } catch {
-          return { outcome: "not_applicable", detail: `remediation target missing: ${resolved}` };
+          return { status: "not_applicable", detail: `remediation target missing: ${resolved}` };
         }
         if (size > QA_REMEDIATION_MAX_FILE_BYTES) {
-          return { outcome: "not_applicable", detail: `remediation target too large: ${resolved}` };
+          return { status: "not_applicable", detail: `remediation target too large: ${resolved}` };
         }
         try {
-          entry = { content: await readFile(resolved, "utf8"), itemCount: 0 };
+          const original = await readFile(resolved, "utf8");
+          entry = { content: original, itemCount: 0, beforeHash: createHash("sha256").update(original).digest("hex") };
         } catch {
-          return { outcome: "not_applicable", detail: `remediation target unreadable: ${resolved}` };
+          return { status: "not_applicable", detail: `remediation target unreadable: ${resolved}` };
         }
         fileBuffers.set(resolved, entry);
       }
       const first = entry.content.indexOf(item.find);
       if (first === -1 || entry.content.indexOf(item.find, first + 1) !== -1) {
-        return { outcome: "not_applicable", detail: `find not exactly-once in ${resolved} (qa ${qa.qaRun.stepId})` };
+        return { status: "not_applicable", detail: `find not exactly-once in ${resolved} (qa ${qa.qaRun.stepId})` };
       }
       entry.content = entry.content.slice(0, first) + item.replace + entry.content.slice(first + item.find.length);
       entry.itemCount += 1;
     }
   }
+  return { status: "qualified", qualified, fileBuffers };
+}
 
-  // wake first: QA 재실행이 거부되면 아무것도 기록하지 않는다(원자성 — 부분 상태 없음).
-  for (const qa of qualified) {
-    if (!qa.qaRun.issueId) return { outcome: "not_applicable", detail: "qualified qa lost issue binding" };
-    const queued = await input.refireQaStep({ stepId: qa.qaRun.stepId, stepRunId: qa.qaRun.id, issueId: qa.qaRun.issueId });
-    if (!queued) {
-      return { outcome: "not_applicable", detail: `qa re-fire refused for ${qa.qaRun.stepId}` };
-    }
-  }
-
-  // write phase: 모든 패치 파일 기록. 실패 시 감사 이벤트(write_failed) 후 기존 경로 폴백.
+/**
+ * [T3 추출] write phase: 패치 파일 기록 + 감사 이벤트 기록. extraEventPayload 로 호출자(Quality
+ *   current_output)가 머신 생성 추가 필드(file 이전/이후 hash)를 같은 이벤트에 넣을 수 있다.
+ */
+export async function writeQaRemediationPatches(input: Pick<TryQaRemediationInput, "db" | "run" | "producerStep" | "producerRun"> & {
+  qualified: readonly QualifiedQa[]; fileBuffers: ReadonlyMap<string, PreparedFile>;
+  extraEventPayload?: (qa: QualifiedQa) => Record<string, unknown>;
+}): Promise<{ writeError: string | null }> {
+  const { db, run } = input;
   let writeError: string | null = null;
-  for (const [file, entry] of fileBuffers) {
+  for (const [file, entry] of input.fileBuffers) {
     try {
       await writeFile(file, entry.content, "utf8");
     } catch (error) {
@@ -283,7 +290,7 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
   }
 
   const nowIso = new Date().toISOString();
-  for (const qa of qualified) {
+  for (const qa of input.qualified) {
     await db.insert(workflowTransitionEvents).values({
       companyId: run.companyId,
       missionId: run.missionId ?? null,
@@ -297,7 +304,7 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
       verdict: "request_changes",
       reason: "workflow_api",
       reasonCode: "qa_remediation",
-      idempotencyKey: `qa-remediation-applied:${run.companyId}:${qa.qaRun.id}:${qa.sourceVerdictEventId}`,
+      idempotencyKey: remediationIdempotencyKey(run.companyId, qa.qaRun.id, qa.sourceVerdictEventId),
       payload: {
         kind: "qa_remediation_applied",
         outcome: writeError ? "write_failed" : "applied",
@@ -310,14 +317,34 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
         items: qa.remediations.items,
         // [P1 결함 서명] 동일 교정 반복 감지용 머신 생성 해시(knowledge-draft-capture 규약 v1).
         signatures: qa.remediations.items.map((item) => computeDefectSignature(item.find, item.replace)),
+        ...(input.extraEventPayload ? input.extraEventPayload(qa) : {}),
         ...(writeError ? { writeError } : {}),
       },
     }).onConflictDoNothing();
   }
+  return { writeError };
+}
 
-  if (writeError) {
-    return { outcome: "not_applicable", detail: `remediation write failed: ${writeError}` };
+/**
+ * [purpose] fresh 반려 QA 전원이 기계 remediable 이면 결정론적 패치 + QA 재실행, 아니면 not_applicable.
+ *   "waiting" = 이 verdict 들은 이미 remediation 이 적용된 상태(재실행 대기 중) — caller 는 재작업도 스킵.
+ */
+export async function tryQaRemediationPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {
+  const { db, run } = input;
+  const prepared = await collectQualifiableQaRemediations(input);
+  if (prepared.status !== "qualified") return { outcome: prepared.status, detail: prepared.detail };
+  const { qualified, fileBuffers } = prepared;
+
+  // wake first: QA 재실행이 거부되면 아무것도 기록하지 않는다(원자성 — 부분 상태 없음).
+  for (const qa of qualified) {
+    if (!qa.qaRun.issueId) return { outcome: "not_applicable", detail: "qualified qa lost issue binding" };
+    const queued = await input.refireQaStep({ stepId: qa.qaRun.stepId, stepRunId: qa.qaRun.id, issueId: qa.qaRun.issueId });
+    if (!queued) return { outcome: "not_applicable", detail: `qa re-fire refused for ${qa.qaRun.stepId}` };
   }
+
+  const { writeError } = await writeQaRemediationPatches({ db, run, producerStep: input.producerStep, producerRun: input.producerRun, qualified, fileBuffers });
+
+  if (writeError) return { outcome: "not_applicable", detail: `remediation write failed: ${writeError}` };
 
   // [P1 지식 초안 캡처 — 비차단] 모든 제어 판정/기록이 끝난 뒤의 부수 기록. 실패해도
   //   applied 반환과 재작업 경로는 절대 바뀌지 않는다(규칙 7 — 실행통제 영향 0).

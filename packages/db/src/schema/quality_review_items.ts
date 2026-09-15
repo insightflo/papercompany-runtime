@@ -21,6 +21,7 @@ export const qualityReviewItems = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    qualityCompanyIdUq: uniqueIndex("quality_review_items_quality_company_id_uq").on(table.companyId, table.id),
     companyStatusIdx: index("quality_review_items_company_status_idx").on(table.companyId, table.status, table.createdAt),
     companyTriggerIdx: index("quality_review_items_company_trigger_idx").on(table.companyId, table.triggerSource, table.createdAt),
     missionIdx: index("quality_review_items_company_mission_idx").on(table.companyId, table.missionId, table.createdAt),

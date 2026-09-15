@@ -1,10 +1,15 @@
+// [T7 fixture] PLAN-QA manifest attachments create assets rows (company FK 없음) → 정리 추가.
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentWakeupRequests,
   agents,
+  assets,
   companies,
   createDb,
   heartbeatRuns,
@@ -28,6 +33,20 @@ import {
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skip PLAN-QA reviewer recovery tests: ${support.reason ?? "unsupported"}`);
+
+// [T7 격리] recordLatest 가 PLAN-QA manifest 를 StorageService 에 기록하므로 기본 인스턴스
+// storage(~/.paperclip) 대신 suite 전용 임시 디렉터리로 돌린다(T12 전역 주입 전 임시 차단).
+let planQaStorageRoot: string | null = null;
+beforeAll(async () => {
+  planQaStorageRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-pqrr-storage-"));
+  vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk");
+  vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", planQaStorageRoot);
+});
+afterAll(async () => {
+  vi.unstubAllEnvs();
+  if (planQaStorageRoot) await rm(planQaStorageRoot, { recursive: true, force: true });
+});
+
 describeDb("PLAN-QA reviewer recovery", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -50,6 +69,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
     await db.delete(workflowDefinitions);
     await db.delete(missions);
     await db.delete(agents);
+    await db.delete(assets);
     await db.delete(companies);
   });
 
@@ -240,7 +260,8 @@ describeDb("PLAN-QA reviewer recovery", () => {
     expect(planQaIssue?.executionLockedAt).toBeNull();
     expect(enqueuePlanQaWakeup).toHaveBeenCalledWith(expect.objectContaining({
       agentId: f.replacementAgentId,
-      issueId: initialPlanQaIssue!.id,
+      // [T7] 검토 중 실행 단위(assignee recovery)가 바뀌면 새 reviewGeneration 이슈로 세대가 갱신된다.
+      issueId: planQaIssue!.id,
       issueStatus: "todo",
     }));
 
