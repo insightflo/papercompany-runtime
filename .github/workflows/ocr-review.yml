@@ -18,7 +18,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: AI code review (advisor)
-        uses: alibaba/open-code-review@v1.12.2
+        # Pinned to the exact v1.12.2 commit (matches the tag; also the
+        # build hash reported by the v1.12.2 CLI) instead of the movable tag.
+        uses: alibaba/open-code-review@b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532 # v1.12.2
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
