@@ -5,6 +5,7 @@ import { consumeHttpToolResponse, nonEmptyString, readObject, redactSecret, reso
 import { fixedHttpTimeout, progressCallbackBase, progressTokenHash, readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { createToolProgressStore } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
+import { httpDispatcher, undiciFetch } from "./http-tool-dispatcher.js";
 export { redactSecret, persistArtifact } from "./http-tool-response.js";
 
 export type HttpWorkflowToolExecutionInput = {
@@ -12,6 +13,9 @@ export type HttpWorkflowToolExecutionInput = {
   stepOutputDir?: string | null; adapterConfig: Record<string, unknown>;
 };
 export type HttpWorkflowToolExecutionDeps = {
+  /** Injected fetch must honor the non-standard `dispatcher` init option
+   * (the re-exported undiciFetch does); the global fetch may silently
+   * ignore it depending on the Node/undici version. */
   fetchImpl?: typeof fetch;
   resolveSecretValue: (companyId: string, secretId: string, version: number | "latest") => Promise<string>;
   progress?: { db: Db; toolId: string; workflowRunId?: string | null; stepId?: string | null; callbackBaseUrl?: string };
@@ -60,6 +64,12 @@ export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionIn
   try {
     const policy = readToolProgressPolicy(config);
     const timeoutMs = fixedHttpTimeout(config.timeoutMs);
+    // Transport-level waits must not undercut the configured deadline: Node's
+    // bundled undici fetch aborts after its default 300s headersTimeout even
+    // when the tool allows longer (2026-09-16 shorts-assemble incident). The
+    // shared dispatcher disables transport waits; our own deadline machinery
+    // (withFixedDeadline / withToolProgress) remains the sole authority.
+    const dispatcher = httpDispatcher();
     if (policy && !deps.progress) throw new ToolProgressError(422, "tool_progress_missing_context");
     const callbackBase = policy ? progressCallbackBase(deps.progress?.callbackBaseUrl) : undefined;
     try { headerValue = await deps.resolveSecretValue(input.companyId, auth.secretId, auth.version); }
@@ -71,7 +81,13 @@ export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionIn
     const body = JSON.stringify(input.parameters ?? {});
     const operation = async (signal: AbortSignal) => {
       signal.throwIfAborted();
-      const res = await (deps.fetchImpl ?? fetch)(url, { method: "POST", headers, body, signal, ...(policy ? { redirect: "error" as const } : {}) });
+      const init = { method: "POST", headers, body, signal, dispatcher, ...(policy ? { redirect: "error" as const } : {}) };
+      const res = deps.fetchImpl
+        ? await deps.fetchImpl(url, init as RequestInit)
+        // undici's Response type differs from the global one, but
+        // consumeHttpToolResponse only reads status/ok/text()/json(), so the
+        // structural cast is safe at runtime.
+        : await undiciFetch(url, init) as unknown as Response;
       signal.throwIfAborted();
       const response = await consumeHttpToolResponse(res, input, responseContract, [headerValue, token], signal);
       if (response.body.error) response.body.error = redactSecret(redactSecret(response.body.error, token), headerValue);
