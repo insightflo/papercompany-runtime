@@ -217,7 +217,7 @@ pnpm install
 pnpm dev
 ```
 
-This starts the API server at `http://localhost:3200`. An embedded PostgreSQL database is created automatically - no setup required.
+This starts the API server at `http://localhost:3200`; the board UI is served from the same port in dev middleware mode. An embedded PostgreSQL database is created automatically - no setup required.
 
 > **Requirements:** Node.js 24.x, pnpm 9.15+
 
