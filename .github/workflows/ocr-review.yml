@@ -18,6 +18,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: AI code review (advisor)
+        id: ocr
+        # Advisor only: an LLM outage must not mark the PR red.
+        continue-on-error: true
         # Pinned to the exact v1.12.2 commit (matches the tag; also the
         # build hash reported by the v1.12.2 CLI) instead of the movable tag.
         uses: alibaba/open-code-review@b3dbcb634cbb39344e0a3c48ccb1cef3ecd51532 # v1.12.2
@@ -32,3 +35,7 @@ jobs:
           llm_extra_body: '{"thinking": {"type": "enabled"}, "reasoning_effort": "max"}'
           language: Korean
           sticky_summary: 'true'
+
+      - name: Warn on advisor failure
+        if: steps.ocr.outcome == 'failure'
+        run: echo "::warning::OCR advisor review failed (LLM outage or misconfiguration). Checks are not blocked; inspect the OCR Review workflow log."
