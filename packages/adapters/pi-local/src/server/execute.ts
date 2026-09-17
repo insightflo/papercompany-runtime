@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +51,43 @@ function parseModelId(model: string | null): string | null {
   return trimmed.slice(trimmed.indexOf("/") + 1).trim() || null;
 }
 
-async function ensurePiSkillsInjected(
+// Skill injection memoization: the mkdir + skills-home scan + per-entry symlink
+// checks are identical for a given (skillsHome, selected entries, desired
+// names) combination, so skip them for TTL ms after a fully successful pass.
+// Any injection failure (including warned-but-continued ones) is NOT cached so
+// the next run retries. Override with PAPERCLIP_PI_SKILLS_INJECT_TTL_MS.
+const DEFAULT_SKILLS_INJECT_TTL_MS = 600_000;
+const piSkillsInjectOkUntil = new Map<string, number>();
+
+export function resetPiSkillsInjectCacheForTests(): void {
+  piSkillsInjectOkUntil.clear();
+}
+
+function resolveSkillsInjectTtlMs(): number {
+  const raw = process.env.PAPERCLIP_PI_SKILLS_INJECT_TTL_MS;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_SKILLS_INJECT_TTL_MS;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_SKILLS_INJECT_TTL_MS;
+  return parsed;
+}
+
+function buildPiSkillsInjectCacheKey(
+  skillsHome: string,
+  selectedEntries: Array<{ key: string; runtimeName: string; source: string }>,
+  desiredSkillNames: string[] | undefined,
+): string {
+  const entriesPart = selectedEntries
+    .map((entry) => `${entry.key}\n${entry.runtimeName}\n${entry.source}`)
+    .sort()
+    .join("\n---\n");
+  const desiredPart = [...(desiredSkillNames ?? [])].sort().join("\n");
+  const signature = createHash("sha256")
+    .update(`${entriesPart}\n===\n${desiredPart}`)
+    .digest("hex");
+  return `${skillsHome}|${signature}`;
+}
+
+export async function ensurePiSkillsInjected(
   onLog: AdapterExecutionContext["onLog"],
   skillsHome: string,
   skillsEntries: Array<{ key: string; runtimeName: string; source: string }>,
@@ -59,6 +96,12 @@ async function ensurePiSkillsInjected(
   const desiredSet = new Set(desiredSkillNames ?? skillsEntries.map((entry) => entry.key));
   const selectedEntries = skillsEntries.filter((entry) => desiredSet.has(entry.key));
   if (selectedEntries.length === 0) return;
+
+  const cacheKey = buildPiSkillsInjectCacheKey(skillsHome, selectedEntries, desiredSkillNames);
+  const now = Date.now();
+  const okUntil = piSkillsInjectOkUntil.get(cacheKey);
+  if (okUntil !== undefined && okUntil > now) return;
+
   await fs.mkdir(skillsHome, { recursive: true });
   const removedSkills = await removeMaintainerOnlySkillSymlinks(
     skillsHome,
@@ -71,6 +114,7 @@ async function ensurePiSkillsInjected(
     );
   }
 
+  let allInjected = true;
   for (const entry of selectedEntries) {
     const target = path.join(skillsHome, entry.runtimeName);
 
@@ -82,11 +126,16 @@ async function ensurePiSkillsInjected(
         `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Pi skill "${entry.runtimeName}" into ${skillsHome}\n`,
       );
     } catch (err) {
+      allInjected = false;
       await onLog(
         "stderr",
         `[paperclip] Failed to inject Pi skill "${entry.runtimeName}" into ${skillsHome}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  }
+
+  if (allInjected) {
+    piSkillsInjectOkUntil.set(cacheKey, Date.now() + resolveSkillsInjectTtlMs());
   }
 }
 
@@ -99,6 +148,28 @@ async function ensureSessionsDir(sessionsDir: string): Promise<string> {
   return sessionsDir;
 }
 
+// Phase-0 observability: wall-clock ms for the main execute() phases. Written
+// once per run as a single JSON line on the stderr log stream (display only —
+// never parsed by control code). Fields the structure cannot measure are
+// omitted rather than approximated as 0.
+type PiLocalTiming = {
+  skillsInjectMs?: number;
+  modelCheckMs?: number;
+  modelCacheHit?: boolean;
+  sessionResolveMs?: number;
+  promptAssembleMs?: number;
+  spawnMs?: number;
+  firstEventMs?: number;
+  settledMs?: number;
+  exitMs?: number;
+  parseMs?: number;
+  totalMs?: number;
+};
+
+function hrElapsedMs(start: bigint): number {
+  return Number((process.hrtime.bigint() - start) / 1_000_000n);
+}
+
 function buildSessionPath(sessionsDir: string, agentId: string, timestamp: string): string {
   const safeTimestamp = timestamp.replace(/[:.]/g, "-");
   return path.join(sessionsDir, `${safeTimestamp}-${agentId}.jsonl`);
@@ -106,6 +177,9 @@ function buildSessionPath(sessionsDir: string, agentId: string, timestamp: strin
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+
+  const executeStartedAt = process.hrtime.bigint();
+  const timing: PiLocalTiming = {};
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -144,7 +218,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Inject skills
   const piSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredPiSkillNames = resolvePaperclipDesiredSkillNames(config, piSkillEntries);
+  const skillsInjectStart = process.hrtime.bigint();
   await ensurePiSkillsInjected(onLog, skillsDir, piSkillEntries, desiredPiSkillNames);
+  timing.skillsInjectMs = hrElapsedMs(skillsInjectStart);
 
   // Build environment
   const envConfig = parseObject(config.env);
@@ -201,12 +277,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureCommandResolvable(command, cwd, runtimeEnv);
 
   // Validate model is available before execution
+  const modelCheckStart = process.hrtime.bigint();
   await ensurePiModelConfiguredAndAvailable({
     model,
     command,
     cwd,
     env: runtimeEnv,
+    onCacheHit: (cacheHit) => {
+      timing.modelCacheHit = cacheHit;
+    },
   });
+  timing.modelCheckMs = hrElapsedMs(modelCheckStart);
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
   const graceSec = asNumber(config.graceSec, 20);
@@ -217,6 +298,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   })();
 
   // Handle session
+  const sessionResolveStart = process.hrtime.bigint();
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
   const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
@@ -245,8 +327,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
   }
+  timing.sessionResolveMs = hrElapsedMs(sessionResolveStart);
 
   // Handle instructions file and build system prompt extension
+  const promptAssembleStart = process.hrtime.bigint();
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const resolvedInstructionsFilePath = instructionsFilePath
     ? path.resolve(cwd, instructionsFilePath)
@@ -324,6 +408,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionHandoffChars: runtimeBrief.length,
     heartbeatPromptChars: renderedHeartbeatPrompt.length,
   };
+  timing.promptAssembleMs = hrElapsedMs(promptAssembleStart);
 
   const commandNotes = (() => {
     if (!resolvedInstructionsFilePath) return [] as string[];
@@ -400,6 +485,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       releaseStdin = resolve;
     });
     let finalAgentEndTimer: ReturnType<typeof setTimeout> | null = null;
+    // Phase-0 timing: set right before the child spawn call; used by the
+    // first-event/settled/exit measurements below. Observation only.
+    let spawnStartedAt: bigint | null = null;
+    const recordSettledMs = (): void => {
+      if (spawnStartedAt !== null && timing.settledMs === undefined) {
+        timing.settledMs = hrElapsedMs(spawnStartedAt);
+      }
+    };
     const clearFinalAgentEndTimer = (): void => {
       if (finalAgentEndTimer !== null) {
         clearTimeout(finalAgentEndTimer);
@@ -407,6 +500,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     };
     const releaseStdinNow = (): void => {
+      recordSettledMs();
       clearFinalAgentEndTimer();
       releaseStdin?.();
     };
@@ -442,6 +536,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             clearFinalAgentEndTimer();
             finalAgentEndTimer = setTimeout(() => {
               finalAgentEndTimer = null;
+              recordSettledMs();
               releaseStdin?.();
             }, 1500);
           }
@@ -477,34 +572,52 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Emit complete lines
       for (const line of lines) {
         if (line) {
+          if (spawnStartedAt !== null && timing.firstEventMs === undefined) {
+            try {
+              JSON.parse(line);
+              timing.firstEventMs = hrElapsedMs(spawnStartedAt);
+            } catch {
+              // not a JSON line yet — keep waiting for the first parseable one
+            }
+          }
           releaseStdinOnSettledEvent(line);
           await onLog(stream, line + "\n");
         }
       }
     };
 
+    const spawnStart = process.hrtime.bigint();
+    spawnStartedAt = spawnStart;
     const proc = await runChildProcess(runId, command, args, {
       cwd,
       env: runtimeEnv,
       timeoutSec,
       graceSec,
       fatalOnLogError: true,
-      onSpawn,
+      onSpawn: async (meta) => {
+        timing.spawnMs = hrElapsedMs(spawnStart);
+        if (onSpawn) await onSpawn(meta);
+      },
       onLog: bufferedOnLog,
       stdin: buildRpcStdin(),
       stdinRelease,
     });
+    timing.exitMs = hrElapsedMs(spawnStart);
     clearFinalAgentEndTimer();
     
     // Flush any remaining buffer content
     if (stdoutBuffer) {
       await onLog("stdout", stdoutBuffer);
     }
+
+    const parseStart = process.hrtime.bigint();
+    const parsed = parsePiJsonl(proc.stdout);
+    timing.parseMs = hrElapsedMs(parseStart);
     
     return {
       proc,
       rawStderr: proc.stderr,
-      parsed: parsePiJsonl(proc.stdout),
+      parsed,
     };
   };
 
@@ -589,6 +702,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  const emitTimingLog = async (): Promise<void> => {
+    timing.totalMs = hrElapsedMs(executeStartedAt);
+    const payload: Record<string, string | number | boolean> = { type: "pi-local-timing" };
+    for (const [key, value] of Object.entries(timing)) {
+      if (value !== undefined) payload[key] = value;
+    }
+    // Best-effort observability: a failure to persist the timing line must not
+    // turn an otherwise-successful run into a thrown adapter error.
+    try {
+      await onLog("stderr", `${JSON.stringify(payload)}\n`);
+    } catch {
+      // ignore — timing log is display-only
+    }
+  };
+
   const initial = await runAttempt(sessionPath);
   const initialFailed =
     !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || initial.parsed.errors.length > 0);
@@ -611,8 +739,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
     const retry = await runAttempt(newSessionPath);
-    return toResult(retry, newSessionPath);
+    const result = toResult(retry, newSessionPath);
+    await emitTimingLog();
+    return result;
   }
 
-  return toResult(initial, sessionPath);
+  const result = toResult(initial, sessionPath);
+  await emitTimingLog();
+  return result;
 }

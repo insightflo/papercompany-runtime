@@ -2,7 +2,19 @@ import { createHash } from "node:crypto";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { asString, runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 
-const MODELS_CACHE_TTL_MS = 60_000;
+// Models list changes rarely (provider auth/config); default TTL is 24h to keep
+// the per-run `pi --list-models` subprocess (~3s) off the hot heartbeat path.
+// Override with PAPERCLIP_PI_MODELS_CACHE_TTL_MS (milliseconds); invalid or
+// negative values fall back to the default.
+const DEFAULT_MODELS_CACHE_TTL_MS = 86_400_000;
+
+function resolveModelsCacheTtlMs(): number {
+  const raw = process.env.PAPERCLIP_PI_MODELS_CACHE_TTL_MS;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_MODELS_CACHE_TTL_MS;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MODELS_CACHE_TTL_MS;
+  return parsed;
+}
 
 function firstNonEmptyLine(text: string): string {
   return (
@@ -155,6 +167,8 @@ export async function discoverPiModelsCached(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  /** Observability hook (phase-0 timing): true when the cached list was served. */
+  onCacheHit?: (cacheHit: boolean) => void;
 } = {}): Promise<AdapterModel[]> {
   const command = resolvePiCommand(input.command);
   const cwd = asString(input.cwd, process.cwd());
@@ -163,10 +177,12 @@ export async function discoverPiModelsCached(input: {
   const now = Date.now();
   pruneExpiredDiscoveryCache(now);
   const cached = discoveryCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.models;
+  const cacheHit = Boolean(cached && cached.expiresAt > now);
+  input.onCacheHit?.(cacheHit);
+  if (cached && cacheHit) return cached.models;
 
   const models = await discoverPiModels({ command, cwd, env });
-  discoveryCache.set(key, { expiresAt: now + MODELS_CACHE_TTL_MS, models });
+  discoveryCache.set(key, { expiresAt: now + resolveModelsCacheTtlMs(), models });
   return models;
 }
 
@@ -175,6 +191,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
   command?: unknown;
   cwd?: unknown;
   env?: unknown;
+  onCacheHit?: (cacheHit: boolean) => void;
 }): Promise<AdapterModel[]> {
   const model = asString(input.model, "").trim();
   if (!model) {
@@ -185,6 +202,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
     command: input.command,
     cwd: input.cwd,
     env: input.env,
+    onCacheHit: input.onCacheHit,
   });
 
   if (models.length === 0) {
