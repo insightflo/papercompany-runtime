@@ -2,8 +2,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execute } from "./execute.js";
+import { resetPiModelsCacheForTests } from "./models.js";
+import { resetPiSkillsInjectCacheForTests } from "./execute.js";
 
 async function writeFakePi(commandPath: string): Promise<void> {
   const script = `#!/usr/bin/env node
@@ -119,6 +121,16 @@ function buildContext(input: {
 }
 
 describe("pi_local execute contract", () => {
+  beforeEach(() => {
+    resetPiModelsCacheForTests();
+    resetPiSkillsInjectCacheForTests();
+  });
+
+  afterEach(() => {
+    resetPiModelsCacheForTests();
+    resetPiSkillsInjectCacheForTests();
+  });
+
   it("passes authToken as PAPERCLIP_API_KEY and uses configured HOME for the session", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-execute-"));
     const cwd = path.join(root, "workspace");
@@ -255,6 +267,49 @@ describe("pi_local execute contract", () => {
 
       expect(result.exitCode).toBe(1);
       expect(result.errorMessage).toBe("structured provider failure");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits exactly one parseable pi-local-timing JSON log line per run", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-execute-timing-"));
+    const cwd = path.join(root, "workspace");
+    const home = path.join(root, "home");
+    const command = path.join(root, "pi");
+    const capture = path.join(root, "capture.json");
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(home, { recursive: true });
+    await writeFakePi(command);
+
+    try {
+      const ctx = buildContext({ command, cwd, home, capturePath: capture });
+      const stderrChunks: string[] = [];
+      ctx.onLog = async (stream, chunk) => {
+        if (stream === "stderr") stderrChunks.push(chunk);
+      };
+      const result = await execute(ctx);
+
+      expect(result.exitCode).toBe(0);
+      const timingLines = stderrChunks
+        .join("")
+        .split("\n")
+        .filter((line) => line.includes("pi-local-timing"));
+      expect(timingLines).toHaveLength(1);
+
+      const parsed = JSON.parse(timingLines[0]) as Record<string, unknown>;
+      expect(parsed.type).toBe("pi-local-timing");
+      expect(typeof parsed.skillsInjectMs).toBe("number");
+      expect(typeof parsed.modelCheckMs).toBe("number");
+      expect(typeof parsed.modelCacheHit).toBe("boolean");
+      expect(typeof parsed.sessionResolveMs).toBe("number");
+      expect(typeof parsed.promptAssembleMs).toBe("number");
+      expect(typeof parsed.spawnMs).toBe("number");
+      expect(typeof parsed.firstEventMs).toBe("number");
+      expect(typeof parsed.settledMs).toBe("number");
+      expect(typeof parsed.exitMs).toBe("number");
+      expect(typeof parsed.parseMs).toBe("number");
+      expect(typeof parsed.totalMs).toBe("number");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
