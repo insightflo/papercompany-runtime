@@ -750,6 +750,13 @@
       "when": 1788943113243,
       "tag": "0106_quick_triathlon",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1789617253552,
+      "tag": "0107_strategy_playbook_entries",
+      "breakpoints": true
     }
   ]
 }

@@ -149,3 +149,4 @@ export { evaluatorAnchorCases } from "./evaluator_anchor_cases.js";
 export { evaluatorVersions } from "./evaluator_versions.js";
 export { evaluatorCandidateRuns } from "./evaluator_candidate_runs.js";
 export { qualityDailyReports } from "./quality_daily_reports.js";
+export { strategyPlaybookEntries } from "./strategy_playbook_entries.js";
