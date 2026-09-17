@@ -44,6 +44,7 @@ import { agentWikiRoutes } from "./routes/agent-wiki.js";
 import { knowledgePatternsRoutes } from "./routes/knowledge-patterns.js";
 import { selfImprovementAdoptionsRoutes } from "./routes/self-improvement-adoptions.js";
 import { channelConfigRoutes } from "./routes/channel-config.js";
+import { strategyPlaybookRoutes } from "./routes/strategy-playbook.js";
 import { hermesChatRoutes } from "./routes/hermes-chat.js";
 import { activityRoutes } from "./routes/activity.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
@@ -403,6 +404,7 @@ export async function createApp(
   api.use(knowledgePatternsRoutes(db));
   api.use(selfImprovementAdoptionsRoutes(db));
   api.use(channelConfigRoutes(db));
+  api.use(strategyPlaybookRoutes(db));
   api.use(activityRoutes(db));
   api.use(dashboardRoutes(db));
   api.use(qualityRoutes(db));

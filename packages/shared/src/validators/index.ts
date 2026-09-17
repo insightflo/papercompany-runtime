@@ -540,3 +540,11 @@ export {
   type EvidenceScope,
   type MissingEvidence,
 } from "./quality-execution.js";
+export {
+  strategyPlaybookChannelSchema,
+  strategyPlaybookStatusSchema,
+  strategyPlaybookCreateProposalSchema,
+  strategyPlaybookUpdateSchema,
+  type StrategyPlaybookCreateProposalInput,
+  type StrategyPlaybookUpdateInput,
+} from "./strategy-playbook.js";

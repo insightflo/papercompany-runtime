@@ -903,7 +903,18 @@ export {
   type OutputCorrectionScope,
   type EvidenceScope,
   type MissingEvidence,
+  strategyPlaybookChannelSchema,
+  strategyPlaybookStatusSchema,
+  strategyPlaybookCreateProposalSchema,
+  strategyPlaybookUpdateSchema,
+  type StrategyPlaybookCreateProposalInput,
+  type StrategyPlaybookUpdateInput,
 } from "./validators/index.js";
+export type {
+  StrategyPlaybookChannel,
+  StrategyPlaybookStatus,
+  StrategyPlaybookEntry,
+} from "./types/index.js";
 export type {
   QualityActionDisplayState,
   QualityActionView,

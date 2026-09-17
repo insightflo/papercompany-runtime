@@ -318,3 +318,8 @@ export type {
   QualityActionDisplayState,
   QualityActionView,
 } from "./quality-action-view.js";
+export type {
+  StrategyPlaybookChannel,
+  StrategyPlaybookStatus,
+  StrategyPlaybookEntry,
+} from "./strategy-playbook.js";
