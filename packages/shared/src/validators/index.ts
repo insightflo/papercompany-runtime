@@ -548,3 +548,12 @@ export {
   type StrategyPlaybookCreateProposalInput,
   type StrategyPlaybookUpdateInput,
 } from "./strategy-playbook.js";
+
+export {
+  judgmentQuestionTypeSchema,
+  judgmentQuestionSchema,
+  judgmentDefinitionSnapshotSchema,
+  judgmentCallOutcomeSchema,
+  judgmentAnswerValueSchema,
+  judgmentAnswerSchema,
+} from "./judgment.js";

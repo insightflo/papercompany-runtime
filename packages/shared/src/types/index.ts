@@ -323,3 +323,18 @@ export type {
   StrategyPlaybookStatus,
   StrategyPlaybookEntry,
 } from "./strategy-playbook.js";
+export type {
+  JudgmentQuestionType,
+  JudgmentQuestion,
+  JudgmentAnswerValue,
+  JudgmentAnswer,
+  JudgmentDefinitionSnapshot,
+  JudgmentCallOutcome,
+  JudgmentAskState,
+  JudgmentAskInput,
+  JudgmentUsage,
+  JudgmentAskSuccess,
+  JudgmentErrorCode,
+  JudgmentAskFailure,
+  JudgmentAskResult,
+} from "./judgment.js";
