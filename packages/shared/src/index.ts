@@ -920,3 +920,27 @@ export type {
   QualityActionView,
 } from "./types/index.js";
 export * from "./validators/quality-plan-qa.js";
+
+export {
+  judgmentQuestionTypeSchema,
+  judgmentQuestionSchema,
+  judgmentDefinitionSnapshotSchema,
+  judgmentCallOutcomeSchema,
+  judgmentAnswerValueSchema,
+  judgmentAnswerSchema,
+} from "./validators/judgment.js";
+export type {
+  JudgmentQuestionType,
+  JudgmentQuestion,
+  JudgmentAnswerValue,
+  JudgmentAnswer,
+  JudgmentDefinitionSnapshot,
+  JudgmentCallOutcome,
+  JudgmentAskState,
+  JudgmentAskInput,
+  JudgmentUsage,
+  JudgmentAskSuccess,
+  JudgmentErrorCode,
+  JudgmentAskFailure,
+  JudgmentAskResult,
+} from "./types/judgment.js";
