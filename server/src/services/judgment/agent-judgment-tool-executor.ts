@@ -63,10 +63,10 @@ function parseQuestions(value: unknown): { questions: JudgmentQuestion[] } | { e
 }
 
 function parseInput(parameters: unknown, options: { allowWorkProductPath: boolean }):
-  | { state: JudgmentAskState; questions: JudgmentQuestion[]; stateWorkProductPath?: string }
+  | { state: JudgmentAskState; questions: JudgmentQuestion[]; mode: "judge" | "observe"; stateWorkProductPath?: string }
   | { error: string } {
   if (!isPlainRecord(parameters)) return { error: "parameters must be an object" };
-  const allowedKeys = new Set(["state", "questions"]);
+  const allowedKeys = new Set(["state", "questions", "mode"]);
   if (options.allowWorkProductPath) allowedKeys.add("stateWorkProductPath");
   const rejectedKeys = Object.keys(parameters).filter((key) => !allowedKeys.has(key));
   if (rejectedKeys.length > 0) {
@@ -84,6 +84,10 @@ function parseInput(parameters: unknown, options: { allowWorkProductPath: boolea
   if (parameters.state === undefined && workProductPath === undefined) {
     return { error: "state is required" };
   }
+  const mode = parameters.mode === undefined ? "judge" : parameters.mode;
+  if (mode !== "judge" && mode !== "observe") {
+    return { error: "mode must be 'judge' or 'observe'" };
+  }
   if (parameters.state !== undefined) {
     const state = parseState(parameters.state);
     if ("error" in state) return state;
@@ -92,6 +96,7 @@ function parseInput(parameters: unknown, options: { allowWorkProductPath: boolea
     return {
       state: state.state,
       questions: questions.questions,
+      mode,
       ...(typeof workProductPath === "string" ? { stateWorkProductPath: workProductPath } : {}),
     };
   }
@@ -100,6 +105,7 @@ function parseInput(parameters: unknown, options: { allowWorkProductPath: boolea
   return {
     state: {},
     questions: questions.questions,
+    mode,
     ...(typeof workProductPath === "string" ? { stateWorkProductPath: workProductPath } : {}),
   };
 }
@@ -190,28 +196,54 @@ export async function executeAgentJudgmentTool(input: {
     mode: "observed",
   });
 
-  if (result.status === "disabled" || result.error === "gate_disabled" || result.error === "missing_api_key") {
-    return { status: 503, body: { error: "judgment layer disabled", tool: input.toolName, source: "core" } };
-  }
-  if (result.status === "blocked") {
-    return {
-      status: 422,
-      body: {
-        error: result.error ?? result.message ?? "judgment blocked",
-        tool: input.toolName,
-        source: "core",
-      },
-    };
-  }
-  if (result.status !== "observed") {
-    return {
-      status: 500,
-      body: {
-        error: result.error ?? result.message ?? "judgment failed",
-        tool: input.toolName,
-        source: "core",
-      },
-    };
+  // [B-4.2] observe 모드(워크플로우 관측 스텝 전용 소프트 성공): judgment 호출이 실패해도
+  //   스텝은 성공으로 마감해 운영 워크플로우 런을 보호한다. 오류·차단·비활성은
+  //   judgment_calls 감사행과 body.data.outcome 에 기록된다(스텝 실패 아님).
+  //   observe 는 스텝 문맥에서만 의도된 용도라도 에이전트가 쓸 수는 있다 — 이때도
+  //   판단은 여전히 권고일 뿐이므로 안전하다(mode 파라미터는 판단에 영향 없음).
+  const observeFailure = (outcome: string, detail: string): CoreWorkflowToolExecutionResult => ({
+    status: 200,
+    body: {
+      content: "judgment observation " + outcome + ": " + detail,
+      data: { outcome, detail },
+      tool: input.toolName,
+      source: "core",
+    },
+  });
+  if (parsed.mode === "observe") {
+    if (result.status === "disabled" || result.error === "gate_disabled" || result.error === "missing_api_key") {
+      return observeFailure("disabled", "judgment layer disabled");
+    }
+    if (result.status === "blocked") {
+      return observeFailure("blocked", result.error ?? result.message ?? "judgment blocked");
+    }
+    if (result.status !== "observed") {
+      return observeFailure("error", result.error ?? result.message ?? "judgment failed");
+    }
+  } else {
+    if (result.status === "disabled" || result.error === "gate_disabled" || result.error === "missing_api_key") {
+      return { status: 503, body: { error: "judgment layer disabled", tool: input.toolName, source: "core" } };
+    }
+    if (result.status === "blocked") {
+      return {
+        status: 422,
+        body: {
+          error: result.error ?? result.message ?? "judgment blocked",
+          tool: input.toolName,
+          source: "core",
+        },
+      };
+    }
+    if (result.status !== "observed") {
+      return {
+        status: 500,
+        body: {
+          error: result.error ?? result.message ?? "judgment failed",
+          tool: input.toolName,
+          source: "core",
+        },
+      };
+    }
   }
 
   const answers = result.answers ?? [];
@@ -225,6 +257,7 @@ export async function executeAgentJudgmentTool(input: {
     body: {
       content: answerSummary(answers),
       data: {
+        outcome: "observed",
         answers,
         confidence: result.confidence ?? null,
         confidences,
