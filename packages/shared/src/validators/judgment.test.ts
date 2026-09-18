@@ -3,6 +3,8 @@ import {
   judgmentAnswerSchema,
   judgmentCallOutcomeSchema,
   judgmentDefinitionSnapshotSchema,
+  judgmentEgressFindingSchema,
+  judgmentEgressStatusSchema,
   judgmentQuestionSchema,
   judgmentQuestionTypeSchema,
 } from "./judgment.js";
@@ -52,6 +54,38 @@ describe("judgmentDefinitionSnapshotSchema", () => {
     expect(judgmentDefinitionSnapshotSchema.safeParse(validSnapshot).success).toBe(true);
   });
 
+  it("하위호환 — purpose/originClass 없는 기존 정의도 그대로 파싱된다 (트랙 C0)", () => {
+    expect(judgmentDefinitionSnapshotSchema.safeParse(validSnapshot).success).toBe(true);
+    // B-1/B-2 시절 정의(메타 필드 없음)도 통과 — 선택 필드만 추가됐다.
+    expect(
+      judgmentDefinitionSnapshotSchema.safeParse({
+        description: "구버전",
+        stateAssembly: { kind: "inline-ref", notes: "x" },
+        questions: [validQuestion],
+        policy: { notes: "n", thresholds: {} },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("purpose/originClass 선택 메타를 허용한다 (트랙 C0)", () => {
+    expect(
+      judgmentDefinitionSnapshotSchema.safeParse({
+        ...validSnapshot,
+        purpose: "plan-qa-prescreen-observation",
+        originClass: "internal",
+      }).success,
+    ).toBe(true);
+    // originClass 는 internal|public|secret 만
+    expect(
+      judgmentDefinitionSnapshotSchema.safeParse({ ...validSnapshot, originClass: "top" })
+        .success,
+    ).toBe(false);
+    // purpose 는 빈 문자열 불가
+    expect(judgmentDefinitionSnapshotSchema.safeParse({ ...validSnapshot, purpose: "" }).success).toBe(
+      false,
+    );
+  });
+
   it("questions 가 비면 거부한다", () => {
     expect(
       judgmentDefinitionSnapshotSchema.safeParse({ ...validSnapshot, questions: [] }).success,
@@ -78,11 +112,30 @@ describe("judgmentDefinitionSnapshotSchema", () => {
 });
 
 describe("judgmentCallOutcomeSchema", () => {
-  it("executed/observed/error/disabled 만 허용한다", () => {
-    for (const outcome of ["executed", "observed", "error", "disabled"]) {
+  it("executed/observed/error/disabled/blocked 만 허용한다", () => {
+    for (const outcome of ["executed", "observed", "error", "disabled", "blocked"]) {
       expect(judgmentCallOutcomeSchema.parse(outcome)).toBe(outcome);
     }
     expect(judgmentCallOutcomeSchema.safeParse("skipped").success).toBe(false);
+  });
+});
+
+describe("judgmentEgressFindingSchema / judgmentEgressStatusSchema (트랙 C0)", () => {
+  it("finding 은 규칙명+양수 횟수만 허용한다", () => {
+    expect(judgmentEgressFindingSchema.safeParse({ rule: "email", count: 2 }).success).toBe(true);
+    expect(judgmentEgressFindingSchema.safeParse({ rule: "email", count: 0 }).success).toBe(false);
+    // matched text 필드는 계약에 없다 — 있으면 strict 거부
+    expect(
+      judgmentEgressFindingSchema.safeParse({ rule: "email", count: 1, matched: "x@y.co" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("egress status 는 3값만 허용한다", () => {
+    for (const status of ["checked_no_findings", "checked_redacted", "error"]) {
+      expect(judgmentEgressStatusSchema.parse(status)).toBe(status);
+    }
+    expect(judgmentEgressStatusSchema.safeParse("passed").success).toBe(false);
   });
 });
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { companies, createDb, judgmentCalls, judgmentDefinitions } from "@paperclipai/db";
@@ -16,16 +16,21 @@ if (!support.supported) {
   console.warn(`Skipping judgment service tests: ${support.reason ?? "unsupported"}`);
 }
 
-function fakeProvider(result: JudgmentAskResult): JudgmentProvider & { lastInput: unknown } {
+function fakeProvider(result: JudgmentAskResult): JudgmentProvider & { lastInput: unknown; calls: number } {
   let lastInput: unknown = null;
+  let calls = 0;
   return {
     id: "typesafe",
     async ask(input) {
+      calls += 1;
       lastInput = input;
       return result;
     },
     get lastInput() {
       return lastInput;
+    },
+    get calls() {
+      return calls;
     },
   };
 }
@@ -310,5 +315,185 @@ describeEP("judgment service (embedded DB)", () => {
     });
     const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
     expect(row.definitionVersion).toBe(3);
+  });
+
+  // -------------------------------------------------------------------------
+  // 트랙 C0 — 반출 통제(egress) 집행점. "전송되는 것 = 검사된 것".
+  // -------------------------------------------------------------------------
+
+  it("PII 가 있으면 provider 는 redacted 본을 받고 감사행에도 redacted 본만 저장한다", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+    const rawState = {
+      plan: "계획 본문",
+      contact: { email: "owner@example.com", phone: "010-1234-5678" },
+    };
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "plan-qa-prescreen",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-1",
+      state: rawState,
+    });
+
+    expect(result.status).toBe("observed");
+    expect(result.egress).toMatchObject({ status: "checked_redacted" });
+    expect(result.egress!.findings).toEqual(
+      expect.arrayContaining([
+        { rule: "email", count: 1 },
+        { rule: "korean_phone", count: 1 },
+      ]),
+    );
+
+    // provider 가 받은 state = redacted 본(원문 아님)
+    const sent = (provider.lastInput as { state: Record<string, unknown> }).state;
+    expect(JSON.stringify(sent)).not.toContain("owner@example.com");
+    expect(JSON.stringify(sent)).not.toContain("010-1234-5678");
+    expect((sent.contact as Record<string, unknown>).email).toBe("«REDACTED_EMAIL_1»");
+
+    // 감사행 inputState 도 redacted 본 + 해시/검사 결과 기록
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(JSON.stringify(row.inputState)).not.toContain("owner@example.com");
+    expect(row.stateOriginalHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.egressStatus).toBe("checked_redacted");
+    expect(row.egressFindings).toEqual(
+      expect.arrayContaining([
+        { rule: "email", count: 1 },
+        { rule: "korean_phone", count: 1 },
+      ]),
+    );
+  });
+
+  it("PII 없으면 egress status checked_no_findings 이고 state 는 내용 그대로 전송된다", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "plan-qa-prescreen",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-2",
+      state: { plan: "깨끗한 계획 본문" },
+    });
+
+    expect(result.status).toBe("observed");
+    expect(result.egress!.status).toBe("checked_no_findings");
+    expect(result.egress!.findings).toEqual([]);
+    expect((provider.lastInput as { state: unknown }).state).toEqual({ plan: "깨끗한 계획 본문" });
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(row.egressStatus).toBe("checked_no_findings");
+    expect(row.egressFindings).toBeNull();
+  });
+
+  it("state 에 originPolicy secret 분류 필드가 있으면 blocked — provider 호출 0회", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "plan-qa-prescreen",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-3",
+      state: {
+        plan: "계획",
+        contact: { value: "비밀 원문", originPolicy: "secret" },
+      },
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error).toContain("state_field_origin_policy_secret");
+    expect(result.attempts).toBe(0);
+    expect(result.egress).toBeTruthy(); // 차단 행에도 검사 결과가 남는다
+    expect(provider.calls).toBe(0); // 전송 0회
+
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(row.outcome).toBe("blocked");
+    expect(row.error).toContain("state_field_origin_policy_secret");
+    expect(row.attempts).toBe(0);
+    expect(row.stateOriginalHash).toMatch(/^[0-9a-f]{64}$/);
+    // 감사행에도 원문 아닌 검사본만 저장("비밀 원문"은 secret 필드라 치환 대상은 아니지만
+    // 저장되는 것은 redactForEgress 의 복사본이다)
+    expect(JSON.stringify(row.inputState)).not.toContain("owner@");
+  });
+
+  it("정의 originClass secret 이면 호출 자체가 차단된다 (blocked, provider 0회)", async () => {
+    await db.insert(judgmentDefinitions).values({
+      companyId,
+      name: "secret-plan",
+      version: 1,
+      isActive: true,
+      providerId: "typesafe",
+      modelId: "jev-1.13.0",
+      definition: { ...definitionJson, originClass: "secret" },
+    });
+
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "secret-plan",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-4",
+      state: { plan: "무해한 계획" },
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error).toBe("blocked:definition_origin_class_secret");
+    expect(result.attempts).toBe(0);
+    expect(provider.calls).toBe(0);
+
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(row.outcome).toBe("blocked");
+    expect(row.error).toBe("blocked:definition_origin_class_secret");
+  });
+
+  it("redaction 검사 실패(status error)면 전송 없이 error 감사행을 남긴다", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "plan-qa-prescreen",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-5",
+      // 직렬화 불가 값(function) — redactForEgress 가 error 를 낸다
+      state: { bad: () => {} } as unknown as Record<string, unknown>,
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toBe("egress_redaction_failed");
+    expect(result.attempts).toBe(0);
+    expect(result.egress!.status).toBe("error");
+    expect(provider.calls).toBe(0); // 전송 없음
+
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(row.outcome).toBe("error");
+    expect(row.error).toBe("egress_redaction_failed");
+    // 원본을 저장할 수 없어 표식만 저장한다 — 원본 유출 없음
+    expect(row.inputState).toEqual({ egress_error: true });
+    expect(row.egressStatus).toBe("error");
+  });
+
+  it("originalHash 는 원본 state 의 sha256 이다 (redacted 본과 다름)", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+
+    const result = await service.askJudgment({
+      companyId,
+      definitionName: "plan-qa-prescreen",
+      contextType: "mission_plan_qa",
+      contextId: "mission-c0-6",
+      state: { email: "hash-check@example.com" },
+    });
+
+    const expected = createHash("sha256")
+      .update(JSON.stringify({ email: "hash-check@example.com" }), "utf8")
+      .digest("hex");
+    expect(result.egress!.originalHash).toBe(expected);
+    const [row] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, result.auditId!));
+    expect(row.stateOriginalHash).toBe(expected);
+    expect(JSON.stringify(row.inputState)).not.toContain("hash-check@example.com");
   });
 });

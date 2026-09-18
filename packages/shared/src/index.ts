@@ -923,18 +923,23 @@ export * from "./validators/quality-plan-qa.js";
 
 export {
   judgmentQuestionTypeSchema,
+  judgmentQuestionCriteriaSchema,
   judgmentQuestionSchema,
   judgmentDefinitionSnapshotSchema,
   judgmentCallOutcomeSchema,
   judgmentAnswerValueSchema,
   judgmentAnswerSchema,
+  judgmentEgressFindingSchema,
+  judgmentEgressStatusSchema,
 } from "./validators/judgment.js";
 export type {
   JudgmentQuestionType,
   JudgmentQuestion,
+  JudgmentQuestionCriteria,
   JudgmentAnswerValue,
   JudgmentAnswer,
   JudgmentDefinitionSnapshot,
+  JudgmentDefinitionOriginClass,
   JudgmentCallOutcome,
   JudgmentAskState,
   JudgmentAskInput,
@@ -943,4 +948,6 @@ export type {
   JudgmentErrorCode,
   JudgmentAskFailure,
   JudgmentAskResult,
+  JudgmentEgressFinding,
+  JudgmentEgressStatus,
 } from "./types/judgment.js";

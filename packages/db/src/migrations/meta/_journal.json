@@ -764,6 +764,13 @@
       "when": 1789657204640,
       "tag": "0108_judgment_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1789698412353,
+      "tag": "0109_steady_paibok",
+      "breakpoints": true
     }
   ]
 }

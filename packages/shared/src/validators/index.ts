@@ -556,4 +556,6 @@ export {
   judgmentCallOutcomeSchema,
   judgmentAnswerValueSchema,
   judgmentAnswerSchema,
+  judgmentEgressFindingSchema,
+  judgmentEgressStatusSchema,
 } from "./judgment.js";
