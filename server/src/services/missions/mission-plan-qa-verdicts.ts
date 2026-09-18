@@ -1,6 +1,6 @@
 // Structured base verdict ledger plus evidence-bound PLAN-QA addendum submissions.
 // Comments are display/audit only. A strict base verdict alone is never a final PASS.
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { activityLog, missionPlanQaVerdicts, qualityPolicyVersions, type Db } from "@paperclipai/db";
 import {
   checkResultSchema, missingEvidenceSchema, qualityAgentActorSchema, planQaScopeSchema,
@@ -11,7 +11,7 @@ import { getStorageService } from "../../storage/index.js";
 import { hashContract, parseEvidence } from "../quality/contract.js";
 import { readVerifiedArtifact, uploadEvidence } from "../quality/evidence-store.js";
 import { linkPlanQaGateEvidence } from "./plan-qa-evidence-registry.js";
-import { assertLivePlanQaAttempt, combinePlanQa, loadPlanQaVerdictRow, stateForAttempt } from "./plan-qa-addendum-gate.js";
+import { assertLivePlanQaAttempt, combinePlanQa, loadPlanQaMarker, loadPlanQaVerdictRow, stateForAttempt } from "./plan-qa-addendum-gate.js";
 import {
   appendResubmissionDispatch, planResubmissionDispatchDecision,
 } from "./plan-qa-resubmission.js";
@@ -35,6 +35,12 @@ export async function recordMissionPlanQaVerdict(input: {
 }): Promise<{ status: "recorded"; planQaIssueId: string; verdict: ValidationVerdict }> {
   const pinned = await recordPinnedPlanQaBase(input);
   if (!pinned) {
+    // 직접 삽입(v1/사용자 판정) 행에서도 이슈 마커가 가리키는 계획 아티팩트를 함께 기록한다.
+    // 마커 조회 실패가 판정 기록을 막지 않게 실패 시 null 로 내려간다.
+    let markerPlanArtifactId: string | null = null;
+    try {
+      markerPlanArtifactId = (await loadPlanQaMarker(input.db, input.companyId, input.planQaIssueId))?.planArtifactId ?? null;
+    } catch { markerPlanArtifactId = null; }
     const fields = {
       reviewerAgentId: input.reviewedBy.actorType === "agent" ? input.reviewedBy.actorId : null,
       reviewerUserId: input.reviewedBy.actorType === "user" ? input.reviewedBy.actorId : null,
@@ -43,9 +49,12 @@ export async function recordMissionPlanQaVerdict(input: {
     };
     await input.db.insert(missionPlanQaVerdicts).values({
       ...fields, companyId: input.companyId, missionId: input.missionId,
+      missionPlanArtifactId: markerPlanArtifactId,
       planQaIssueId: input.planQaIssueId, decisionHash: input.decisionHash,
     }).onConflictDoUpdate({
-      target: [missionPlanQaVerdicts.companyId, missionPlanQaVerdicts.planQaIssueId, missionPlanQaVerdicts.decisionHash], set: fields,
+      target: [missionPlanQaVerdicts.companyId, missionPlanQaVerdicts.planQaIssueId, missionPlanQaVerdicts.decisionHash],
+      // 기존 행에 이미 계획 아티팩트 연결이 있으면 마커가 달라도 덮어쓰지 않는다(null 만 채운다).
+      set: { ...fields, missionPlanArtifactId: sql`coalesce(${missionPlanQaVerdicts.missionPlanArtifactId}, excluded."mission_plan_artifact_id")` },
     });
   }
   const body = input.verdict === "pass" ? "Plan is sound.\nPASS"
