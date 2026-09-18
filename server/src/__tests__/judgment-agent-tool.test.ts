@@ -344,4 +344,36 @@ describe("judgment stateWorkProductPath (workflow step context only)", () => {
     expect(sentState.document).toBe("검토 대상 문서");
   });
 });
+
+  it("mode:'observe'는 judgment 실패/차단/비활성도 200으로 마감해 워크플로우 런을 보호한다", async () => {
+    const stepCtx = { agentId: null as string | null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "observe-step" };
+    // 게이트 off 시뮬레이션: provider가 disabled를 반환
+    const disabledProvider = fakeProvider({ ...okResult, status: "disabled" });
+    const r1 = await execute({ ...parameters(), mode: "observe" }, createJudgmentService(db, { provider: disabledProvider }), randomUUID(), stepCtx);
+    expect(r1.status).toBe(200);
+    expect((r1.body.data as Record<string, unknown>).outcome).toBe("disabled");
+
+    // blocked 시뮬레이션
+    const blockedProvider = fakeProvider({ ...okResult, status: "blocked", error: "blocked:test" });
+    const r2 = await execute({ ...parameters(), mode: "observe" }, createJudgmentService(db, { provider: blockedProvider }), randomUUID(), stepCtx);
+    expect(r2.status).toBe(200);
+    expect((r2.body.data as Record<string, unknown>).outcome).toBe("blocked");
+
+    // 정상 관측은 outcome=observed
+    const okProvider = fakeProvider(okResult);
+    const r3 = await execute({ ...parameters(), mode: "observe" }, createJudgmentService(db, { provider: okProvider }), randomUUID(), stepCtx);
+    expect(r3.status).toBe(200);
+    expect((r3.body.data as Record<string, unknown>).outcome).toBe("observed");
+
+    // judge 모드(기본)는 기존 하드 실패 유지 — disabled → 503
+    const r4 = await execute({ ...parameters(), mode: "judge" }, createJudgmentService(db, { provider: disabledProvider }), randomUUID(), stepCtx);
+    expect(r4.status).toBe(503);
+  });
+
+  it("mode 값이 잘못되면 422", async () => {
+    const provider = fakeProvider(okResult);
+    const result = await execute({ ...parameters(), mode: "force" }, createJudgmentService(db, { provider }), randomUUID(), { agentId: null, workflowRunId: randomUUID(), stepId: "s" });
+    expect(result.status).toBe(422);
+    expect(result.body.error).toContain("mode");
+  });
 });
