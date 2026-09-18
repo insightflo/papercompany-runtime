@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { Db } from "@paperclipai/db";
 import type { JudgmentAnswer, JudgmentAskState, JudgmentQuestion } from "@paperclipai/shared";
 import { judgmentQuestionSchema } from "@paperclipai/shared";
@@ -61,18 +62,78 @@ function parseQuestions(value: unknown): { questions: JudgmentQuestion[] } | { e
   return { questions };
 }
 
-function parseInput(parameters: unknown):
-  | { state: JudgmentAskState; questions: JudgmentQuestion[] }
+function parseInput(parameters: unknown, options: { allowWorkProductPath: boolean }):
+  | { state: JudgmentAskState; questions: JudgmentQuestion[]; stateWorkProductPath?: string }
   | { error: string } {
   if (!isPlainRecord(parameters)) return { error: "parameters must be an object" };
-  if (Object.keys(parameters).some((key) => key !== "state" && key !== "questions")) {
-    return { error: "parameters may contain only state and questions" };
+  const allowedKeys = new Set(["state", "questions"]);
+  if (options.allowWorkProductPath) allowedKeys.add("stateWorkProductPath");
+  const rejectedKeys = Object.keys(parameters).filter((key) => !allowedKeys.has(key));
+  if (rejectedKeys.length > 0) {
+    return {
+      error: "parameters may contain only " + [...allowedKeys].sort().join(", ")
+        + " (rejected: " + rejectedKeys.sort().join(", ") + ")"
+        + (options.allowWorkProductPath ? "" : "; stateWorkProductPath requires workflow step context"),
+    };
   }
-  const state = parseState(parameters.state);
-  if ("error" in state) return state;
+  const workProductPath = parameters.stateWorkProductPath;
+  if (workProductPath !== undefined
+      && (typeof workProductPath !== "string" || workProductPath.trim().length === 0)) {
+    return { error: "stateWorkProductPath must be a non-empty string" };
+  }
+  if (parameters.state === undefined && workProductPath === undefined) {
+    return { error: "state is required" };
+  }
+  if (parameters.state !== undefined) {
+    const state = parseState(parameters.state);
+    if ("error" in state) return state;
+    const questions = parseQuestions(parameters.questions);
+    if ("error" in questions) return questions;
+    return {
+      state: state.state,
+      questions: questions.questions,
+      ...(typeof workProductPath === "string" ? { stateWorkProductPath: workProductPath } : {}),
+    };
+  }
   const questions = parseQuestions(parameters.questions);
   if ("error" in questions) return questions;
-  return { state: state.state, questions: questions.questions };
+  return {
+    state: {},
+    questions: questions.questions,
+    ...(typeof workProductPath === "string" ? { stateWorkProductPath: workProductPath } : {}),
+  };
+}
+
+/**
+ * [보안] stateWorkProductPath 는 워크플로우 도구 스텝 문맥에서만 허용한다. 경로는 서버측
+ * resolveWorkflowToolStepArgs 가 조상 스텝의 workProduct 로 해석한 값이며, 에이전트가
+ * 임의 경로를 넘겨 파일을 읽는 우회를 막는다(스텝 문맥 없이 path 가 오면 parseInput 단계
+ * 에서 거부). 읽은 내용은 C0 반출 통제(마스킹·집행점)를 그대로 통과한다.
+ */
+async function readWorkProductState(
+  filePath: string,
+  base: JudgmentAskState,
+): Promise<{ state: JudgmentAskState } | { error: string }> {
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf8");
+  } catch {
+    return { error: "stateWorkProductPath is not readable" };
+  }
+  if (content.length > MAX_STATE_SERIALIZED_CHARS) {
+    return { error: "stateWorkProductPath content exceeds " + MAX_STATE_SERIALIZED_CHARS + " characters" };
+  }
+  const merged: Record<string, unknown> = {
+    ...(isPlainRecord(base) ? base : { state: base }),
+    source: "workflow_work_product",
+    document: content,
+  };
+  const serialized = JSON.stringify(merged);
+  if (typeof serialized !== "string") return { error: "state must be JSON serializable" };
+  if (serialized.length > MAX_STATE_SERIALIZED_CHARS) {
+    return { error: "state exceeds " + MAX_STATE_SERIALIZED_CHARS + " serialized characters" };
+  }
+  return { state: merged as JudgmentAskState };
 }
 
 function invalidInput(toolName: string, error: string): CoreWorkflowToolExecutionResult {
@@ -99,26 +160,32 @@ export async function executeAgentJudgmentTool(input: {
   stepId?: string | null;
   judgmentService?: JudgmentService;
 }): Promise<CoreWorkflowToolExecutionResult> {
-  const parsed = parseInput(input.parameters);
-  if ("error" in parsed) return invalidInput(input.toolName, parsed.error);
-
-  const service = input.judgmentService ?? createJudgmentService(input.db);
   const workflowRunId = input.workflowRunId?.trim() || null;
   const stepRunId = input.stepRunId?.trim() || null;
   const stepId = input.stepId?.trim() || null;
   const isWorkflowStepContext = Boolean(workflowRunId && stepId);
+  const parsed = parseInput(input.parameters, { allowWorkProductPath: isWorkflowStepContext });
+  if ("error" in parsed) return invalidInput(input.toolName, parsed.error);
+
+  const service = input.judgmentService ?? createJudgmentService(input.db);
   const contextType = isWorkflowStepContext ? "workflow_step" : "agent_tool";
   const contextId = isWorkflowStepContext
     ? `wfr:${workflowRunId}:step:${stepRunId ?? stepId}`
     : input.requestId;
   // 같은 스텝의 재시도는 judgment_calls에 각각 한 행을 남긴다. 같은 correlationKey를
   // 공유하지만 correlationKey는 비유니크 인덱스이므로 여러 행을 허용한다.
+  let state = parsed.state;
+  if (parsed.stateWorkProductPath !== undefined) {
+    const read = await readWorkProductState(parsed.stateWorkProductPath, parsed.state);
+    if ("error" in read) return invalidInput(input.toolName, read.error);
+    state = read.state;
+  }
   const result = await service.askJudgment({
     companyId: input.companyId,
     definitionName: "agent-judgment",
     contextType,
     contextId,
-    state: parsed.state,
+    state,
     questions: parsed.questions,
     mode: "observed",
   });
