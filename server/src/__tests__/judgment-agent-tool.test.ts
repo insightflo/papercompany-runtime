@@ -251,4 +251,97 @@ describeEP("agent-facing judgment builtin tool", () => {
     const rows = await db.select().from(judgmentCalls).where(eq(judgmentCalls.contextType, "agent_tool"));
     expect(rows.some((row) => row.outcome === "blocked")).toBe(true);
   });
+
+function questions() {
+  return parameters().questions;
+}
+
+describe("judgment stateWorkProductPath (workflow step context only)", () => {
+  it("스텝 문맥에서 stateWorkProductPath 파일을 읽어 state.document로 판단하고 C0 마스킹을 통과한다", async () => {
+    const { writeFile, mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "judgment-wp-"));
+    const wp = join(dir, "draft.md");
+    await writeFile(wp, "# 초안\n초보자용 개념 설명. 문의: owner@example.com\n", "utf8");
+
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+    const result = await execute(
+      { stateWorkProductPath: wp, questions: questions() },
+      service,
+      randomUUID(),
+      { agentId: null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "judge-draft" },
+    );
+
+    expect(result.status).toBe(200);
+    expect(provider.calls).toBe(1);
+    const sentState = provider.lastInput?.state as Record<string, unknown>;
+    expect(sentState.source).toBe("workflow_work_product");
+    expect(String(sentState.document)).toContain("초보자용 개념 설명");
+    expect(JSON.stringify(sentState)).not.toContain("owner@example.com");
+
+    const data = result.body.data as Record<string, unknown>;
+    const [audit] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, data.auditId as string));
+    expect(audit?.contextType).toBe("workflow_step");
+    expect(audit?.inputState).toMatchObject({ source: "workflow_work_product" });
+  });
+
+  it("스텝 문맥이 아니면(에이전트 문맥) stateWorkProductPath 키 자체가 거부된다(파일 읽기 우회 방지)", async () => {
+    await grant();
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: "/etc/hosts", questions: questions() },
+      createJudgmentService(db, { provider }),
+    );
+    expect(result.status).toBe(422);
+    expect(result.body.error).toContain("stateWorkProductPath");
+    expect(provider.calls).toBe(0);
+  });
+
+  it("에이전트·스텝 문맥이 모두 없으면 신원 가드(403)가 파라미터 검사보다 먼저 발동한다", async () => {
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: "/etc/hosts", questions: questions() },
+      createJudgmentService(db, { provider }),
+      randomUUID(),
+      { agentId: null },
+    );
+    expect(result.status).toBe(403);
+    expect(provider.calls).toBe(0);
+  });
+
+  it("읽을 수 없는 경로는 422로 실패한다", async () => {
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: "/nonexistent/path/wp.md", questions: questions() },
+      createJudgmentService(db, { provider }),
+      randomUUID(),
+      { agentId: null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "s" },
+    );
+    expect(result.status).toBe(422);
+    expect(result.body.error).toContain("not readable");
+    expect(provider.calls).toBe(0);
+  });
+
+  it("state 없이 stateWorkProductPath만으로 판단할 수 있다", async () => {
+    const { writeFile, mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "judgment-wp2-"));
+    const wp = join(dir, "doc.txt");
+    await writeFile(wp, "검토 대상 문서", "utf8");
+
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: wp, questions: questions() },
+      createJudgmentService(db, { provider }),
+      randomUUID(),
+      { agentId: null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "s2" },
+    );
+    expect(result.status).toBe(200);
+    const sentState = provider.lastInput?.state as Record<string, unknown>;
+    expect(sentState.document).toBe("검토 대상 문서");
+  });
+});
 });
