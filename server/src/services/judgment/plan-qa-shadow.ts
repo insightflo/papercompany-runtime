@@ -39,6 +39,7 @@ import {
 import type { JudgmentDefinitionSnapshot } from "@paperclipai/shared";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 import { createJudgmentService, type JudgmentService } from "./judgment-service.js";
+import { seedAgentJudgmentTool } from "./agent-judgment-tool.js";
 
 // ---------------------------------------------------------------------------
 // env 게이트 — agent-skill-optimizer(resolveAgentWikiEvolutionOwnership) 미러.
@@ -481,6 +482,7 @@ export function createPlanQaShadowLoop(options: CreatePlanQaShadowLoopOptions): 
       seededOnce = true;
       try {
         seed = await seedPlanQaPrescreenDefinitions(options.db);
+        await seedAgentJudgmentTool(options.db);
         if (seed.seeded > 0) {
           log.info({ ...seed }, "plan-qa shadow: seeded plan-qa-prescreen definitions");
         }

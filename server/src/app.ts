@@ -100,6 +100,7 @@ import { createNativeWorkflowScheduler } from "./services/workflow/native-schedu
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
 import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
 import { createPlanQaShadowLoop, resolvePlanQaShadowOwnership } from "./services/judgment/plan-qa-shadow.js";
+import { seedAgentJudgmentTool } from "./services/judgment/agent-judgment-tool.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -981,6 +982,11 @@ export async function createApp(
   planQaShadowLoop?.start();
   if (planQaShadowLoop) {
     process.once("exit", () => planQaShadowLoop.stop());
+  } else if (typeof db.select === "function" && typeof db.insert === "function") {
+    // 판단 게이트가 꺼져도 도구 정의는 존재할 수 있으며, grant는 만들지 않는다.
+    void seedAgentJudgmentTool(db).catch((err) => {
+      logger.error({ err }, "Failed to seed agent judgment tool");
+    });
   }
 
   pluginScheduler.start();
