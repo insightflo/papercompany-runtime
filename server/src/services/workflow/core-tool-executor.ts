@@ -33,7 +33,7 @@ export async function checkCoreWorkflowToolsAvailable(db: Db, input: { companyId
 }
 export async function executeCoreWorkflowTool(input: {
   db: Db; companyId: string; agentId?: string | null; agentName?: string | null; issueId?: string | null;
-  toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepId?: string | null;
+  toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null;
   stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db.select({ id: toolDefinitions.id, name: toolDefinitions.name,
@@ -49,7 +49,8 @@ export async function executeCoreWorkflowTool(input: {
       .where(and(eq(agents.companyId, input.companyId), eq(agents.name, input.agentName.trim()))).limit(1);
     agentId = agent?.id ?? "";
   }
-  if (isJudgmentTool && !agentId) {
+  const hasWorkflowStepContext = Boolean(input.workflowRunId?.trim() && input.stepId?.trim());
+  if (isJudgmentTool && !agentId && !hasWorkflowStepContext) {
     return { status: 403, body: { error: `Agent identity is required for workflow tool "${input.toolName}"` } };
   }
   if (agentId) {
@@ -65,6 +66,9 @@ export async function executeCoreWorkflowTool(input: {
       toolName: input.toolName,
       parameters: input.parameters,
       requestId: input.requestId,
+      workflowRunId: input.workflowRunId,
+      stepRunId: input.stepRunId,
+      stepId: input.stepId,
       judgmentService: input.judgmentService,
     });
   }

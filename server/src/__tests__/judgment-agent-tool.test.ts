@@ -105,14 +105,22 @@ describeEP("agent-facing judgment builtin tool", () => {
     await grantWorkflowToolToAgent(db, { companyId, agentId, toolName: "judgment", grantedBy: "test-board" });
   }
 
-  async function execute(input: unknown, service?: JudgmentService, requestId = randomUUID()) {
+  async function execute(
+    input: unknown,
+    service?: JudgmentService,
+    requestId = randomUUID(),
+    context: { agentId?: string | null; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null } = {},
+  ) {
     return executeCoreWorkflowTool({
       db,
       companyId,
-      agentId,
+      agentId: context.agentId === undefined ? agentId : context.agentId,
       toolName: "judgment",
       parameters: input,
       requestId,
+      workflowRunId: context.workflowRunId,
+      stepRunId: context.stepRunId,
+      stepId: context.stepId,
       ...(service ? { judgmentService: service } : {}),
     });
   }
@@ -135,6 +143,46 @@ describeEP("agent-facing judgment builtin tool", () => {
     expect(result.status).toBe(403);
     expect(result.body.error).toContain("not granted");
     expect(provider.calls).toBe(0);
+  });
+
+  it("에이전트와 스텝 문맥이 모두 없으면 403을 유지한다", async () => {
+    const provider = fakeProvider(okResult);
+    const result = await execute(parameters(), createJudgmentService(db, { provider }), randomUUID(), { agentId: null });
+    expect(result.status).toBe(403);
+    expect(result.body.error).toContain("Agent identity is required");
+    expect(provider.calls).toBe(0);
+  });
+
+  it("에이전트 없는 workflow tool step은 judgment를 실행하고 스텝 감사 문맥과 C0 검사본을 사용한다", async () => {
+    const provider = fakeProvider(okResult);
+    const service = createJudgmentService(db, { provider });
+    const workflowRunId = randomUUID();
+    const stepRunId = randomUUID();
+    const stepId = "judge-branch";
+    const result = await execute(parameters(), service, randomUUID(), {
+      agentId: null,
+      workflowRunId,
+      stepRunId,
+      stepId,
+    });
+
+    expect(result.status).toBe(200);
+    expect(provider.calls).toBe(1);
+    expect(JSON.stringify(provider.lastInput?.state)).not.toContain("owner@example.com");
+    expect(JSON.stringify(provider.lastInput?.state)).not.toContain("010-1234-5678");
+
+    const data = result.body.data as Record<string, unknown>;
+    const [audit] = await db.select().from(judgmentCalls).where(eq(judgmentCalls.id, data.auditId as string));
+    expect(audit).toMatchObject({
+      companyId,
+      contextType: "workflow_step",
+      contextId: `wfr:${workflowRunId}:step:${stepRunId}`,
+      correlationKey: `workflow_step:wfr:${workflowRunId}:step:${stepRunId}`,
+      outcome: "observed",
+      egressStatus: "checked_redacted",
+    });
+    expect(JSON.stringify(audit.inputState)).not.toContain("owner@example.com");
+    expect(JSON.stringify(audit.inputState)).not.toContain("010-1234-5678");
   });
 
   it("grant 후 builtin judgment를 호출하고 C0 검사본과 agent_tool 감사행을 반환한다", async () => {

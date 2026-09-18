@@ -94,17 +94,30 @@ export async function executeAgentJudgmentTool(input: {
   toolName: string;
   parameters: unknown;
   requestId: string;
+  workflowRunId?: string | null;
+  stepRunId?: string | null;
+  stepId?: string | null;
   judgmentService?: JudgmentService;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const parsed = parseInput(input.parameters);
   if ("error" in parsed) return invalidInput(input.toolName, parsed.error);
 
   const service = input.judgmentService ?? createJudgmentService(input.db);
+  const workflowRunId = input.workflowRunId?.trim() || null;
+  const stepRunId = input.stepRunId?.trim() || null;
+  const stepId = input.stepId?.trim() || null;
+  const isWorkflowStepContext = Boolean(workflowRunId && stepId);
+  const contextType = isWorkflowStepContext ? "workflow_step" : "agent_tool";
+  const contextId = isWorkflowStepContext
+    ? `wfr:${workflowRunId}:step:${stepRunId ?? stepId}`
+    : input.requestId;
+  // 같은 스텝의 재시도는 judgment_calls에 각각 한 행을 남긴다. 같은 correlationKey를
+  // 공유하지만 correlationKey는 비유니크 인덱스이므로 여러 행을 허용한다.
   const result = await service.askJudgment({
     companyId: input.companyId,
     definitionName: "agent-judgment",
-    contextType: "agent_tool",
-    contextId: input.requestId,
+    contextType,
+    contextId,
     state: parsed.state,
     questions: parsed.questions,
     mode: "observed",
