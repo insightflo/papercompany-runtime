@@ -1,26 +1,49 @@
 /**
- * 판단 계층 공급자(provider) — TypeSafe "System One"/jev 클라이언트 (트랙 B-1).
+ * 판단 계층 공급자(provider) — TypeSafe "System One"/jev 공식 JS SDK 클라이언트 (트랙 B-2).
  *
- * 원칙: "모델은 추천하고, 정책은 허용하며, 검증기는 완료를 확인한다."
+ * 원칙: "모델은 추론하고, 정책은 허용하며, 검증기는 완료를 확인한다."
  * 이 클라이언트의 결과는 실행 권한이 아니라 권고다.
  *
- * - 재시도 단일 소유권: 이 클라이언트가 재시도를 소유한다(기본 최대 2회 재시도,
- *   지수 백오프+지터, Retry-After 헤더 준수, 총 타임아웃 기본 30s).
- *   상위 호출자(하트비트 등)는 중첩 재시도를 하지 말고 결과의 attempts 로
- *   이미 재시도되었음을 확인해야 한다.
+ * B-2 부터 수제 fetch 클라이언트 대신 공식 `@typesafe-ai/sdk`(v0.6.0)를 쓴다.
+ * SDK 가 HTTP 전송·재시도·타임아웃을 소유하고, 우리는 계약(게이트/검증/분류)을 소유한다.
+ *
+ * - 재시도 단일 소유권: 재시도 정책을 우리가 명시 전달한다(maxRetries 2 + 지수 백오프,
+ *   SDK 기본값과 동일한 500ms/5000ms/지터 0.25 — 전부 명시). 총 타임아웃 30s 는 우리가
+ *   AbortController 로 예산을 걸고 SDK 에 signal 로 전달한다(SDK 의 per-attempt timeout 은
+ *   예산 전액으로 설정 — 단일 시도가 예산을 초과할 수 없고, 재시도 포함 총 예산이 30s 다).
+ *   상위 호출자(하트비트 등)는 중첩 재시도를 하지 말고 결과의 attempts 로 이미 재시도되었음을
+ *   확인해야 한다. attempts 는 SDK 가 노출하지 않아 주입된 fetch 호출 수로 계산한다.
  * - env 게이트: PAPERCLIP_JUDGMENT_ENABLED (기본 off). off 면 네트워크 호출 없이
  *   disabled 결과. TYPESAFE_API_KEY 가 없으면 네트워크 호출 없이 error.
- * - 모델 버전 고정: model 은 항상 고정 버전 ID(예: "jev-1.13.0")로 받으며,
- *   응답의 model(modelVersion)을 감사행에 남겨 실제 사용 버전을 재구성 가능하게 한다.
- * - 응답 검증: answers 구조와 질문 이름 대응을 검증 후 정형(JudgmentAnswer)으로
- *   반환한다. choice/score 질문의 답 누락, 질문에 없는 answer 키, 값 타입 불일치는
- *   invalid_response(재시도 없음)다. noul 질문은 답이 없거나 null 일 수 있다.
+ * - 모델 버전 고정: model 은 항상 정의의 고정 버전 ID(예: "jev-1.13.0")를 명시 전달한다.
+ *   SDK 기본 모델(jev-latest 별칭)은 절대 상속하지 않는다.
+ * - 응답 검증: SDK 는 본문을 JSON 파싱만 하므로(검증 없음), answers 구조와 질문 이름 대응은
+ *   우리가 검증 후 정형(JudgmentAnswer)으로 반환한다. choice/score 질문의 답 누락, 질문에
+ *   없는 answer 키, 값 타입 불일치, score 루브릭 없음은 invalid_response(재시도 없음)다.
+ *   noul 질문은 답이 없을 수 있고, 있으면 yes 확률(noul: 0~1)을 value 로 넣는다.
+ * - 에러 분류: SDK 에러 클래스(RateLimitError/InternalServerError/APITimeoutError/
+ *   APIConnectionError/APIUserAbortError/기타 APIError/TypeSafeError)를 우리 에러 코드로
+ *   매핑한다. APIUserAbortError 는 이 공급자가 건 총예산 signal 이 유일한 abort 원인이므로
+ *   timeout 으로 분류한다.
  */
 
+import {
+  APIConnectionError,
+  APIError,
+  APIUserAbortError,
+  APITimeoutError,
+  InternalServerError,
+  RateLimitError,
+  TypeSafeClient,
+  TypeSafeError,
+  type EntryType,
+  type Questions,
+} from "@typesafe-ai/sdk";
 import type {
   JudgmentAnswer,
   JudgmentAskInput,
   JudgmentAskResult,
+  JudgmentErrorCode,
   JudgmentQuestion,
 } from "@paperclipai/shared";
 
@@ -30,132 +53,139 @@ export interface JudgmentProvider {
 }
 
 export interface TypesafeProviderDeps {
-  /** 주입 가능한 fetch(테스트 목킹용). */
+  /** 주입 가능한 fetch(테스트 목킹용). SDK transport 로 전달된다. */
   fetchFn?: typeof fetch;
+  /** TypeSafe API 루트(SDK baseURL). 기본 https://api.typesafe.ai */
   baseUrl?: string;
   apiKey?: string;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  /** 재시도 상한(초기 시도 제외). 기본 2. */
+  /** 재시도 상한(초기 시도 제외). 기본 2. SDK retry.maxRetries 로 명시 전달. */
   maxRetries?: number;
-  /** 총 타임아웃 예산(ms, 모든 시도 합산). 기본 30_000. */
+  /** 총 타임아웃 예산(ms, 모든 시도 합산). 기본 30_000. AbortController signal 로 강제. */
   timeoutMs?: number;
-  /** 백오프 지터 난수원(테스트 주입용). */
-  random?: () => number;
+  /** 백오프 정책 오버라이드(테스트용 — 실대화면 0ms 로 재시도를 빠르게 돌린다). */
+  retryBackoff?: { initialMs?: number; maxMs?: number; jitter?: number };
 }
 
-export const TYPESAFE_SYSTEMONE_URL = "https://api.typesafe.ai/v1/systemone";
+/** TypeSafe API 루트(SDK baseURL). */
+export const TYPESAFE_API_BASE_URL = "https://api.typesafe.ai";
+/** System One 엔드포인트 전체 경로(참조·표시용 — SDK 가 경로를 조립한다). */
+export const TYPESAFE_SYSTEMONE_URL = `${TYPESAFE_API_BASE_URL}/v1/systemone`;
 
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const BACKOFF_BASE_MS = 500;
-const BACKOFF_JITTER_MS = 250;
+// SDK 기본 백오프와 동일한 값을 "명시적으로" 전달한다(재시도 정책의 단일 소유 확인용).
+const BACKOFF_INITIAL_MS = 500;
+const BACKOFF_MAX_MS = 5_000;
+const BACKOFF_JITTER = 0.25;
 
 function isGateEnabled(env: NodeJS.ProcessEnv): boolean {
   const raw = env.PAPERCLIP_JUDGMENT_ENABLED?.trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 }
 
-function isAbortError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.name === "AbortError" || error.name === "TimeoutError" || error.name === "DOMException")
-  );
-}
+// ---------------------------------------------------------------------------
+// 질문 변환 — JudgmentQuestion[](이름 포함 배열) → SDK Questions(이름 키 맵).
+// ---------------------------------------------------------------------------
 
-function parseRetryAfterMs(headerValue: string | null, now: number): number | null {
-  if (headerValue === null) return null;
-  const trimmed = headerValue.trim();
-  const seconds = Number(trimmed);
-  if (Number.isFinite(seconds) && trimmed !== "") return Math.max(0, seconds * 1000);
-  const date = Date.parse(trimmed);
-  if (!Number.isNaN(date)) return Math.max(0, date - now);
-  return null;
-}
-
-type WireAnswer = { value?: unknown; probabilities?: unknown; confidence?: unknown };
-
-function normalizeAnswer(question: JudgmentQuestion, raw: unknown): JudgmentAnswer {
-  let value: unknown;
-  let probabilities: unknown;
-  let confidence: unknown;
-
-  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
-    const wire = raw as WireAnswer;
-    value = wire.value;
-    probabilities = wire.probabilities;
-    confidence = wire.confidence;
-  } else {
-    value = raw;
-  }
-
-  if (question.type === "noul") {
-    return {
-      name: question.name,
-      type: "noul",
-      value: value === undefined || value === null ? null : (value as string | number),
-      ...(typeof probabilities === "object" && probabilities !== null
-        ? { probabilities: probabilities as Record<string, number> }
-        : {}),
-      ...(typeof confidence === "number" ? { confidence } : {}),
+function toSdkQuestions(questions: JudgmentQuestion[]): Questions {
+  const map: Record<string, unknown> = {};
+  for (const question of questions) {
+    map[question.name] = {
+      type: question.type,
+      instructions: question.instructions,
+      ...(question.criteria === undefined ? {} : { criteria: question.criteria }),
     };
   }
+  return map as Questions;
+}
 
-  if (question.type === "choice") {
-    if (typeof value !== "string") {
-      throw new Error(`invalid answer for question '${question.name}'`);
-    }
-    return {
-      name: question.name,
-      type: "choice",
-      value,
-      ...(typeof probabilities === "object" && probabilities !== null
-        ? { probabilities: probabilities as Record<string, number> }
-        : {}),
-      ...(typeof confidence === "number" ? { confidence } : {}),
-    };
+// ---------------------------------------------------------------------------
+// 응답 검증 — SDK 파싱 결과(원 JSON)를 정형 JudgmentAnswer 로.
+// ---------------------------------------------------------------------------
+
+type WireChoiceAnswer = { type?: unknown; choice?: unknown; confidence?: unknown; probabilities?: unknown };
+type WireScoreAnswer = { type?: unknown; score?: unknown; confidence?: unknown; probabilities?: unknown };
+type WireNoulAnswer = { type?: unknown; noul?: unknown };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeChoiceAnswer(question: JudgmentQuestion, raw: unknown): JudgmentAnswer {
+  if (!isPlainObject(raw)) throw new Error(`invalid answer for question '${question.name}'`);
+  const wire = raw as WireChoiceAnswer;
+  if (typeof wire.choice !== "string") {
+    throw new Error(`invalid answer for question '${question.name}'`);
   }
+  return {
+    name: question.name,
+    type: "choice",
+    value: wire.choice,
+    ...(isPlainObject(wire.probabilities)
+      ? { probabilities: wire.probabilities as Record<string, number> }
+      : {}),
+    ...(typeof wire.confidence === "number" ? { confidence: wire.confidence } : {}),
+  };
+}
 
-  // score
-  if (typeof value !== "number" || !Number.isFinite(value)) {
+function normalizeScoreAnswer(question: JudgmentQuestion, raw: unknown): JudgmentAnswer {
+  if (!isPlainObject(raw)) throw new Error(`invalid answer for question '${question.name}'`);
+  const wire = raw as WireScoreAnswer;
+  if (typeof wire.score !== "number" || !Number.isFinite(wire.score)) {
     throw new Error(`invalid answer for question '${question.name}'`);
   }
   return {
     name: question.name,
     type: "score",
-    value,
-    ...(typeof confidence === "number" ? { confidence } : {}),
+    value: wire.score,
+    ...(isPlainObject(wire.probabilities)
+      ? { probabilities: wire.probabilities as Record<string, number> }
+      : {}),
+    ...(typeof wire.confidence === "number" ? { confidence: wire.confidence } : {}),
   };
 }
 
-function validateResponseBody(body: unknown, questions: JudgmentQuestion[]): {
+function normalizeNoulAnswer(question: JudgmentQuestion, raw: unknown): JudgmentAnswer {
+  if (raw === undefined || raw === null) {
+    return { name: question.name, type: "noul", value: null };
+  }
+  if (!isPlainObject(raw)) throw new Error(`invalid answer for question '${question.name}'`);
+  const wire = raw as WireNoulAnswer;
+  if (typeof wire.noul !== "number" || !Number.isFinite(wire.noul)) {
+    throw new Error(`invalid answer for question '${question.name}'`);
+  }
+  return { name: question.name, type: "noul", value: wire.noul };
+}
+
+function validateSdkResult(
+  body: unknown,
+  questions: JudgmentQuestion[],
+): {
   modelVersion: string;
   answers: JudgmentAnswer[];
   usage: { inputTokens: number; outputTokens: number };
 } {
-  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+  if (!isPlainObject(body)) {
     throw new Error("response body is not an object");
   }
-  const record = body as Record<string, unknown>;
-  if (typeof record.model !== "string" || record.model.trim() === "") {
+  if (typeof body.model !== "string" || body.model.trim() === "") {
     throw new Error("response model is missing");
   }
-  if (record.answers === null || typeof record.answers !== "object" || Array.isArray(record.answers)) {
+  if (!isPlainObject(body.answers)) {
     throw new Error("response answers is not an object");
   }
-  const usage = record.usage as Record<string, unknown> | undefined;
+  const usage = body.usage;
   if (
-    usage === null ||
-    typeof usage !== "object" ||
-    Array.isArray(usage) ||
+    !isPlainObject(usage) ||
     typeof usage.input_tokens !== "number" ||
     typeof usage.output_tokens !== "number"
   ) {
     throw new Error("response usage is missing or malformed");
   }
 
-  const answersRecord = record.answers as Record<string, unknown>;
+  const answersRecord = body.answers;
   const questionNames = new Set(questions.map((question) => question.name));
   for (const key of Object.keys(answersRecord)) {
     if (!questionNames.has(key)) {
@@ -165,32 +195,72 @@ function validateResponseBody(body: unknown, questions: JudgmentQuestion[]): {
 
   const answers = questions.map((question) => {
     if (question.type === "noul") {
-      if (!(question.name in answersRecord)) {
-        return { name: question.name, type: "noul" as const, value: null };
-      }
-      return normalizeAnswer(question, answersRecord[question.name]);
+      return normalizeNoulAnswer(question, answersRecord[question.name]);
     }
     if (!(question.name in answersRecord)) {
       throw new Error(`missing answer for question '${question.name}'`);
     }
-    return normalizeAnswer(question, answersRecord[question.name]);
+    const raw = answersRecord[question.name];
+    if (question.type === "choice") return normalizeChoiceAnswer(question, raw);
+    return normalizeScoreAnswer(question, raw);
   });
 
   return {
-    modelVersion: record.model,
+    modelVersion: body.model,
     answers,
     usage: { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens },
   };
 }
 
+// ---------------------------------------------------------------------------
+// 에러 분류 — SDK 에러 클래스 → JudgmentErrorCode.
+// ---------------------------------------------------------------------------
+
+function describeUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function classifySdkError(error: unknown): { error: JudgmentErrorCode; message: string } {
+  if (error instanceof RateLimitError) {
+    return { error: "rate_limited", message: `typesafe rate limited: ${describeUnknown(error)}` };
+  }
+  if (error instanceof InternalServerError) {
+    return { error: "server_error", message: `typesafe server error (HTTP ${error.status})` };
+  }
+  if (error instanceof APITimeoutError) {
+    return {
+      error: "timeout",
+      message: `typesafe attempt timed out after ${error.timeoutMs}ms`,
+    };
+  }
+  if (error instanceof APIUserAbortError) {
+    // 이 공급자가 건 총예산 signal 이 유일한 abort 원인이다(외부 signal 을 받지 않는다).
+    return { error: "timeout", message: "judgment request aborted — total timeout budget elapsed" };
+  }
+  if (error instanceof APIConnectionError) {
+    return { error: "network_error", message: describeUnknown(error) };
+  }
+  if (error instanceof APIError) {
+    return {
+      error: "http_error",
+      message: `typesafe systemone returned HTTP ${error.status}: ${describeUnknown(error)}`,
+    };
+  }
+  // TypeSafeError(질문/설정 검증) 등 클라이언트 계약 위반.
+  return { error: "invalid_response", message: describeUnknown(error) };
+}
+
 export function createTypesafeProvider(deps: TypesafeProviderDeps = {}): JudgmentProvider {
   const fetchFn = deps.fetchFn ?? fetch;
-  const baseUrl = deps.baseUrl ?? TYPESAFE_SYSTEMONE_URL;
+  const baseUrl = deps.baseUrl ?? TYPESAFE_API_BASE_URL;
   const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const random = deps.random ?? Math.random;
+  const backoff = {
+    initialMs: deps.retryBackoff?.initialMs ?? BACKOFF_INITIAL_MS,
+    maxMs: deps.retryBackoff?.maxMs ?? BACKOFF_MAX_MS,
+    jitter: deps.retryBackoff?.jitter ?? BACKOFF_JITTER,
+  };
 
   return {
     id: "typesafe",
@@ -219,140 +289,66 @@ export function createTypesafeProvider(deps: TypesafeProviderDeps = {}): Judgmen
         };
       }
 
-      const deadline = start + timeoutMs;
+      // attempts 노출: SDK 가 시도 횟수를 알려주지 않으므로 주입 fetch 호출 수로 센다.
+      let fetchCalls = 0;
+      const countingFetch = ((inputUrl: string, init?: RequestInit) => {
+        fetchCalls += 1;
+        return fetchFn(inputUrl, init);
+      }) as typeof fetch;
 
-      const backoffMs = (attempt: number): number =>
-        BACKOFF_BASE_MS * 2 ** (attempt - 1) + random() * BACKOFF_JITTER_MS;
+      // 총 타임아웃 예산: 우리가 signal 을 소유하고 SDK 에 전달한다.
+      // per-attempt timeout 은 예산 전액 — 단일 시도도 예산을 넘을 수 없고,
+      // 재시도 대기 중 예산 소진이면 SDK 가 APIUserAbortError 로 나온다.
+      const budget = new AbortController();
+      const budgetTimer = setTimeout(() => budget.abort(), Math.max(0, timeoutMs));
 
-      for (let attempt = 1; ; attempt += 1) {
-        const remaining = deadline - now();
-        if (remaining <= 0) {
-          return {
-            status: "error",
-            error: "timeout",
-            message: `judgment request timed out after ${timeoutMs}ms total budget`,
-            attempts: attempt - 1,
-            latencyMs: now() - start,
-          };
-        }
+      try {
+        const client = new TypeSafeClient({
+          fetch: countingFetch,
+          apiKey,
+          baseURL: baseUrl,
+          // 항상 정의의 고정 modelId 를 명시 전달한다. defaultModel 도 같은 값으로 못박아
+          // SDK 기본값(jev-latest 별칭)이 어떤 경로로도 쓰이지 않게 한다.
+          defaultModel: input.model,
+          retry: {
+            maxRetries,
+            backoffInitialMs: backoff.initialMs,
+            backoffMaxMs: backoff.maxMs,
+            backoffJitter: backoff.jitter,
+          },
+        });
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), remaining);
-        let response: Response;
-        try {
-          response = (await fetchFn(baseUrl, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              state: input.state,
-              model: input.model,
-              questions: input.questions.map((question) => ({
-                name: question.name,
-                type: question.type,
-                instructions: question.instructions,
-                ...(question.criteria === undefined ? {} : { criteria: question.criteria }),
-              })),
-            }),
-            signal: controller.signal,
-          } as RequestInit)) as Response;
-        } catch (error) {
-          clearTimeout(timer);
-          const noBudget = deadline - now() <= 0;
-          const last = attempt > maxRetries;
-          if (isAbortError(error) || noBudget) {
-            return {
-              status: "error",
-              error: "timeout",
-              message: `judgment request aborted before response (attempt ${attempt})`,
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          }
-          if (last) {
-            return {
-              status: "error",
-              error: "network_error",
-              message: error instanceof Error ? error.message : "network error",
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          }
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        clearTimeout(timer);
+        const result = await client.systemOne(
+          {
+            // JudgmentAskState 는 jsonb 기반 값이라 JSON 직렬화 가능이 보장된다 —
+            // SDK EntryType(JsonValue 위생 타입)으로 좁혀서 전달한다.
+            state: input.state as EntryType,
+            model: input.model,
+            questions: toSdkQuestions(input.questions),
+          },
+          { timeout: Math.max(1, timeoutMs), signal: budget.signal },
+        );
 
-        if (response.status === 200) {
-          let bodyText: string;
-          try {
-            bodyText = await response.text();
-          } catch (error) {
-            return {
-              status: "error",
-              error: "network_error",
-              message: error instanceof Error ? error.message : "failed to read response body",
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          }
-          let body: unknown;
-          try {
-            body = JSON.parse(bodyText);
-          } catch {
-            return {
-              status: "error",
-              error: "invalid_response",
-              message: "response body is not valid JSON",
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          }
-          try {
-            const validated = validateResponseBody(body, input.questions);
-            return {
-              status: "ok",
-              answers: validated.answers,
-              modelVersion: validated.modelVersion,
-              usage: validated.usage,
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          } catch (error) {
-            return {
-              status: "error",
-              error: "invalid_response",
-              message: error instanceof Error ? error.message : "invalid response shape",
-              attempts: attempt,
-              latencyMs: now() - start,
-            };
-          }
-        }
-
-        const retryable = response.status === 429 || response.status >= 500;
-        if (!retryable) {
-          return {
-            status: "error",
-            error: "http_error",
-            message: `typesafe systemone returned HTTP ${response.status}`,
-            attempts: attempt,
-            latencyMs: now() - start,
-          };
-        }
-        if (attempt > maxRetries) {
-          return {
-            status: "error",
-            error: response.status === 429 ? "rate_limited" : "server_error",
-            message: `typesafe systemone returned HTTP ${response.status} after ${attempt} attempts`,
-            attempts: attempt,
-            latencyMs: now() - start,
-          };
-        }
-        const retryAfterMs = parseRetryAfterMs(response.headers?.get?.("retry-after") ?? null, now());
-        const delay = retryAfterMs ?? backoffMs(attempt);
-        await sleep(Math.max(0, Math.min(delay, Math.max(0, deadline - now()))));
+        const validated = validateSdkResult(result, input.questions);
+        return {
+          status: "ok",
+          answers: validated.answers,
+          modelVersion: validated.modelVersion,
+          usage: validated.usage,
+          attempts: fetchCalls,
+          latencyMs: now() - start,
+        };
+      } catch (error) {
+        const classified = classifySdkError(error);
+        return {
+          status: "error",
+          error: classified.error,
+          message: classified.message,
+          attempts: fetchCalls,
+          latencyMs: now() - start,
+        };
+      } finally {
+        clearTimeout(budgetTimer);
       }
     },
   };

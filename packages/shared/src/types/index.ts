@@ -329,6 +329,7 @@ export type {
   JudgmentAnswerValue,
   JudgmentAnswer,
   JudgmentDefinitionSnapshot,
+  JudgmentDefinitionOriginClass,
   JudgmentCallOutcome,
   JudgmentAskState,
   JudgmentAskInput,
@@ -337,4 +338,6 @@ export type {
   JudgmentErrorCode,
   JudgmentAskFailure,
   JudgmentAskResult,
+  JudgmentEgressFinding,
+  JudgmentEgressStatus,
 } from "./judgment.js";

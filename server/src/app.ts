@@ -99,6 +99,7 @@ import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler
 import { createNativeWorkflowScheduler } from "./services/workflow/native-scheduler.js";
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
 import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
+import { createPlanQaShadowLoop, resolvePlanQaShadowOwnership } from "./services/judgment/plan-qa-shadow.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -421,6 +422,7 @@ export async function createApp(
   const workflowSchedulerOwnership = resolveWorkflowSchedulerOwnership();
   api.use(qualityPolicyRoutes(db, workflowSchedulerOwnership.mode));
   const agentWikiEvolutionOwnership = resolveAgentWikiEvolutionOwnership();
+  const planQaShadowOwnership = resolvePlanQaShadowOwnership();
   logger.info({
     mode: workflowSchedulerOwnership.mode,
     nativeSchedulerEnabled: workflowSchedulerOwnership.nativeSchedulerEnabled,
@@ -968,6 +970,17 @@ export async function createApp(
   agentWikiEvolutionLoop?.start();
   if (agentWikiEvolutionLoop) {
     process.once("exit", () => agentWikiEvolutionLoop.stop());
+  }
+
+  // 판단 계층 B-2 — PLAN-QA 사후 관측(섀도) 파일럿. PAPERCLIP_JUDGMENT_ENABLED=1 일 때만 등록
+  // (default off). 이미 저장된 PLAN-QA 판정을 사후 관측해 judgment_calls 감사행만 남긴다.
+  // 어떤 판정·상태·이슈도 변경하지 않는다(순수 관측). 비활성 시 loop 자체를 생성하지 않는다.
+  const planQaShadowLoop = planQaShadowOwnership.enabled
+    ? createPlanQaShadowLoop({ db })
+    : null;
+  planQaShadowLoop?.start();
+  if (planQaShadowLoop) {
+    process.once("exit", () => planQaShadowLoop.stop());
   }
 
   pluginScheduler.start();
