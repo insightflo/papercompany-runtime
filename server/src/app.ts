@@ -503,6 +503,7 @@ export async function createApp(
       parameters: request.args ?? {},
       requestId: request.requestId,
       workflowRunId: request.workflowRunId,
+      stepRunId: request.stepRunId,
       stepId: request.stepId,
       stepEnv: await resolveWorkflowRunStepEnv(db, {
         companyId: request.companyId,
