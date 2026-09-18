@@ -75,6 +75,8 @@ export interface AskJudgmentInput {
   contextType: string;
   contextId: string;
   state: JudgmentAskState;
+  /** 호출자가 정의의 질문 목록을 완전히 치환할 때 사용한다. 기존 호출부는 overrides를 유지한다. */
+  questions?: JudgmentQuestion[];
   /** 질문 name → 부분 덮어쓰기(instructions/criteria). */
   questionOverrides?: Partial<Pick<JudgmentQuestion, "instructions" | "criteria">> & {
     [questionName: string]: Partial<Pick<JudgmentQuestion, "instructions" | "criteria">> | undefined;
@@ -188,7 +190,7 @@ export function createJudgmentService(db: Db, deps: JudgmentServiceDeps = {}): J
         };
       }
 
-      const questions = assembleQuestions(
+      const questions = input.questions ?? assembleQuestions(
         definition.definition.questions,
         input.questionOverrides,
       );

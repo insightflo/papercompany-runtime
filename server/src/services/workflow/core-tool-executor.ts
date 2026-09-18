@@ -7,11 +7,13 @@ import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./re
 import { normalizeCommandParts, parametersToCliArgs, readObject } from "./core-tool-context.js";
 import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
+import { executeAgentJudgmentTool } from "../judgment/agent-judgment-tool-executor.js";
+import type { JudgmentService } from "../judgment/judgment-service.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
 const execFile = promisify(execFileCallback);
 export type CoreWorkflowToolExecutionResult = {
-  status: 200 | 403 | 404 | 422 | 500 | 501;
+  status: 200 | 403 | 404 | 422 | 500 | 501 | 503;
   artifactPath?: string;
   body: { content?: string; data?: unknown; stderr?: string; tool?: string; source?: "core"; error?: string };
 };
@@ -32,24 +34,39 @@ export async function checkCoreWorkflowToolsAvailable(db: Db, input: { companyId
 export async function executeCoreWorkflowTool(input: {
   db: Db; companyId: string; agentId?: string | null; agentName?: string | null; issueId?: string | null;
   toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepId?: string | null;
-  stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps;
+  stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db.select({ id: toolDefinitions.id, name: toolDefinitions.name,
     enabled: toolDefinitions.enabled, adapterType: toolDefinitions.adapterType, adapterConfig: toolDefinitions.adapterConfig })
     .from(toolDefinitions).where(and(eq(toolDefinitions.companyId, input.companyId), eq(toolDefinitions.name, input.toolName))).limit(1);
   if (!tool) return { status: 404, body: { error: `Tool "${input.toolName}" not found` } };
   if (!tool.enabled) return { status: 403, body: { error: `Tool "${input.toolName}" is disabled` } };
+  const adapterConfig = readObject(tool.adapterConfig);
+  const isJudgmentTool = tool.adapterType === "builtin" && adapterConfig.kind === "judgment";
   let agentId = input.agentId?.trim() || "";
   if (!agentId && input.agentName?.trim()) {
     const [agent] = await input.db.select({ id: agents.id }).from(agents)
       .where(and(eq(agents.companyId, input.companyId), eq(agents.name, input.agentName.trim()))).limit(1);
     agentId = agent?.id ?? "";
   }
+  if (isJudgmentTool && !agentId) {
+    return { status: 403, body: { error: `Agent identity is required for workflow tool "${input.toolName}"` } };
+  }
   if (agentId) {
     const [grant] = await input.db.select({ id: agentToolGrants.id }).from(agentToolGrants).where(and(
       eq(agentToolGrants.companyId, input.companyId), eq(agentToolGrants.agentId, agentId), eq(agentToolGrants.toolId, tool.id),
     )).limit(1);
     if (!grant) return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
+  }
+  if (isJudgmentTool) {
+    return executeAgentJudgmentTool({
+      db: input.db,
+      companyId: input.companyId,
+      toolName: input.toolName,
+      parameters: input.parameters,
+      requestId: input.requestId,
+      judgmentService: input.judgmentService,
+    });
   }
   const remoteResult = await executeRemoteWorkflowTool({ db: input.db, companyId: input.companyId,
     toolId: tool.id, toolName: input.toolName, parameters: input.parameters, requestId: input.requestId,
@@ -58,7 +75,6 @@ export async function executeCoreWorkflowTool(input: {
   if (remoteResult) return remoteResult;
   if (tool.adapterType !== "builtin") return { status: 501,
     body: { error: `Core workflow tool "${input.toolName}" uses unsupported adapter type "${tool.adapterType}"` } };
-  const adapterConfig = readObject(tool.adapterConfig);
   const command = typeof adapterConfig.command === "string" ? adapterConfig.command.trim() : "";
   const commandParts = normalizeCommandParts(command);
   if (commandParts.length === 0) return { status: 422, body: { error: `Core workflow tool "${input.toolName}" has no command configured` } };
