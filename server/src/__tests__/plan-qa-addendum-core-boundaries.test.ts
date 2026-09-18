@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { beforeAll, afterAll, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { heartbeatRuns, issues, missionPlanQaVerdicts, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issues, missionPlanArtifacts, missionPlanQaVerdicts, type Db } from "@paperclipai/db";
 import { createQualityTestDb, describeQualityDb, type QualityTestDb } from "./helpers/quality-db.js";
 import { seedGateWorld, checkoutReviewer, readAndVerify, GATE_CHECK_ID, GATE_DECISION_HASH } from "./helpers/plan-qa-addendum.js";
 import { buildPlanQaScope, readPlanQaCheck, verifyPlanQaSubmission, readVerifiedPlanQaGate, planQaGateMode } from "../services/missions/plan-qa-addendum-gate.js";
@@ -80,6 +80,52 @@ describeQualityDb("PLAN-QA core attempt boundaries", () => {
     const scope = await buildPlanQaScope(db, { companyId: w.companyId, issueId: w.planQaIssueId, heartbeatRunId: w.runId, executionEpoch: 1 });
     await checkoutReviewer(db, { companyId: w.companyId, issueId: w.planQaIssueId, reviewerAgentId: w.reviewerAgentId, executionEpoch: 2 });
     expect(await readVerifiedPlanQaGate(db, scope)).toBeNull();
+  });
+
+  it("fallback verdict row links the plan artifact from the issue marker", async () => {
+    const w = await seedGateWorld(db);
+    // 사용자(board) 판정은 v2 pinned 경로가 아니라 직접 삽입 폴백을 탄다.
+    await recordMissionPlanQaVerdict({ db, companyId: w.companyId, missionId: w.missionId, planQaIssueId: w.planQaIssueId,
+      decisionHash: GATE_DECISION_HASH, verdict: "pass", reviewedBy: { actorType: "user", actorId: "board-user-linkage" } });
+    const [row] = await db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.planQaIssueId, w.planQaIssueId));
+    expect(row?.verdict).toBe("pass");
+    expect(row?.missionPlanArtifactId).toBe(w.planArtifactId);
+  });
+
+  it("fallback verdict row keeps null artifact linkage when the issue has no marker", async () => {
+    const w = await seedGateWorld(db);
+    await db.update(issues).set({ qualityPlanQaBinding: null }).where(eq(issues.id, w.planQaIssueId));
+    await recordMissionPlanQaVerdict({ db, companyId: w.companyId, missionId: w.missionId, planQaIssueId: w.planQaIssueId,
+      decisionHash: GATE_DECISION_HASH, verdict: "pass", reviewedBy: { actorType: "user", actorId: "board-user-linkage" } });
+    const [row] = await db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.planQaIssueId, w.planQaIssueId));
+    expect(row?.missionPlanArtifactId).toBeNull();
+  });
+
+  it("fallback re-record fills a null linkage but never overwrites an existing one", async () => {
+    const w = await seedGateWorld(db);
+    // 1차 기록은 마커를 제거한 상태(null 연결)로 남긴다.
+    const [orig] = await db.select({ marker: issues.qualityPlanQaBinding }).from(issues).where(eq(issues.id, w.planQaIssueId));
+    await db.update(issues).set({ qualityPlanQaBinding: null }).where(eq(issues.id, w.planQaIssueId));
+    await recordMissionPlanQaVerdict({ db, companyId: w.companyId, missionId: w.missionId, planQaIssueId: w.planQaIssueId,
+      decisionHash: GATE_DECISION_HASH, verdict: "request_changes", reviewedBy: { actorType: "user", actorId: "board-user-linkage" } });
+    // 원래 마커를 복구하고 같은 decisionHash 재기록 → null 연결이 마커 값으로 채워진다.
+    await db.update(issues).set({ qualityPlanQaBinding: orig?.marker }).where(eq(issues.id, w.planQaIssueId));
+    await recordMissionPlanQaVerdict({ db, companyId: w.companyId, missionId: w.missionId, planQaIssueId: w.planQaIssueId,
+      decisionHash: GATE_DECISION_HASH, verdict: "request_changes", reviewedBy: { actorType: "user", actorId: "board-user-linkage" } });
+    const [filled] = await db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.planQaIssueId, w.planQaIssueId));
+    expect(filled?.missionPlanArtifactId).toBe(w.planArtifactId);
+    // 마커가 다른 아티팩트를 가리켜도 기존 연결은 유지된다.
+    const [secondPlan] = await db.insert(missionPlanArtifacts).values({
+      companyId: w.companyId, missionId: w.missionId, ownerAgentId: w.ownerAgentId, revision: 2,
+      missionGoal: "다른 계획", refs: {}, requiredInputs: [], successCriteria: [], steps: [],
+    }).returning({ id: missionPlanArtifacts.id });
+    await db.update(issues).set({ qualityPlanQaBinding: { ...(orig?.marker as Record<string, unknown>), planArtifactId: secondPlan!.id } })
+      .where(eq(issues.id, w.planQaIssueId));
+    await recordMissionPlanQaVerdict({ db, companyId: w.companyId, missionId: w.missionId, planQaIssueId: w.planQaIssueId,
+      decisionHash: GATE_DECISION_HASH, verdict: "pass", reviewedBy: { actorType: "user", actorId: "board-user-linkage" } });
+    const [kept] = await db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.planQaIssueId, w.planQaIssueId));
+    expect(kept?.missionPlanArtifactId).toBe(w.planArtifactId);
+    expect(kept?.verdict).toBe("pass");
   });
 
   it("rejects changed final submissions and preserves the original receipt", async () => {
