@@ -136,6 +136,8 @@ export { channelConfigs } from "./channel_configs.js";
 export { missionPlanDecisionSubmissions } from "./mission_plan_decision_submissions.js";
 export { missionPlanQaVerdicts } from "./mission_plan_qa_verdicts.js";
 export { workflowTransitionEvents } from "./workflow_transition_events.js";
+export { workflowTerminalDecisions, workflowTerminalEffectIntents } from "./workflow_terminal_decisions.js";
+export type { WorkflowTerminalStopTargets } from "./workflow_terminal_decisions.js";
 export { qualityOccurrences } from "./quality_occurrences.js";
 export { qualityActions } from "./quality_actions.js";
 export { qualityActionGroups } from "./quality_action_groups.js";

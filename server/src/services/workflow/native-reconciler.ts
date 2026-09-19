@@ -5,6 +5,9 @@ import { recoverTerminalUnsettledRuns } from "../heartbeat-finalization/recovery
 import { reconcileProvider403LadderWakeups } from "../heartbeat-provider403-ladder.js";
 import { reconcileQualityIntents } from "../quality/native-reconcile.js";
 import { sweepTerminalMissionOrphanRuns } from "../missions/terminal-mission-orphan-sweep.js";
+// [run-terminal-boundary v1] 종결 부작용 인텐트의 지연 재처리(플래그 게이팅, tick 깨뜨리지 않음).
+import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
+import { processPendingTerminalEffectIntents } from "./run-terminal-boundary.js";
 
 export interface NativeWorkflowReconcilerLogger {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -126,6 +129,24 @@ export function createNativeWorkflowReconciler(
         log.warn(
           { err: error instanceof Error ? error.message : String(error) },
           "Terminal mission orphan cleanup sweep failed",
+        );
+      }
+      // [run-terminal-boundary v1] 종결 부작용 인텐트의 지연 재처리 — 즉시 실행 실패분을 회수한다.
+      //   실패해도 reconciler tick 은 깨지지 않는다(같은 파일의 나머지 sweep 들과 동일 계약).
+      try {
+        const boundarySweep = await isRunTerminalBoundaryV1Enabled(options.db)
+          ? await processPendingTerminalEffectIntents(options.db)
+          : null;
+        if (boundarySweep && boundarySweep.executed + boundarySweep.failed > 0) {
+          log.info(
+            { timeoutMinutes, ...boundarySweep },
+            "Run terminal boundary effect intents reprocessed",
+          );
+        }
+      } catch (error) {
+        log.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          "Run terminal boundary effect intent sweep failed",
         );
       }
     } catch (error) {

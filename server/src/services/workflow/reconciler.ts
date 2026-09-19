@@ -20,6 +20,9 @@ import {
   isChildStartContention,
   isChildStartDatabaseTimeout,
 } from "./workflow-child-start-contention.js";
+// [run-terminal-boundary v1] stuck 강제 종결의 경계 우회 + 커밋 후 부작용 즉시 실행(플래그 게이팅은 호출자 책임).
+import { evaluateRecoveryChannels, executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
+import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 
 export { reconcileDeadlockedWorkflowRuns } from "./deadlock-reconciler.js";
 export {
@@ -39,7 +42,7 @@ export { reconcileDueWorkflowStepRetries } from "./retry-reconciler.js";
  */
 export interface ReconciliationResult {
   runId: string;
-  action: "recovered" | "failed" | "skipped";
+  action: "recovered" | "failed" | "skipped" | "deferred";
   reason?: string;
 }
 
@@ -61,6 +64,8 @@ export async function reconcileStuckWorkflowRuns(
   timeoutMinutes: number = 60,
 ): Promise<ReconciliationResult[]> {
   const timeout = new Date(Date.now() - timeoutMinutes * 60 * 1000);
+  // [run-terminal-boundary v1] 플래그는 pass 당 1회 읽는다 — legacy 경로의 추가 I/O 를 이 한 번으로 제한한다.
+  const boundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
 
   const stuckRuns = await db
     .select()
@@ -156,6 +161,11 @@ export async function reconcileStuckWorkflowRuns(
           ),
         );
 
+      // [run-terminal-boundary v1] 경계 종결과 선점평가가 같은 stepRun 사실을 소비한다(1회 적재).
+      const boundaryStepRuns = boundaryEnabled
+        ? await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id))
+        : [];
+
       if (pendingSteps.length > 0) {
         const normalizeMetadata = (m: unknown): Record<string, unknown> =>
           m && typeof m === "object" && !Array.isArray(m)
@@ -174,6 +184,28 @@ export async function reconcileStuckWorkflowRuns(
         if (liveChildWaits.some(Boolean)) {
           results.push({ runId: run.id, action: "skipped", reason: "Workflow run has live workflow child step waits in progress" });
           continue;
+        }
+        // [run-terminal-boundary v1] 스텝 skip "전" 회복 채널 선점평가 — 열/불명이면 그 외 어떤
+        //   행도 쓰지 않고 유예한다(계약: 유예 시 그 외 어떤 행도 쓰지 않는다).
+        if (boundaryEnabled) {
+          const precheck = await evaluateRecoveryChannels(db, {
+            runId: run.id,
+            companyId: run.companyId,
+            missionId: run.missionId,
+            stepRuns: boundaryStepRuns,
+            now: new Date(),
+          });
+          if (precheck.kind !== "clear") {
+            const evidenceSummary = precheck.kind === "open"
+              ? precheck.evidence.map((item) => `${item.channel}:${item.targetId}`).join(",")
+              : `unknown:${precheck.error ?? "?"}`;
+            results.push({
+              runId: run.id,
+              action: "deferred",
+              reason: `Recovery channel open/unknown; finalization deferred (${evidenceSummary})`,
+            });
+            continue;
+          }
         }
         const now = new Date();
         for (const step of pendingSteps) {
@@ -209,6 +241,51 @@ export async function reconcileStuckWorkflowRuns(
             });
           }
         }
+      }
+
+      if (boundaryEnabled) {
+        // [run-terminal-boundary v1] stuck 강제 종결을 경계로 우한다 — CAS/원인 스탬프/회복 게이트는
+        //   코어 계약이 소유한다. 최종 재평가에서 채널이 열리면 유예되어 run 은 비종말로 남는다.
+        const boundary = await finalizeRunTerminal(db, {
+          runId: run.id,
+          companyId: run.companyId,
+          expectedAuthorityVersion: run.dispatchAuthorityVersion,
+          decision: "failed",
+          cause: {
+            policy: "recovery_deadline_hard",
+            discovery: "stuck_diagnostic",
+            origin: "reconciler",
+            reason: "Marked stuck run as failed",
+          },
+          gatePolicy: "defer_on_open_recovery",
+          now: new Date(),
+          stepRuns: boundaryStepRuns,
+        });
+        if (boundary.kind === "deferred") {
+          results.push({ runId: run.id, action: "deferred", reason: "Recovery channel opened during finalization; steps skipped, run left non-terminal" });
+          continue;
+        }
+        if (boundary.kind === "stale_authority") {
+          results.push({ runId: run.id, action: "skipped", reason: "Run authority superseded; stuck finalization discarded" });
+          continue;
+        }
+        if (boundary.kind === "already_finalized") {
+          results.push({ runId: run.id, action: "skipped", reason: "Run already terminal" });
+          continue;
+        }
+        let effectNote = "";
+        try {
+          await executeTerminalEffectIntents(db, boundary.decisionId);
+        } catch (error) {
+          // 부작용 실행 실패는 관측 사항 — pending 인텐트는 periodic sweep 이 재처리한다(계약).
+          effectNote = ` (effect execution deferred to sweep: ${error instanceof Error ? error.message : String(error)})`;
+        }
+        results.push({
+          runId: run.id,
+          action: "recovered",
+          reason: `Marked stuck run as failed (terminal decision ${boundary.decisionId})${effectNote}`,
+        });
+        continue;
       }
 
       // Mark the run as failed
