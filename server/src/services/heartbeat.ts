@@ -116,6 +116,10 @@ import {
 } from "./heartbeat-stability.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
+import {
+  configureInstantWorkflowAdvanceDb,
+  requestInstantWorkflowAdvance,
+} from "./workflow/instant-advance.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
 import {
@@ -907,6 +911,28 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
 
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * [instant-advance v1.2] 종말 확정된 런이 워크플로우 런에 속하면(contextSnapshot.workflowRunId)
+ *   즉시 진행을 요청한다 — fire-and-forget(fireWikiRecord 와 동일 non-blocking 패턴). 훅 실패가
+ *   런 완료 경로에 영향을 주지 않도록 전체를 try/catch 로 감싼다. 게이트 off 면 모듈 내부에서
+ *   no-op 다(PAPERCLIP_WORKFLOW_INSTANT_ADVANCE).
+ * [수정시 영향] 호출부는 런 종결 확정 지점 3곳(정상 outcome / inner catch / outer catch).
+ */
+function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnapshot: unknown }): void {
+  try {
+    const workflowRunId = readNonEmptyString(
+      parseObject(run.contextSnapshot)["workflowRunId"],
+    );
+    if (!workflowRunId) return;
+    requestInstantWorkflowAdvance(workflowRunId);
+  } catch (err) {
+    logger.warn(
+      { err, runId: run.id, tag: "instant-advance" },
+      "failed to request instant workflow advance for terminal run",
+    );
+  }
 }
 
 function normalizePaperclipApiUrl(value: string | null | undefined): string | null {
@@ -3217,6 +3243,8 @@ function fireWikiRecord(
 }
 
 export function heartbeatService(db: Db) {
+  // [instant-advance v1.2] fire-and-forget 진행 모듈에 db 주입(미주입 요청은 no-op).
+  configureInstantWorkflowAdvanceDb(db);
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -8160,6 +8188,9 @@ export function heartbeatService(db: Db) {
         }
         if (!queuedAdapterFallbackRun && !transientAdapterRetryQueued) {
           await releaseIssueExecutionAndPromote(finalizedRun);
+          // [instant-advance v1.2] 런 종결+이슈 정산 커밋 후 즉시 진행. fallback/retry 재큐 시엔 스텝이
+          // 아직 미종결(재시도 런이 완료 시점에 훅 발화)이라 스킵한다.
+          fireInstantWorkflowAdvanceForTerminalRun(finalizedRun);
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
@@ -8259,6 +8290,8 @@ export function heartbeatService(db: Db) {
         }
         if (!queuedAdapterFallbackRun) {
           await releaseIssueExecutionAndPromote(failedRun);
+          // [instant-advance v1.2] 실패도 진행 트리거 — 실패 정산(이슈 blocked/스텝 failed) 커밋 후 즉시 재평가.
+          fireInstantWorkflowAdvanceForTerminalRun(failedRun);
         }
 
         await updateRuntimeState(agent, failedRun, {
@@ -8345,6 +8378,8 @@ export function heartbeatService(db: Db) {
               message,
             }).catch(() => undefined);
             await releaseIssueExecutionAndPromote(failedRun).catch(() => undefined);
+            // [instant-advance v1.2] setup 실패 확정 후에도 워크플로우 런이면 즉시 재평가(실패 스텝 처리 촉진).
+            fireInstantWorkflowAdvanceForTerminalRun(failedRun);
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
