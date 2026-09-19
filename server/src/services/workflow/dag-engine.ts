@@ -57,6 +57,7 @@ import {
   classifyStepActivation,
   findSkippableSteps,
   resolveEdges,
+  resolveFailureRecoveryChannel,
   workflowHasConditionalEdges,
   type PredFacts,
   type PredStatus,
@@ -2103,6 +2104,7 @@ function buildPredFactsMap(
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
   validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>,
   v1EnforcementEnabled?: boolean,
+  issueStatusByIssueId?: Map<string, string>,
 ): Map<string, PredFacts> {
   const facts = new Map<string, PredFacts>();
   for (const step of steps) {
@@ -2126,6 +2128,17 @@ function buildPredFactsMap(
       // the step-run's dispatch_ready_at (evidence + settlement). When disabled,
       // omit (undefined → treated as true → legacy behavior).
       ...(v1EnforcementEnabled ? { dispatchReady: run?.dispatchReadyAt != null } : {}),
+      // [B2 좁은 회복 채널] failed 선행에만 — 연결 실행 이슈의 비종결 여부를 사실망에 최소 전달한다.
+      //   v1 대기 규칙이 failed 선행을 대기로 분류하는 것은 이 채널이 열려 있을 때뿐이다(이슈 없는
+      //   엔진 측 실패/종결 이슈 실패는 기존 하드 실패 분류). 미공급 맵은 fail-closed 로 open 취급.
+      ...(v1EnforcementEnabled && run?.status === "failed"
+        ? {
+          failureRecoveryChannel: resolveFailureRecoveryChannel({
+            issueId: run.issueId,
+            issueStatus: run.issueId ? issueStatusByIssueId?.get(run.issueId) : undefined,
+          }),
+        }
+        : {}),
     });
   }
   return facts;
@@ -2138,12 +2151,13 @@ function findRunnableSteps(
     launchedStepIds?: Set<string>;
     validationVerdictsByIssueId?: Map<string, ValidationVerdictObservation>;
     v1EnforcementEnabled?: boolean;
+    issueStatusByIssueId?: Map<string, string>;
   } = {},
 ): WorkflowStep[] {
   // [IF/loop] edge-aware 활성화 게이트. classifyStepActivation 은 legacy dependencies[] 에 대해
   // 기존 `dependencies.every(completed)` 와 byte-identical 이므로 legacy 회귀가 없고, conditional edge 가
   // 있는 step 만 when 평가(failure/always 발화 또는 waiting)로 분기된다.
-  const predsByStepId = buildPredFactsMap(steps, stepRunMap, options.validationVerdictsByIssueId, options.v1EnforcementEnabled);
+  const predsByStepId = buildPredFactsMap(steps, stepRunMap, options.validationVerdictsByIssueId, options.v1EnforcementEnabled, options.issueStatusByIssueId);
   return steps.filter((step) => {
     if (options.launchedStepIds && !options.launchedStepIds.has(step.id)) return false;
     if (step.triggerOn === "escalation") return false;
@@ -3625,6 +3639,12 @@ async function applyConditionalSkipPropagation(input: {
   stepRuns: (typeof workflowStepRuns.$inferSelect)[];
   dynamicLaunchStepIds?: Set<string>;
   validationVerdictsByIssueId: Map<string, ValidationVerdictObservation>;
+  // [B2 사실망 통일] launch(findRunnableSteps)와 동일한 v1 enforcement 정책 스냅샷. 같은 sync 평가에서
+  //   세 경로가 같은 사실망(dispatch_ready_at 포함)을 소비하게 한다 — 평가 중 재계산/혼합 금지.
+  v1EnforcementEnabled: boolean;
+  // [B2 좁은 회복 채널] 실패 선행의 연결 이슈 상태 스냅샷 — v1 대기 규칙을 failed 선행에 좁게
+  //   적용하기 위한 최소 사실 전달. 미공급 시 fail-closed 로 open 취급(기존 대기 유지).
+  issueStatusByIssueId?: Map<string, string>;
 }): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
   if (input.context.run.status === "cancelled" || !workflowHasConditionalEdges(input.context.steps)) {
     return input.stepRuns;
@@ -3636,6 +3656,8 @@ async function applyConditionalSkipPropagation(input: {
       input.context.steps,
       skipRunMap,
       input.validationVerdictsByIssueId,
+      input.v1EnforcementEnabled,
+      input.issueStatusByIssueId,
     );
     const skippableSteps = findSkippableSteps(input.context.steps, skipPredsByStepId, {
       launchedStepIds: input.dynamicLaunchStepIds,
@@ -3693,6 +3715,28 @@ export async function syncWorkflowRunState(
 }
 
 /** [cycle A §7] sync 본체 — 소유권/경합 결과를 스냅숏과 함께 타입으로 반환한다. */
+/**
+ * [B2 좁은 회복 채널] 스텝 런들이 참조하는 실행 이슈 상태 스냅샷. v1 대기 규칙이 failed 선행을
+ *   대기로 분류할 때 "연결 비종결 이슈 보유"를 검증하기 위해 revival/skip 전파/launch 가 동일한
+ *   스냅샷을 소비한다(사실망 최소 전달 — validationVerdicts 와 같은 per-sync 스냅샷 계약).
+ */
+async function loadIssueStatusesForStepRuns(
+  db: Db,
+  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+): Promise<Map<string, string>> {
+  const ids = [...new Set(
+    stepRuns
+      .map((stepRun) => stepRun.issueId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  )];
+  if (ids.length === 0) return new Map<string, string>();
+  const rows = await db
+    .select({ id: issues.id, status: issues.status })
+    .from(issues)
+    .where(inArray(issues.id, ids));
+  return new Map(rows.map((row) => [row.id, row.status]));
+}
+
 export async function syncWorkflowRunStateWithOutcome(
   db: Db,
   runId: string,
@@ -3728,6 +3772,10 @@ export async function syncWorkflowRunStateWithOutcome(
   const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
   const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
+  // [B2 좁은 회복 채널] v1 이 켜진 sync 에서만 이슈 상태 스냅샷을 적재한다(legacy 비용 없음).
+  const issueStatusByIssueId = v1Enforcement
+    ? await loadIssueStatusesForStepRuns(db, stepRuns)
+    : new Map<string, string>();
 
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   if (!dynamicLaunchStepIds && context.run.status !== "cancelled") {
@@ -3767,7 +3815,9 @@ export async function syncWorkflowRunStateWithOutcome(
   //   이 pass 가 유일한 정확한 부활 경로(무조건 skipped→pending flap 없음).
   if (context.run.status !== "cancelled") {
     const reviveRunMap = buildStepRunMap(stepRuns);
-    const revivePredsByStepId = buildPredFactsMap(context.steps, reviveRunMap, validationVerdictsByIssueId);
+    // [B2 사실망 통일] revive 도 launch 와 동일한 v1 정책 스냅샷을 소비한다 — launch 가 dispatch_ready_at
+    //   대기로 미기동하는 선행을 revive 가 먼저 부활시키지 않는다(같은 평가에서 같은 사실).
+    const revivePredsByStepId = buildPredFactsMap(context.steps, reviveRunMap, validationVerdictsByIssueId, v1Enforcement, issueStatusByIssueId);
     let revivedAny = false;
     for (const step of context.steps) {
       const sr = reviveRunMap.get(step.id);
@@ -3794,6 +3844,8 @@ export async function syncWorkflowRunStateWithOutcome(
     stepRuns,
     dynamicLaunchStepIds,
     validationVerdictsByIssueId,
+    v1EnforcementEnabled: v1Enforcement,
+    issueStatusByIssueId,
   });
 
   // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
@@ -3903,6 +3955,7 @@ export async function syncWorkflowRunStateWithOutcome(
         launchedStepIds: dynamicLaunchStepIds,
         validationVerdictsByIssueId,
         v1EnforcementEnabled: v1Enforcement,
+        issueStatusByIssueId,
       }));
       if (runnableSteps.length === 0) break;
 
@@ -4018,6 +4071,8 @@ export async function syncWorkflowRunStateWithOutcome(
           stepRuns,
           dynamicLaunchStepIds,
           validationVerdictsByIssueId,
+          v1EnforcementEnabled: v1Enforcement,
+          issueStatusByIssueId,
         });
       }
       shouldContinue = failedIssueLessToolStep || executedControlNode;

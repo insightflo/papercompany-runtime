@@ -276,6 +276,8 @@ describeEmbeddedPostgres("gate work-product grace window", () => {
 
     expect(ifRun.status).toBe("failed");
     expect(ifRun.lastDispatchErrorSummary).toContain("no completed-attempt local work product");
+    // [B2 좁은 회복 채널] 컨트롤 노드(IF) 실패는 실행 이슈가 없는 엔진 측 실패다 — 회복 채널이
+    //   없으므로 v1 대기 규칙을 적용하지 않고 같은 sync 에서 즉시 계단식 skip + run failed 로 수렴한다.
     expect(seeded.result?.status).toBe("failed");
   });
 
