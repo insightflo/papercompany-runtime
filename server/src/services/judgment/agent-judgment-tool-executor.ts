@@ -7,6 +7,11 @@ import { createJudgmentService, type JudgmentService } from "./judgment-service.
 
 const MAX_STATE_SERIALIZED_CHARS = 120_000;
 
+// [판단 로더 강화] 엄격(fatal) utf8 디코더 — 유효하지 않은 바이트 시퀀스에서 즉시 예외.
+//   대표 산출물이 바이너리(예: PNG)로 바뀌었을 때 mojibake 문자열로 직렬화되어 모델 호출
+//   까지 진행되는 사고(런 56eb185e)를 직렬화 전에 차단한다.
+const strictUtf8TextDecoder = new TextDecoder("utf-8", { fatal: true });
+
 type JsonRecord = Record<string, unknown>;
 
 function isPlainRecord(value: unknown): value is JsonRecord {
@@ -115,19 +120,37 @@ function parseInput(parameters: unknown, options: { allowWorkProductPath: boolea
  * resolveWorkflowToolStepArgs 가 조상 스텝의 workProduct 로 해석한 값이며, 에이전트가
  * 임의 경로를 넘겨 파일을 읽는 우회를 막는다(스텝 문맥 없이 path 가 오면 parseInput 단계
  * 에서 거부). 읽은 내용은 C0 반출 통제(마스킹·집행점)를 그대로 통과한다.
+ *
+ * [판단 로더 강화] 파일은 Buffer 로 읽어 엄격(fatal) utf8 검증을 통과한 텍스트만 사용한다.
+ *   유효하지 않은 바이트 시퀀스/NUL 제어바이트 → artifact_type_mismatch 로 직렬화 전 즉시
+ *   실패. 크기 예산(120k 자) 검사는 직렬화 전에 수행하며 초과분은 artifact_state_too_large
+ *   로 실패한다(상한 인상·자동 절단 없음). 식별 가능한 코드로 감독 루프가 원인(대표 오등록
+ *   등의 입력 계약 위반 vs 예산 초과)을 구분할 수 있다.
  */
 async function readWorkProductState(
   filePath: string,
   base: JudgmentAskState,
 ): Promise<{ state: JudgmentAskState } | { error: string }> {
-  let content: string;
+  let bytes: Buffer;
   try {
-    content = await readFile(filePath, "utf8");
+    bytes = await readFile(filePath);
   } catch {
     return { error: "stateWorkProductPath is not readable" };
   }
+  let content: string;
+  try {
+    content = strictUtf8TextDecoder.decode(bytes);
+  } catch {
+    return { error: `artifact_type_mismatch: ${filePath} is not decodable as UTF-8 text` };
+  }
+  // 유효 utf8 로 디코딩되더라도 NUL 바이트는 텍스트 state 문서에 정상적으로 나타나지 않는다.
+  if (bytes.includes(0)) {
+    return { error: `artifact_type_mismatch: ${filePath} is not decodable as UTF-8 text` };
+  }
   if (content.length > MAX_STATE_SERIALIZED_CHARS) {
-    return { error: "stateWorkProductPath content exceeds " + MAX_STATE_SERIALIZED_CHARS + " characters" };
+    return {
+      error: `artifact_state_too_large: stateWorkProductPath content exceeds ${MAX_STATE_SERIALIZED_CHARS} characters`,
+    };
   }
   const merged: Record<string, unknown> = {
     ...(isPlainRecord(base) ? base : { state: base }),
@@ -137,7 +160,7 @@ async function readWorkProductState(
   const serialized = JSON.stringify(merged);
   if (typeof serialized !== "string") return { error: "state must be JSON serializable" };
   if (serialized.length > MAX_STATE_SERIALIZED_CHARS) {
-    return { error: "state exceeds " + MAX_STATE_SERIALIZED_CHARS + " serialized characters" };
+    return { error: `artifact_state_too_large: state exceeds ${MAX_STATE_SERIALIZED_CHARS} serialized characters` };
   }
   return { state: merged as JudgmentAskState };
 }

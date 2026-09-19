@@ -143,7 +143,28 @@ export function workProductService(db: Db) {
         throw conflict("stale_generation", { issueId });
       }
       const row = await db.transaction(async (tx) => {
-        if (data.isPrimary) {
+        // [생략 등록 보호] isPrimary 미지정 등록은 기존 활성 대표를 강등하지 않는다.
+        //   같은 스코프(company+issue+type — 종전 강등 단위와 동일 분류)에 활성 대표가
+        //   있으면 비대표(false)로 등록하고, 없으면 종전대로 대표(true)로 등록한다
+        //   (첫 산출물 생략 호출자 호환). 명시 true/false는 종전 관찰 계약 그대로며,
+        //   생략 해석은 라우트 검증 계층의 default(true) 대신 이 서비스 계약이 담당한다.
+        let isPrimary: boolean | undefined = data.isPrimary;
+        if (isPrimary === undefined) {
+          const [existingPrimary] = await tx
+            .select({ id: issueWorkProducts.id })
+            .from(issueWorkProducts)
+            .where(
+              and(
+                eq(issueWorkProducts.companyId, companyId),
+                eq(issueWorkProducts.issueId, issueId),
+                eq(issueWorkProducts.type, data.type),
+                eq(issueWorkProducts.isPrimary, true),
+              ),
+            )
+            .limit(1);
+          isPrimary = !existingPrimary;
+        }
+        if (isPrimary) {
           await tx
             .update(issueWorkProducts)
             .set({ isPrimary: false, updatedAt: new Date() })
@@ -159,6 +180,7 @@ export function workProductService(db: Db) {
           .insert(issueWorkProducts)
           .values({
             ...data,
+            isPrimary,
             companyId,
             issueId,
           })

@@ -217,6 +217,35 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     expect(crossCompany.status).toBe(403);
   });
 
+  // [PR1 입력 검증] 라우트 진입에서 형식 오류를 422로 차단한다(500 금지).
+  //   감독 루프가 회복 불가 오류로 오인하지 않게 하기 위함. 서비스 throw는 직접 호출자
+  //   방어용으로 유지된다.
+  it("routes: POST rejects non-string symptoms with 422 instead of a 500", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "board", source: "board_key", companyId, companyIds: [companyId], isInstanceAdmin: false,
+        actorId: "board-user", agentId: null,
+      };
+      next();
+    });
+    app.use("/api", knowledgePatternsRoutes(db));
+    app.use(errorHandler);
+
+    const bad = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({
+        kind: "failure_mode",
+        title: "형식 오류 카드",
+        summary: "symptoms가 문자열이 아니면 라우트 진입에서 422로 거절된다.",
+        symptoms: { list: ["런 running 유지"] },
+        evidence: [],
+        source: "operator",
+      });
+    expect(bad.status).toBe(422);
+  });
+
   // [P1] 자동 초안 라우팅: 에이전트 키는 draft 미노출, 승인은 보드 전용(403/404 매핑 포함).
   it("routes: drafts visible to board only; approve is board-only and maps missing drafts to 404", async () => {
     const svc = knowledgePatternsService(db);
