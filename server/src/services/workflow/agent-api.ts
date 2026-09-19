@@ -45,7 +45,9 @@ type WorkflowPreviewUrlRegister = {
   readonly marker?: string;
   readonly topic?: string;
   readonly summary?: string | null;
-  readonly isPrimary: boolean;
+  // [생략 등록 보호] 스키마 default 제거에 따라 생략(undecided) 상태를 그대로 전달한다.
+  //   생략 시 대표 유지/첫 등록 대표 해석은 createForIssue 가 수행한다.
+  readonly isPrimary?: boolean;
 };
 
 type WorkflowLocalArtifactRegister = {
@@ -53,7 +55,8 @@ type WorkflowLocalArtifactRegister = {
   readonly title?: string;
   readonly type: "artifact" | "document";
   readonly summary?: string | null;
-  readonly isPrimary: boolean;
+  // preview_url 과 동일 — 생략 해석은 createForIssue 가 수행한다.
+  readonly isPrimary?: boolean;
 };
 
 function isPreviewUrlRegister(data: WorkflowArtifactRegister): data is WorkflowPreviewUrlRegister {

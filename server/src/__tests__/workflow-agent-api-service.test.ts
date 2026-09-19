@@ -30,6 +30,7 @@ import { clearWorkflowAgentApiTestDb } from "./helpers/workflow-agent-api-cleanu
 import { errorHandler } from "../middleware/index.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { completeWorkflowIssue, registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
+import { workProductService } from "../services/work-products.js";
 import { hasWorkflowValidationCompletionLedger } from "../services/workflow/validation-verdict-ledger.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -551,6 +552,120 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       contentMarker: "260707-llm-document-search",
       deliveryReadback: { required: true, source: "workflow_preview_url" },
     });
+  });
+
+  // [PR1 생략 등록 보호] isPrimary 생략 등록은 기존 활성 대표를 강등하지 않는다.
+  //   사고(런 56eb185e): build 스텝이 index.html 등록 후 og-image.png를 생략 등록 →
+  //   zod default(true) + 신규 true 강등 로직이 대표를 이미지로 교체.
+  it("omitted isPrimary keeps the existing active primary and the first omitted registration stays primary", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-omitted-"));
+    tempDirs.add(dir);
+    const htmlPath = path.join(dir, "index.html");
+    const imagePath = path.join(dir, "og-image.png");
+    await writeFile(htmlPath, "<html></html>", "utf8");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x01, 0xff]));
+
+    // 대표가 없는 첫 생략 등록은 종전대로 대표가 된다(단일 산출물 생략 호출자 호환).
+    const first = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: htmlPath, type: "artifact" },
+    });
+    expect(first.isPrimary).toBe(true);
+
+    // 같은 스코프(company+issue+type)에 활성 대표가 있으면 생략 등록은 비대표로 들어가고
+    // 기존 대표는 불변이다.
+    const second = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: imagePath, type: "artifact" },
+    });
+    expect(second.isPrimary).toBe(false);
+    const [primaryAfter] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, first.id));
+    expect(primaryAfter.isPrimary).toBe(true);
+  });
+
+  it("explicit isPrimary:true still replaces the existing primary", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-replace-"));
+    tempDirs.add(dir);
+    const firstPath = path.join(dir, "first.md");
+    const secondPath = path.join(dir, "second.md");
+    await writeFile(firstPath, "first", "utf8");
+    await writeFile(secondPath, "second", "utf8");
+
+    const first = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: firstPath, type: "document" },
+    });
+    expect(first.isPrimary).toBe(true);
+
+    const second = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: secondPath, type: "document", isPrimary: true },
+    });
+    expect(second.isPrimary).toBe(true);
+    const [firstAfter] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, first.id));
+    expect(firstAfter.isPrimary).toBe(false);
+  });
+
+  it("explicit isPrimary:false callers keep their observation contract (no demotion, non-primary insert)", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-explicit-false-"));
+    tempDirs.add(dir);
+    const primaryPath = path.join(dir, "primary.md");
+    const sidePath = path.join(dir, "side.md");
+    await writeFile(primaryPath, "primary", "utf8");
+    await writeFile(sidePath, "side", "utf8");
+
+    const primary = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: primaryPath, type: "document" },
+    });
+
+    // 내부 등록 경로(exact-artifact-registration 등)와 동일한 명시 false 계약 — 워크플로우 초크포인트 경유.
+    const side = await registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: sidePath, type: "document", isPrimary: false },
+    });
+    expect(side.isPrimary).toBe(false);
+    const [primaryAfter] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, primary.id));
+    expect(primaryAfter.isPrimary).toBe(true);
+
+    // createForIssue 직접 호출자(plan-qa-work-product 등)의 명시 false도 동일 계약.
+    const planQaPath = path.join(dir, "plan-qa.md");
+    await writeFile(planQaPath, "plan-qa projection", "utf8");
+    const direct = await workProductService(db).createForIssue(issue.id, issue.companyId, {
+      projectId: null,
+      executionWorkspaceId: null,
+      runtimeServiceId: null,
+      type: "document",
+      provider: "local_file",
+      externalId: planQaPath,
+      title: "PLAN-QA projection",
+      url: null,
+      status: "active",
+      reviewState: "none",
+      isPrimary: false,
+      healthStatus: "unknown",
+      summary: null,
+      metadata: { path: planQaPath },
+      createdByRunId: null,
+    });
+    expect(direct?.isPrimary).toBe(false);
+    const [primaryAfterDirect] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, primary.id));
+    expect(primaryAfterDirect.isPrimary).toBe(true);
   });
 
   it("rejects artifact paths outside the mission workProduct directory", async () => {

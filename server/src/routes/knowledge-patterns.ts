@@ -7,11 +7,37 @@
 
 import { Router } from "express";
 import { and, eq, sql } from "drizzle-orm";
+import { z } from "zod";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { badRequest, notFound } from "../errors.js";
+import { validate } from "../middleware/index.js";
+
+// [입력 검증] 라우트 진입 차단 1차 — 형식 오류(비문자열/초과 길이/잘못된 열거값)는
+//   500 이 아니라 422 로 거절해 감독 루프가 회복 불가 오류로 오인하지 않게 한다.
+//   제한값은 services/knowledge-patterns.ts 의 상수(TITLE_MAX=200, SUMMARY_MAX=1200,
+//   TEXT_MAX=2000, TAGS_MAX=8, EVIDENCE_MAX=10 및 열거값)와 동일하며, 서비스 throw 는
+//   직접 호출자 방어용으로 유지된다.
+const knowledgePatternEvidenceEntrySchema = z.object({
+  type: z.enum(["mission", "workflow_run", "issue", "transition_event", "pr", "heartbeat_run"]),
+  id: z.string().trim().min(1),
+  note: z.string().optional(),
+});
+
+const createKnowledgePatternSchema = z.object({
+  kind: z.enum(["failure_mode", "success_recipe", "constraint"]),
+  title: z.string().trim().min(1).max(200),
+  summary: z.string().trim().min(1).max(1200),
+  evidence: z.array(knowledgePatternEvidenceEntrySchema).max(10).optional(),
+  symptoms: z.string().trim().max(2000).optional().nullable(),
+  rootCause: z.string().trim().max(2000).optional().nullable(),
+  whatWorked: z.string().trim().max(2000).optional().nullable(),
+  scopeTags: z.array(z.string()).max(8).optional(),
+  source: z.enum(["mission_owner_compile", "agent_candidate", "operator", "auto_rework_draft"]).optional(),
+  supersedeId: z.string().trim().min(1).optional(),
+});
 
 export function knowledgePatternsRoutes(db: Db) {
   const router = Router();
@@ -39,7 +65,7 @@ export function knowledgePatternsRoutes(db: Db) {
   });
 
   // POST /api/companies/:companyId/knowledge-patterns
-  router.post("/companies/:companyId/knowledge-patterns", async (req, res) => {
+  router.post("/companies/:companyId/knowledge-patterns", validate(createKnowledgePatternSchema, 422), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const actor = req.actor;

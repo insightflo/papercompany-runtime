@@ -7,7 +7,10 @@ const workflowLocalArtifactRegisterSchema = z.object({
   title: z.string().trim().min(1).optional(),
   type: workflowLocalArtifactTypeSchema.optional().default("artifact"),
   summary: z.string().trim().optional().nullable(),
-  isPrimary: z.boolean().optional().default(true),
+  // [생략 등록 보호] default(true) 제거 — isPrimary 생략의 해석(기존 활성 대표 존재 시
+  //   비대표, 없으면 대표)은 등록 서비스 계층(createForIssue)이 수행한다. 명시 true/false는
+  //   종전 관찰 계약 그대로다.
+  isPrimary: z.boolean().optional(),
 });
 
 const workflowPreviewUrlRegisterSchema = z.object({
@@ -20,7 +23,8 @@ const workflowPreviewUrlRegisterSchema = z.object({
   marker: z.string().trim().min(1).optional(),
   topic: z.string().trim().min(1).optional(),
   summary: z.string().trim().optional().nullable(),
-  isPrimary: z.boolean().optional().default(true),
+  // [생략 등록 보호] local artifact 와 동일 — 생략 해석은 등록 서비스 계층 몫.
+  isPrimary: z.boolean().optional(),
 });
 
 export const workflowArtifactRegisterSchema = z.union([

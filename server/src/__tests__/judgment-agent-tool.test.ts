@@ -343,6 +343,53 @@ describe("judgment stateWorkProductPath (workflow step context only)", () => {
     const sentState = provider.lastInput?.state as Record<string, unknown>;
     expect(sentState.document).toBe("검토 대상 문서");
   });
+
+  // [PR1 판단 로더 강화] 바이너리 대표 산출물은 직렬화 전에 식별 가능한 코드로 즉시 실패한다.
+  //   사고(런 56eb185e): og-image.png를 utf8로 읽어 mojibake 직렬화 후 "state exceeds ..."로
+  //   실패해 원인 구분이 늦었다(5분52초 회복).
+  it("바이너리 산출물은 artifact_type_mismatch로 즉시 실패하고 provider를 호출하지 않는다", async () => {
+    const { writeFile, mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "judgment-wp-bin-"));
+    const wp = join(dir, "og-image.png");
+    await writeFile(wp, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x01, 0xff]));
+
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: wp, questions: questions() },
+      createJudgmentService(db, { provider }),
+      randomUUID(),
+      { agentId: null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "s-bin" },
+    );
+    expect(result.status).toBe(422);
+    const message = String(result.body.error);
+    expect(message).toContain("artifact_type_mismatch");
+    expect(message).toContain(wp);
+    expect(provider.calls).toBe(0);
+  });
+
+  it("초대형 텍스트는 직렬화 전 예산 검사로 artifact_state_too_large 실패한다", async () => {
+    const { writeFile, mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "judgment-wp-big-"));
+    const wp = join(dir, "big.txt");
+    await writeFile(wp, "가".repeat(120_001), "utf8");
+
+    const provider = fakeProvider(okResult);
+    const result = await execute(
+      { stateWorkProductPath: wp, questions: questions() },
+      createJudgmentService(db, { provider }),
+      randomUUID(),
+      { agentId: null, workflowRunId: randomUUID(), stepRunId: randomUUID(), stepId: "s-big" },
+    );
+    expect(result.status).toBe(422);
+    const message = String(result.body.error);
+    expect(message).toContain("artifact_state_too_large");
+    expect(message).toContain("120000");
+    expect(provider.calls).toBe(0);
+  });
 });
 
   it("mode:'observe'는 judgment 실패/차단/비활성도 200으로 마감해 워크플로우 런을 보호한다", async () => {
