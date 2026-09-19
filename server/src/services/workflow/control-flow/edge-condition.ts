@@ -57,6 +57,19 @@ export interface PredFacts {
    * when OFF or unset, defaults to true (legacy behavior — terminal = ready).
    */
   dispatchReady?: boolean;
+  /**
+   * [B2 좁은 회복 채널] failed 선행의 연결 실행 이슈 기반 회복 채널 상태 — v1 대기 규칙이
+   * failed 선행에 적용될 때만 소비된다.
+   *  - "open":   선행 step-run 이 실행 이슈를 가지며 그 이슈가 비종결(todo/in_progress/blocked/
+   *              in_review 등)이다. 실패 재시도/복구가 이슈를 통해 진행될 수 있으므로 v1 규칙대로
+   *              waiting 으로 분류한다.
+   *  - "closed": 이슈가 없거나(컨트롤 노드·물화 오류 등 엔진 측 실패) 이슈가 종결(done/cancelled)
+   *              이다. 회복 채널이 없으므로 v1 대기 규칙을 적용하지 않고 기존 하드 실패 분류를
+   *              유지한다(계단식 skip + run 종결 보존).
+   * 미제공(undefined) 시 fail-closed 로 open 취급한다 — 이슈 상태를 사실망에 공급하지 않는
+   * 호출자의 기존 v1 대기 동작을 보존한다(섣부른 수렴 금지; 장기 수렴은 reconciler 백업).
+   */
+  failureRecoveryChannel?: "open" | "closed";
 }
 
 /**
@@ -151,6 +164,24 @@ export interface StepActivation {
 }
 
 /**
+ * [목적] failed 선행의 회복 채널 판정(순수 함수) — v1 대기 규칙을 좁게 적용하기 위한 최소 사실.
+ * [규칙] 실행 이슈가 없으면 closed(회복 채널 없음). 이슈가 종결(done/cancelled)이면 closed.
+ *   이슈가 있고 비종결이면 open. 이슈 상태를 알 수 없으면(맵 미공급) fail-closed 로 open 취급해
+ *   섣부른 run 종결을 막는다(장기 수렴은 reconciler 가 담당).
+ */
+export function resolveFailureRecoveryChannel(input: {
+  issueId: string | null | undefined;
+  issueStatus: string | undefined;
+}): "open" | "closed" {
+  if (!input.issueId) return "closed";
+  if (input.issueStatus === undefined) return "open";
+  return TERMINAL_RECOVERY_ISSUE_STATUSES.has(input.issueStatus) ? "closed" : "open";
+}
+
+/** 종결 이슈 상태 — 이 상태의 연결 이슈는 회복 채널이 닫혀 있다. */
+export const TERMINAL_RECOVERY_ISSUE_STATUSES: ReadonlySet<string> = new Set(["done", "cancelled"]);
+
+/**
  * [목적] 대상 step 의 활성화 상태를 판정. 호출자는 step 이 현재 "pending + issueId==null"(아직 발화 전) 임을
  *   별도로 보장한다 — 이 함수는 순수하게 edge 수학만 다룬다.
  * [입력] step, predsByStepId(모든 선행 stepId → PredFacts; 없으면 비-terminal 로 취급).
@@ -188,10 +219,20 @@ export function classifyStepActivation(
   let hardRequiredFailed = false;
   for (const edge of edges) {
     const pred = predsByStepId.get(edge.stepId);
-    if (!pred || !TERMINAL_PRED_STATUSES.has(pred.status) || pred.dispatchReady === false) {
+    if (!pred || !TERMINAL_PRED_STATUSES.has(pred.status)) {
       // 선행이 아직 terminal 아님 — 이 step 은 지금 결정할 수 없다.
       waiting = true;
       continue;
+    }
+    if (pred.dispatchReady === false) {
+      // [B2 좁은 회복 채널] v1 대기 규칙(dispatch_ready_at 미충족)은 failed 선행에 한해,
+      //   그 선행이 열린 회복 채널(연결 비종결 실행 이슈)을 가질 때만 적용한다. 이슈 없는/종결
+      //   이슈 실패는 회복 채널이 없으므로 즉시 하드 실패 분류로 수렴한다(계단식 skip + run 종결).
+      //   completed/skipped 선행과 채널 미제공 사실망은 기존 v1 대기를 유지한다(fail-closed).
+      if (pred.status !== "failed" || pred.failureRecoveryChannel !== "closed") {
+        waiting = true;
+        continue;
+      }
     }
     if (edgeHolds(edge.when, pred)) {
       satisfied = true;

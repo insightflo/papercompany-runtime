@@ -74,6 +74,8 @@ describeEP("workflow frozen reconcilers (captured graph governs convergence and 
     executionMode?: string | null;
     pendingStepId: string;
     planCompleted?: boolean;
+    /** 연결 실행 이슈 상태. undefined=todo(기존 기본), null=이슈 없는 pending 스텝. */
+    linkedIssueStatus?: "todo" | "blocked" | "cancelled" | null;
   }) {
     const seeded = await seedCompanyWithMission(fixture.sql, "RC" + randomUUID().slice(0, 3));
     const [liveAgent] = await db.insert(agents).values({ id: randomUUID(), companyId: seeded.companyId, name: "Live Agent", role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} }).returning();
@@ -87,22 +89,25 @@ describeEP("workflow frozen reconcilers (captured graph governs convergence and 
     const run = await createFrozenRun(db, { workflowId, companyId: seeded.companyId, missionId: seeded.missionId });
     await markRunStatus(db, run.id, "running");
     await db.update(workflowRuns).set({ startedAt: new Date(Date.now() - 6 * 60_000) }).where(eq(workflowRuns.id, run.id));
-    const [issue] = await db.insert(issues).values({
-      companyId: seeded.companyId,
-      missionId: seeded.missionId,
-      identifier: "RC-" + randomUUID().slice(0, 8),
-      title: "Wake target",
-      status: "todo",
-      originKind: "workflow_execution",
-      originRunId: run.id,
-    }).returning();
+    const issueStatus = input.linkedIssueStatus === undefined ? "todo" : input.linkedIssueStatus;
+    const [issue] = issueStatus
+      ? await db.insert(issues).values({
+        companyId: seeded.companyId,
+        missionId: seeded.missionId,
+        identifier: "RC-" + randomUUID().slice(0, 8),
+        title: "Wake target",
+        status: issueStatus,
+        originKind: "workflow_execution",
+        originRunId: run.id,
+      }).returning()
+      : [];
     await db.insert(workflowStepRuns).values([
       input.planCompleted
         ? { workflowRunId: run.id, stepId: "plan", status: "completed", completedAt: new Date(), iterationIndex: 0 }
         : { workflowRunId: run.id, stepId: "collect", status: "failed", completedAt: new Date(), iterationIndex: 0 },
-      { workflowRunId: run.id, stepId: input.pendingStepId, status: "pending", issueId: issue!.id, iterationIndex: 0 },
+      { workflowRunId: run.id, stepId: input.pendingStepId, status: "pending", ...(issue ? { issueId: issue!.id } : {}), iterationIndex: 0 },
     ]);
-    return { seeded, liveAgentId: liveAgent!.id, workflowId, runId: run.id, issueId: issue!.id };
+    return { seeded, liveAgentId: liveAgent!.id, workflowId, runId: run.id, issueId: issue?.id ?? null };
   }
 
   const wakesForRun = (runId: string) =>
@@ -115,6 +120,8 @@ describeEP("workflow frozen reconcilers (captured graph governs convergence and 
         { id: "synthesize", name: "Synthesize", agentId: capturedAgentId, dependencies: ["collect"] },
       ],
       pendingStepId: "synthesize",
+      // [B3 회귀] 이슈 없는 도달 불가 스텝은 기존 deadlock 처리를 유지한다(수렴 보존).
+      linkedIssueStatus: null,
     });
     await editLiveDefinition(db, f.workflowId, {
       stepsJson: [
@@ -132,8 +139,6 @@ describeEP("workflow frozen reconcilers (captured graph governs convergence and 
     const synthesize = steps.find((step) => step.stepId === "synthesize")!;
     expect(synthesize.status).toBe("skipped");
     expect((synthesize.metadata as { controlFlowSkipped?: boolean }).controlFlowSkipped).toBe(true);
-    const [issueRow] = await db.select().from(issues).where(eq(issues.id, f.issueId));
-    expect(issueRow?.status).toBe("blocked");
     const stepEvents = await db.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.workflowRunId, f.runId), eq(workflowTransitionEvents.workflowStepRunId, synthesize.id)));
     expect(stepEvents).toHaveLength(1);
@@ -142,6 +147,64 @@ describeEP("workflow frozen reconcilers (captured graph governs convergence and 
       reasonCode: "workflow_deadlock_reconciler",
       payload: { source: "workflow_deadlock_reconciler", priorStatus: "pending", transitionVersion: 1 },
     }));
+    expect(wakesForRun(f.runId)).toHaveLength(0);
+  });
+
+  it.each(["todo", "blocked"] as const)("deadlock reconciler holds a pending step whose linked issue is non-terminal (%s) and reports the waiting reason", async (issueStatus) => {
+    const f = await seedFrozenReconcilerFixture({
+      stepsJson: ({ capturedAgentId }) => [
+        { id: "collect", name: "Collect", agentId: capturedAgentId, dependencies: [] },
+        { id: "synthesize", name: "Synthesize", agentId: capturedAgentId, dependencies: ["collect"] },
+      ],
+      pendingStepId: "synthesize",
+      linkedIssueStatus: issueStatus,
+    });
+
+    const result = await reconcileDeadlockedWorkflowRuns(db, 0);
+
+    // [B3] 회복 채널이 열린(비종결) 실행 이슈를 가진 pending 스텝은 최종 skip 으로 확정하지 않고
+    //   대기 사유를 구조화 결과로 남긴다.
+    expect(result).toEqual([expect.objectContaining({
+      runId: f.runId,
+      action: "skipped",
+      reason: expect.stringContaining("non-terminal"),
+    })]);
+    const [runRow] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
+    expect(runRow?.status).toBe("running");
+    expect(runRow?.completedAt).toBeNull();
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, f.runId));
+    const synthesize = steps.find((step) => step.stepId === "synthesize")!;
+    expect(synthesize.status).toBe("pending");
+    const stepEvents = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, f.runId), eq(workflowTransitionEvents.workflowStepRunId, synthesize.id)));
+    expect(stepEvents).toHaveLength(0);
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, f.issueId!));
+    expect(issueRow?.status).toBe(issueStatus);
+    expect(wakesForRun(f.runId)).toHaveLength(0);
+  });
+
+  it("deadlock reconciler still converges when the linked issue is terminal (cancelled) — existing handling preserved", async () => {
+    const f = await seedFrozenReconcilerFixture({
+      stepsJson: ({ capturedAgentId }) => [
+        { id: "collect", name: "Collect", agentId: capturedAgentId, dependencies: [] },
+        { id: "synthesize", name: "Synthesize", agentId: capturedAgentId, dependencies: ["collect"] },
+      ],
+      pendingStepId: "synthesize",
+      linkedIssueStatus: "cancelled",
+    });
+
+    const result = await reconcileDeadlockedWorkflowRuns(db, 0);
+
+    expect(result).toEqual([expect.objectContaining({ runId: f.runId, action: "recovered" })]);
+    const [runRow] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
+    expect(runRow?.status).toBe("failed");
+    const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, f.runId));
+    const synthesize = steps.find((step) => step.stepId === "synthesize")!;
+    expect(synthesize.status).toBe("skipped");
+    expect((synthesize.metadata as { controlFlowSkipped?: boolean }).controlFlowSkipped).toBe(true);
+    // 회복 채널이 닫힌 이슈는 건드리지 않는다(재차 blocked 처리/코멘트 없음).
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, f.issueId!));
+    expect(issueRow?.status).toBe("cancelled");
     expect(wakesForRun(f.runId)).toHaveLength(0);
   });
 

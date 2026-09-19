@@ -4,6 +4,7 @@ import {
   classifyStepActivation,
   findSkippableSteps,
   resolveEdges,
+  resolveFailureRecoveryChannel,
   workflowHasConditionalEdges,
   type EdgeBearingStep,
   type PredFacts,
@@ -21,7 +22,7 @@ import {
  */
 
 function preds(
-  input: Record<string, { status: PredStatus; isQaGate?: boolean; verdict?: "pass" | "request_changes" | null; verdictChecked?: boolean }>,
+  input: Record<string, { status: PredStatus; isQaGate?: boolean; verdict?: "pass" | "request_changes" | null; verdictChecked?: boolean; dispatchReady?: boolean; failureRecoveryChannel?: "open" | "closed" }>,
 ): Map<string, PredFacts> {
   const map = new Map<string, PredFacts>();
   for (const [id, value] of Object.entries(input)) {
@@ -30,6 +31,10 @@ function preds(
       isQaGate: value.isQaGate ?? false,
       verdict: value.verdict ?? null,
       verdictChecked: value.verdictChecked,
+      // dispatchReady: v1EnforcementEnabled 사실망 전용 필드. 미제공(legacy)은 생략된다.
+      ...(value.dispatchReady !== undefined ? { dispatchReady: value.dispatchReady } : {}),
+      // failureRecoveryChannel: failed 선행의 연결 이슈 기반 회복 채널 사실. 미제공은 fail-closed(open 취급).
+      ...(value.failureRecoveryChannel !== undefined ? { failureRecoveryChannel: value.failureRecoveryChannel } : {}),
     });
   }
   return map;
@@ -129,6 +134,64 @@ describe("classifyStepActivation — conditional edge (IF)", () => {
     expect(classifyStepActivation(s, preds({ qa: { status: "failed", isQaGate: true, verdictChecked: true } })).runnable).toBe(false);
     // 대조: P2(맵 미제공, verdictChecked 생략)는 기존 fallback 유지 → 여전히 rework 발화.
     expect(classifyStepActivation(s, preds({ qa: { status: "failed", isQaGate: true } })).runnable).toBe(true);
+  });
+});
+
+describe("classifyStepActivation — v1 사실망 (dispatchReady)", () => {
+  // [B2 사실망 통일 계약] v1EnforcementEnabled 가 켜지면 findRunnableSteps(launch)/skip 전파/revive 가
+  //   모두 동일한 dispatch_ready_at 사실을 소비한다. launch 가 대기하는 상태를 skip/revive 도 대기한다.
+  it("terminal 선행이라도 dispatchReady:false 면 waiting — runnable 도 skippable 도 아니다", () => {
+    const s = step("c", { dependencies: ["a"] });
+    expect(classifyStepActivation(s, preds({ a: { status: "completed", dispatchReady: false } })))
+      .toMatchObject({ runnable: false, waiting: true, skippable: false });
+  });
+  it("failed 선행 + dispatchReady:false → waiting (v1 에선 failure-cascade skip 확정 금지)", () => {
+    const s = step("c", { dependencies: ["a"] });
+    const act = classifyStepActivation(s, preds({ a: { status: "failed", dispatchReady: false } }));
+    expect(act.runnable).toBe(false);
+    expect(act.waiting).toBe(true);
+    expect(act.skippable).toBe(false);
+  });
+  it("dispatchReady 미제공(legacy 사실망)은 기존 동작 유지 — failed 선행 → skippable", () => {
+    const s = step("c", { dependencies: ["a"] });
+    const act = classifyStepActivation(s, preds({ a: { status: "failed" } }));
+    expect(act.runnable).toBe(false);
+    expect(act.waiting).toBe(false);
+    expect(act.skippable).toBe(true);
+  });
+
+  // [B2 좁은 회복 채널] v1 대기 규칙은 failed 선행이 연결 비종결 이슈(열린 회복 채널)를 보유할 때만 적용.
+  //   이슈 없는 엔진 측 실패(컨트롤 노드·물화 오류)나 종결 이슈 실패는 즉시 하드 실패 분류로 수렴한다.
+  it("failed + dispatchReady:false + closed 채널(이슈 없음/종결 이슈) → 하드 실패 분류(skippable)", () => {
+    const s = step("c", { dependencies: ["a"] });
+    const act = classifyStepActivation(s, preds({ a: { status: "failed", dispatchReady: false, failureRecoveryChannel: "closed" } }));
+    expect(act.runnable).toBe(false);
+    expect(act.waiting).toBe(false);
+    expect(act.skippable).toBe(true);
+  });
+
+  it("failed + dispatchReady:false + open 채널(비종결 이슈 보유) → waiting 유지", () => {
+    const s = step("c", { dependencies: ["a"] });
+    const act = classifyStepActivation(s, preds({ a: { status: "failed", dispatchReady: false, failureRecoveryChannel: "open" } }));
+    expect(act.runnable).toBe(false);
+    expect(act.waiting).toBe(true);
+    expect(act.skippable).toBe(false);
+  });
+
+  it("failed + dispatchReady:false + 채널 미제공 → fail-closed 로 open 취급(기존 대기 유지)", () => {
+    const s = step("c", { dependencies: ["a"] });
+    const act = classifyStepActivation(s, preds({ a: { status: "failed", dispatchReady: false } }));
+    expect(act.waiting).toBe(true);
+    expect(act.skippable).toBe(false);
+  });
+
+  it("resolveFailureRecoveryChannel — 이슈 없음/종결 이슈 closed, 비종결·미공급 open", () => {
+    expect(resolveFailureRecoveryChannel({ issueId: null, issueStatus: undefined })).toBe("closed");
+    expect(resolveFailureRecoveryChannel({ issueId: "i1", issueStatus: "done" })).toBe("closed");
+    expect(resolveFailureRecoveryChannel({ issueId: "i1", issueStatus: "cancelled" })).toBe("closed");
+    expect(resolveFailureRecoveryChannel({ issueId: "i1", issueStatus: "todo" })).toBe("open");
+    expect(resolveFailureRecoveryChannel({ issueId: "i1", issueStatus: "blocked" })).toBe("open");
+    expect(resolveFailureRecoveryChannel({ issueId: "i1", issueStatus: undefined })).toBe("open");
   });
 });
 
