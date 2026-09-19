@@ -519,19 +519,34 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       ...(missionRuleContext.ruleRefs.length > 0 ? { ruleRefs: missionRuleContext.ruleRefs } : {}),
     });
     const planSvc = missionPlanArtifactService(db);
-    const activePlan = await planSvc.getActiveMissionPlan({ companyId: mission.companyId, missionId: mission.id });
-    if (activePlan) {
-      const currentRefs = typeof activePlan.refs === "object" && activePlan.refs !== null && !Array.isArray(activePlan.refs)
-        ? activePlan.refs as Record<string, unknown>
-        : {};
-      const baseRefs = pruneStaleWorkflowExecutionUnits(currentRefs, workflowName, metadata.sourceRunId);
-      const mergedRefs = mergeMissionPlanRefs(baseRefs, refs);
-      const changed = JSON.stringify(currentRefs) !== JSON.stringify(mergedRefs);
-      if (changed) {
-        await db
-          .update(missionPlanArtifacts)
-          .set({ refs: mergedRefs, updatedAt: new Date() })
-          .where(eq(missionPlanArtifacts.id, activePlan.id));
+    // [2026-09-19 500-버그 수정] 가드는 '활성' 계획이 아니라 '임의 상태의 최신' 계획으로
+    // 판정한다. 미션 종료 처리가 계획을 completed/archived로 바꾼 뒤 같은 흐름에서
+    // 오버사이트 확보가 다시 불리면 활성 계획만 보는 가드는 재생성 경로로 빠져
+    // (mission_id, revision=1) 유니크 위반 500을 냈다. 이미 어떤 계획이든 있으면
+    // 새 초기 계획을 만들지 않는다(활성인 경우에만 refs 병합을 갱신).
+    const [latestPlan] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(and(
+        eq(missionPlanArtifacts.companyId, mission.companyId),
+        eq(missionPlanArtifacts.missionId, mission.id),
+      ))
+      .orderBy(desc(missionPlanArtifacts.revision))
+      .limit(1);
+    if (latestPlan) {
+      if (latestPlan.status === "active") {
+        const currentRefs = typeof latestPlan.refs === "object" && latestPlan.refs !== null && !Array.isArray(latestPlan.refs)
+          ? latestPlan.refs as Record<string, unknown>
+          : {};
+        const baseRefs = pruneStaleWorkflowExecutionUnits(currentRefs, workflowName, metadata.sourceRunId);
+        const mergedRefs = mergeMissionPlanRefs(baseRefs, refs);
+        const changed = JSON.stringify(currentRefs) !== JSON.stringify(mergedRefs);
+        if (changed) {
+          await db
+            .update(missionPlanArtifacts)
+            .set({ refs: mergedRefs, updatedAt: new Date() })
+            .where(eq(missionPlanArtifacts.id, latestPlan.id));
+        }
       }
       return;
     }
