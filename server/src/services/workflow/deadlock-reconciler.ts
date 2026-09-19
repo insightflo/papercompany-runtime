@@ -13,6 +13,9 @@ import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
 import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { logger } from "../../middleware/logger.js";
+// [run-terminal-boundary v1] deadlock 수렴의 경계 우회 + 커밋 후 부작용 즉시 실행(플래그 게이팅은 호출자 책임).
+import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
+import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 
 const DEADLOCK_COMMENT_MARKER = "control-plane-deadlock";
 
@@ -27,6 +30,8 @@ export async function reconcileDeadlockedWorkflowRuns(
   settlingMinutes: number = 5,
 ): Promise<ReconciliationResult[]> {
   const settlingCutoff = new Date(Date.now() - settlingMinutes * 60 * 1000);
+  // [run-terminal-boundary v1] 플래그는 pass 당 1회 읽는다 — legacy 경로의 추가 I/O 를 이 한 번으로 제한한다.
+  const boundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
   const candidates = await db
     .select()
     .from(workflowRuns)
@@ -170,12 +175,52 @@ export async function reconcileDeadlockedWorkflowRuns(
       //   run failed + pending 잔존 상태(되돌림 역발생)를 만들지 않는다. 모두 수렴했을 때만 기존과
       //   동일하게 최종 실패 처리와 회복 채널 종료를 일관되게 수행한다.
       if (heldWaitingSteps.length === 0) {
-        await db.update(workflowRuns).set({ status: "failed", completedAt: now }).where(eq(workflowRuns.id, run.id));
-        results.push({
-          runId: run.id,
-          action: "recovered",
-          reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
-        });
+        if (boundaryEnabled) {
+          // [run-terminal-boundary v1] 최종 수렴을 경계로 우회한다 — CAS/원인 스탬프/회복 게이트는
+          //   코어 계약(run-terminal-boundary.ts)이 소유한다. 채널이 열리면 유예되어 run 은 비종말로 남는다.
+          const boundary = await finalizeRunTerminal(db, {
+            runId: run.id,
+            companyId: run.companyId,
+            expectedAuthorityVersion: run.dispatchAuthorityVersion,
+            decision: "failed",
+            cause: {
+              policy: "recovery_deadline_hard",
+              discovery: "deadlock_detection",
+              origin: "deadlock_reconciler",
+              reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
+            },
+            gatePolicy: "defer_on_open_recovery",
+            now,
+            stepRuns: runSteps,
+          });
+          if (boundary.kind === "finalized") {
+            let effectNote = "";
+            try {
+              await executeTerminalEffectIntents(db, boundary.decisionId);
+            } catch (error) {
+              // 부작용 실행 실패는 관측 사항 — pending 인텐트는 periodic sweep 이 재처리한다(계약).
+              effectNote = ` (effect execution deferred to sweep: ${error instanceof Error ? error.message : String(error)})`;
+            }
+            results.push({
+              runId: run.id,
+              action: "recovered",
+              reason: `Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait (terminal decision ${boundary.decisionId})${effectNote}`,
+            });
+          } else if (boundary.kind === "deferred") {
+            results.push({ runId: run.id, action: "skipped", reason: "Deadlock finalization deferred: recovery channel open/unknown; waiting for recovery" });
+          } else if (boundary.kind === "stale_authority") {
+            results.push({ runId: run.id, action: "skipped", reason: "Deadlock finalization discarded: run authority superseded" });
+          } else {
+            results.push({ runId: run.id, action: "skipped", reason: "Deadlock finalization skipped: run already terminal" });
+          }
+        } else {
+          await db.update(workflowRuns).set({ status: "failed", completedAt: now }).where(eq(workflowRuns.id, run.id));
+          results.push({
+            runId: run.id,
+            action: "recovered",
+            reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
+          });
+        }
       } else {
         const heldIssueStatuses = [...new Set(heldWaitingSteps.map((step) =>
           step.issueId ? issueStatusById.get(step.issueId) ?? "missing" : "no-issue",

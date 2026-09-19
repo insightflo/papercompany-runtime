@@ -68,6 +68,9 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { cancelResolvedQaSourceDefectOwnerCards } from "./qa-source-defect-owner-card.js";
 import { closeResolvedWorkflowUnblocks } from "./resolved-unblock-closeout.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
+// [run-terminal-boundary v1] plain 종결의 경계 우회 + 커밋 후 부작용 즉시 실행(호출자 게이팅).
+import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
+import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from "./control-flow/structural-gate-rework.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
@@ -3336,8 +3339,17 @@ async function finalizeWorkflowRunState(
   db: Db,
   context: WorkflowExecutionContext,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
+  boundaryEnabled: boolean,
 ): Promise<typeof workflowRuns.$inferSelect> {
-  const hasFailedStep = stepRuns.some((stepRun) => stepRun.status === "failed");
+  // [run-terminal-boundary v1] failureCascadeSkipped 는 reconciler cascade 로 죽은 관측이다 —
+  //   완료 스텝이 하나도 없는 런이 completed 로 재수렴하는 것을 항상 차단한다(플래그 무관).
+  //   완료 스텝이 하나라도 있으면 실제 산출이 존재하므로 기존 수렴을 유지한다
+  //   (workflow-failure-cascade-skip-sticky 계약 — sentinel 스텝은 종말 정산을 방해하지 않는다).
+  //   아래 cancelled 분기 우선순위는 그대로 유지된다.
+  const hasCascadeKill = stepRuns.some((stepRun) => normalizeRecord(stepRun.metadata).failureCascadeSkipped === true);
+  const hasCompletedStep = stepRuns.some((stepRun) => stepRun.status === "completed");
+  const hasFailedStep = stepRuns.some((stepRun) => stepRun.status === "failed")
+    || (hasCascadeKill && !hasCompletedStep);
   const hasActiveStep = stepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
   const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
   const executableStepRuns = dynamicLaunchStepIds
@@ -3361,9 +3373,12 @@ async function finalizeWorkflowRunState(
     completedAt: nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled" ? new Date() : null,
   };
 
+  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
   // [descope D5][r9 §1] 링크 자식 최종 변이는 유한 writer(잠금 하 P→I→S→C + 대상 재평가)로만 — 0행/경합은 실패닫힌 관찰(내구 행 재적재).
   const gate = await resolveWorkflowRunFinalizationGate(db, { runId: context.run.id, companyId: context.run.companyId, nextStatus });
   let finalRun: typeof workflowRuns.$inferSelect;
+  // 경계 분기가 최종화를 소유하면 legacy 미션 전역 stop 은 하지 않는다(스코프 대상만 효과로 실행).
+  let boundaryHandledFinalization = false;
   if (gate.kind === "refused-invalid") {
     await logWorkflowRunFinalizationRefused(db, { companyId: context.run.companyId, runId: context.run.id, reason: gate.reason });
     finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
@@ -3382,14 +3397,50 @@ async function finalizeWorkflowRunState(
     finalRun = result.outcome === "updated"
       ? result.run
       : await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
+  } else if (boundaryEnabled && (nextStatus === "failed" || nextStatus === "completed" || nextStatus === "cancelled")) {
+    // [run-terminal-boundary v1] plain 종결을 경계로 우회한다 — CAS/원인 스탬프/스코프 정지 대상
+    //   캡처는 코어 계약(run-terminal-boundary.ts)이 소유한다. 유예(deferred)면 run 은 비종말로,
+    //   stale/이미 종결이면 기존 상태로 남고 그 외 어떤 행도 건드리지 않는다.
+    boundaryHandledFinalization = true;
+    const boundary = await finalizeRunTerminal(db, {
+      runId: context.run.id,
+      companyId: context.run.companyId,
+      expectedAuthorityVersion: context.run.dispatchAuthorityVersion,
+      decision: nextStatus,
+      cause: { policy: "outcome_convergence", discovery: "engine_recompute", origin: "dag_engine" },
+      gatePolicy: nextStatus === "failed" ? "defer_on_open_recovery" : "immediate",
+      now: new Date(),
+      stepRuns,
+      dynamicOwnerPlanCompleted: dynamicOwnerPlan && nextStatus === "completed",
+    });
+    finalRun = boundary.run;
+    if (boundary.kind === "finalized") {
+      try {
+        await executeTerminalEffectIntents(db, boundary.decisionId);
+      } catch (error) {
+        // [규칙 8] 부작용 실행 실패는 관측일 뿐 권위가 아니다 — pending 인텐트는 reconciler sweep 이 재처리한다.
+        await logActivity(db, {
+          companyId: context.run.companyId,
+          actorType: "system",
+          actorId: "dag-engine",
+          action: "workflow_run.terminal_effect_execution_failed",
+          entityType: "workflow_run",
+          entityId: context.run.id,
+          details: {
+            decisionId: boundary.decisionId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+    }
   } else {
     const [updatedRun] = await db.update(workflowRuns).set(patch)
       .where(eq(workflowRuns.id, context.run.id)).returning();
     finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
   }
-  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
   const missionId = finalRun.missionId;
-  const shouldStopMissionRuntimes = missionId !== null
+  const shouldStopMissionRuntimes = !boundaryHandledFinalization
+    && missionId !== null
     && TERMINAL_WORKFLOW_STATUSES.has(finalRun.status)
     && !(dynamicOwnerPlan && finalRun.status === "completed");
   if (shouldStopMissionRuntimes) {
@@ -4106,7 +4157,9 @@ export async function syncWorkflowRunStateWithOutcome(
     }
   }
 
-  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns);
+  // [run-terminal-boundary v1] 플래그는 sync 당 1회 읽는다(legacy 경로의 추가 I/O 를 이 한 번으로 제한).
+  const terminalBoundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
+  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled);
   // [workflow child step] 자식 run 종말 → 부모 waiting 스텝 마감 훅. 훅 실패는 sync 를 깨뜨리지 않는다
   //   (reconciler 가 회복). 훅은 자기 waiting 스텝만 마감한다(규칙 7/8).
   if (TERMINAL_WORKFLOW_STATUSES.has(updatedRun.status)) {
