@@ -421,8 +421,25 @@ export function missionPlanArtifactService(db: Db) {
         risks: input.risks ?? [],
         steps: input.steps ?? [],
       })
+      // [2026-09-19 500-버그 수정] 미션 종료 처리는 활성 계획을 completed/archived로
+      // 바꾸고, 같은 종료 흐름의 하위 경로(오버사이트 확보 등)는 "활성 계획 없음"
+      // 을 보고 초기 계획 재생성을 시도할 수 있다. (mission_id, revision=1) 유니크
+      // 제약 위반으로 전체 요청이 500이 나던 것을 멱등하게 만든다: 충돌 시 기존 1번
+      // 리비전을 그대로 반환한다.
+      .onConflictDoNothing({ target: [missionPlanArtifacts.missionId, missionPlanArtifacts.revision] })
       .returning();
-    return created;
+    if (created) return created;
+    const [existing] = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(and(
+        eq(missionPlanArtifacts.companyId, input.companyId),
+        eq(missionPlanArtifacts.missionId, input.missionId),
+        eq(missionPlanArtifacts.revision, 1),
+      ))
+      .limit(1);
+    if (existing) return existing;
+    throw notFound(`Mission plan revision 1 disappeared for mission: ${input.missionId}`);
   }
 
   async function getActiveMissionPlan(input: { companyId: string; missionId: string }): Promise<MissionPlanArtifact | null> {

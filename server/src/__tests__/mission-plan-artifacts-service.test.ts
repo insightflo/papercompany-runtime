@@ -349,6 +349,39 @@ describeEmbeddedPostgres("mission plan artifact service", () => {
     expect(active?.id).toBe(created.id);
   });
 
+  it("createInitialMissionPlan is idempotent on (mission_id, revision=1) conflicts (2026-09-19 500 regression)", async () => {
+    const { companyId, missionId } = await seedMission();
+    const svc = missionPlanArtifactService(db);
+
+    const first = await svc.createInitialMissionPlan({ companyId, missionId });
+    // 두 번째 호출은 유니크 충돌 대신 기존 1번 리비전을 그대로 반환해야 한다.
+    const second = await svc.createInitialMissionPlan({ companyId, missionId });
+    expect(second.id).toBe(first.id);
+    expect(second.revision).toBe(1);
+
+    const rows = await db
+      .select()
+      .from(missionPlanArtifacts)
+      .where(eq(missionPlanArtifacts.missionId, missionId));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("createInitialMissionPlan returns the terminal-status plan when mission cleanup already completed it", async () => {
+    // 미션 종료 흐름 재현: 활성 계획이 completed 로 바뀐 뒤 재호출되어도 500 없이 기존 행 반환.
+    const { companyId, missionId } = await seedMission();
+    const svc = missionPlanArtifactService(db);
+
+    const initial = await svc.createInitialMissionPlan({ companyId, missionId });
+    await db
+      .update(missionPlanArtifacts)
+      .set({ status: "completed", updatedAt: new Date() })
+      .where(eq(missionPlanArtifacts.id, initial.id));
+
+    const again = await svc.createInitialMissionPlan({ companyId, missionId });
+    expect(again.id).toBe(initial.id);
+    expect(again.status).toBe("completed");
+  });
+
   it("creates revisions by superseding the previous active artifact", async () => {
     const { companyId, missionId } = await seedMission();
     const svc = missionPlanArtifactService(db);
