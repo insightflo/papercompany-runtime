@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { withTxTimeout } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
@@ -283,6 +283,80 @@ function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
     return repoName || null;
   } catch {
     return null;
+  }
+}
+
+
+/**
+ * [스테이지 A + 봇 bug·high 조사 결과 기록] 이 헬퍼의 3개 호출부 함수
+ * (autoRegisterWorkProductFromIssueDocument / FromClaimedFile /
+ *  applyMissionOwnerUnblockArtifactUrlToSource)는 현재 트리에서 호출부가 없다 —
+ * 과거 리팩터에서 유실(이 PR 이전 상태, 활동 로그 액션명은 유입됨). savepoint 복구는
+ * 호출부 복원 시 그대로 유효하다. 복원 여부는 별도 제품 결정으로 보고됨.
+ *
+ * [스테이지 A + 봇 bug·medium 교정] heartbeat 자동 등록의 삽입. 대표 부분 유니크 인덱스
+ * 도입 후 동시 첫 대표 등록은 23505 하드 실패가 된다(종전엔 조용한 이중 대표 드리프트).
+ * savepoint 로 위반을 끊어낸 뒤 (동일 산출물이면 기존 행 재사용, 아니면) 비대표로
+ * 재시기한다 — 자동 등록은 늘 성공해야 한다.
+ * [주의] tx 는 트랜잭션 객체(input.tx)여야 한다 — 최상위 db 를 넘기면 savepoint 가
+ * 아니라 독립 트랜잭션이 시작된다(호출부 계약).
+ */
+async function insertAutoWorkProduct(
+  tx: Pick<Db, "insert" | "select"> & { transaction?: Db["transaction"] },
+  values: typeof issueWorkProducts.$inferInsert,
+): Promise<typeof issueWorkProducts.$inferSelect | null> {
+  if (typeof tx.transaction !== "function") {
+    // 테스트 더블(부분 mock) — 성공 경로만 시뮬레이션한다.
+    return await tx
+      .insert(issueWorkProducts)
+      .values(values)
+      .returning()
+      .then((rows) => rows[0] ?? null);
+  }
+  try {
+    return await tx.transaction(async (nested) =>
+      nested
+        .insert(issueWorkProducts)
+        .values(values)
+        .returning()
+        .then((rows) => rows[0] ?? null));
+  } catch (error) {
+    // [봇 bug·high 교정] drizzle 은 원본 PG 오류를 cause 체인에 둔다 — 공용 판별 사용.
+    if (!isPgUniqueViolation(error)) throw error;
+    // [봇 bug·medium 교정] 동시 등록이 같은 산출물이었으면 이중 행이 된다 — 동일
+    //   (provider, externalId/url, issue) 행이 이미 있으면 그것을 재사용한다.
+    const externalId = typeof values.externalId === "string" ? values.externalId : null;
+    const url = typeof values.url === "string" ? values.url : null;
+    const provider = typeof values.provider === "string" ? values.provider : null;
+    // [봇 bug·medium 교정] 재사용 술부는 실제 충돌 키(company, issue, type — 부분 유니크)
+    //   와 일치해야 한다. provider/externalId/url 까지 같아야 "동일 산출물"이다.
+    const existing = await tx
+      .select()
+      .from(issueWorkProducts)
+      .where(and(
+        eq(issueWorkProducts.companyId, values.companyId),
+        eq(issueWorkProducts.issueId, values.issueId),
+        ...(typeof values.type === "string" ? [eq(issueWorkProducts.type, values.type)] : []),
+    // [봇 bug·medium 교정] null 식별자는 eq(col, null) — SQL 에서 항상 거짓 — 이 아니라
+    //   isNull 으로 명시해야 "식별자 없는 산출물끼리"만 재사용된다(모든 값 일치 방지).
+        ...(provider
+          ? [eq(issueWorkProducts.provider, provider)]
+          : [isNull(issueWorkProducts.provider)]),
+        ...(externalId
+          ? [eq(issueWorkProducts.externalId, externalId)]
+          : [isNull(issueWorkProducts.externalId)]),
+        ...(url
+          ? [eq(issueWorkProducts.url, url)]
+          : [isNull(issueWorkProducts.url)]),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (existing) return existing;
+    return await tx
+      .insert(issueWorkProducts)
+      .values({ ...values, isPrimary: false })
+      .returning()
+      .then((rows) => rows[0] ?? null);
   }
 }
 
@@ -1395,9 +1469,7 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null));
 
-  const [created] = await input.tx
-    .insert(issueWorkProducts)
-    .values({
+  const created = await insertAutoWorkProduct(input.tx, {
       companyId: input.issue.companyId,
       projectId: input.issue.projectId ?? null,
       issueId: input.issue.id,
@@ -1418,8 +1490,7 @@ async function autoRegisterWorkProductFromIssueDocument(input: {
         claimedArtifactPaths: input.claimedArtifactPaths,
       },
       createdByRunId: input.run.id,
-    })
-    .returning({ id: issueWorkProducts.id });
+    });
 
   await input.tx.insert(activityLog).values({
     companyId: input.issue.companyId,
@@ -1528,9 +1599,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null));
 
-  const [created] = await input.tx
-    .insert(issueWorkProducts)
-    .values({
+  const created = await insertAutoWorkProduct(input.tx, {
       companyId: input.issue.companyId,
       projectId: input.issue.projectId ?? null,
       issueId: input.issue.id,
@@ -1558,8 +1627,7 @@ async function autoRegisterWorkProductFromClaimedFile(input: {
             claimedArtifactPaths: input.claimedArtifactPaths,
           },
       createdByRunId: input.run.id,
-    })
-    .returning({ id: issueWorkProducts.id });
+    });
 
   await input.tx.insert(activityLog).values({
     companyId: input.issue.companyId,
@@ -1665,7 +1733,7 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
     .limit(1)
     .then((rows) => rows[0] ?? null);
 
-  let workProductId = existingWorkProduct?.id ?? null;
+  let workProductId: string | null = existingWorkProduct?.id ?? null;
   if (!workProductId) {
     const hasExistingWorkProduct = await input.tx
       .select({ id: issueWorkProducts.id })
@@ -1674,9 +1742,7 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
       .limit(1)
       .then((rows) => Boolean(rows[0]));
 
-    const [created] = await input.tx
-      .insert(issueWorkProducts)
-      .values({
+    const created = await insertAutoWorkProduct(input.tx, {
         companyId: sourceIssue.companyId,
         projectId: sourceIssue.projectId ?? null,
         issueId: sourceIssue.id,
@@ -1697,8 +1763,7 @@ async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
           ownerActionRunId: input.run.id,
         },
         createdByRunId: input.run.id,
-      })
-      .returning({ id: issueWorkProducts.id });
+      });
     workProductId = created?.id ?? null;
 
     await input.tx.insert(activityLog).values({
@@ -11102,3 +11167,4 @@ export function heartbeatService(db: Db) {
     },
   };
 }
+import { isPgUniqueViolation } from "./pg-error.js";

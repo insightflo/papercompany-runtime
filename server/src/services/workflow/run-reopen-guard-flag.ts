@@ -40,6 +40,19 @@ export async function isRunRecoveryServiceEnabled(db: SettingsReader): Promise<b
 }
 
 /**
+ * [work-product binding v1] tool 스텝 인자의 산출물 참조를 consumer step-run 단위로
+ * 고정하는 스위치 — 기본 비활성. off 는 현재 대표 재해석 경로를 유지한다.
+ */
+export async function isWorkProductBindingEnabled(db: SettingsReader): Promise<boolean> {
+  const row = await db
+    .select({ experimental: instanceSettings.experimental })
+    .from(instanceSettings)
+    .where(eq(instanceSettings.singletonKey, DEFAULT_SINGLETON_KEY))
+    .then((rows) => rows[0] ?? null);
+  return row?.experimental?.enableWorkProductBindingV1 === true;
+}
+
+/**
  * 재오픈 가드가 "종결 권위"로 취급하는 run 상태 집합. 이 상태의 run 은 관측 사실(재계산/
  * 즉시 재평가)만으로는 running 으로 부활하지 않는다. failed 는 종결이지만 PR-2b 공식 복구
  * 서비스까지 기존 resume/retry 경로(CAS + 권한버전 범프)로 재개를 허용한다.

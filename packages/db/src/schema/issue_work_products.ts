@@ -7,7 +7,9 @@ import {
   text,
   timestamp,
   uuid,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { executionWorkspaces } from "./execution_workspaces.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
@@ -62,6 +64,9 @@ export const issueWorkProducts = pgTable(
       table.companyId,
       table.updatedAt,
     ),
+    primaryUniqueIdx: uniqueIndex("issue_work_products_primary_uq")
+      .on(table.companyId, table.issueId, table.type)
+      .where(sql`is_primary = true`),
     createdByRunGenerationIdx: index("issue_work_products_created_by_run_generation_idx").on(
       table.createdByRunId,
       table.sourceExecutionGeneration,
