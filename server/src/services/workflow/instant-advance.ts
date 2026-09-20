@@ -32,16 +32,31 @@ let configuredDb: Db | null = null;
 // 플래그 off 로 취급해 fire-and-forget 트리거가 깨지지 않는다(기존 틱 폴백 유지).
 let reopenGuardEnabledCache: boolean | null = null;
 let reopenGuardJudgement: Promise<boolean> | null = null;
+let reopenGuardVerdictToken: symbol | null = null;
 
 export function configureInstantWorkflowAdvanceDb(db: Db | null): void {
   configuredDb = db;
   reopenGuardEnabledCache = null;
-  reopenGuardJudgement = db
-    ? isRunReopenGuardEnabled(db).catch(() => false)
-    : Promise.resolve(false);
-  void reopenGuardJudgement.then((enabled) => {
-    reopenGuardEnabledCache = enabled;
-  });
+  applyReopenGuardVerdict(db ? isRunReopenGuardEnabled(db) : Promise.resolve(false));
+}
+
+/** [봇 지적 교정] 판정 실패는 이번 한 번만 off 로 취급(동기 계약 유지)하고 판정을 비워
+ *   다음 요청이 다시 읽게 한다 — 재시작 전까지 영구 off(fail-open 고착)가 되지 않는다.
+ *   재호출 시 낡은 Promise 가 캐시를 덮어쓰지 않게 토큰으로 선별한다. */
+function applyReopenGuardVerdict(judgement: Promise<boolean>): void {
+  const token = Symbol("instant-advance-guard-verdict");
+  reopenGuardVerdictToken = token;
+  reopenGuardJudgement = judgement;
+  void judgement.then(
+    (enabled) => {
+      if (reopenGuardVerdictToken === token) reopenGuardEnabledCache = enabled;
+    },
+    () => {
+      if (reopenGuardVerdictToken !== token) return;
+      reopenGuardEnabledCache = false;
+      reopenGuardJudgement = null;
+    },
+  );
 }
 
 /** 게이트 판정 — 호출마다 process.env 를 다시 읽는다(테스트/런타임 토글 가능). */
@@ -78,12 +93,24 @@ export function requestInstantWorkflowAdvance(workflowRunId: string): void {
       return;
     }
     if (reopenGuardEnabledCache === false) {
-      // 플래그 off 확정 — 기존 동기 경로 그대로(신규 I/O 없음).
+      // 플래그 off 확정 — 기존 동기 경로 그대로(신규 I/O 없음). 단 판정 "실패로 인한 off" 라면
+      // (judgement 가 null 로 비워져 있으면) 다음 요청의 회복을 위해 비동기 재판정만 걸어둔다.
+      if (reopenGuardJudgement === null && configuredDb) {
+        applyReopenGuardVerdict(isRunReopenGuardEnabled(configuredDb));
+      }
       startAdvance(db, workflowRunId, 1, false);
       return;
     }
     // 플래그 on(또는 판정 경합) — 종결 run 은 평가 자체를 스킵한다(실패닫힘).
-    void advanceIfNotTerminal(db, workflowRunId);
+    // [봇 지적 교정] advanceIfNotTerminal 은 async — void 호출의 rejection 을 여기서 흡수해야
+    //   트리거 계약("이 함수는 절대 throw 하지 않는다")이 유지된다(비동기 rejection 은 동기
+    //   try/catch 로 잡히지 않고 프로세스를 죽일 수 있다).
+    advanceIfNotTerminal(db, workflowRunId).catch((err) => {
+      logger.warn(
+        { err, tag: TAG, workflowRunId },
+        "instant advance terminal-check failed — falling back to heartbeat tick",
+      );
+    });
   } catch (err) {
     logger.warn(
       { err, tag: TAG, workflowRunId },

@@ -168,16 +168,17 @@ describeEP("run-reopen-guard v1", () => {
       expect((await runOf(db, world.runId))?.dispatchAuthorityVersion).toBe(2);
     });
 
-    it("flag ON: CAS loser re-reads and fails closed — pending run → 409 resume_conflict", async () => {
+    it("flag ON: pending run → deterministic 409 not_allowed (mislabeled conflict corrected)", async () => {
       await setRunReopenGuardFlag(db, true);
       const world = await seedBoundaryIntegrationRun(db, {
         runStatus: "pending",
         steps: [{ stepId: "a", status: "pending" }],
       });
 
+      // pending 은 허용 집합 밖 비종결 — 재시도해도 같은 결과이므로 결정적 거부로 분류한다.
       await expect(resumeWorkflowRun(db, world.runId, world.companyId)).rejects.toMatchObject({
         status: 409,
-        message: expect.stringContaining("workflow_run_resume_conflict"),
+        message: expect.stringContaining("workflow_run_resume_not_allowed"),
       });
       expect((await runOf(db, world.runId))?.status).toBe("pending");
     });

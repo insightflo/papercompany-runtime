@@ -94,22 +94,26 @@ async function executeCancelHeartbeatRun(db: Db, intent: TerminalEffectIntent, n
 
 /** supersede_unblock_issue — 비종결 보장 하에 취소로 대체하고 결정 출처 코멘트를 남긴다. */
 async function executeSupersedeUnblockIssue(db: Db, intent: TerminalEffectIntent, now: Date): Promise<void> {
-  const updated = await db
-    .update(issues)
-    .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
-    .where(and(
-      eq(issues.companyId, intent.companyId),
-      eq(issues.id, intent.targetId),
-      notInArray(issues.status, ["done", "cancelled"]),
-    ))
-    .returning({ id: issues.id });
-  if (updated.length === 0) return; // 이미 종결 = 바람직한 상태 — 멱등 no-op.
-  await issueService(db).addComment(
-    intent.targetId,
-    `Superseded (cancelled) by workflow terminal decision ${intent.terminalDecisionId}: `
-      + "this owner action no longer represents open mission work after the run was finalized.",
-    {},
-  );
+  // [봇 지적 교정] 취소와 코멘트를 한 트랜잭션으로 — 부분 적용 시(취소만 커밋·코멘트 실패)
+  //   재시도가 0행 no-op 로 커버해 코멘트가 영구 누락되던 구멍을 닫는다.
+  await db.transaction(async (tx) => {
+    const updated = await tx
+      .update(issues)
+      .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
+      .where(and(
+        eq(issues.companyId, intent.companyId),
+        eq(issues.id, intent.targetId),
+        notInArray(issues.status, ["done", "cancelled"]),
+      ))
+      .returning({ id: issues.id });
+    if (updated.length === 0) return; // 이미 종결 = 바람직한 상태 — 멱등 no-op.
+    await issueService(tx as unknown as Db).addComment(
+      intent.targetId,
+      `Superseded (cancelled) by workflow terminal decision ${intent.terminalDecisionId}: `
+        + "this owner action no longer represents open mission work after the run was finalized.",
+      {},
+    );
+  });
 }
 
 /** 인텐트 1건 실행 + 시도 계장. 실패는 pending 유지(lastError 산출)이고 밖으로 throw 하지 않는다. */

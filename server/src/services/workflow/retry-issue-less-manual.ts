@@ -77,16 +77,11 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
     .returning({ id: workflowStepRuns.id });
   if (retryCas.length === 0) return null;
 
-  const refreshedStepRuns = await input.db
-    .select()
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, input.runId));
-  await input.resetUnlaunchedTerminalStepRuns(input.db, refreshedStepRuns);
-
   if (reopenGuardEnabled) {
-    // [run-reopen-guard v1] run 재오픈에도 상태 CAS + 권한버전 범프 — cancelled·completed 등 종결
-    //   run 은 재오픈되지 않고, 경합으로 CAS 가 빈 반환하면 호출자가 이미 falsy 처리하는 null 로
-    //   실패닫힌다(스텝 리셋은 이미 일어났지만 run 권위는 보존된다).
+    // [run-reopen-guard v1 + 봇 지적 교정] run 재오픈 CAS 를 스텝 리셋 쓰기 "보다 먼저" 둔다 —
+    //   CAS 가 빈 반환하면 종결 run 의 스텝들이 리셋된 채 남는 불일치 잔류를 없앤다(거절은
+    //   어떤 스텝 쓰기보다 앞선다). 상태 CAS + 권한버전 범프로 cancelled·completed 종결 run 은
+    //   재오픈되지 않고, 경합 시 호출자가 이미 falsy 처리하는 null 로 실패닫힌다.
     const reopened = await input.db
       .update(workflowRuns)
       .set({
@@ -115,6 +110,12 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
         eq(workflowRuns.companyId, input.companyId),
       ));
   }
+
+  const refreshedStepRuns = await input.db
+    .select()
+    .from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, input.runId));
+  await input.resetUnlaunchedTerminalStepRuns(input.db, refreshedStepRuns);
 
   return {
     stepRunId: stepRun.id,

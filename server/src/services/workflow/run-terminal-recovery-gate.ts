@@ -55,22 +55,25 @@ export async function evaluateRecoveryChannels(
 ): Promise<RecoveryGateResult> {
   try {
     const stepIssueIds = uniqueIssueIds(input.stepRuns);
-    if (stepIssueIds.length === 0) return { kind: "clear", staleUnblockIssueIds: [] };
 
     const evidence: RecoveryChannelEvidence[] = [];
     const staleUnblockIssueIds: string[] = [];
 
     // (a) unblock owner-action — 원 source 이슈가 아직 비종결일 때만 열린 채널이다.
-    const openUnblocks = await db
-      .select({ id: issues.id, originId: issues.originId, status: issues.status })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, input.companyId),
-        eq(issues.originKind, RECOVERY_UNBLOCK_ORIGIN_KIND),
-        inArray(issues.originId, stepIssueIds),
-        isNull(issues.hiddenAt),
-        notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
-      ));
+    //   [봇 지적 교정] 이슈 없는 run(이슈 없는 도구 스텝만)도 (b) 재시도 예약은 평가한다 —
+    //   채널별로 이슈 의존성이 다르므로 조기 반환 대신 쿼리만 스킵한다.
+    const openUnblocks = stepIssueIds.length > 0
+      ? await db
+        .select({ id: issues.id, originId: issues.originId, status: issues.status })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.originKind, RECOVERY_UNBLOCK_ORIGIN_KIND),
+          inArray(issues.originId, stepIssueIds),
+          isNull(issues.hiddenAt),
+          notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
+        ))
+      : [];
     const sourceIds = Array.from(new Set(
       openUnblocks.map((unblock) => unblock.originId).filter((v): v is string => v !== null),
     ));
@@ -126,10 +129,12 @@ export async function evaluateRecoveryChannels(
     if (input.triggerHeartbeatRunId) {
       heartbeatFilters.push(notInArray(heartbeatRuns.id, [input.triggerHeartbeatRunId]));
     }
-    const activeHeartbeats = await db
-      .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId, status: heartbeatRuns.status })
-      .from(heartbeatRuns)
-      .where(and(...heartbeatFilters));
+    const activeHeartbeats = stepIssueIds.length > 0
+      ? await db
+        .select({ id: heartbeatRuns.id, issueId: heartbeatRuns.issueId, status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(and(...heartbeatFilters))
+      : [];
     for (const heartbeat of activeHeartbeats) {
       evidence.push({
         channel: "active_heartbeat",

@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { instanceSettings } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
+import { TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 
 const DEFAULT_SINGLETON_KEY = "default";
 
@@ -25,14 +26,10 @@ export async function isRunReopenGuardEnabled(db: SettingsReader): Promise<boole
  * 재오픈 가드가 "종결 권위"로 취급하는 run 상태 집합. 이 상태의 run 은 관측 사실(재계산/
  * 즉시 재평가)만으로는 running 으로 부활하지 않는다. failed 는 종결이지만 PR-2b 공식 복구
  * 서비스까지 기존 resume/retry 경로(CAS + 권한버전 범프)로 재개를 허용한다.
+ * [봇 지적 교정] 집합을 재정의하지 않고 미션 런타임 종결 집합을 그대로 참조한다 —
+ * finalize/트리거/가드가 서로 다른 "종결" 정의로 갈라지는 것을 방지한다.
  */
-export const RUN_REOPEN_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
-  "completed",
-  "cancelled",
-  "aborted",
-  "failed",
-  "timed-out",
-]);
+export const RUN_REOPEN_TERMINAL_STATUSES: ReadonlySet<string> = TERMINAL_WORKFLOW_STATUSES;
 
 /**
  * 재오픈 가드 on 경로에서 resume/재시도 쓰기가 허용되는 상태 CAS 집합.

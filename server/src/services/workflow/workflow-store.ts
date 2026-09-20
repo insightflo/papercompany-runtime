@@ -471,16 +471,21 @@ export async function updateWorkflowRunStatus(
 }
 
 /**
- * Resume a workflow run through the native server DAG engine.
- *
- * [run-reopen-guard v1] 플래그 on: cancelled·completed·aborted·timed-out 종결 run 은 어떤 쓰기도
- * 없이(부작용 0) 409 로 거부된다. failed·running 만 재개하며, 이때 상태 CAS(inArray) +
- * dispatchAuthorityVersion 범프로 경합을 안전하게 만든다. CAS 가 빈 반환하면(경합) run 을 재조회해
- * 종결이면 not_allowed, 그 외엔 재시도 가능한 conflict 를 던진다. 플래그 off 는 기존 plain 쓰기다.
+ * [run-reopen-guard v1] 재개 허용 집합 밖 종결 상태(cancelled·completed·aborted·timed-out).
+ *   failed 는 공식 재개 대상이므로 제외된다.
  */
 const isReviveBlockedTerminal = (status: string): boolean =>
   RUN_REOPEN_TERMINAL_STATUSES.has(status) && status !== "failed";
 
+/**
+ * Resume a workflow run through the native server DAG engine.
+ *
+ * [run-reopen-guard v1] 플래그 on: cancelled·completed·aborted·timed-out 종결 run 은 어떤 쓰기도
+ * 없이(부작용 0) 409 로 거부된다. failed·running 만 재개하며, 이때 상태 CAS(inArray) +
+ * dispatchAuthorityVersion 범프로 경합을 안전하게 만든다. CAS 가 빈 반환하면(경합) run 을
+ * 재조회해 분류한다 — 종결이면 not_allowed, 허용 집합 밖 비종결(예: pending)이면 재시도해도
+ * 같은 결과인 결정적 거부, 그 외에만 재시도 가능한 conflict. 플래그 off 는 기존 plain 쓰기다.
+ */
 export async function resumeWorkflowRun(
   db: Db,
   id: string,
@@ -538,6 +543,14 @@ export async function resumeWorkflowRun(
     throw new HttpError(
       409,
       `workflow_run_resume_not_allowed: terminal status ${raced.status}`,
+    );
+  }
+  // [봇 지적 교정] 허용 집합 밖 비종결(pending 등)은 재시도해도 같은 결과다 — 결정적 거부로
+  //   분류해 무의미한 재시도 루프를 유도하지 않는다.
+  if (!RUN_REOPEN_RESUMABLE_STATUSES.includes(raced.status)) {
+    throw new HttpError(
+      409,
+      `workflow_run_resume_not_allowed: status ${raced.status} is not resumable`,
     );
   }
   throw new HttpError(409, "workflow_run_resume_conflict");

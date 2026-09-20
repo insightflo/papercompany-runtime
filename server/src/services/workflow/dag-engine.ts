@@ -3403,7 +3403,6 @@ async function finalizeWorkflowRunState(
     // [run-terminal-boundary v1] plain 종결을 경계로 우회한다 — CAS/원인 스탬프/스코프 정지 대상
     //   캡처는 코어 계약(run-terminal-boundary.ts)이 소유한다. 유예(deferred)면 run 은 비종말로,
     //   stale/이미 종결이면 기존 상태로 남고 그 외 어떤 행도 건드리지 않는다.
-    boundaryHandledFinalization = true;
     const boundary = await finalizeRunTerminal(db, {
       runId: context.run.id,
       companyId: context.run.companyId,
@@ -3416,6 +3415,29 @@ async function finalizeWorkflowRunState(
       dynamicOwnerPlanCompleted: dynamicOwnerPlan && nextStatus === "completed",
     });
     finalRun = boundary.run;
+    // [봇 지적 교정] legacy 종결 행(결정 기록 없음)의 already_finalized 는 대체 kill 인텐트도
+    //   원결정의 효과도 없다 — legacy 와 동일하게 미션 스톱을 계속 맡기게 한다. 결정 기록이 있는
+    //   already_finalized/finalized 만 경계가 부작용을 소유한다(스윕이 재처리).
+    boundaryHandledFinalization = boundary.kind === "finalized"
+      || (boundary.kind === "already_finalized" && boundary.existingDecision !== null);
+    if (boundary.kind !== "finalized" && boundary.kind !== "already_finalized") {
+      // [관측 계약] deferred/stale_authority 는 조용히 유실되지 않는다 — 구조화 감사로 남긴다.
+      await logActivity(db, {
+        companyId: context.run.companyId,
+        actorType: "system",
+        actorId: "dag-engine",
+        action: "workflow_run.terminal_boundary_not_finalized",
+        entityType: "workflow_run",
+        entityId: context.run.id,
+        details: {
+          boundaryKind: boundary.kind,
+          expectedAuthorityVersion: context.run.dispatchAuthorityVersion,
+          currentAuthorityVersion: boundary.kind === "stale_authority" ? boundary.currentAuthorityVersion : undefined,
+          gateKind: boundary.kind === "deferred" ? boundary.gateKind : undefined,
+          computedDecision: nextStatus,
+        },
+      });
+    }
     if (boundary.kind === "finalized") {
       try {
         await executeTerminalEffectIntents(db, boundary.decisionId);
