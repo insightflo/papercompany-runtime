@@ -7,7 +7,9 @@
 
 import type { Db } from "@paperclipai/db";
 import { workflowDefinitions, workflowRunSlots, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { HttpError } from "../../errors.js";
+import { isRunReopenGuardEnabled, RUN_REOPEN_RESUMABLE_STATUSES, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
 import { archiveWorkflowDefinitionWithGuard } from "./workflow-definition-delete-guard.js";
 import type {
   WorkflowDefinition,
@@ -470,21 +472,73 @@ export async function updateWorkflowRunStatus(
 
 /**
  * Resume a workflow run through the native server DAG engine.
+ *
+ * [run-reopen-guard v1] 플래그 on: cancelled·completed·aborted·timed-out 종결 run 은 어떤 쓰기도
+ * 없이(부작용 0) 409 로 거부된다. failed·running 만 재개하며, 이때 상태 CAS(inArray) +
+ * dispatchAuthorityVersion 범프로 경합을 안전하게 만든다. CAS 가 빈 반환하면(경합) run 을 재조회해
+ * 종결이면 not_allowed, 그 외엔 재시도 가능한 conflict 를 던진다. 플래그 off 는 기존 plain 쓰기다.
  */
+const isReviveBlockedTerminal = (status: string): boolean =>
+  RUN_REOPEN_TERMINAL_STATUSES.has(status) && status !== "failed";
+
 export async function resumeWorkflowRun(
   db: Db,
   id: string,
   companyId: string,
 ): Promise<WorkflowRun | null> {
+  const scope = and(eq(workflowRuns.id, id), eq(workflowRuns.companyId, companyId));
+  if (!(await isRunReopenGuardEnabled(db))) {
+    const [run] = await db
+      .update(workflowRuns)
+      .set({
+        status: "running",
+        startedAt: new Date(),
+        completedAt: null,
+      })
+      .where(scope)
+      .returning();
+
+    return run ? mapWorkflowRun(run) : null;
+  }
+
+  // 사전 분류 — 거절 판정은 어떤 쓰기보다 앞선다(부작용 0).
+  const [current] = await db
+    .select({ status: workflowRuns.status })
+    .from(workflowRuns)
+    .where(scope)
+    .limit(1);
+  if (!current) return null;
+  if (isReviveBlockedTerminal(current.status)) {
+    throw new HttpError(
+      409,
+      `workflow_run_resume_not_allowed: terminal status ${current.status}`,
+    );
+  }
+
   const [run] = await db
     .update(workflowRuns)
     .set({
       status: "running",
       startedAt: new Date(),
       completedAt: null,
+      dispatchAuthorityVersion: sql`${workflowRuns.dispatchAuthorityVersion} + 1`,
     })
-    .where(and(eq(workflowRuns.id, id), eq(workflowRuns.companyId, companyId)))
+    .where(and(scope, inArray(workflowRuns.status, [...RUN_REOPEN_RESUMABLE_STATUSES])))
     .returning();
+  if (run) return mapWorkflowRun(run);
 
-  return run ? mapWorkflowRun(run) : null;
+  // 경합 — CAS 가 빈 반환했다. 내구 행을 재조회해 분기한다(추측 없이 관측 사실만).
+  const [raced] = await db
+    .select({ status: workflowRuns.status })
+    .from(workflowRuns)
+    .where(scope)
+    .limit(1);
+  if (!raced) return null;
+  if (isReviveBlockedTerminal(raced.status)) {
+    throw new HttpError(
+      409,
+      `workflow_run_resume_not_allowed: terminal status ${raced.status}`,
+    );
+  }
+  throw new HttpError(409, "workflow_run_resume_conflict");
 }

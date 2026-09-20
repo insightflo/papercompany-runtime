@@ -71,6 +71,7 @@ import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
 // [run-terminal-boundary v1] plain 종결의 경계 우회 + 커밋 후 부작용 즉시 실행(호출자 게이팅).
 import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
 import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
+import { isRunReopenGuardEnabled } from "./run-reopen-guard-flag.js";
 import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from "./control-flow/structural-gate-rework.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
@@ -3340,6 +3341,7 @@ async function finalizeWorkflowRunState(
   context: WorkflowExecutionContext,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
   boundaryEnabled: boolean,
+  reopenGuardEnabled: boolean,
 ): Promise<typeof workflowRuns.$inferSelect> {
   // [run-terminal-boundary v1] failureCascadeSkipped 는 reconciler cascade 로 죽은 관측이다 —
   //   완료 스텝이 하나도 없는 런이 completed 로 재수렴하는 것을 항상 차단한다(플래그 무관).
@@ -3433,6 +3435,21 @@ async function finalizeWorkflowRunState(
         });
       }
     }
+  } else if (
+    // [run-reopen-guard v1] 재계산 부활 차단 — 종결 권위(completed/cancelled/aborted/failed/timed-out)는
+    //   비종결 스텝 재계산 같은 관측 사실만으로 running 으로 부활하지 않는다. 쓰기 없이 종결 상태를
+    //   유지하고 거부 사유만 구조화 감사에 남긴다(실행 권위 없음 — 규칙 8/9). 공식 재개는 회복 경로의
+    //   소관이며, cancelled 분기는 위 nextStatus 우선순위가 이미 cancelled 로 수렴하므로 여기서 유지된다.
+    reopenGuardEnabled
+    && nextStatus === "running"
+    && TERMINAL_WORKFLOW_STATUSES.has(context.run.status)
+  ) {
+    await logWorkflowRunFinalizationRefused(db, {
+      companyId: context.run.companyId,
+      runId: context.run.id,
+      reason: "recompute revive refused — terminal authority stands (reopen requires the official recovery path)",
+    });
+    finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
   } else {
     const [updatedRun] = await db.update(workflowRuns).set(patch)
       .where(eq(workflowRuns.id, context.run.id)).returning();
@@ -4157,9 +4174,10 @@ export async function syncWorkflowRunStateWithOutcome(
     }
   }
 
-  // [run-terminal-boundary v1] 플래그는 sync 당 1회 읽는다(legacy 경로의 추가 I/O 를 이 한 번으로 제한).
+  // [run-reopen-guard v1] 플래그는 sync 당 1회 읽는다(legacy 경로의 추가 I/O 를 이 한 번으로 제한).
   const terminalBoundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
-  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled);
+  const reopenGuardEnabled = await isRunReopenGuardEnabled(db);
+  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled, reopenGuardEnabled);
   // [workflow child step] 자식 run 종말 → 부모 waiting 스텝 마감 훅. 훅 실패는 sync 를 깨뜨리지 않는다
   //   (reconciler 가 회복). 훅은 자기 waiting 스텝만 마감한다(규칙 7/8).
   if (TERMINAL_WORKFLOW_STATUSES.has(updatedRun.status)) {
