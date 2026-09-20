@@ -1455,6 +1455,8 @@ export function createSupervision({ db, deps, ownerActions }: {
               companyId: mission.companyId,
               runId: toolRecovery.run.id,
               stepId: toolRecovery.stepRun.stepId,
+              // [run-recovery-service v1] 감독 재시도 멱등 키 — 공식 복구의 1회 소비 판정에 쓴다.
+              recoveryRequestReference: retryIdempotencyKey,
             });
             if (!retryResult) {
               findings.push(`tool_step_recovery_not_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} is not a retryable unified-engine issue-less tool step`);

@@ -3315,7 +3315,7 @@ export async function completeWorkflowToolStepFromResult(
 }
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
-  input: { companyId: string; runId: string; stepId: string },
+  input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
   // [descope D2] workflow-type S 는 수동 issue-less retry 를 명시적으로 거부한다 — schedule/
   //   reset/retry-count 증가 같은 어떤 변이도 일어나기 "전"이다(스케줄러 리셋 제외 포함).

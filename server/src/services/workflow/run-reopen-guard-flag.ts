@@ -23,6 +23,23 @@ export async function isRunReopenGuardEnabled(db: SettingsReader): Promise<boole
 }
 
 /**
+ * [run-recovery-service v1 — PR-2b] 공식 복구 서비스 스위치 — 기본 비활성. 켜지면 종결
+ * 실행의 재개(resume/감독 재시도/언블록 해결)가 recoverTerminalRun 의 1회 소비·권한버전
+ * 검증을 경유한다. [봇 지적 교정] reopenGuard 도 함께 켜져 있어야만 활성으로 판정한다 —
+ * 가드가 꺼지면 legacy 재개 경로가 살아나 복구 서비스의 소비 기록과 어긋나기 때문이다.
+ * 이 판정을 이 함수 하나에 두어 세 호출부의 게이팅 불일치를 원천 봉쇄한다.
+ */
+export async function isRunRecoveryServiceEnabled(db: SettingsReader): Promise<boolean> {
+  const row = await db
+    .select({ experimental: instanceSettings.experimental })
+    .from(instanceSettings)
+    .where(eq(instanceSettings.singletonKey, DEFAULT_SINGLETON_KEY))
+    .then((rows) => rows[0] ?? null);
+  return row?.experimental?.enableRunReopenGuardV1 === true
+    && row?.experimental?.enableRunRecoveryServiceV1 === true;
+}
+
+/**
  * 재오픈 가드가 "종결 권위"로 취급하는 run 상태 집합. 이 상태의 run 은 관측 사실(재계산/
  * 즉시 재평가)만으로는 running 으로 부활하지 않는다. failed 는 종결이지만 PR-2b 공식 복구
  * 서비스까지 기존 resume/retry 경로(CAS + 권한버전 범프)로 재개를 허용한다.
