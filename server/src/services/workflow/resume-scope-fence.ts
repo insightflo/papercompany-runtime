@@ -9,6 +9,8 @@ import { activityLog, agentWakeupRequests, workflowRuns, workflowStepRuns } from
  * [stamp 규약] resumeRequestId 는 workflow_runs.metadata 와 workflow_step_runs.metadata 의
  *   own non-null string key 로만 판정한다(resume/reset.ts 가 stamp 한다; prototype key 불가).
  * [불변식] generation 은 resetForResume 이 resumeRequestId stamp 과 같은 트랜잭션에서 +1 한다.
+ *   [PR-3 확장] 종결(finalizeRunTerminal)과 공식 복구(recoverTerminalRun) 도 같은 트랜잭션에서
+ *   전 스텝 generation 을 +1 한다 — 세대 CAS 소비 지점이 낡은 쓰기를 차단하는 원리는 동일하다.
  *   따라서 step stamp === run stamp 이고 recorded generation === 현재 generation 이면 그 결과는
  *   현재 resume 세대의 것이다. 불일치면 결과는 이전 세대의 늦은 도착물 — 무음 스킵 또는
  *   아래의 진단 로그 1건만 기록한다. 진단 로그는 표시/감사 전용이며 실행 권위로 파싱되지

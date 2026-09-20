@@ -111,6 +111,12 @@ export async function atomicStructuralCompletion(input: {
   observedIterationIndex: number | null;
   observedRequestId: string | null;
   observedCompletedAt: Date | null;
+  /** [PR-3 세대 울타리 — 봇 bug·medium 교정] 관측 시점의 스텝 세대. 종결/복구가 세대를
+   *  올리면 상태·iteration·requestId 는 그대로일 수 있어 기존 CAS 만으로는 낡은 구조
+   *  게이트 완료가 통과한다 — 세대 조건이 그 사각을 막는다. 프로덕션 진입
+   *  (completeWorkflowToolStepFromResult) 은 항상 전달하며, 미지정(레거시/테스트) 이면
+   *  조건을 생략해 기존 CAS 계약을 유지한다. */
+  observedExecutionGeneration?: number | null;
   /** Captured at dispatch; binds this verdict to the producer generation. */
   producerToken: StructuralGateProducerToken | null;
   /** Immutable callback details. The status/error portion is derived inside
@@ -127,6 +133,7 @@ export async function atomicStructuralCompletion(input: {
     db, step, success, data, companyId, workflowRunId,
     workflowStepRunId, missionId, issueId, source, requestId,
     observedStatus, observedIterationIndex, observedRequestId, observedCompletedAt, producerToken,
+    observedExecutionGeneration,
     patch,
   } = input;
 
@@ -163,6 +170,9 @@ export async function atomicStructuralCompletion(input: {
       eq(workflowStepRuns.id, workflowStepRunId),
       eq(workflowStepRuns.status, observedStatus),
       eq(workflowStepRuns.iterationIndex, observedIterationIndex ?? 0),
+      ...(observedExecutionGeneration != null
+        ? [eq(workflowStepRuns.executionGeneration, observedExecutionGeneration)]
+        : []),
     ];
     if (observedRequestId) {
       casConditions.push(eq(workflowStepRuns.lastDispatchRequestId, observedRequestId));
