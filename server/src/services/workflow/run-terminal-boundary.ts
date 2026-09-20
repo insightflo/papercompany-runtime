@@ -23,6 +23,7 @@ import {
   type WorkflowTerminalStopTargets,
 } from "@paperclipai/db";
 import { ACTIVE_MISSION_RUNTIME_STATUSES } from "../missions/mission-runtime-manager.js";
+import { logger } from "../../middleware/logger.js";
 import {
   TERMINAL_RUN_STATUSES,
   isTerminalRunStatus,
@@ -57,6 +58,24 @@ export type {
 } from "./run-terminal-recovery-gate.js";
 export { evaluateRecoveryChannels } from "./run-terminal-recovery-gate.js";
 export { executeTerminalEffectIntents, processPendingTerminalEffectIntents } from "./run-terminal-effect-executor.js";
+
+/** 캡처된 정지 대상 → 효과 인텐트 행 값(공통 조립 — 본 경로/자가치유 경로 동일 계약). */
+function buildEffectIntentValues(
+  base: { companyId: string; terminalDecisionId: string; payload: Record<string, unknown> },
+  targets: WorkflowTerminalStopTargets,
+): Array<typeof workflowTerminalEffectIntents.$inferInsert> {
+  const values: Array<typeof workflowTerminalEffectIntents.$inferInsert> = [];
+  for (const runtimeId of targets.runtimeIds) {
+    values.push({ ...base, effectKind: "kill_runtime", targetId: runtimeId });
+  }
+  for (const heartbeatRunId of targets.heartbeatRunIds) {
+    values.push({ ...base, effectKind: "cancel_heartbeat_run", targetId: heartbeatRunId });
+  }
+  for (const issueId of targets.supersededUnblockIssueIds) {
+    values.push({ ...base, effectKind: "supersede_unblock_issue", targetId: issueId });
+  }
+  return values;
+}
 
 /** 이미 기록된 (run, version) 결정을 분류한다 — 같은 결정이면 멱등, 다르면 충돌(전체 롤백). */
 async function classifyExistingDecision(
@@ -224,28 +243,88 @@ export async function finalizeRunTerminal(db: Db, input: FinalizeRunTerminalInpu
       .onConflictDoNothing()
       .returning({ id: workflowTerminalDecisions.id });
     if (!decisionRow) {
-      // 유니크 충돌 = 동일 (run, version) 결정이 선행 커밋됨 — 계약대로 재분류한다.
-      const [current] = await tx
-        .select()
-        .from(workflowRuns)
-        .where(and(eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId)))
-        .for("update");
-      if (!current) throw new Error(`workflow run not found: ${input.runId}`);
-      return await classifyExistingDecision(tx, input, current);
+      // 유니크 충돌 = 동일 (run, version) 결정이 선행 존재. 같은 결정이면 멱등 재분류,
+      //   다른 결정이면 버전 범프 없이 재오픈된 레거시 상태(재개 가드 이전 시대)이다 —
+      //   권한 버전을 +1 해 새 (run, version) 키로 자가치유 기록한다(검수 계약 "복구 후
+      //   재종결은 새 버전에서" 의 소급 이행). 종결 진입 시점부터 종결이었던 행은 위
+      //   classifyExistingDecision 경로가 진짜 불변식 위반으로 롤백한다.
+      const [existing] = await tx
+        .select({ id: workflowTerminalDecisions.id, decision: workflowTerminalDecisions.decision })
+        .from(workflowTerminalDecisions)
+        .where(and(
+          eq(workflowTerminalDecisions.companyId, input.companyId),
+          eq(workflowTerminalDecisions.workflowRunId, input.runId),
+          eq(workflowTerminalDecisions.decidedAuthorityVersion, input.expectedAuthorityVersion),
+        ));
+      if (existing && existing.decision === input.decision) {
+        const [current] = await tx
+          .select()
+          .from(workflowRuns)
+          .where(and(eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId)))
+          .for("update");
+        if (!current) throw new Error(`workflow run not found: ${input.runId}`);
+        return await classifyExistingDecision(tx, input, current);
+      }
+      const healedVersion = input.expectedAuthorityVersion + 1;
+      await tx
+        .update(workflowRuns)
+        .set({ dispatchAuthorityVersion: healedVersion })
+        .where(and(
+          eq(workflowRuns.id, input.runId),
+          eq(workflowRuns.companyId, input.companyId),
+          eq(workflowRuns.dispatchAuthorityVersion, input.expectedAuthorityVersion),
+        ));
+      const healedTargets = await captureStopTargets(tx, input, updatedRun, stepIssueIds, staleUnblockIssueIds);
+      const [healedRow] = await tx
+        .insert(workflowTerminalDecisions)
+        .values({
+          companyId: input.companyId,
+          workflowRunId: input.runId,
+          decidedAuthorityVersion: healedVersion,
+          decision: input.decision,
+          policyCause: input.cause.policy,
+          discoveryPath: input.cause.discovery,
+          origin: input.cause.origin,
+          reason: input.cause.reason ?? null,
+          recoveryGate,
+          capturedStopTargets: healedTargets,
+        })
+        .onConflictDoNothing()
+        .returning({ id: workflowTerminalDecisions.id });
+      if (!healedRow) throw new Error("terminal decision conflict (self-heal reinsert failed)");
+      logger.warn(
+        {
+          runId: input.runId,
+          companyId: input.companyId,
+          expectedAuthorityVersion: input.expectedAuthorityVersion,
+          healedAuthorityVersion: healedVersion,
+          existingDecision: existing?.decision ?? null,
+          newDecision: input.decision,
+        },
+        "terminal decision self-healed after legacy un-bumped reopen",
+      );
+      const healedIntents = buildEffectIntentValues(
+        { companyId: input.companyId, terminalDecisionId: healedRow.id, payload: { decisionId: healedRow.id } },
+        healedTargets,
+      );
+      if (healedIntents.length > 0) {
+        await tx.insert(workflowTerminalEffectIntents).values(healedIntents).onConflictDoNothing();
+      }
+      return {
+        kind: "finalized",
+        decisionId: healedRow.id,
+        decision: input.decision,
+        decidedAuthorityVersion: healedVersion,
+        effectIntentCount: healedIntents.length,
+        run: { ...updatedRun, dispatchAuthorityVersion: healedVersion },
+      };
     }
 
     // 인텐트는 추가 사실일 뿐 권위가 아니다 — 중복 캡처는 onConflictDoNothing 로 무해화.
-    const intentValues: Array<typeof workflowTerminalEffectIntents.$inferInsert> = [];
-    const intentBase = { companyId: input.companyId, terminalDecisionId: decisionRow.id, payload: { decisionId: decisionRow.id } };
-    for (const runtimeId of capturedStopTargets.runtimeIds) {
-      intentValues.push({ ...intentBase, effectKind: "kill_runtime", targetId: runtimeId });
-    }
-    for (const heartbeatRunId of capturedStopTargets.heartbeatRunIds) {
-      intentValues.push({ ...intentBase, effectKind: "cancel_heartbeat_run", targetId: heartbeatRunId });
-    }
-    for (const issueId of capturedStopTargets.supersededUnblockIssueIds) {
-      intentValues.push({ ...intentBase, effectKind: "supersede_unblock_issue", targetId: issueId });
-    }
+    const intentValues = buildEffectIntentValues(
+      { companyId: input.companyId, terminalDecisionId: decisionRow.id, payload: { decisionId: decisionRow.id } },
+      capturedStopTargets,
+    );
     if (intentValues.length > 0) {
       await tx.insert(workflowTerminalEffectIntents).values(intentValues).onConflictDoNothing();
     }

@@ -236,11 +236,15 @@ export async function scheduleWorkflowStepRetry(
       // If the run was cancelled/completed/pending between snapshot and now,
       // zero rows match: roll back the step reset + event so a cancelled run
       // is never reopened by retry scheduling.
+      // [run-reopen 계약] 재오픈은 권한 버전을 범프한다 — 종결 결정은 (run, version) 단위로
+      //   유니크하므로, 범프 없이 failed→running 재개 후 재종결되면 같은 버전에 서로 다른
+      //   결정이 충돌한다(2026-09-19 프로덕션 웨지 원인). 새 결정은 새 버전에 기록된다.
       const reopened = await tx
         .update(workflowRuns)
         .set({
           status: "running",
           completedAt: null,
+          dispatchAuthorityVersion: sql`${workflowRuns.dispatchAuthorityVersion} + 1`,
         })
         .where(and(
           eq(workflowRuns.id, input.workflowRunId),

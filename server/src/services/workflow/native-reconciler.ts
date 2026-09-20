@@ -6,7 +6,6 @@ import { reconcileProvider403LadderWakeups } from "../heartbeat-provider403-ladd
 import { reconcileQualityIntents } from "../quality/native-reconcile.js";
 import { sweepTerminalMissionOrphanRuns } from "../missions/terminal-mission-orphan-sweep.js";
 // [run-terminal-boundary v1] 종결 부작용 인텐트의 지연 재처리(플래그 게이팅, tick 깨뜨리지 않음).
-import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 import { processPendingTerminalEffectIntents } from "./run-terminal-boundary.js";
 
 export interface NativeWorkflowReconcilerLogger {
@@ -133,11 +132,11 @@ export function createNativeWorkflowReconciler(
       }
       // [run-terminal-boundary v1] 종결 부작용 인텐트의 지연 재처리 — 즉시 실행 실패분을 회수한다.
       //   실패해도 reconciler tick 은 깨지지 않는다(같은 파일의 나머지 sweep 들과 동일 계약).
+      //   [봇 지적 교정] 이미 기록된 pending 인텐트는 플래그와 무관하게 존재하므로 sweep 은
+      //   플래그 게이트 없이 항상 실행한다(인텐트가 없으면 no-op — 롤백 시 고립 방지).
       try {
-        const boundarySweep = await isRunTerminalBoundaryV1Enabled(options.db)
-          ? await processPendingTerminalEffectIntents(options.db)
-          : null;
-        if (boundarySweep && boundarySweep.executed + boundarySweep.failed > 0) {
+        const boundarySweep = await processPendingTerminalEffectIntents(options.db);
+        if (boundarySweep.executed + boundarySweep.failed > 0) {
           log.info(
             { timeoutMinutes, ...boundarySweep },
             "Run terminal boundary effect intents reprocessed",

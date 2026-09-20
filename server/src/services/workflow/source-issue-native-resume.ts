@@ -29,6 +29,7 @@ import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 import { restoreFailedSourceIssueWorkflowState } from "./source-issue-failed-state-restore.js";
+import { HttpError } from "../../errors.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts 와 동일. 이 상태의 wake/heartbeat 보유 시 중복 dispatch 금지.
 const LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution", "coalesced"] as const;
@@ -277,7 +278,24 @@ export async function dispatchSourceIssueNativeResume(
         stepId: step.id,
       };
     }
-    const resumedRun = await resumeWorkflowRun(db, run.id, input.companyId);
+    // [봇 지적 교정] 재개 가드가 종결/경합으로 409 를 던지면 null 회로를 우회해 예외가 샌다 —
+    //   이 경로의 계약(실패 시 원상복구 + report_only)으로 흡수한다.
+    let resumedRun: Awaited<ReturnType<typeof resumeWorkflowRun>>;
+    try {
+      resumedRun = await resumeWorkflowRun(db, run.id, input.companyId);
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 409) {
+        await restoreFailedState();
+        return {
+          kind: "report_only",
+          reason: "wake_rejected",
+          workflowRunId: run.id,
+          workflowStepRunId: stepRun.id,
+          stepId: step.id,
+        };
+      }
+      throw error;
+    }
     const [resumedStep] = await db
       .update(workflowStepRuns)
       .set({ status: "running", completedAt: null })
