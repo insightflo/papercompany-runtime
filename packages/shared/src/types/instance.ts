@@ -14,6 +14,11 @@ export interface InstanceExperimentalSettings {
    *  resume/감독 재시도/언블록 해결에 적용. 기본 off — off 면 PR-2a 가드 동작을 유지하고,
    *  서버는 reopenGuard 플래그와 함께 켜져 있을 때만 활성으로 판정한다. */
   enableRunRecoveryServiceV1: boolean;
+  /** [work-product binding v1 — 스테이지 A] 도구 스텝의 workProducts 참조를 실행 단위로
+   *  핀한다(재시도가 "현재 대표"를 재해석하지 않는다). 기본 off — off 면 기존 대표 우선
+   *  재해석 경로 유지. 핀은 tool-step dispatch 경로(스텝런 신원 있는 곳)에만 적용되며
+   *  condition-source/child-precheck 호출부는 스텝런 신원이 없어 이 단계에서 제외. */
+  enableWorkProductBindingV1: boolean;
   /** [P2 측정 롤아웃] 사람 큐레이션 패턴 카드의 스텝 디스패치 주입 스위치. 기본 off = 주입 없음. */
   enableKnowledgePatternInjection: boolean;
 }

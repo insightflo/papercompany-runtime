@@ -35,6 +35,7 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableRunTerminalBoundaryV1: parsed.data.enableRunTerminalBoundaryV1 ?? false,
       enableRunReopenGuardV1: parsed.data.enableRunReopenGuardV1 ?? false,
       enableRunRecoveryServiceV1: parsed.data.enableRunRecoveryServiceV1 ?? false,
+      enableWorkProductBindingV1: parsed.data.enableWorkProductBindingV1 ?? false,
       enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
     };
   }
@@ -45,6 +46,7 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     enableRunTerminalBoundaryV1: false,
     enableRunReopenGuardV1: false,
     enableRunRecoveryServiceV1: false,
+    enableWorkProductBindingV1: false,
     enableKnowledgePatternInjection: false,
   };
 }

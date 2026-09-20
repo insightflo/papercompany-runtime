@@ -114,6 +114,7 @@ export { workflowCuJobs } from "./workflow_cu_jobs.js";
 export { workflowCuObservations } from "./workflow_cu_observations.js";
 export { workflowStepInvocations } from "./workflow_step_invocations.js";
 export { workflowStepRuns } from "./workflow_step_runs.js";
+export { workflowStepOutputBindings } from "./workflow_step_output_bindings.js";
 export { workflowDelegations } from "./workflow_delegations.js";
 export { workflowResyncJobs } from "./workflow_resync_jobs.js";
 export { toolDefinitions } from "./tool_definitions.js";

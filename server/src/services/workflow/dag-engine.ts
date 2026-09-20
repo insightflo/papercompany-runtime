@@ -2547,6 +2547,7 @@ async function startIssueLessToolStepRun(input: {
       run,
       step: step as PersistedWorkflowStep,
       workflowSteps,
+      consumerStepRunId: stepRun.id,
     });
   } catch (error) {
     await failToolStepRunWithDispatchError({
@@ -2844,6 +2845,7 @@ export async function processQueuedWorkflowToolStepRuns(
         run: row.run,
         step: step as PersistedWorkflowStep,
         workflowSteps: steps,
+        consumerStepRunId: row.stepRun.id,
       });
     if (!requestId) {
       await failToolStepRunWithDispatchError({

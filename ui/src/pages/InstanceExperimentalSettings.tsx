@@ -31,6 +31,7 @@ export function InstanceExperimentalSettings() {
       enableRunTerminalBoundaryV1?: boolean;
       enableRunReopenGuardV1?: boolean;
       enableRunRecoveryServiceV1?: boolean;
+      enableWorkProductBindingV1?: boolean;
     }) =>
       instanceSettingsApi.updateExperimental(patch),
     onSuccess: async () => {
@@ -65,6 +66,7 @@ export function InstanceExperimentalSettings() {
   const enableRunTerminalBoundaryV1 = experimentalQuery.data?.enableRunTerminalBoundaryV1 === true;
   const enableRunReopenGuardV1 = experimentalQuery.data?.enableRunReopenGuardV1 === true;
   const enableRunRecoveryServiceV1 = experimentalQuery.data?.enableRunRecoveryServiceV1 === true;
+  const enableWorkProductBindingV1 = experimentalQuery.data?.enableWorkProductBindingV1 === true;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -248,6 +250,33 @@ export function InstanceExperimentalSettings() {
               className={cn(
                 "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
                 enableRunRecoveryServiceV1 ? "translate-x-4.5" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Work-Product Binding V1</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Tool-step workProduct references pin the producer artifact per execution (run + step) instead of re-resolving the current primary.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Toggle work-product binding v1"
+            disabled={toggleMutation.isPending}
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              enableWorkProductBindingV1 ? "bg-green-600" : "bg-muted",
+            )}
+            onClick={() => toggleMutation.mutate({ enableWorkProductBindingV1: !enableWorkProductBindingV1 })}
+          >
+            <span
+              className={cn(
+                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                enableWorkProductBindingV1 ? "translate-x-4.5" : "translate-x-0.5",
               )}
             />
           </button>
