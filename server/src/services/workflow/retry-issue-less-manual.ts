@@ -1,6 +1,7 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { isRunReopenGuardEnabled, RUN_REOPEN_RESUMABLE_STATUSES } from "./run-reopen-guard-flag.js";
 import type { WorkflowExecutionResult } from "./types.js";
 
 function record(value: unknown): Record<string, unknown> {
@@ -26,6 +27,8 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
   ) => Promise<(typeof workflowStepRuns.$inferSelect)[]>;
   syncWorkflowRunState: (db: Db, runId: string) => Promise<WorkflowExecutionResult>;
 }): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
+  // [run-reopen-guard v1] 플래그는 함수 진입부 1회 읽는다 — off 면 이후 판정/쓰기가 전혀 없다.
+  const reopenGuardEnabled = await isRunReopenGuardEnabled(input.db);
   const context = await input.loadWorkflowExecutionContext(input.db, input.runId);
   if (context.run.companyId !== input.companyId) return null;
 
@@ -80,17 +83,38 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
     .where(eq(workflowStepRuns.workflowRunId, input.runId));
   await input.resetUnlaunchedTerminalStepRuns(input.db, refreshedStepRuns);
 
-  await input.db
-    .update(workflowRuns)
-    .set({
-      status: "running",
-      startedAt: context.run.startedAt ?? new Date(),
-      completedAt: null,
-    })
-    .where(and(
-      eq(workflowRuns.id, input.runId),
-      eq(workflowRuns.companyId, input.companyId),
-    ));
+  if (reopenGuardEnabled) {
+    // [run-reopen-guard v1] run 재오픈에도 상태 CAS + 권한버전 범프 — cancelled·completed 등 종결
+    //   run 은 재오픈되지 않고, 경합으로 CAS 가 빈 반환하면 호출자가 이미 falsy 처리하는 null 로
+    //   실패닫힌다(스텝 리셋은 이미 일어났지만 run 권위는 보존된다).
+    const reopened = await input.db
+      .update(workflowRuns)
+      .set({
+        status: "running",
+        startedAt: context.run.startedAt ?? new Date(),
+        completedAt: null,
+        dispatchAuthorityVersion: sql`${workflowRuns.dispatchAuthorityVersion} + 1`,
+      })
+      .where(and(
+        eq(workflowRuns.id, input.runId),
+        eq(workflowRuns.companyId, input.companyId),
+        inArray(workflowRuns.status, [...RUN_REOPEN_RESUMABLE_STATUSES]),
+      ))
+      .returning({ id: workflowRuns.id });
+    if (reopened.length === 0) return null;
+  } else {
+    await input.db
+      .update(workflowRuns)
+      .set({
+        status: "running",
+        startedAt: context.run.startedAt ?? new Date(),
+        completedAt: null,
+      })
+      .where(and(
+        eq(workflowRuns.id, input.runId),
+        eq(workflowRuns.companyId, input.companyId),
+      ));
+  }
 
   return {
     stepRunId: stepRun.id,

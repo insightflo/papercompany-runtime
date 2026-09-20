@@ -29,6 +29,7 @@ export function InstanceExperimentalSettings() {
       autoRestartDevServerWhenIdle?: boolean;
       enableHeartbeatFinalizationV1?: boolean;
       enableRunTerminalBoundaryV1?: boolean;
+      enableRunReopenGuardV1?: boolean;
     }) =>
       instanceSettingsApi.updateExperimental(patch),
     onSuccess: async () => {
@@ -61,6 +62,7 @@ export function InstanceExperimentalSettings() {
   const autoRestartDevServerWhenIdle = experimentalQuery.data?.autoRestartDevServerWhenIdle === true;
   const enableHeartbeatFinalizationV1 = experimentalQuery.data?.enableHeartbeatFinalizationV1 === true;
   const enableRunTerminalBoundaryV1 = experimentalQuery.data?.enableRunTerminalBoundaryV1 === true;
+  const enableRunReopenGuardV1 = experimentalQuery.data?.enableRunReopenGuardV1 === true;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -190,6 +192,33 @@ export function InstanceExperimentalSettings() {
               className={cn(
                 "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
                 enableRunTerminalBoundaryV1 ? "translate-x-4.5" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Run Reopen Guard V1</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Reopen paths require status CAS + authority version bump; terminal runs cannot be revived by observation.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Toggle run reopen guard v1"
+            disabled={toggleMutation.isPending}
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              enableRunReopenGuardV1 ? "bg-green-600" : "bg-muted",
+            )}
+            onClick={() => toggleMutation.mutate({ enableRunReopenGuardV1: !enableRunReopenGuardV1 })}
+          >
+            <span
+              className={cn(
+                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                enableRunReopenGuardV1 ? "translate-x-4.5" : "translate-x-0.5",
               )}
             />
           </button>

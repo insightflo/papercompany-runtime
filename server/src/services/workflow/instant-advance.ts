@@ -14,7 +14,10 @@
 //   동기 재귀 아님). 재진행 시작 시 dirty 를 해제해, 재진행 중에 다시 오는 요청만 다음
 //   dirty 가 된다. 연속 진행 상한(기본 5회/요청 체인)으로 dirty 무한 루프를 차단한다.
 import type { Db } from "@paperclipai/db";
+import { workflowRuns } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
+import { isRunReopenGuardEnabled, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
 import { executeWorkflowRun } from "./workflow-run-execution.js";
 
 const TAG = "instant-advance";
@@ -24,8 +27,21 @@ const MAX_CONSECUTIVE_ADVANCES = 5;
 /** DI 등록 — heartbeatService(db) 팩토리 시작 시 1회 호출. null 로 해제 가능(테스트). 미등록 요청은 no-op(warn). */
 let configuredDb: Db | null = null;
 
+// [run-reopen-guard v1] 주입 시점 1회 플래그 판정(요청당 재판정 없음). true/false 는 확정값,
+// null 은 판정 경합 중 — 이 경우 요청이 실패닫힌 비동기 판정 경로로 진입한다. 판정 실패는
+// 플래그 off 로 취급해 fire-and-forget 트리거가 깨지지 않는다(기존 틱 폴백 유지).
+let reopenGuardEnabledCache: boolean | null = null;
+let reopenGuardJudgement: Promise<boolean> | null = null;
+
 export function configureInstantWorkflowAdvanceDb(db: Db | null): void {
   configuredDb = db;
+  reopenGuardEnabledCache = null;
+  reopenGuardJudgement = db
+    ? isRunReopenGuardEnabled(db).catch(() => false)
+    : Promise.resolve(false);
+  void reopenGuardJudgement.then((enabled) => {
+    reopenGuardEnabledCache = enabled;
+  });
 }
 
 /** 게이트 판정 — 호출마다 process.env 를 다시 읽는다(테스트/런타임 토글 가능). */
@@ -61,7 +77,13 @@ export function requestInstantWorkflowAdvance(workflowRunId: string): void {
       );
       return;
     }
-    startAdvance(db, workflowRunId, 1);
+    if (reopenGuardEnabledCache === false) {
+      // 플래그 off 확정 — 기존 동기 경로 그대로(신규 I/O 없음).
+      startAdvance(db, workflowRunId, 1, false);
+      return;
+    }
+    // 플래그 on(또는 판정 경합) — 종결 run 은 평가 자체를 스킵한다(실패닫힘).
+    void advanceIfNotTerminal(db, workflowRunId);
   } catch (err) {
     logger.warn(
       { err, tag: TAG, workflowRunId },
@@ -70,13 +92,60 @@ export function requestInstantWorkflowAdvance(workflowRunId: string): void {
   }
 }
 
-function startAdvance(db: Db, workflowRunId: string, chainCount: number): void {
+/**
+ * [run-reopen-guard v1] 종결 판정 후 진행 — 평가 직전 run 상태 1회 SELECT 로 종결
+ * (completed/cancelled/aborted/failed/timed-out) run 을 스킵한다. 재계산 부활 경로로의 재진입을
+ * 막는 트리거 측 가드이며, 공식 재개는 회복 경로(PR-2b)의 소관이다.
+ */
+async function advanceIfNotTerminal(db: Db, workflowRunId: string): Promise<void> {
+  const guardEnabled = reopenGuardEnabledCache
+    ?? await (reopenGuardJudgement ?? Promise.resolve(false));
+  if (inflightByWorkflowRunId.has(workflowRunId)) {
+    dirtyWorkflowRunIds.add(workflowRunId);
+    return;
+  }
+  if (!guardEnabled) {
+    startAdvance(db, workflowRunId, 1, false);
+    return;
+  }
+  if (await isTerminalRunForInstantAdvance(db, workflowRunId)) {
+    logger.debug(
+      { tag: TAG, workflowRunId },
+      "terminal run — instant advance skipped (reopen requires the official recovery path)",
+    );
+    return;
+  }
+  if (inflightByWorkflowRunId.has(workflowRunId)) {
+    dirtyWorkflowRunIds.add(workflowRunId);
+    return;
+  }
+  startAdvance(db, workflowRunId, 1, true);
+}
+
+async function isTerminalRunForInstantAdvance(db: Db, workflowRunId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ status: workflowRuns.status })
+    .from(workflowRuns)
+    .where(eq(workflowRuns.id, workflowRunId))
+    .limit(1);
+  return row ? RUN_REOPEN_TERMINAL_STATUSES.has(row.status) : false;
+}
+
+function startAdvance(db: Db, workflowRunId: string, chainCount: number, reopenGuardEnabled: boolean): void {
   // 재진행 시작 시 dirty 해제 — 재진행 중에 다시 도착하는 요청만 다음 dirty 가 된다.
   // 연속 상한 검사는 settleAdvance 에서 체인을 넘기기 전에 한다(여기엔 항상 ≤ MAX 로만 온다).
   dirtyWorkflowRunIds.delete(workflowRunId);
   logger.info({ tag: TAG, workflowRunId, chainCount }, "advance start");
   const advance = (async () => {
     try {
+      // [run-reopen-guard v1] 평가 직전 종결 판정 — dirty 체인의 재진행도 같은 위치에서 차단된다.
+      if (reopenGuardEnabled && (await isTerminalRunForInstantAdvance(db, workflowRunId))) {
+        logger.debug(
+          { tag: TAG, workflowRunId, chainCount },
+          "terminal run — instant advance skipped (reopen requires the official recovery path)",
+        );
+        return;
+      }
       await executeWorkflowRun(db, workflowRunId);
       logger.info({ tag: TAG, workflowRunId, chainCount }, "advance finished");
     } catch (err) {
@@ -89,13 +158,13 @@ function startAdvance(db: Db, workflowRunId: string, chainCount: number): void {
   })();
   inflightByWorkflowRunId.set(workflowRunId, advance);
   void advance.then(
-    () => settleAdvance(db, workflowRunId, chainCount),
-    () => settleAdvance(db, workflowRunId, chainCount),
+    () => settleAdvance(db, workflowRunId, chainCount, reopenGuardEnabled),
+    () => settleAdvance(db, workflowRunId, chainCount, reopenGuardEnabled),
   );
 }
 
 /** 진행 종료 정산 — map 정리/연쇄를 한 동기 블록에서 처리해 끼어들 틈을 주지 않는다. */
-function settleAdvance(db: Db, workflowRunId: string, chainCount: number): void {
+function settleAdvance(db: Db, workflowRunId: string, chainCount: number, reopenGuardEnabled: boolean): void {
   if (dirtyWorkflowRunIds.has(workflowRunId)) {
     if (chainCount + 1 > MAX_CONSECUTIVE_ADVANCES) {
       // 상한 도달 — dirty 체인 중단·경고. 상태를 정리해 이후 요청이 새 체인(카운터 초기화)으로
@@ -112,7 +181,7 @@ function settleAdvance(db: Db, workflowRunId: string, chainCount: number): void 
       { tag: TAG, workflowRunId, chainCount },
       "dirty request pending — chaining one more advance",
     );
-    startAdvance(db, workflowRunId, chainCount + 1);
+    startAdvance(db, workflowRunId, chainCount + 1, reopenGuardEnabled);
     return;
   }
   inflightByWorkflowRunId.delete(workflowRunId);
@@ -122,4 +191,9 @@ function settleAdvance(db: Db, workflowRunId: string, chainCount: number): void 
 export function resetInstantWorkflowAdvanceForTests(): void {
   inflightByWorkflowRunId.clear();
   dirtyWorkflowRunIds.clear();
+}
+
+/** 테스트 전용 — 주입 시점 reopen-guard 플래그 판정 대기. 프로덕션 코드는 호출 금지. */
+export function reopenGuardJudgementForTests(): Promise<boolean> | null {
+  return reopenGuardJudgement;
 }
