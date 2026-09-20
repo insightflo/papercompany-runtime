@@ -9,7 +9,8 @@ import type { Db } from "@paperclipai/db";
 import { workflowDefinitions, workflowRunSlots, workflowRuns, workflowStepRuns, issues } from "@paperclipai/db";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { HttpError } from "../../errors.js";
-import { isRunReopenGuardEnabled, RUN_REOPEN_RESUMABLE_STATUSES, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
+import { isRunReopenGuardEnabled, isRunRecoveryServiceEnabled, RUN_REOPEN_RESUMABLE_STATUSES, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
+import { latestTerminalDecision, recoverTerminalRun } from "./run-recovery-authority.js";
 import { archiveWorkflowDefinitionWithGuard } from "./workflow-definition-delete-guard.js";
 import type {
   WorkflowDefinition,
@@ -508,7 +509,7 @@ export async function resumeWorkflowRun(
 
   // 사전 분류 — 거절 판정은 어떤 쓰기보다 앞선다(부작용 0).
   const [current] = await db
-    .select({ status: workflowRuns.status })
+    .select({ status: workflowRuns.status, dispatchAuthorityVersion: workflowRuns.dispatchAuthorityVersion })
     .from(workflowRuns)
     .where(scope)
     .limit(1);
@@ -518,6 +519,35 @@ export async function resumeWorkflowRun(
       409,
       `workflow_run_resume_not_allowed: terminal status ${current.status}`,
     );
+  }
+
+  // [run-recovery-service v1 — PR-2b] 결정이 기록된 failed 종결은 공식 복구(1회 소비·버전
+  // 검증)로만 되살린다. 결정 없는 failed(경계 이전 레거시)는 기존 CAS+범프 경로를 유지한다.
+  if (current.status === "failed" && (await isRunRecoveryServiceEnabled(db))) {
+    const latestDecision = await latestTerminalDecision(db, id, companyId);
+    if (latestDecision && latestDecision.decidedAuthorityVersion === current.dispatchAuthorityVersion) {
+      const recovery = await recoverTerminalRun(db, {
+        runId: id,
+        companyId,
+        expectedAuthorityVersion: current.dispatchAuthorityVersion,
+        expectedDecision: latestDecision.decision,
+        recoveryKind: "manual_resume",
+        requestedBy: "board",
+        now: new Date(),
+      });
+      if (recovery.kind === "recovered" || recovery.kind === "already_consumed") {
+        const [recovered] = await db.select().from(workflowRuns).where(scope).limit(1);
+        return recovered ? mapWorkflowRun(recovered) : null;
+      }
+      if (recovery.kind === "stale_authority") {
+        throw new HttpError(409, `workflow_run_resume_stale_authority: current version ${recovery.currentAuthorityVersion}`);
+      }
+      // [봇 지적 교정] 결정값 불일치는 버전 문제가 아니다 — 운영자 오진을 피하게 별도 코드로.
+      if (recovery.kind === "decision_mismatch") {
+        throw new HttpError(409, `workflow_run_resume_decision_mismatch: recorded decision ${recovery.existingDecision}`);
+      }
+      // not_terminal / missing_decision → 아래 기존 CAS 경로로 폴백(경합·레거시).
+    }
   }
 
   const [run] = await db

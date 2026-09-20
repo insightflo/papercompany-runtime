@@ -17,12 +17,15 @@ import {
   workflowRuns,
   workflowStepRuns,
   workflowTerminalDecisions,
+  workflowRecoveryAuthorities,
   workflowTerminalEffectIntents,
   type Db,
 } from "@paperclipai/db";
 
 /** FK 역순 전체 삭제 — 각 테스트 DB 는 임시(임베디드 PG)라 전체 비움이 안전하다. */
 export async function cleanupTerminalBoundaryTables(db: Db): Promise<void> {
+  // recovery 권한이 결정을 FK 참조 — 결정 삭제보다 먼저 지운다.
+  await db.delete(workflowRecoveryAuthorities);
   await db.delete(workflowTerminalEffectIntents);
   await db.delete(workflowTerminalDecisions);
   await db.delete(issueComments);

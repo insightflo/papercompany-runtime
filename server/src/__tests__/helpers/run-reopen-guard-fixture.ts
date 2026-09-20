@@ -28,6 +28,20 @@ export async function setRunReopenGuardFlag(db: Db, enabled: boolean): Promise<v
   } as never);
 }
 
+/** [run-recovery-service v1] 두 플래그를 함께 제어한다 — 복구 서비스는 가드와 함께 켤 때만 의미가 있다. */
+export async function setRunRecoveryFlags(
+  db: Db,
+  reopenGuard: boolean,
+  recoveryService: boolean,
+): Promise<void> {
+  await db.delete(instanceSettings);
+  await db.insert(instanceSettings).values({
+    singletonKey: "default",
+    general: {},
+    experimental: { enableRunReopenGuardV1: reopenGuard, enableRunRecoveryServiceV1: recoveryService },
+  } as never);
+}
+
 export const runOf = (db: Db, runId: string) =>
   db.select().from(workflowRuns).where(eq(workflowRuns.id, runId)).then((rows) => rows[0]);
 

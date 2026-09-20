@@ -137,6 +137,7 @@ export { missionPlanDecisionSubmissions } from "./mission_plan_decision_submissi
 export { missionPlanQaVerdicts } from "./mission_plan_qa_verdicts.js";
 export { workflowTransitionEvents } from "./workflow_transition_events.js";
 export { workflowTerminalDecisions, workflowTerminalEffectIntents } from "./workflow_terminal_decisions.js";
+export { workflowRecoveryAuthorities } from "./workflow_recovery_authorities.js";
 export type { WorkflowTerminalStopTargets } from "./workflow_terminal_decisions.js";
 export { qualityOccurrences } from "./quality_occurrences.js";
 export { qualityActions } from "./quality_actions.js";

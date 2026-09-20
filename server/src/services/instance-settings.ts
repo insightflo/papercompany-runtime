@@ -34,6 +34,7 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableHeartbeatFinalizationV1: parsed.data.enableHeartbeatFinalizationV1 ?? false,
       enableRunTerminalBoundaryV1: parsed.data.enableRunTerminalBoundaryV1 ?? false,
       enableRunReopenGuardV1: parsed.data.enableRunReopenGuardV1 ?? false,
+      enableRunRecoveryServiceV1: parsed.data.enableRunRecoveryServiceV1 ?? false,
       enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
     };
   }
@@ -43,6 +44,7 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     enableHeartbeatFinalizationV1: false,
     enableRunTerminalBoundaryV1: false,
     enableRunReopenGuardV1: false,
+    enableRunRecoveryServiceV1: false,
     enableKnowledgePatternInjection: false,
   };
 }
