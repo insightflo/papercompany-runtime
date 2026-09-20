@@ -12,12 +12,13 @@
 // - 이 모듈은 플래그를 읽지 않는다. 게이팅(run-terminal-boundary-flag.ts)은 호출자 책임이며
 //   legacy 경로는 이 모듈을 전혀 거치지 않는다.
 
-import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
   missionAgentRuntimes,
   workflowRuns,
+  workflowStepRuns,
   workflowTerminalDecisions,
   workflowTerminalEffectIntents,
   type WorkflowTerminalStopTargets,
@@ -223,6 +224,14 @@ export async function finalizeRunTerminal(db: Db, input: FinalizeRunTerminalInpu
       }
       return await classifyExistingDecision(tx, input, current);
     }
+
+    // 종결 CAS 성공 시점의 울타리다. 종결 전 세대를 쥔 진행 중 정산/동기화/완료 쓰기는
+    // 세대 CAS 에서 즉시 실패해야 하며, 새 세대는 공식 복구가 다시 열어 주기 전까지 없다.
+    // (run 행을 이미 (id, companyId) 로 잠가 검증했으므로 eq(runId) 로 충분하다.)
+    await tx
+      .update(workflowStepRuns)
+      .set({ executionGeneration: sql`${workflowStepRuns.executionGeneration} + 1` })
+      .where(eq(workflowStepRuns.workflowRunId, input.runId));
 
     const stepIssueIds = uniqueIssueIds(input.stepRuns);
     const capturedStopTargets = await captureStopTargets(tx, input, locked, stepIssueIds, staleUnblockIssueIds);

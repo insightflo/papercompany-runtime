@@ -2,6 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRunFinalizations, heartbeatRuns, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
+import { logger } from "../../middleware/logger.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import type { HeartbeatRun } from "./owner-capability.js";
 import { allRequiredStages, Q_STAGE, STAGE_CLASS } from "./stage-classifier.js";
@@ -83,6 +84,8 @@ export async function settleRunIfReady(
   // settled_at and dispatch_ready_at are one authority transition: if the linked
   // workflow step cannot receive dispatch readiness, the transaction rolls back
   // settled_at as well so the recovery lane can safely retry.
+  // [PR-3 세대 예외] 연결 스텝의 세대가 종결/복구로 바뀐 늦은 정산은 dispatch readiness 를
+  // 받을 수 없고도 정당하다 — 스탬프만 건너뛰고 정산은 확정한다(아래 stale-generation skip).
   const settled = await db.transaction(async (tx) => {
     const row = await tx
       .update(heartbeatRuns)
@@ -103,12 +106,15 @@ export async function settleRunIfReady(
         throw new Error(`Cannot settle heartbeat ${run.id}: linked workflow execution generation is missing`);
       }
       const stepRun = await tx
-        .select({ id: workflowStepRuns.id, dispatchReadyAt: workflowStepRuns.dispatchReadyAt })
+        .select({
+          id: workflowStepRuns.id,
+          dispatchReadyAt: workflowStepRuns.dispatchReadyAt,
+          executionGeneration: workflowStepRuns.executionGeneration,
+        })
         .from(workflowStepRuns)
         .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId))
         .where(and(
           eq(workflowStepRuns.id, run.workflowStepRunId),
-          eq(workflowStepRuns.executionGeneration, run.workflowExecutionGeneration),
           eq(workflowRuns.companyId, run.companyId),
         ))
         .limit(1)
@@ -116,8 +122,22 @@ export async function settleRunIfReady(
       if (!stepRun) {
         throw new Error(`Cannot settle heartbeat ${run.id}: linked workflow step run ${run.workflowStepRunId} was not found`);
       }
+      const generationChanged = stepRun.executionGeneration !== run.workflowExecutionGeneration;
+      if (generationChanged) {
+        // 늦은 정산은 현재 스텝의 새 세대를 건드릴 권한이 없다. 정산 자체는 이미 끝났고,
+        // dispatch 스탬프만 지워진 연산처럼 건너뛰어 recovery retry 영구 실패를 막는다.
+        logger.warn(
+          {
+            heartbeatRunId: run.id,
+            stepRunId: run.workflowStepRunId,
+            expectedGeneration: run.workflowExecutionGeneration,
+            actualGeneration: stepRun.executionGeneration,
+          },
+          "heartbeat settlement skipped stale generation dispatch readiness",
+        );
+      }
 
-      if (!stepRun.dispatchReadyAt) {
+      if (!generationChanged && !stepRun.dispatchReadyAt) {
         const ready = await tx
           .update(workflowStepRuns)
           .set({ dispatchReadyAt: now })
@@ -129,7 +149,31 @@ export async function settleRunIfReady(
           .returning({ id: workflowStepRuns.id })
           .then((rows) => rows[0] ?? null);
         if (!ready) {
-          throw new Error(`Cannot settle heartbeat ${run.id}: dispatch readiness CAS failed for ${run.workflowStepRunId}`);
+          const [currentStepRun] = await tx
+            .select({ executionGeneration: workflowStepRuns.executionGeneration })
+            .from(workflowStepRuns)
+            .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId))
+            .where(and(
+              eq(workflowStepRuns.id, run.workflowStepRunId),
+              eq(workflowRuns.companyId, run.companyId),
+            ))
+            .limit(1);
+          if (!currentStepRun) {
+            throw new Error(`Cannot settle heartbeat ${run.id}: linked workflow step run ${run.workflowStepRunId} was not found`);
+          }
+          if (currentStepRun.executionGeneration !== run.workflowExecutionGeneration) {
+            logger.warn(
+              {
+                heartbeatRunId: run.id,
+                stepRunId: run.workflowStepRunId,
+                expectedGeneration: run.workflowExecutionGeneration,
+                actualGeneration: currentStepRun.executionGeneration,
+              },
+              "heartbeat settlement CAS hit a newer step generation",
+            );
+          } else {
+            throw new Error(`Cannot settle heartbeat ${run.id}: dispatch readiness CAS failed for ${run.workflowStepRunId}`);
+          }
         }
       }
     }

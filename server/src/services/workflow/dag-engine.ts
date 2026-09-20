@@ -1253,10 +1253,16 @@ async function syncStepRunsFromIssueState(
         eq(workflowStepRuns.metadata, stepRun.metadata),
       )
       : undefined;
+    // 늦은 이슈 완료가 종결/재설정된 세대의 스텝 행을 덮어쓰지 않게 하는 소비 지점 울타리.
+    // 세대가 바뀌었다면 이 패치는 0행으로 흐르고, 이후 reload 가 실제 상태를 반영한다.
     await db
       .update(workflowStepRuns)
       .set(patch)
-      .where(and(eq(workflowStepRuns.id, stepRun.id), metadataCleanupCondition));
+      .where(and(
+        eq(workflowStepRuns.id, stepRun.id),
+        eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
+        metadataCleanupCondition,
+      ));
   }
 
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
@@ -3243,6 +3249,7 @@ export async function completeWorkflowToolStepFromResult(
       observedIterationIndex: row.stepRun.iterationIndex ?? null,
       observedRequestId: row.stepRun.lastDispatchRequestId,
       observedCompletedAt: row.stepRun.completedAt,
+      observedExecutionGeneration: row.stepRun.executionGeneration,
       producerToken: structuralGateProducerToken,
       patch: {
         startedAt: row.stepRun.startedAt ?? now, completedAt: now,
@@ -3261,18 +3268,18 @@ export async function completeWorkflowToolStepFromResult(
   // entirely, so we set it here on successful completion (only if not already set).
   const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
   const nextStatus = effectiveSuccess ? "completed" : "failed";
-  // [Task6c-A] resume run 의 최종 UPDATE 는 세대 CAS 로 강화된다: load 시점과 update 시점 사이
+  // [Task6c-A] 완료 UPDATE 는 세대 CAS 로 강화된다: load 시점과 update 시점 사이
   //   resetForResume 이 executionGeneration/statusTransitionVersion 을 정확히 함께 +1 하고 새
   //   resumeRequestId 로 stamp 을 교체하므로, (generation, transitionVersion) 이 여전히 일치하는
-  //   행은 필연히 같은 resumeRequestId 를 가진다(metadata 동등성은 이 CAS 가 보장 — 별도 where
-  //   불필요). 0 row 이면 stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다. ordinary run
-  //   은 where(eq(id)) 그대로 유지된다.
-  const resumeCasCondition = resumeScopeRequestId !== null
-    ? and(
-      eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
-      eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion),
-    )
-    : undefined;
+  //   resume 행은 필연히 같은 resumeRequestId 를 가진다(metadata 동등성은 이 CAS 가 보장 — 별도
+  //   where 불필요). ordinary run 도 generation 만으로 낡은 종결/복구 결과를 차단한다. 0 row 이면
+  //   stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다.
+  const completionCasCondition = and(
+    eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
+    ...(resumeScopeRequestId !== null
+      ? [eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion)]
+      : []),
+  );
   // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 절대 마감하지 않는다 —
   //   자식 정산 권위는 workflow-child-settlement-writers 의 전체 신원 형태뿐이다(위에서 거부됨).
   const [updatedStepRun] = await db.update(workflowStepRuns).set({
@@ -3285,9 +3292,7 @@ export async function completeWorkflowToolStepFromResult(
       : structuralContractFailure ? "structural_gate_contract_failure"
       : (input.error ?? input.stderr ?? null),
     metadata: resultMetadata,
-  }).where(resumeCasCondition
-    ? and(eq(workflowStepRuns.id, row.stepRun.id), resumeCasCondition)
-    : eq(workflowStepRuns.id, row.stepRun.id)).returning({
+  }).where(and(eq(workflowStepRuns.id, row.stepRun.id), completionCasCondition)).returning({
     id: workflowStepRuns.id,
     transitionVersion: workflowStepRuns.statusTransitionVersion,
   });

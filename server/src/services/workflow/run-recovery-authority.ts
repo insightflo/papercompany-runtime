@@ -11,9 +11,14 @@
 // - 이 모듈은 플래그를 읽지 않는다. 게이팅은 호출자 책임이며 legacy 경로는 거치지 않는다.
 // - 스텝 리셋 등 후속 조작은 호출자 몫 — 코어는 run 재개(상태 CAS + 버전 범프)까지만.
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { workflowRecoveryAuthorities, workflowRuns, workflowTerminalDecisions } from "@paperclipai/db";
+import {
+  workflowRecoveryAuthorities,
+  workflowRuns,
+  workflowStepRuns,
+  workflowTerminalDecisions,
+} from "@paperclipai/db";
 import { isTerminalRunStatus } from "./run-terminal-boundary-cause.js";
 
 export type RunRecoveryKind =
@@ -168,6 +173,14 @@ export async function recoverTerminalRun(
       //   명시한다(호출자는 kind 분기 밖에서 실패닫힘 처리).
       throw new Error("workflow recovery CAS lost after row lock — transaction aborted");
     }
+
+    // 복구는 예전 세대를 되살리지 않는다. 공식 재개가 열릴 때 새 스텝 세대를 발급해
+    // 종결 경계 이전의 늦은 결과가 복구된 실행을 오염하지 않게 한다.
+    // (run 행을 이미 (id, companyId) 로 잠가 검증했으므로 eq(runId) 로 충분하다.)
+    await tx
+      .update(workflowStepRuns)
+      .set({ executionGeneration: sql`${workflowStepRuns.executionGeneration} + 1` })
+      .where(eq(workflowStepRuns.workflowRunId, input.runId));
 
     return { kind: "recovered", authority, run: runStateOf(updatedRun) };
   });

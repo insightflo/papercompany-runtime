@@ -8,6 +8,8 @@ import {
   agentWakeupRequests,
   agents,
   companies,
+  heartbeatRunFinalizationSteps,
+  heartbeatRunFinalizations,
   heartbeatRuns,
   issueComments,
   issues,
@@ -30,6 +32,9 @@ export async function cleanupTerminalBoundaryTables(db: Db): Promise<void> {
   await db.delete(workflowTerminalDecisions);
   await db.delete(issueComments);
   await db.delete(missionAgentRuntimes);
+  // heartbeat 정산(finalizations/steps)이 heartbeat_runs 를 FK 참조 — 먼저 지운다.
+  await db.delete(heartbeatRunFinalizationSteps);
+  await db.delete(heartbeatRunFinalizations);
   // heartbeat_runs.wakeup_request_id → agent_wakeup_requests FK 때문에 heartbeat 를 먼저 삭제한다.
   await db.delete(heartbeatRuns);
   await db.delete(agentWakeupRequests);
