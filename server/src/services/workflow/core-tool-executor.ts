@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./remote-tool-executor.js";
+import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
 import { normalizeCommandParts, parametersToCliArgs, readObject } from "./core-tool-context.js";
 import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
@@ -60,6 +61,20 @@ export async function executeCoreWorkflowTool(input: {
     if (!grant) return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
   }
   if (isJudgmentTool) {
+    // [봇 bug·medium 교정] 디렉토리 해석 실패(일시 DB 오류 포함)가 판단 실행 자체를
+    //   실패시키지 않게 한다 — 산출물 없이 판단만 수행한다(observe 소프트 성공 계약).
+    let stepOutputDir: string | null = null;
+    if (hasWorkflowStepContext) {
+      try {
+        stepOutputDir = await resolveWorkflowRunStepOutputDir(input.db, {
+          companyId: input.companyId,
+          workflowRunId: input.workflowRunId,
+          stepId: input.stepId,
+        });
+      } catch {
+        stepOutputDir = null;
+      }
+    }
     return executeAgentJudgmentTool({
       db: input.db,
       companyId: input.companyId,
@@ -69,6 +84,7 @@ export async function executeCoreWorkflowTool(input: {
       workflowRunId: input.workflowRunId,
       stepRunId: input.stepRunId,
       stepId: input.stepId,
+      stepOutputDir,
       judgmentService: input.judgmentService,
     });
   }
