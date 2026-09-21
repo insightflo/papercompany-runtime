@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { logger } from "../../middleware/logger.js";
+import { persistArtifact } from "../workflow/http-tool-response.js";
 import type { Db } from "@paperclipai/db";
 import type { JudgmentAnswer, JudgmentAskState, JudgmentQuestion } from "@paperclipai/shared";
 import { judgmentQuestionSchema } from "@paperclipai/shared";
@@ -214,6 +216,7 @@ export async function executeAgentJudgmentTool(input: {
   workflowRunId?: string | null;
   stepRunId?: string | null;
   stepId?: string | null;
+  stepOutputDir?: string | null;
   judgmentService?: JudgmentService;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const workflowRunId = input.workflowRunId?.trim() || null;
@@ -302,11 +305,42 @@ export async function executeAgentJudgmentTool(input: {
       .filter((answer) => typeof answer.confidence === "number")
       .map((answer) => [answer.name, answer.confidence]),
   );
+
+  // [봇 bug·high/medium 교정] 산출물 쓰기는 관측 계약(판단 성공 → 스텝 소프트 성공,
+  //   B-4.2)을 깨지 않는 부가물이다 — 디렉토리 해석/파일 I/O 실패 시 warn 만 남기고
+  //   판단 결과는 그대로 반환한다(형제 구현 http-tool-response.ts:146 패턴).
+  //   overall 은 answers 순서 가정이 아니라 '선택형 질문 = 최종 판정' 컨벤션으로 찾는다.
+  let artifactPath: string | undefined;
+  if (isWorkflowStepContext && input.stepOutputDir) {
+    try {
+      const verdictAnswer = answers.find((answer) => answer.type === "choice") ?? answers[0];
+      artifactPath = await persistArtifact(input.stepOutputDir, "judgment-result.json", {
+        overall: verdictAnswer?.value,
+        // [봇 bug·medium] probabilities 는 옵션별 확률(choice 전용) — 질문이름→신뢰도
+        //   confidences 폴백은 의미 혼합 오독을 낳는다. 없으면 생략(undefined).
+        probabilities: verdictAnswer?.probabilities,
+        answers,
+        outcome: "observed",
+        latencyMs: result.latencyMs,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      logger.warn(
+        { err: (error as Error).message, workflowRunId, stepId },
+        "judgment artifact persistence failed — observation result returned without artifact",
+      );
+    }
+  }
+
   return {
+    ...(artifactPath ? { artifactPath } : {}),
     status: 200,
     body: {
       content: answerSummary(answers),
       data: {
+        // [봇 bug·medium] 모든 호출 경로(에이전트 도구 디스패치는 body 만 직렬화)가
+        //   산출물 경로를 관측할 수 있게 data 에도 노출(형제 계약 http-tool-response 패턴).
+        ...(artifactPath ? { artifactPath } : {}),
         outcome: "observed",
         answers,
         confidence: result.confidence ?? null,
