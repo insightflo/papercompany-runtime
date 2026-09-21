@@ -62,6 +62,33 @@ function parseQuestions(value: unknown): { questions: JudgmentQuestion[] } | { e
     }
     const parsed = judgmentQuestionSchema.safeParse({ name, ...raw });
     if (!parsed.success) return { error: "question '" + name + "' has an invalid shape" };
+    // [봇 bug·medium 확장] provider 계약과 조기 정합 — criteria 는 질문 타입별 형태를
+    //   지켜야 한다(choice/noul={라벨: 설명} 객체, score=루브릭 배열). 잘못된 형태(배열·
+    //   문자열 레거시 포함)는 provider 422·재시도 낭비 전에 질문 이름과 함께 조기 거부한다.
+    //   criteria 미지정은 provider 가 판단하게 둔다(존재하지 않는 형태는 없으므로).
+    const criteria = parsed.data.criteria;
+    if (criteria !== undefined) {
+      const isObject = typeof criteria === "object" && criteria !== null && !Array.isArray(criteria);
+      const isArray = Array.isArray(criteria);
+      const isString = typeof criteria === "string";
+      // [봇 bug·low] score 루브릭은 최소 2개(공식 계약) — 빈/1개 배열도 조기 거부.
+      const shapeOk = parsed.data.type === "score"
+        ? isArray && criteria.length >= 2
+        : isObject;
+      if (!shapeOk) {
+        // [봇 other·medium] 타입별 예시 — noul 에 choice 예시를 보이면 같은 실패로 재시도하게 된다.
+        const expectedByType: Record<string, string> = {
+          score: "a rubric array with at least 2 entries",
+          choice: "a {label: description} object (for example {proceed: '진행 조건'})",
+          noul: "a {label: description} object (for example {true: '근거 충족', false: '미달'})",
+        };
+        const got = isArray ? "array(" + criteria.length + ")" : isString ? "string" : typeof criteria;
+        return {
+          error: "question '" + name + "' (" + parsed.data.type + ") has invalid criteria: got "
+            + got + ", expected " + (expectedByType[parsed.data.type] ?? "a valid criteria object"),
+        };
+      }
+    }
     questions.push(parsed.data);
   }
   return { questions };
