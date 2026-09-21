@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-09-21 — conditional QA fixtures must preserve artifact names and boundary import order
+- Date: 2026-09-21
+- Task: Jev conditional skip settlement and revival actual-DB verification.
+- What failed: Both decision-rework directions kept the old IF result; an engine regression fixture started real heartbeat writers and failed teardown foreign keys.
+- Root cause: Artifact registration canonicalizes the filename into the title, so `jev-mirror-N.json` did not replace the IF source `decision.json`. Importing the shared boundary after engine dependencies allowed real heartbeat services to load.
+- Category: Integration fixture contracts / module initialization.
+- Fix: Register each revision under a distinct directory with basename `decision.json`, assert its stored title, and import the shared control-node boundary before fixture/engine dependencies. Complete validator issues through scoped verdict/lifecycle APIs.
+- Prevention rule: Verify durable registered identity, not requested title; establish mocks before service imports. Never delete queue rows to hide real asynchronous writers. Package typecheck excludes tests, so actual DB tests remain mandatory.
+- Reuse trigger: Conditional work-product rework, heartbeat-backed integration fixtures, unexpected queue rows or teardown FK failures.
+- Evidence: /tmp/jev-qa-targeted-r2.log; /tmp/jev-qa-f2-r3.log; /tmp/jev-qa-final-six.log (21 passed).
+
 ### 2026-09-10 — async stdout flood starved the loop instead of flooding the pipe
 - Date: 2026-09-10
 - Task: PR219 noisy-child subprocess-kill fixture (workflow-resume-cu-adapters).
