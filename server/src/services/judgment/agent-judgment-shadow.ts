@@ -17,7 +17,7 @@ import { logger as defaultLogger } from "../../middleware/logger.js";
 import { createJudgmentService, type JudgmentService } from "./judgment-service.js";
 import { AGENT_JUDGMENT_DEFINITION_NAME } from "./agent-judgment-tool.js";
 import {
-  AGENT_SHADOW_CONF_FLOOR_DEFAULT,
+  AGENT_SHADOW_YES_FLOOR_DEFAULT,
   assembleAgentJudgmentShadowState,
   type AgentShadowState,
 } from "./agent-judgment-shadow-state.js";
@@ -79,7 +79,7 @@ export function buildAgentJudgmentShadowDefinition(): JudgmentDefinitionSnapshot
       notes:
         "섀도 관측 파일럿 — 결과는 실행에 반영되지 않는다. thresholds 는 메모용이며 최종 등급은 " +
         "computeAgentJudgmentShadowVerdict 가 코드로 계산한다.",
-      thresholds: { noul_confidence_min: AGENT_SHADOW_CONF_FLOOR_DEFAULT },
+      thresholds: { noul_yes_min: AGENT_SHADOW_YES_FLOOR_DEFAULT },
     },
   };
 }

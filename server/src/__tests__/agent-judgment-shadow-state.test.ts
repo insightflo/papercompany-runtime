@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AGENT_SHADOW_CONF_FLOOR_DEFAULT,
+  AGENT_SHADOW_YES_FLOOR_DEFAULT,
   AGENT_SHADOW_TEXT_CHAR_CAP,
   assembleAgentJudgmentShadowState,
   buildShadowStructureStats,
@@ -97,86 +97,91 @@ function answer(name: string, fields: Partial<RawAnswer>): RawAnswer {
   return { name, type: "noul", ...fields };
 }
 
-function bothTrue(confA: number, confB: number): RawAnswer[] {
+/** 실제 공급자 계약: noul value 는 P(yes) 0~1 숫자(null=무답)다. */
+function bothYes(pA: number | null, pB: number | null): RawAnswer[] {
   return [
-    answer("complete_html", { value: true, confidence: confA }),
-    answer("claims_grounded", { value: true, confidence: confB }),
+    answer("complete_html", { value: pA }),
+    answer("claims_grounded", { value: pB }),
   ];
 }
 
-describe("computeAgentJudgmentShadowVerdict — 계산형 verdict 전 분기", () => {
-  it("둘 다 true + conf >= floor → low_risk(최소 신뢰도 보고)", () => {
-    const verdict = computeAgentJudgmentShadowVerdict(bothTrue(0.9, 0.8));
+describe("computeAgentJudgmentShadowVerdict — 계산형 verdict 전 분기(P(yes) 도메인)", () => {
+  it("양쪽 P(yes) >= floor → low_risk(최소 P(yes) 보고)", () => {
+    const verdict = computeAgentJudgmentShadowVerdict(bothYes(0.83, 0.62));
     expect(verdict.verdict).toBe("low_risk");
-    expect(verdict.minConfidence).toBe(0.8);
+    expect(verdict.reason).toBe("noul_all_yes");
+    expect(verdict.minPYes).toBe(0.62);
   });
 
-  it("하나라도 false → needs_full_review", () => {
-    const verdict = computeAgentJudgmentShadowVerdict([
-      answer("complete_html", { value: true, confidence: 0.9 }),
-      answer("claims_grounded", { value: false, confidence: 0.9 }),
-    ]);
+  it("하나라도 P(yes) <= 1-floor(확정 아니오 대역) → needs_full_review", () => {
+    const verdict = computeAgentJudgmentShadowVerdict(bothYes(0.9, 0.1));
     expect(verdict.verdict).toBe("needs_full_review");
-    expect(verdict.minConfidence).toBe(0.9);
+    expect(verdict.reason).toBe("noul_no:claims_grounded");
+    expect(verdict.minPYes).toBe(0.1);
+  });
+
+  it("모호 대역(1-floor < P(yes) < floor) → insufficient_evidence(ambiguous)", () => {
+    const verdict = computeAgentJudgmentShadowVerdict(bothYes(0.9, 0.5));
+    expect(verdict.verdict).toBe("insufficient_evidence");
+    expect(verdict.reason).toBe("ambiguous_band");
+    expect(verdict.minPYes).toBe(0.5);
+  });
+
+  it("무답(value null) → insufficient_evidence(no_answer)", () => {
+    const verdict = computeAgentJudgmentShadowVerdict(bothYes(0.9, null));
+    expect(verdict.verdict).toBe("insufficient_evidence");
+    expect(verdict.reason).toBe("no_answer:claims_grounded");
+    expect(verdict.minPYes).toBeNull();
   });
 
   it("질문 결측 → insufficient_evidence(malformed)", () => {
     const verdict = computeAgentJudgmentShadowVerdict([
-      answer("complete_html", { value: true, confidence: 0.9 }),
+      answer("complete_html", { value: 0.9 }),
     ]);
     expect(verdict.verdict).toBe("insufficient_evidence");
     expect(verdict.reason).toMatch(/^malformed:/);
-    expect(verdict.minConfidence).toBeNull();
+    expect(verdict.minPYes).toBeNull();
   });
 
-  it("boolean 이 아닌 value → insufficient_evidence(malformed)", () => {
-    for (const bad of ["yes", 1]) {
-      const verdict = computeAgentJudgmentShadowVerdict([
-        answer("complete_html", { value: bad, confidence: 0.9 }),
-        answer("claims_grounded", { value: true, confidence: 0.9 }),
-      ]);
-      expect(verdict.verdict).toBe("insufficient_evidence");
-      expect(verdict.reason).toMatch(/^malformed:/);
-    }
+  it("중복 답변 → insufficient_evidence(malformed)", () => {
+    const verdict = computeAgentJudgmentShadowVerdict([
+      answer("complete_html", { value: 0.9 }),
+      answer("complete_html", { value: 0.8 }),
+      answer("claims_grounded", { value: 0.9 }),
+    ]);
+    expect(verdict.verdict).toBe("insufficient_evidence");
+    expect(verdict.reason).toMatch(/^malformed:/);
   });
 
   it("noul 이 아닌 type → insufficient_evidence(malformed)", () => {
     const verdict = computeAgentJudgmentShadowVerdict([
-      { name: "complete_html", type: "choice", value: true, confidence: 0.9 },
-      answer("claims_grounded", { value: true, confidence: 0.9 }),
+      { name: "complete_html", type: "choice", value: 0.9 },
+      answer("claims_grounded", { value: 0.9 }),
     ]);
     expect(verdict.verdict).toBe("insufficient_evidence");
     expect(verdict.reason).toMatch(/^malformed:/);
   });
 
-  it("confidence 결측·범위 밖 → insufficient_evidence(malformed)", () => {
-    for (const bad of [undefined, 1.5, Number.NaN]) {
+  it("숫자가 아니거나 0~1 범위 밖인 value → insufficient_evidence(malformed)", () => {
+    for (const bad of ["yes", true, 1.5, -0.1, Number.NaN]) {
       const verdict = computeAgentJudgmentShadowVerdict([
-        answer("complete_html", { value: true, confidence: 0.9 }),
-        answer("claims_grounded", { value: true, ...(bad === undefined ? {} : { confidence: bad }) }),
+        answer("complete_html", { value: bad }),
+        answer("claims_grounded", { value: 0.9 }),
       ]);
       expect(verdict.verdict).toBe("insufficient_evidence");
       expect(verdict.reason).toMatch(/^malformed:/);
     }
   });
 
-  it("min conf < floor → insufficient_evidence(low_confidence)", () => {
-    const verdict = computeAgentJudgmentShadowVerdict(bothTrue(0.9, 0.5));
-    expect(verdict.verdict).toBe("insufficient_evidence");
-    expect(verdict.reason).toBe("low_confidence");
-    expect(verdict.minConfidence).toBeNull();
-    // false 답변 + 저신뢰도도 마찬가지로 실패 닫힘(floor 게이트가 등급 판정보다 앞선다)
-    const falseLow = computeAgentJudgmentShadowVerdict([
-      answer("complete_html", { value: true, confidence: 0.9 }),
-      answer("claims_grounded", { value: false, confidence: 0.4 }),
-    ]);
-    expect(falseLow.verdict).toBe("insufficient_evidence");
-    expect(falseLow.reason).toBe("low_confidence");
+  it("경계값 P(yes) === floor 는 low_risk, 1-floor 는 needs_full_review", () => {
+    expect(computeAgentJudgmentShadowVerdict(bothYes(AGENT_SHADOW_YES_FLOOR_DEFAULT, AGENT_SHADOW_YES_FLOOR_DEFAULT)).verdict).toBe("low_risk");
+    const noBand = 1 - AGENT_SHADOW_YES_FLOOR_DEFAULT;
+    expect(computeAgentJudgmentShadowVerdict(bothYes(0.95, noBand)).verdict).toBe("needs_full_review");
   });
 
-  it("경계값 conf === floor 는 통과한다", () => {
-    expect(computeAgentJudgmentShadowVerdict(bothTrue(AGENT_SHADOW_CONF_FLOOR_DEFAULT, AGENT_SHADOW_CONF_FLOOR_DEFAULT)).verdict).toBe("low_risk");
-    expect(computeAgentJudgmentShadowVerdict(bothTrue(0.9, 0.85), 0.9).verdict).toBe("insufficient_evidence");
+  it("floor 상향 시 모호 대역이 넓어진다", () => {
+    // floor 0.9: 0.83 은 어느 대역에도 속하지 않는다 → ambiguous
+    expect(computeAgentJudgmentShadowVerdict(bothYes(0.95, 0.83), 0.9).verdict).toBe("insufficient_evidence");
   });
 
   it("unknown 입력 오염(배열 아님) → insufficient_evidence(malformed)", () => {
