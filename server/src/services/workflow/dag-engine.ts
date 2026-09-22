@@ -73,6 +73,11 @@ import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-termina
 import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 import { isRunReopenGuardEnabled } from "./run-reopen-guard-flag.js";
 import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from "./control-flow/structural-gate-rework.js";
+import {
+  reviveConditionalSkip,
+  settleConditionalSkip,
+  type ConditionalStepObservation,
+} from "./conditional-skip-settlement.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
@@ -2154,6 +2159,21 @@ function buildPredFactsMap(
   return facts;
 }
 
+function toConditionalStepObservation(row: typeof workflowStepRuns.$inferSelect): ConditionalStepObservation {
+  return {
+    id: row.id,
+    workflowRunId: row.workflowRunId,
+    stepId: row.stepId,
+    status: row.status,
+    issueId: row.issueId,
+    startedAt: row.startedAt,
+    lastDispatchAttemptAt: row.lastDispatchAttemptAt,
+    dispatchReadyAt: row.dispatchReadyAt,
+    executionGeneration: row.executionGeneration,
+    metadata: row.metadata,
+  };
+}
+
 function findRunnableSteps(
   steps: WorkflowStep[],
   stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
@@ -3742,9 +3762,9 @@ async function applyConditionalSkipPropagation(input: {
   // [B2 좁은 회복 채널] 실패 선행의 연결 이슈 상태 스냅샷 — v1 대기 규칙을 failed 선행에 좁게
   //   적용하기 위한 최소 사실 전달. 미공급 시 fail-closed 로 open 취급(기존 대기 유지).
   issueStatusByIssueId?: Map<string, string>;
-}): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+}): Promise<{ stepRuns: (typeof workflowStepRuns.$inferSelect)[]; cancelled: boolean }> {
   if (input.context.run.status === "cancelled" || !workflowHasConditionalEdges(input.context.steps)) {
-    return input.stepRuns;
+    return { stepRuns: input.stepRuns, cancelled: false };
   }
   let stepRuns = input.stepRuns;
   for (;;) {
@@ -3773,28 +3793,37 @@ async function applyConditionalSkipPropagation(input: {
         );
       },
     });
-    if (skippableSteps.length === 0) return stepRuns;
+    if (skippableSteps.length === 0) return { stepRuns, cancelled: false };
 
-    const completedAt = new Date();
+    let settledAny = false;
     for (const step of skippableSteps) {
       const stepRun = skipRunMap.get(step.id);
       if (!stepRun) continue;
-      await input.db
-        .update(workflowStepRuns)
-        .set({
-          status: "skipped",
-          completedAt,
-          metadata: {
-            ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
-            controlFlowSkipped: true,
-          },
-        })
-        .where(eq(workflowStepRuns.id, stepRun.id));
+      const nextMetadata = {
+        ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
+        controlFlowSkipped: true,
+      };
+      const result = await settleConditionalSkip(input.db, {
+        observedRun: input.context.run,
+        target: stepRun,
+        nextMetadata,
+        observedPredecessors: stepRuns
+          .filter((predecessor) => predecessor.id !== stepRun.id)
+          .map(toConditionalStepObservation),
+      });
+      if (result.kind === "cancelled") return { stepRuns, cancelled: true };
+      if (result.kind !== "settled") {
+        stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
+        return { stepRuns, cancelled: false };
+      }
+      settledAny = true;
+      stepRun.status = "skipped";
+      stepRun.metadata = nextMetadata;
+      stepRun.completedAt = result.completedAt;
+      stepRun.dispatchReadyAt = result.dispatchReadyAt;
     }
-    stepRuns = await input.db
-      .select()
-      .from(workflowStepRuns)
-      .where(eq(workflowStepRuns.workflowRunId, input.context.run.id));
+    if (!settledAny) return { stepRuns, cancelled: false };
+    stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
   }
 }
 
@@ -3910,47 +3939,94 @@ export async function syncWorkflowRunStateWithOutcome(
   //   IF false-branch / 여전히 failed 인 선행은 classifyStepActivation 이 runnable=false 를 주어 부활하지
   //   않는다(legitimate-skip/flap 회피). resetUnlaunchedTerminalStepRuns 은 controlFlowSkipped 를 제외하므로
   //   이 pass 가 유일한 정확한 부활 경로(무조건 skipped→pending flap 없음).
+  let revivalProofLost = false;
   if (context.run.status !== "cancelled") {
     const reviveRunMap = buildStepRunMap(stepRuns);
     // [B2 사실망 통일] revive 도 launch 와 동일한 v1 정책 스냅샷을 소비한다 — launch 가 dispatch_ready_at
     //   대기로 미기동하는 선행을 revive 가 먼저 부활시키지 않는다(같은 평가에서 같은 사실).
-    const revivePredsByStepId = buildPredFactsMap(context.steps, reviveRunMap, validationVerdictsByIssueId, v1Enforcement, issueStatusByIssueId);
+    let revivePredsByStepId = buildPredFactsMap(context.steps, reviveRunMap, validationVerdictsByIssueId, v1Enforcement, issueStatusByIssueId);
     let revivedAny = false;
     for (const step of context.steps) {
       const sr = reviveRunMap.get(step.id);
       if (!sr || sr.status !== "skipped" || normalizeRecord(sr.metadata).controlFlowSkipped !== true) continue;
       if (!classifyStepActivation(step, revivePredsByStepId).runnable) continue;
-      await db
-        .update(workflowStepRuns)
-        .set({
-          status: "pending",
-          startedAt: null,
-          completedAt: null,
-          metadata: { ...buildWorkflowStepRunMetadata(step, sr.metadata), controlFlowSkipped: false },
-        })
-        .where(eq(workflowStepRuns.id, sr.id));
+      const nextMetadata = { ...buildWorkflowStepRunMetadata(step, sr.metadata), controlFlowSkipped: false };
+      const result = await reviveConditionalSkip(db, {
+        observedRun: context.run,
+        target: sr,
+        nextMetadata,
+        observedPredecessors: stepRuns
+          .filter((predecessor) => predecessor.id !== sr.id)
+          .map(toConditionalStepObservation),
+        invalidateGeneration: v1Enforcement,
+      });
+      if (result.kind !== "settled") {
+        // The CAS proof was lost after the snapshot was taken. Reload authority and
+        // stop this sync's derived passes; a later sync re-evaluates fresh state.
+        revivalProofLost = true;
+        stepRuns = await reloadWorkflowStepRunsForSameRun(db, stepRuns);
+        // A cancelled durable row is terminal authority. Return the committed
+        // snapshot instead of letting tail finalization recompute over it.
+        const durable = await getWorkflowExecutionResultSnapshot(db, runId);
+        if (!durable) throw new Error(`Workflow run ${runId} not found`);
+        if (durable.status === "cancelled") {
+          return { kind: "synced", result: durable };
+        }
+        break;
+      }
       revivedAny = true;
+      // Keep later candidates on the authoritative observation returned by the CAS
+      // write; otherwise a revived predecessor still looks skipped and causes a
+      // false proof loss on the next row.
+      sr.status = "pending";
+      sr.startedAt = null;
+      sr.completedAt = null;
+      sr.dispatchReadyAt = null;
+      sr.evidenceReadyAt = null;
+      sr.dispatchOwnerWakeupRequestId = null;
+      sr.dispatchOwnerHeartbeatRunId = null;
+      sr.executionGeneration = result.executionGeneration;
+      sr.statusTransitionVersion = result.statusTransitionVersion;
+      sr.metadata = nextMetadata;
+      revivePredsByStepId = buildPredFactsMap(
+        context.steps,
+        reviveRunMap,
+        validationVerdictsByIssueId,
+        v1Enforcement,
+        issueStatusByIssueId,
+      );
     }
     if (revivedAny) {
       stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
     }
   }
-  stepRuns = await applyConditionalSkipPropagation({
-    db,
-    context,
-    stepRuns,
-    dynamicLaunchStepIds,
-    validationVerdictsByIssueId,
-    v1EnforcementEnabled: v1Enforcement,
-    issueStatusByIssueId,
-  });
+  if (!revivalProofLost) {
+    const skipPropagation = await applyConditionalSkipPropagation({
+      db,
+      context,
+      stepRuns,
+      dynamicLaunchStepIds,
+      validationVerdictsByIssueId,
+      v1EnforcementEnabled: v1Enforcement,
+      issueStatusByIssueId,
+    });
+    stepRuns = skipPropagation.stepRuns;
+    if (skipPropagation.cancelled) {
+      const durable = await getWorkflowExecutionResultSnapshot(db, runId);
+      if (!durable) throw new Error(`Workflow run ${runId} not found`);
+      if (durable.status === "cancelled") {
+        return { kind: "synced", result: durable };
+      }
+      revivalProofLost = true;
+    }
+  }
 
   // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
   //   maxIterations cap 내에서 리셋(rework). 리셋된 producer 는 이어지는 launch while-loop 에서 재실행되고,
   //   producer 재완료 후 기존 validation-recheck(syncStepRunsFromIssueState) 가 QA issue 를 재QA 시킨다.
   //   skip-pass 이후·launch 이전에 실행: QA failed 가 반영된 뒤 리셋된 step 이 runnable 로 launch 되게.
   //   가즈아 무한 loop 방지: iteration_index 단조 증가 + maxIterations 하드 cap(loop-driver). reconciler(60min) 백업.
-  if (hasConditionalEdges && context.run.status !== "cancelled") {
+  if (!revivalProofLost && hasConditionalEdges && context.run.status !== "cancelled") {
     const reworkPredsByStepId = buildPredFactsMap(
       context.steps,
       buildStepRunMap(stepRuns),
@@ -3993,7 +4069,7 @@ export async function syncWorkflowRunStateWithOutcome(
   //   gates when a producer is reworked (fresh gate re-run, no stale PASS).
   //   Runs after applyBackEdgeReworkPass so both QA and structural gate rejections
   //   are handled before the launch loop.
-  if (context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
+  if (!revivalProofLost && context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
     const structuralResult = await applyStructuralGatePass({
       db,
       run: context.run,
@@ -4010,7 +4086,7 @@ export async function syncWorkflowRunStateWithOutcome(
   //   해당 게이트를 CAS 로 pending 리셋+구조화 파인딩 기록 → 아래 launch loop 가 새 requestId/
   //   새 토큰으로 재파견해 결정적 validator 가 재검증한다. iteration 이 오르는 rework 세대는
   //   위 applyStructuralGatePass 소관이라 여기선 같은 iteration 형태만 다룬다(fail-closed).
-  if (context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
+  if (!revivalProofLost && context.run.status !== "cancelled" && context.steps.some(isStructuralGateStep)) {
     const requeueResult = await requeueStaleStructuralGatesForBlockedQa({
       db,
       run: context.run,
@@ -4023,7 +4099,7 @@ export async function syncWorkflowRunStateWithOutcome(
   // [Workflow Retry] After recovery/rework passes settle, atomically schedule
   // eligible failed steps; launch loop below dispatches immediate retries and
   // leaves delayed retries pending for the reconciler.
-  if (context.run.status !== "cancelled") {
+  if (!revivalProofLost && context.run.status !== "cancelled") {
     stepRuns = await applyWorkflowStepRetryPass({
       db,
       context,
@@ -4033,7 +4109,7 @@ export async function syncWorkflowRunStateWithOutcome(
   }
 
   const hasFailure = stepRuns.some((stepRun) => stepRun.status === "failed");
-  if (hasFailure) {
+  if (!revivalProofLost && hasFailure) {
     await commentOnMainExecutorOversightForFailures(db, context, stepRuns);
   }
   // [IF/loop] short-circuit narrowing: legacy 워크플로(hasConditionalEdges=false)에선 기존과 동일하게
@@ -4042,7 +4118,7 @@ export async function syncWorkflowRunStateWithOutcome(
   //   recoverable (request_changes triggers rework), so allow launch when structural
   //   gates exist — pending sibling gates must be able to finish.
   const hasStructuralGates = context.steps.some(isStructuralGateStep);
-  if (!hasFailure || hasConditionalEdges || hasStructuralGates) {
+  if (!revivalProofLost && (!hasFailure || hasConditionalEdges || hasStructuralGates)) {
     let shouldContinue = true;
     let synchronousControlPasses = 0;
     while (shouldContinue) {
@@ -4162,7 +4238,7 @@ export async function syncWorkflowRunStateWithOutcome(
         // Only a freshly executed IF can change condition_true/condition_false
         // reachability inside this synchronous loop. Keep the legacy QA/back-edge
         // launch order untouched on iterations that did not execute a control node.
-        stepRuns = await applyConditionalSkipPropagation({
+        const skipPropagation = await applyConditionalSkipPropagation({
           db,
           context,
           stepRuns,
@@ -4171,6 +4247,16 @@ export async function syncWorkflowRunStateWithOutcome(
           v1EnforcementEnabled: v1Enforcement,
           issueStatusByIssueId,
         });
+        stepRuns = skipPropagation.stepRuns;
+        if (skipPropagation.cancelled) {
+          const durable = await getWorkflowExecutionResultSnapshot(db, runId);
+          if (!durable) throw new Error(`Workflow run ${runId} not found`);
+          if (durable.status === "cancelled") {
+            return { kind: "synced", result: durable };
+          }
+          revivalProofLost = true;
+          break;
+        }
       }
       shouldContinue = failedIssueLessToolStep || executedControlNode;
     }
