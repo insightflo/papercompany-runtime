@@ -93,13 +93,14 @@ async function readDocumentFile(
 ): Promise<{ document: string; docChars: number } | HtmlPreflightResult> {
   // [보안 · high 교정] documentPath 는 실행 루트(스텝 디렉토리의 워크플로 run 디렉토리) 안으로만 허용한다.
   const resolvedRoot = await realpath(path.resolve(allowedRoot)).catch(() => path.resolve(allowedRoot));
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
   let resolved: string;
   try {
     resolved = await realpath(filePath);
   } catch {
     return defect("document_unreadable");
   }
-  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
     return defect("document_path_outside_run_root");
   }
   let bytes: Buffer;
