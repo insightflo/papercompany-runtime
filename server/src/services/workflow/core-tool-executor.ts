@@ -9,6 +9,7 @@ import { normalizeCommandParts, parametersToCliArgs, readObject } from "./core-t
 import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
 import { executeAgentJudgmentTool } from "../judgment/agent-judgment-tool-executor.js";
+import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
@@ -44,6 +45,7 @@ export async function executeCoreWorkflowTool(input: {
   if (!tool.enabled) return { status: 403, body: { error: `Tool "${input.toolName}" is disabled` } };
   const adapterConfig = readObject(tool.adapterConfig);
   const isJudgmentTool = tool.adapterType === "builtin" && adapterConfig.kind === "judgment";
+  const isHtmlPreflightTool = tool.adapterType === "builtin" && adapterConfig.kind === "html-preflight";
   let agentId = input.agentId?.trim() || "";
   if (!agentId && input.agentName?.trim()) {
     const [agent] = await input.db.select({ id: agents.id }).from(agents)
@@ -51,7 +53,7 @@ export async function executeCoreWorkflowTool(input: {
     agentId = agent?.id ?? "";
   }
   const hasWorkflowStepContext = Boolean(input.workflowRunId?.trim() && input.stepId?.trim());
-  if (isJudgmentTool && !agentId && !hasWorkflowStepContext) {
+  if ((isJudgmentTool || isHtmlPreflightTool) && !agentId && !hasWorkflowStepContext) {
     return { status: 403, body: { error: `Agent identity is required for workflow tool "${input.toolName}"` } };
   }
   if (agentId) {
@@ -60,9 +62,9 @@ export async function executeCoreWorkflowTool(input: {
     )).limit(1);
     if (!grant) return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
   }
-  if (isJudgmentTool) {
-    // [봇 bug·medium 교정] 디렉토리 해석 실패(일시 DB 오류 포함)가 판단 실행 자체를
-    //   실패시키지 않게 한다 — 산출물 없이 판단만 수행한다(observe 소프트 성공 계약).
+  if (isJudgmentTool || isHtmlPreflightTool) {
+    // [봇 bug·medium 교정] 디렉토리 해석 실패(일시 DB 오류 포함)가 관측 도구 실행 자체를
+    //   실패시키지 않게 한다 — 결과는 각 실행기가 구조화해 반환한다.
     let stepOutputDir: string | null = null;
     if (hasWorkflowStepContext) {
       try {
@@ -75,7 +77,7 @@ export async function executeCoreWorkflowTool(input: {
         stepOutputDir = null;
       }
     }
-    return executeAgentJudgmentTool({
+    const sharedInput = {
       db: input.db,
       companyId: input.companyId,
       toolName: input.toolName,
@@ -85,8 +87,9 @@ export async function executeCoreWorkflowTool(input: {
       stepRunId: input.stepRunId,
       stepId: input.stepId,
       stepOutputDir,
-      judgmentService: input.judgmentService,
-    });
+    };
+    if (isJudgmentTool) return executeAgentJudgmentTool({ ...sharedInput, judgmentService: input.judgmentService });
+    return executeHtmlPreflightTool(sharedInput);
   }
   const remoteResult = await executeRemoteWorkflowTool({ db: input.db, companyId: input.companyId,
     toolId: tool.id, toolName: input.toolName, parameters: input.parameters, requestId: input.requestId,

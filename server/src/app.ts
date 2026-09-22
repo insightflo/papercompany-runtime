@@ -101,6 +101,7 @@ import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.j
 import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
 import { createPlanQaShadowLoop, resolvePlanQaShadowOwnership } from "./services/judgment/plan-qa-shadow.js";
 import { seedAgentJudgmentTool } from "./services/judgment/agent-judgment-tool.js";
+import { seedHtmlPreflightTool } from "./services/judgment/html-preflight-tool.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
@@ -987,6 +988,11 @@ export async function createApp(
     // 판단 게이트가 꺼져도 도구 정의는 존재할 수 있으며, grant는 만들지 않는다.
     void seedAgentJudgmentTool(db).catch((err) => {
       logger.error({ err }, "Failed to seed agent judgment tool");
+    });
+  }
+  if (typeof db.select === "function" && typeof db.insert === "function") {
+    void seedHtmlPreflightTool(db).catch((err) => {
+      logger.error({ err }, "Failed to seed html-preflight tool");
     });
   }
 
