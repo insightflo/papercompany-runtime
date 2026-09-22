@@ -1,5 +1,7 @@
 export {
   instanceGeneralSettingsSchema,
+  judgmentBaseUrlSchema,
+  judgmentModelIdSchema,
   patchInstanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
   type PatchInstanceGeneralSettings,

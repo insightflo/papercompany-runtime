@@ -1,7 +1,39 @@
 import { z } from "zod";
 
+/** 판단(Jev) 엔드포인트 오버라이드 — http(s) 만, userinfo/query/fragment 금지, 2048자 이하. null 은 해제. */
+export const judgmentBaseUrlSchema = z
+  .string()
+  .min(1)
+  .max(2048)
+  .refine((value) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return false;
+    }
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  }, "judgment base URL must be http(s) without userinfo, query, or fragment")
+  .nullable();
+
+/** 판단(Jev) 모델 오버라이드 — 1~200자, [A-Za-z0-9._:/-]. null 은 해제(정의별 모델로 복귀). */
+export const judgmentModelIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9._:/-]+$/, "judgment model id contains invalid characters")
+  .nullable();
+
 export const instanceGeneralSettingsSchema = z.object({
   censorUsernameInLogs: z.boolean().default(false),
+  judgmentBaseUrl: judgmentBaseUrlSchema.optional(),
+  judgmentModelId: judgmentModelIdSchema.optional(),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
