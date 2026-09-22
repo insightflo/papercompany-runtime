@@ -3,10 +3,8 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { companies, createDb, judgmentCalls, judgmentDefinitions } from "@paperclipai/db";
 import type { JudgmentAnswer, JudgmentAskResult } from "@paperclipai/shared";
-import {
-  computeJudgmentCostUsd,
-  createJudgmentService,
-} from "../services/judgment/judgment-service.js";
+import { createJudgmentService } from "../services/judgment/judgment-service.js";
+import { computeJudgmentCostUsd } from "../services/judgment/pricing.js";
 import type { JudgmentProvider } from "../services/judgment/provider.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 

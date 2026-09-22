@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -1430,7 +1430,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
-    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue:event:${(await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.issueId, unblockIssue.id), eq(workflowTransitionEvents.eventType, "mission_owner_decision"))))[0]!.id}`;
 
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
@@ -1816,7 +1816,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date(Date.now() + 20 * 60 * 1000), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
-    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue`;
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${unblockIssue.id}:${blockedIssue.id}:retry_source_issue:event:${(await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.issueId, unblockIssue.id), eq(workflowTransitionEvents.eventType, "mission_owner_decision"))))[0]!.id}`;
 
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({ targetAgentId: workerAgentId, idempotencyKey }));
     expect(result.appliedActions).toEqual(expect.arrayContaining([
@@ -2665,7 +2665,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const result = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-05-31T01:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
-    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue`;
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue:event:${(await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.issueId, ownerAction.id), eq(workflowTransitionEvents.eventType, "mission_owner_decision"))))[0]!.id}`;
 
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({
@@ -2830,7 +2830,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(onOwnerDecisionRetrySourceIssueApplied).not.toHaveBeenCalled();
 
     const second = await svc.runMainExecutorSupervision({ missionId, staleAfterMinutes: 1, now: new Date("2026-05-31T02:00:00.000Z"), applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true });
-    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue`;
+    const idempotencyKey = `mission-owner-decision-wakeup:${missionId}:${ownerAction.id}:${sourceIssue.id}:retry_source_issue:event:${(await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.issueId, ownerAction.id), eq(workflowTransitionEvents.eventType, "mission_owner_decision"))))[0]!.id}`;
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledTimes(1);
     expect(onOwnerDecisionRetrySourceIssueApplied).toHaveBeenCalledWith(expect.objectContaining({ targetAgentId: workerAgentId, idempotencyKey }));
     expect(second.appliedActions).toEqual(expect.arrayContaining([
