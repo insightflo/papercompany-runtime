@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-09-22 — conditional QA closeout: sandbox failures are not bug RED and identical-conditions rerun decides blame
+- Date: 2026-09-22
+- Task: PR #260 two-finding correction (durable skip cancellation + JSONB predecessor comparison) closeout and A1 deploy.
+- What failed: (1) Worker sandbox listen/EPERM blocks were initially treated as bug RED, nearly producing an unauthorized Unix-socket @paperclipai/db workaround. (2) The correction's first full-suite run showed 3 failures in unrelated heartbeat/tool suites and deployment was held; causal relation to the 4-file correction was never established. (3) The JSONB key-order fix exposed a fixture that depended on the old buggy comparison semantics. (4) An independent review prompt invented an expanded fallback invariant, producing a P2 the reviewer reclassified as beyond-scope P3.
+- Root cause: sandbox transport limits misread as product behavior; a single parallel-suite run treated as deterministic; test fixtures encoding current buggy behavior; review brief diverging from the approved contract.
+- Category: process / test
+- Fix: Actual-DB proofs moved to the parent (unsandboxed) context; identical-conditions full-suite rerun reproduced 0 failures (888 files / 6748 tests) before unblocking merge; fixture asserts semantic changed-value behavior with a positive unchanged control; boundary call-count/target asserted before outcome; review prompts restate the approved fallback contract verbatim.
+- Prevention rule: Sandbox transport errors are never bug RED — move the DB check, do not mock the DB. Never claim flaky or causally related from one run; rerun identical conditions first. When fixing comparison semantics, expect fixtures that relied on the bug. Independent review prompts must copy the approved contract, not invent invariants.
+- Reuse trigger: delegated implementation in sandboxes, JSONB metadata comparison changes, full-suite failure triage on bounded corrections, review-brief authoring.
+- Evidence: /tmp/jev260-full-rerun.log (888 files green); /tmp/jev-qa-correction-full-tests.log (blocked run, 3 unrelated failures).
+
 ### 2026-09-21 — conditional QA fixtures must preserve artifact names and boundary import order
 - Date: 2026-09-21
 - Task: Jev conditional skip settlement and revival actual-DB verification.
