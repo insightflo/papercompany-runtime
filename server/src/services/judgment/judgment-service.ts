@@ -39,30 +39,8 @@ import type {
 } from "@paperclipai/shared";
 import { createTypesafeProvider, type JudgmentProvider } from "./provider.js";
 import { findSecretOriginPolicyFields, redactForEgress } from "./redact.js";
-
-/**
- * 공급자별 단가 테이블 (USD / 1M 토큰).
- * B-1 은 typesafe 1개만 하드코딩한다. 모르는 공급자는 비용을 추측하지 않고 null.
- */
-export const JUDGMENT_PROVIDER_PRICING: Readonly<
-  Record<string, { inputUsdPerMillionTokens: number; outputUsdPerMillionTokens: number }>
-> = {
-  typesafe: { inputUsdPerMillionTokens: 0.042, outputUsdPerMillionTokens: 0 },
-};
-
-export function computeJudgmentCostUsd(
-  providerId: string | null | undefined,
-  inputTokens: number,
-  outputTokens: number,
-): number | null {
-  if (!providerId) return null;
-  const pricing = JUDGMENT_PROVIDER_PRICING[providerId];
-  if (!pricing) return null;
-  return (
-    (inputTokens / 1_000_000) * pricing.inputUsdPerMillionTokens +
-    (outputTokens / 1_000_000) * pricing.outputUsdPerMillionTokens
-  );
-}
+import { computeJudgmentCostUsd } from "./pricing.js";
+import { resolveJudgmentModel, resolveJudgmentProviderConfig } from "./provider-config.js";
 
 export interface JudgmentServiceDeps {
   /** 기본: env 를 읽는 typesafe provider. 테스트는 목 provider 를 주입한다. */
@@ -163,8 +141,6 @@ export interface JudgmentService {
 }
 
 export function createJudgmentService(db: Db, deps: JudgmentServiceDeps = {}): JudgmentService {
-  const provider = deps.provider ?? createTypesafeProvider();
-
   return {
     async askJudgment(input: AskJudgmentInput): Promise<AskJudgmentResult> {
       const [definition] = await db
@@ -308,9 +284,14 @@ export function createJudgmentService(db: Db, deps: JudgmentServiceDeps = {}): J
       }
 
       // 4) 전송: provider 는 검사본(redacted)을 그대로 받는다(전송=검사본 일치).
+      //    주입 provider(테스트 목)는 인스턴스 설정을 읽지 않는다. 기본 provider 는
+      //    호출마다 설정의 endpoint/model 오버라이드를 1회 읽어 반영한다.
+      const config = deps.provider ? null : await resolveJudgmentProviderConfig(db);
+      const provider =
+        deps.provider ?? createTypesafeProvider(config?.baseUrl ? { baseUrl: config.baseUrl } : {});
       const result = await provider.ask({
         state: egressScan.redacted as JudgmentAskState,
-        model: definition.modelId,
+        model: config ? resolveJudgmentModel(config, definition.modelId) : definition.modelId,
         questions,
       });
 
