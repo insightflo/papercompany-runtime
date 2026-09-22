@@ -3762,9 +3762,9 @@ async function applyConditionalSkipPropagation(input: {
   // [B2 좁은 회복 채널] 실패 선행의 연결 이슈 상태 스냅샷 — v1 대기 규칙을 failed 선행에 좁게
   //   적용하기 위한 최소 사실 전달. 미공급 시 fail-closed 로 open 취급(기존 대기 유지).
   issueStatusByIssueId?: Map<string, string>;
-}): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+}): Promise<{ stepRuns: (typeof workflowStepRuns.$inferSelect)[]; cancelled: boolean }> {
   if (input.context.run.status === "cancelled" || !workflowHasConditionalEdges(input.context.steps)) {
-    return input.stepRuns;
+    return { stepRuns: input.stepRuns, cancelled: false };
   }
   let stepRuns = input.stepRuns;
   for (;;) {
@@ -3793,7 +3793,7 @@ async function applyConditionalSkipPropagation(input: {
         );
       },
     });
-    if (skippableSteps.length === 0) return stepRuns;
+    if (skippableSteps.length === 0) return { stepRuns, cancelled: false };
 
     let settledAny = false;
     for (const step of skippableSteps) {
@@ -3811,10 +3811,10 @@ async function applyConditionalSkipPropagation(input: {
           .filter((predecessor) => predecessor.id !== stepRun.id)
           .map(toConditionalStepObservation),
       });
-      if (result.kind === "cancelled") return stepRuns;
+      if (result.kind === "cancelled") return { stepRuns, cancelled: true };
       if (result.kind !== "settled") {
         stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
-        return stepRuns;
+        return { stepRuns, cancelled: false };
       }
       settledAny = true;
       stepRun.status = "skipped";
@@ -3822,7 +3822,7 @@ async function applyConditionalSkipPropagation(input: {
       stepRun.completedAt = result.completedAt;
       stepRun.dispatchReadyAt = result.dispatchReadyAt;
     }
-    if (!settledAny) return stepRuns;
+    if (!settledAny) return { stepRuns, cancelled: false };
     stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
   }
 }
@@ -4001,7 +4001,7 @@ export async function syncWorkflowRunStateWithOutcome(
     }
   }
   if (!revivalProofLost) {
-    stepRuns = await applyConditionalSkipPropagation({
+    const skipPropagation = await applyConditionalSkipPropagation({
       db,
       context,
       stepRuns,
@@ -4010,6 +4010,15 @@ export async function syncWorkflowRunStateWithOutcome(
       v1EnforcementEnabled: v1Enforcement,
       issueStatusByIssueId,
     });
+    stepRuns = skipPropagation.stepRuns;
+    if (skipPropagation.cancelled) {
+      const durable = await getWorkflowExecutionResultSnapshot(db, runId);
+      if (!durable) throw new Error(`Workflow run ${runId} not found`);
+      if (durable.status === "cancelled") {
+        return { kind: "synced", result: durable };
+      }
+      revivalProofLost = true;
+    }
   }
 
   // [IF/loop P4] back-edge rework pass — QA request_changes 로 발화한 back-edge 의 타겟(producer) 을
@@ -4229,7 +4238,7 @@ export async function syncWorkflowRunStateWithOutcome(
         // Only a freshly executed IF can change condition_true/condition_false
         // reachability inside this synchronous loop. Keep the legacy QA/back-edge
         // launch order untouched on iterations that did not execute a control node.
-        stepRuns = await applyConditionalSkipPropagation({
+        const skipPropagation = await applyConditionalSkipPropagation({
           db,
           context,
           stepRuns,
@@ -4238,6 +4247,16 @@ export async function syncWorkflowRunStateWithOutcome(
           v1EnforcementEnabled: v1Enforcement,
           issueStatusByIssueId,
         });
+        stepRuns = skipPropagation.stepRuns;
+        if (skipPropagation.cancelled) {
+          const durable = await getWorkflowExecutionResultSnapshot(db, runId);
+          if (!durable) throw new Error(`Workflow run ${runId} not found`);
+          if (durable.status === "cancelled") {
+            return { kind: "synced", result: durable };
+          }
+          revivalProofLost = true;
+          break;
+        }
       }
       shouldContinue = failedIssueLessToolStep || executedControlNode;
     }

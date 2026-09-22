@@ -5,6 +5,7 @@ import {
   appendWorkflowAuthorityTransition,
   supersedeWorkflowDelegationsForGeneration,
 } from "./authority/transitions.js";
+import { stableStringify } from "../issue-execution-cards/hash.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
 type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -284,7 +285,7 @@ function sameTimestamp(left: Date | null, right: Date | null): boolean {
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return stableStringify(left) === stableStringify(right);
 }
 
 function isNullValue(column: unknown) {
