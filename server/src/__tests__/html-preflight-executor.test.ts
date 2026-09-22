@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +12,14 @@ async function newOutputDir() {
   const dir = await mkdtemp(join(tmpdir(), "html-preflight-"));
   outputDirs.push(dir);
   return dir;
+}
+
+// 운영 레이아웃(.../runs/<runId>/steps/<stepId>)과 동일한 중첩 구조 — 루트 퇴화 없이 포함 관계 검증 가능.
+async function newStepOutputDir() {
+  const runRoot = await newOutputDir();
+  const stepOutputDir = join(runRoot, "runs", "run-1", "steps", "step-1");
+  await mkdir(stepOutputDir, { recursive: true });
+  return { runRoot, stepOutputDir };
 }
 
 afterEach(async () => {
@@ -54,7 +62,7 @@ describe("html-preflight core workflow tool executor", () => {
   });
 
   it("reads a workflow-bound document path and persists the same structured contract", async () => {
-    const stepOutputDir = await newOutputDir();
+    const { runRoot, stepOutputDir } = await newStepOutputDir();
     const documentPath = join(stepOutputDir, "index.html");
     await writeFile(documentPath, "<html><body>  </body></html>", "utf8");
     const result = await execute(
@@ -97,6 +105,23 @@ describe("html-preflight core workflow tool executor", () => {
   });
 
   it("rejects documentPath that escapes the workflow run root", async () => {
+    const { runRoot, stepOutputDir } = await newStepOutputDir();
+    const outsidePath = join(runRoot, "outside-secret.txt");
+    await writeFile(outsidePath, "<html><body>must not be read</body></html>", "utf8");
+    const result = await execute(
+      { documentPath: outsidePath },
+      { workflowRunId: randomUUID(), stepId: "preflight", stepOutputDir },
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.data).toMatchObject({
+      ok: false,
+      findings: ["document_path_outside_run_root"],
+    });
+    expect(await readFile(result.artifactPath!, "utf8")).toContain("document_path_outside_run_root");
+  });
+
+  it("refuses documentPath when the run root degenerates to the filesystem root", async () => {
     const stepOutputDir = await newOutputDir();
     const result = await execute(
       { documentPath: "/etc/hosts" },
@@ -108,7 +133,6 @@ describe("html-preflight core workflow tool executor", () => {
       ok: false,
       findings: ["document_path_outside_run_root"],
     });
-    expect(await readFile(result.artifactPath!, "utf8")).toContain("document_path_outside_run_root");
   });
 
   it("rejects oversized inline documents with a structured finding", async () => {
