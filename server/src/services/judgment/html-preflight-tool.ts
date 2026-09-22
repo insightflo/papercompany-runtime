@@ -19,12 +19,14 @@ export const HTML_PREFLIGHT_TOOL_INPUT_SCHEMA: Record<string, unknown> = {
       description: "워크플로우 스텝 문맥에서만 허용되는 조상 스텝 workProduct 파일 경로.",
     },
   },
-  anyOf: [
+  oneOf: [
     { required: ["document"] },
     { required: ["documentPath"] },
   ],
   additionalProperties: false,
 };
+
+// 런타임 parseInput 이 둘 중 정확히 하나만 허용함에 맞춘 oneOf 계약(스키마-런타임 일치).
 
 async function ensureHtmlPreflightTool(db: Db, companyId: string): Promise<boolean> {
   const [existing] = await db
@@ -64,7 +66,12 @@ export async function seedHtmlPreflightTool(
     : await db.select({ id: companies.id }).from(companies);
   let toolsSeeded = 0;
   for (const row of rows) {
-    if (await ensureHtmlPreflightTool(db, row.id)) toolsSeeded += 1;
+    // 한 회사의 일시 DB 오류가 다른 회사 시딩을 막지 않게 한다(루프 오류 격리).
+    try {
+      if (await ensureHtmlPreflightTool(db, row.id)) toolsSeeded += 1;
+    } catch (error) {
+      console.error("html-preflight seed failed for company", row.id, (error as Error).message);
+    }
   }
   return { companies: rows.length, toolsSeeded };
 }

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import path from "node:path";
 import { JSDOM } from "jsdom";
 import { logger } from "../../middleware/logger.js";
 import { persistArtifact } from "../workflow/http-tool-response.js";
@@ -8,6 +9,9 @@ import type { CoreWorkflowToolExecutionResult } from "../workflow/core-tool-exec
 export const HTML_PREFLIGHT_SCOPE =
   "conservative structural HTML preflight; not an HTML validator";
 const NEAR_EMPTY_TEXT_CHARS = 20;
+// DOM spec NodeType.TEXT_NODE (Node.js 전역에는 Node 인터페이스가 없어 지역 상수로 둔다).
+const TEXT_NODE_TYPE = 3;
+const MAX_DOCUMENT_CHARS = 2_000_000;
 const NON_VISIBLE_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
 const strictUtf8TextDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -31,9 +35,17 @@ function visibleTextChars(body: HTMLElement | null): number {
   const pending: Node[] = [body];
   while (pending.length > 0) {
     const node = pending.pop()!;
-    if (node.nodeType === 3) {
-      const parent = node.parentElement;
-      if (!parent || !NON_VISIBLE_TAGS.has(parent.tagName)) text += node.nodeValue ?? "";
+    if (node.nodeType === TEXT_NODE_TYPE) {
+      let parent = node.parentElement;
+      let hidden = false;
+      while (parent) {
+        if (NON_VISIBLE_TAGS.has(parent.tagName)) {
+          hidden = true;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+      if (!hidden) text += node.nodeValue ?? "";
     }
     pending.push(...Array.from(node.childNodes));
   }
@@ -69,18 +81,36 @@ export function inspectHtmlDocument(document: Document, docChars: number): HtmlP
   };
 }
 
+function tooLarge(docChars: number): HtmlPreflightResult | null {
+  return docChars > MAX_DOCUMENT_CHARS
+    ? defect(`document_too_large: docChars=${docChars} (>=${MAX_DOCUMENT_CHARS})`, docChars)
+    : null;
+}
+
 async function readDocumentFile(
   filePath: string,
+  allowedRoot: string,
 ): Promise<{ document: string; docChars: number } | HtmlPreflightResult> {
+  // [보안 · high 교정] documentPath 는 실행 루트(스텝 디렉토리의 워크플로 run 디렉토리) 안으로만 허용한다.
+  const resolvedRoot = await realpath(path.resolve(allowedRoot)).catch(() => path.resolve(allowedRoot));
+  let resolved: string;
+  try {
+    resolved = await realpath(filePath);
+  } catch {
+    return defect("document_unreadable");
+  }
+  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+    return defect("document_path_outside_run_root");
+  }
   let bytes: Buffer;
   try {
-    bytes = await readFile(filePath);
+    bytes = await readFile(resolved);
   } catch {
     return defect("document_unreadable");
   }
   try {
     const document = strictUtf8TextDecoder.decode(bytes);
-    return { document, docChars: document.length };
+    return tooLarge(document.length) ?? { document, docChars: document.length };
   } catch {
     return defect("artifact_type_mismatch: document is not decodable as UTF-8 text");
   }
@@ -88,7 +118,7 @@ async function readDocumentFile(
 
 async function parseInput(
   parameters: unknown,
-  options: { allowDocumentPath: boolean },
+  options: { allowDocumentPath: boolean; stepOutputDir?: string | null },
 ): Promise<{ document: string; docChars: number } | HtmlPreflightResult> {
   if (!isPlainRecord(parameters)) return defect("input_type_mismatch: parameters must be an object");
   const rejected = Object.keys(parameters).filter((key) => key !== "document" && key !== "documentPath");
@@ -97,14 +127,17 @@ async function parseInput(
   const inlineDocument = parameters.document;
   const documentPath = parameters.documentPath;
   if (inlineDocument !== undefined && documentPath !== undefined) return defect("input_conflict: provide exactly one of document or documentPath");
-  if (typeof inlineDocument === "string") return { document: inlineDocument, docChars: inlineDocument.length };
+  if (typeof inlineDocument === "string") {
+    return tooLarge(inlineDocument.length) ?? { document: inlineDocument, docChars: inlineDocument.length };
+  }
   if (inlineDocument !== undefined) return defect("input_type_mismatch: document must be a string");
   if (documentPath === undefined) return defect("input_missing: document or documentPath is required");
   if (!options.allowDocumentPath) return defect("document_path_requires_workflow_context");
   if (typeof documentPath !== "string" || documentPath.trim().length === 0) {
     return defect("input_type_mismatch: documentPath must be a non-empty string");
   }
-  return readDocumentFile(documentPath);
+  // 스텝 디렉토리(.../runs/<runId>/steps/<stepId>)의 run 루트만 읽기 허용한다.
+  return readDocumentFile(documentPath, path.resolve(options.stepOutputDir!, "..", ".."));
 }
 
 export async function executeHtmlPreflightTool(input: {
@@ -119,14 +152,22 @@ export async function executeHtmlPreflightTool(input: {
   stepOutputDir?: string | null;
 }): Promise<CoreWorkflowToolExecutionResult> {
   void input.db;
+  // db/companyId 는 판단 실행기와의 시그니처 정합을 위해 받는다(이 도구는 DB 접근이 없다).
   void input.companyId;
   const isWorkflowStepContext = Boolean(input.workflowRunId?.trim() && input.stepId?.trim());
-  const parsed = await parseInput(input.parameters, { allowDocumentPath: isWorkflowStepContext });
+  const parsed = await parseInput(input.parameters, {
+    allowDocumentPath: isWorkflowStepContext,
+    stepOutputDir: input.stepOutputDir,
+  });
   let result: HtmlPreflightResult;
   if ("document" in parsed) {
     try {
       result = inspectHtmlDocument(new JSDOM(parsed.document).window.document, parsed.docChars);
-    } catch {
+    } catch (error) {
+      logger.debug(
+        { err: (error as Error).message, workflowRunId: input.workflowRunId, stepId: input.stepId },
+        "html-preflight jsdom parse failed — structured defect returned",
+      );
       result = defect("pathological_parse_result", parsed.docChars);
     }
   } else {

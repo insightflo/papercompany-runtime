@@ -95,4 +95,27 @@ describe("html-preflight core workflow tool executor", () => {
       findings: ["document_path_requires_workflow_context"],
     });
   });
+
+  it("rejects documentPath that escapes the workflow run root", async () => {
+    const stepOutputDir = await newOutputDir();
+    const result = await execute(
+      { documentPath: "/etc/hosts" },
+      { workflowRunId: randomUUID(), stepId: "preflight", stepOutputDir },
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.data).toMatchObject({
+      ok: false,
+      findings: ["document_path_outside_run_root"],
+    });
+    expect(await readFile(result.artifactPath!, "utf8")).toContain("document_path_outside_run_root");
+  });
+
+  it("rejects oversized inline documents with a structured finding", async () => {
+    const result = await execute({ document: "<html><body>" + "x".repeat(2_000_001) + "</body></html>" });
+
+    expect(result.status).toBe(200);
+    expect(result.body.data.findings[0]).toContain("document_too_large");
+    expect(result.body.data.ok).toBe(false);
+  });
 });

@@ -77,21 +77,7 @@ export async function executeCoreWorkflowTool(input: {
         stepOutputDir = null;
       }
     }
-    if (isJudgmentTool) {
-      return executeAgentJudgmentTool({
-        db: input.db,
-        companyId: input.companyId,
-        toolName: input.toolName,
-        parameters: input.parameters,
-        requestId: input.requestId,
-        workflowRunId: input.workflowRunId,
-        stepRunId: input.stepRunId,
-        stepId: input.stepId,
-        stepOutputDir,
-        judgmentService: input.judgmentService,
-      });
-    }
-    return executeHtmlPreflightTool({
+    const sharedInput = {
       db: input.db,
       companyId: input.companyId,
       toolName: input.toolName,
@@ -101,7 +87,9 @@ export async function executeCoreWorkflowTool(input: {
       stepRunId: input.stepRunId,
       stepId: input.stepId,
       stepOutputDir,
-    });
+    };
+    if (isJudgmentTool) return executeAgentJudgmentTool({ ...sharedInput, judgmentService: input.judgmentService });
+    return executeHtmlPreflightTool(sharedInput);
   }
   const remoteResult = await executeRemoteWorkflowTool({ db: input.db, companyId: input.companyId,
     toolId: tool.id, toolName: input.toolName, parameters: input.parameters, requestId: input.requestId,
