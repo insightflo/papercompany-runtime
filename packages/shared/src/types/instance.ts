@@ -1,5 +1,9 @@
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
+  /** 판단(Jev) 엔드포인트 오버라이드. 미설정(undefined)이면 기본값 사용. */
+  judgmentBaseUrl?: string;
+  /** 판단(Jev) 모델 오버라이드. 미설정(undefined)이면 정의별 모델 사용. */
+  judgmentModelId?: string;
 }
 
 export interface InstanceExperimentalSettings {

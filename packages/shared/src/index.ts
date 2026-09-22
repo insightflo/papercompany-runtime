@@ -436,6 +436,8 @@ export {
   testToolSchema,
   type TestToolRequest,
   instanceGeneralSettingsSchema,
+  judgmentBaseUrlSchema,
+  judgmentModelIdSchema,
   patchInstanceGeneralSettingsSchema,
   type PatchInstanceGeneralSettings,
   instanceExperimentalSettingsSchema,

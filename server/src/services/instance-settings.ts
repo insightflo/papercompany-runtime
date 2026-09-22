@@ -1,9 +1,10 @@
 import type { Db } from "@paperclipai/db";
 import { companies, instanceSettings } from "@paperclipai/db";
 import {
-  instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
   instanceExperimentalSettingsSchema,
+  judgmentBaseUrlSchema,
+  judgmentModelIdSchema,
   type InstanceExperimentalSettings,
   type PatchInstanceGeneralSettings,
   type InstanceSettings,
@@ -14,14 +15,15 @@ import { eq } from "drizzle-orm";
 const DEFAULT_SINGLETON_KEY = "default";
 
 function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
-  const parsed = instanceGeneralSettingsSchema.safeParse(raw ?? {});
-  if (parsed.success) {
-    return {
-      censorUsernameInLogs: parsed.data.censorUsernameInLogs ?? false,
-    };
-  }
+  const source = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const baseUrl = judgmentBaseUrlSchema.safeParse(source.judgmentBaseUrl);
+  const modelId = judgmentModelIdSchema.safeParse(source.judgmentModelId);
+  // 필드 단위 검증: 한 필드가 손상되어도 다른 필드(예: censorUsernameInLogs)까지
+  // 기본값으로 되돌리지 않는다. null/불량값은 해당 오버라이드만 뺀다.
   return {
-    censorUsernameInLogs: false,
+    censorUsernameInLogs: source.censorUsernameInLogs === true,
+    ...(baseUrl.success && baseUrl.data !== null ? { judgmentBaseUrl: baseUrl.data } : {}),
+    ...(modelId.success && modelId.data !== null ? { judgmentModelId: modelId.data } : {}),
   };
 }
 
