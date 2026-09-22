@@ -17,8 +17,9 @@ import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
 import { LIVE_WAKEUP_STATUSES } from "./owner-action-unblock-handback.js";
 import type { MissionServiceDeps } from "../missions.js";
-import { buildMissionOwnerDecisionWakeupIdempotencyKey, buildWorkProductReuseWakeIdempotencyKey } from "./mission-owner-recovery-events.js";
+import { buildWorkProductReuseWakeIdempotencyKey } from "./mission-owner-recovery-events.js";
 import { hasStructuredSourceRecoveryDecision, loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
+import { acquireOwnerRetryLock, resolveOwnerRetryKey } from "./mission-owner-retry-identity.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
@@ -55,17 +56,6 @@ import { loadTerminalValidationVerdicts } from "./terminal-mission-workflow-cont
 import { summarizeProvider403LadderForMission } from "../heartbeat-provider403-ladder.js";
 import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
 export { selectTerminalWorkflowAuthoritySource };
-
-// [D cap-override authority] owner-action issue 의 latest STRUCTURED mission-owner decision 만 권위.
-//   자연어 comment parsing 은 제거됨 — loadLatestMissionOwnerDecision 만 결정을 인정한다.
-//   decision 이 retry_source_issue 일 때만 durable eventId 를 전달 → cap-override wake/audit 는
-//   commentId 대신 이 eventId 를 권위 식별자로 사용한다. newer replan/escalate/invalid structured
-//   decision 이 먼저면 null → cap-override wake 금지.
-async function resolveOwnerRetryDecisionCommentId(db: Db, companyId: string, ownerActionIssueId: string): Promise<string | null> {
-  const record = await loadLatestMissionOwnerDecision({ db, companyId, ownerActionIssueId });
-  if (!record || record.decision.decision !== "retry_source_issue") return null;
-  return record.eventId;
-}
 
 /** [observability] wakeup callback 결과(report_only 등)에서 fail-closed 사유 문자열만 안전 추출. */
 function readWakeupResultDetailReason(value: unknown): string | null {
@@ -1543,6 +1533,11 @@ export function createSupervision({ db, deps, ownerActions }: {
                 safeToAutoApply: false,
               });
               if (input.applyOwnerDecisionActions) {
+                const releaseRetryLock = await acquireOwnerRetryLock(db, mission.companyId, issue.id);
+                if (!releaseRetryLock) break;
+                try {
+                const currentDecision = await loadLatestMissionOwnerDecision({ db, companyId: mission.companyId, ownerActionIssueId: issue.id });
+                if (currentDecision?.eventId !== decisionRecord?.eventId || (!autoDefaulted && (currentDecision?.missionId !== mission.id || currentDecision?.authorAgentId !== mission.ownerAgentId))) break;
                 // [P3 QA recovery ownership gate] QA recovery chain 이 live/stalled 면 producer reopen·
                 //   mission_owner_retry_source_issue wakeup·source 상태변경 전부 금지(req 1/2, codex 계약 2).
                 //   stalled(QA recovery deadlock)도 producer 재시도 ❌ — 일반 owner-action/replan 경로로 넘김.
@@ -1697,10 +1692,11 @@ export function createSupervision({ db, deps, ownerActions }: {
                   await loadActiveWorkProductUpdatedAt(db, mission.companyId, sourceCandidate.id),
                 );
                 const sourceComments = commentsByIssueId.get(sourceCandidate.id) ?? [];
-                const idempotencyKey = buildMissionOwnerDecisionWakeupIdempotencyKey({
-                  missionId: mission.id,
-                  ownerActionIssueId: issue.id,
-                  sourceIssueId: sourceCandidate.id,
+                if (sourceHasActiveHeartbeat) break;
+                const idempotencyKey = await resolveOwnerRetryKey({
+                  db, companyId: mission.companyId, missionId: mission.id,
+                  ownerActionIssueId: issue.id, sourceIssueId: sourceCandidate.id,
+                  decision: autoDefaulted ? null : decisionRecord,
                 });
                 const retryApplyIdempotencyKey = `${idempotencyKey}:apply`;
                 const [retryWakeupRecorded, retryApplyRecorded] = await Promise.all([
@@ -1843,7 +1839,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                           sourceIssue: sourceCandidate,
                           targetAgentId: sourceCandidate.assigneeAgentId,
                           idempotencyKey,
-                          decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
+                          decisionCommentId: autoDefaulted ? null : decisionRecord!.eventId,
                         });
                         wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                         await issueService(db).addComment(
@@ -1936,7 +1932,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                         sourceIssue: sourceCandidate,
                         targetAgentId: sourceCandidate.assigneeAgentId,
                         idempotencyKey,
-                        decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
+                        decisionCommentId: autoDefaulted ? null : decisionRecord!.eventId,
                       });
                       const redispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await recordRecoveryAction({
@@ -2117,7 +2113,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                         sourceIssue: sourceCandidate,
                         targetAgentId: sourceCandidate.assigneeAgentId,
                         idempotencyKey,
-                        decisionCommentId: await resolveOwnerRetryDecisionCommentId(db, mission.companyId, issue.id),
+                        decisionCommentId: autoDefaulted ? null : decisionRecord!.eventId,
                       });
                       wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await issueService(db).addComment(
@@ -2178,6 +2174,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   wakeupDispatchStatus,
                   idempotencyKey,
                 });
+                } finally { await releaseRetryLock(); }
               }
               break;
             case "reassign_source_issue":

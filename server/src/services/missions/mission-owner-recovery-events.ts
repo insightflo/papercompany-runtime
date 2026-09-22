@@ -171,8 +171,10 @@ export function buildMissionOwnerDecisionWakeupIdempotencyKey(input: {
   ownerActionIssueId: string;
   sourceIssueId: string;
   decision?: AppliedMissionOwnerDecisionOption;
+  decisionEventId?: string;
 }): string {
-  return `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:${input.decision ?? "retry_source_issue"}`;
+  const key = `mission-owner-decision-wakeup:${input.missionId}:${input.ownerActionIssueId}:${input.sourceIssueId}:${input.decision ?? "retry_source_issue"}`;
+  return input.decisionEventId ? `${key}:event:${input.decisionEventId}` : key;
 }
 
 export function buildMissionOwnerDecisionWakeupDispatchedMarker(input: {
