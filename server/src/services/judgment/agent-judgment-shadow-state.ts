@@ -5,8 +5,9 @@
 //
 // [핵심 원칙] 모델 추정 overall 제거 — 최종 등급(low_risk | needs_full_review |
 //   insufficient_evidence)은 코드가 계산한다(실패 닫힘). 모델은 noul 사실질문
-//   (complete_html, claims_grounded)에만 답하고, 답변이 결측·오염되거나 최소 신뢰도에
-//   못 미치면 insufficient_evidence 로 닫는다.
+//   (complete_html, claims_grounded)에만 P(yes) 확률로 답하고(공급자 계약: value=0~1,
+//   null=무답), 답변이 결측·오염·무답이거나 확률이 확정 대역(양쪽 >= floor 아니면 한쪽
+//   <= 1-floor)에 속하지 않으면 insufficient_evidence 로 닫는다.
 //
 // [입력 축약] 판단 공급자에는 원문 HTML 을 보내지 않는다 — 가시 텍스트만 뽑은
 //   document_text(상한 절단) + 구조 통계 structure_stats 만 전달한다.
@@ -24,8 +25,8 @@ export interface AgentShadowStructureStats {
 /** 가시 텍스트 추출 상한(자). 초과분은 절단하고 truncated 플래그를 세운다. */
 export const AGENT_SHADOW_TEXT_CHAR_CAP = 20_000;
 
-/** noul 답변 최소 신뢰도(기본 바닥값). min confidence 미달이면 insufficient_evidence. */
-export const AGENT_SHADOW_CONF_FLOOR_DEFAULT = 0.6;
+/** noul P(yes) 바닥값(기본). 양쪽 답변의 P(yes) 가 모두 이 값 이상이어야 low_risk. */
+export const AGENT_SHADOW_YES_FLOOR_DEFAULT = 0.6;
 
 // DOM spec NodeType.TEXT_NODE(Node.js 전역에는 Node 인터페이스가 없어 지역 상수로 둔다).
 const TEXT_NODE_TYPE = 3;
@@ -134,70 +135,81 @@ export type AgentShadowVerdictValue = "low_risk" | "needs_full_review" | "insuff
 
 export interface AgentShadowVerdict {
   verdict: AgentShadowVerdictValue;
-  /** "malformed:<원인>" | "low_confidence" | 등급 산출 근거 요약. */
+  /** "malformed:<원인>" | "no_answer:<질문>" | "ambiguous_band" | 등급 산출 근거 요약. */
   reason: string;
-  /** 검증 통과한 noul 답변들의 최소 confidence. 검증 실패 시 null. */
-  minConfidence: number | null;
+  /** 검증 통과한 noul 답변들의 최소 P(yes). 무답·검증 실패 시 null. */
+  minPYes: number | null;
+}
+
+function insufficient(reason: string, minPYes: number | null = null): AgentShadowVerdict {
+  return { verdict: "insufficient_evidence", reason, minPYes };
 }
 
 function malformed(reason: string): AgentShadowVerdict {
-  return { verdict: "insufficient_evidence", reason, minConfidence: null };
+  return insufficient(reason);
 }
 
-/** 검증 통과한 noul 답변(value/confidence). 하나라도 어기면 null(malformed). */
-interface ValidatedNoulAnswer {
-  value: boolean;
-  confidence: number;
-}
+/** 검증 통과한 noul 답변(P(yes)). 불일치 사유는 문자열로 보고한다. */
+type NoulRead =
+  | { kind: "ok"; pYes: number }
+  | { kind: "no_answer" }
+  | { kind: "malformed"; reason: string };
 
 /**
  * [목적] 외부 JSON answers 에서 특정 이름의 noul 답변을 꺼내 직접 검증한다.
- *   조건: 정확히 1개 존재(결측·중복 모두 모호 → 실패 닫힘), type "noul", value boolean,
- *   confidence 0..1 유한 숫자. 형태를 믿지 않고 하나씩 확인한다.
+ *   실제 공급자 계약(provider.ts): noul value 는 yes 확률 0~1 숫자, null 은 무답.
+ *   조건: 정확히 1개 존재(결측·중복 모두 모호 → 실패 닫힘), type "noul",
+ *   value 는 유한 숫자(0~1) 또는 null. 형태를 믿지 않고 하나씩 확인한다.
  */
-function readNoulAnswer(answers: unknown[], name: string): ValidatedNoulAnswer | null {
+function readNoulAnswer(answers: unknown[], name: string): NoulRead {
   const matches = answers.filter(
     (entry): entry is Record<string, unknown> =>
       typeof entry === "object" && entry !== null && !Array.isArray(entry) && (entry as Record<string, unknown>).name === name,
   );
-  if (matches.length !== 1) return null;
+  if (matches.length === 0) return { kind: "malformed", reason: "malformed:missing:" + name };
+  if (matches.length > 1) return { kind: "malformed", reason: "malformed:duplicate:" + name };
   const answer = matches[0];
-  if (answer.type !== "noul") return null;
-  if (typeof answer.value !== "boolean") return null;
-  const confidence = answer.confidence;
-  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-    return null;
+  if (answer.type !== "noul") return { kind: "malformed", reason: "malformed:" + name + ":type" };
+  if (answer.value === null) return { kind: "no_answer" };
+  if (typeof answer.value !== "number" || !Number.isFinite(answer.value)) {
+    return { kind: "malformed", reason: "malformed:" + name + ":value_type" };
   }
-  return { value: answer.value, confidence };
+  if (answer.value < 0 || answer.value > 1) {
+    return { kind: "malformed", reason: "malformed:" + name + ":value_range" };
+  }
+  return { kind: "ok", pYes: answer.value };
 }
 
 /**
- * [목적] 계산형 verdict(실패 닫힘). complete_html·claims_grounded(noul, boolean value,
- *   0..1 numeric confidence) 중 하나라도 결측·오염이면 insufficient_evidence
- *   ("malformed:..."), min confidence 가 floor 미만이면 insufficient_evidence
- *   ("low_confidence"), 둘 다 true 면 low_risk, 그 외엔 needs_full_review.
+ * [목적] 계산형 verdict(실패 닫힘). complete_html·claims_grounded 의 P(yes) 만 본다:
+ *   결측·중복·type 오염·범위 밖 → insufficient_evidence("malformed:..."), 무답(null) →
+ *   insufficient_evidence("no_answer:<질문>"), 양쪽 P(yes) >= floor → low_risk,
+ *   하나라도 P(yes) <= 1-floor(확정 아니오 대역) → needs_full_review, 그 외(모호 대역) →
+ *   insufficient_evidence("ambiguous_band"). low_risk 외 전부 검증 실행이 기본값이다.
  * [보안] answers 는 외부 JSON(unknown)으로 받아 직접 검증한다 — 형태를 믿지 않는다.
  */
 export function computeAgentJudgmentShadowVerdict(
   answers: unknown,
-  floor: number = AGENT_SHADOW_CONF_FLOOR_DEFAULT,
+  floor: number = AGENT_SHADOW_YES_FLOOR_DEFAULT,
 ): AgentShadowVerdict {
   if (!Array.isArray(answers)) return malformed("malformed:answers_not_array");
   const completeHtml = readNoulAnswer(answers, "complete_html");
-  if (!completeHtml) return malformed("malformed:complete_html");
+  if (completeHtml.kind === "malformed") return malformed(completeHtml.reason);
   const claimsGrounded = readNoulAnswer(answers, "claims_grounded");
-  if (!claimsGrounded) return malformed("malformed:claims_grounded");
-  const minConfidence = Math.min(completeHtml.confidence, claimsGrounded.confidence);
-  // 신뢰도 게이트가 등급 판정보다 앞선다 — false 답변 + 저신뢰도도 insufficient_evidence.
-  if (minConfidence < floor) {
-    return { verdict: "insufficient_evidence", reason: "low_confidence", minConfidence: null };
+  if (claimsGrounded.kind === "malformed") return malformed(claimsGrounded.reason);
+  if (completeHtml.kind === "no_answer") return insufficient("no_answer:complete_html");
+  if (claimsGrounded.kind === "no_answer") return insufficient("no_answer:claims_grounded");
+  const minPYes = Math.min(completeHtml.pYes, claimsGrounded.pYes);
+  if (completeHtml.pYes >= floor && claimsGrounded.pYes >= floor) {
+    return { verdict: "low_risk", reason: "noul_all_yes", minPYes };
   }
-  if (completeHtml.value && claimsGrounded.value) {
-    return { verdict: "low_risk", reason: "noul_all_true", minConfidence };
+  const noBand = 1 - floor;
+  const noNames = [
+    ...(completeHtml.pYes <= noBand ? ["complete_html"] : []),
+    ...(claimsGrounded.pYes <= noBand ? ["claims_grounded"] : []),
+  ];
+  if (noNames.length > 0) {
+    return { verdict: "needs_full_review", reason: "noul_no:" + noNames.join(","), minPYes };
   }
-  const failed = [
-    ...(completeHtml.value ? [] : ["complete_html"]),
-    ...(claimsGrounded.value ? [] : ["claims_grounded"]),
-  ].join(",");
-  return { verdict: "needs_full_review", reason: "noul_false:" + failed, minConfidence };
+  return insufficient("ambiguous_band", minPYes);
 }

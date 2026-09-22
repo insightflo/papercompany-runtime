@@ -53,8 +53,8 @@ const okShadowAnswers: JudgmentAskResult = {
   answers: [
     // v2 noul 답변의 value 는 boolean 이다 — 공유 타입 JudgmentAnswerValue 는 boolean 슬롯이
     // 없으므로(외부 JSON 계약) 테스트에서만 캐스트해 심는다. verdict 계산은 unknown 으로 검증한다.
-    { name: "complete_html", type: "noul", value: true as unknown as JudgmentAnswer["value"], confidence: 0.9 },
-    { name: "claims_grounded", type: "noul", value: true as unknown as JudgmentAnswer["value"], confidence: 0.85 },
+    { name: "complete_html", type: "noul", value: 0.9 },
+    { name: "claims_grounded", type: "noul", value: 0.85 },
   ],
   modelVersion: AGENT_JUDGMENT_SHADOW_MODEL_ID,
   usage: { inputTokens: 100, outputTokens: 10 },
@@ -100,7 +100,7 @@ describe("agent-judgment-shadow — 게이트/설정/정의(단위)", () => {
   it("정의 스냅샷 — purpose/thresholds 메모/축약 조립 notes", () => {
     const definition = buildAgentJudgmentShadowDefinition();
     expect(definition.purpose).toBe(AGENT_JUDGMENT_SHADOW_PURPOSE);
-    expect(definition.policy.thresholds).toEqual({ noul_confidence_min: 0.6 });
+    expect(definition.policy.thresholds).toEqual({ noul_yes_min: 0.6 });
     expect(definition.stateAssembly.notes).toContain("document_text");
     expect(definition.stateAssembly.notes).toContain("structure_stats");
     expect(definition.originClass ?? "internal").not.toBe("secret");

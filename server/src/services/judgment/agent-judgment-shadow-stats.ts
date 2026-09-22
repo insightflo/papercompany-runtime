@@ -14,7 +14,7 @@ import type { Db } from "@paperclipai/db";
 import { judgmentCalls, judgmentDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { AGENT_JUDGMENT_DEFINITION_NAME } from "./agent-judgment-tool.js";
 import { AGENT_JUDGMENT_SHADOW_DEFINITION_NAME } from "./agent-judgment-shadow.js";
-import { AGENT_SHADOW_CONF_FLOOR_DEFAULT, computeAgentJudgmentShadowVerdict } from "./agent-judgment-shadow-state.js";
+import { AGENT_SHADOW_YES_FLOOR_DEFAULT, computeAgentJudgmentShadowVerdict } from "./agent-judgment-shadow-state.js";
 
 /** 정답측 validator 스텝 식별자(HTML 검증기). */
 export const JEV_VALIDATOR_STEP_ID = "validate-tech-scout-html-report";
@@ -33,8 +33,8 @@ export interface AgentShadowStatsInput {
   validatorStepId?: string;
   /** 정답측 QA 스텝 식별자 오버라이드(기본 JEV_QA_STEP_ID). */
   qaStepId?: string;
-  /** v2 verdict 계산용 신뢰도 바닥값 오버라이드. */
-  confFloor?: number;
+  /** v2 verdict 계산용 noul P(yes) 바닥값 오버라이드. */
+  noulYesFloor?: number;
 }
 
 export interface AgentShadowStats {
@@ -169,7 +169,7 @@ export async function computeAgentJudgmentShadowStats(
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   const validatorStepId = input.validatorStepId ?? JEV_VALIDATOR_STEP_ID;
   const qaStepId = input.qaStepId ?? JEV_QA_STEP_ID;
-  const confFloor = input.confFloor ?? AGENT_SHADOW_CONF_FLOOR_DEFAULT;
+  const noulYesFloor = input.noulYesFloor ?? AGENT_SHADOW_YES_FLOOR_DEFAULT;
 
   const v1Latest = await latestCallsByContext(db, {
     companyId: input.companyId,
@@ -187,7 +187,7 @@ export async function computeAgentJudgmentShadowStats(
   // judged = 최신 shadow 행이 observed ∧ 계산형 verdict 가 산출되는 행(insufficient 제외).
   const judged = Array.from(shadowLatest.entries()).flatMap(([contextId, row]) => {
     if (row.outcome !== "observed") return [];
-    const verdict = computeAgentJudgmentShadowVerdict(row.answers, confFloor);
+    const verdict = computeAgentJudgmentShadowVerdict(row.answers, noulYesFloor);
     if (verdict.verdict === "insufficient_evidence") return [];
     return [{ contextId, verdict: verdict.verdict }];
   });

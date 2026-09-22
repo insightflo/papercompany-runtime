@@ -77,14 +77,14 @@ const snapshot: JudgmentDefinitionSnapshot = {
   policy: { notes: "stub", thresholds: {} },
 };
 
-function noul(name: string, value: boolean, confidence?: number): JudgmentAnswer {
-  // v2 noul 답변의 value 는 boolean — 공유 타입 슬롯이 없으므로 테스트에서만 캐스트해 심는다.
-  return { name, type: "noul", value: value as unknown as JudgmentAnswer["value"], ...(confidence === undefined ? {} : { confidence }) };
+/** 실제 공급자 계약: noul value 는 P(yes) 0~1 숫자(null=무답). */
+function noul(name: string, pYes: number | null): JudgmentAnswer {
+  return { name, type: "noul", value: pYes };
 }
 
-const v2LowRisk: JudgmentAnswer[] = [noul("complete_html", true, 0.9), noul("claims_grounded", true, 0.85)];
-const v2NeedsReview: JudgmentAnswer[] = [noul("complete_html", true, 0.9), noul("claims_grounded", false, 0.9)];
-const v2NoConfidence: JudgmentAnswer[] = [noul("complete_html", true, 0.9), noul("claims_grounded", true)];
+const v2LowRisk: JudgmentAnswer[] = [noul("complete_html", 0.9), noul("claims_grounded", 0.85)];
+const v2NeedsReview: JudgmentAnswer[] = [noul("complete_html", 0.9), noul("claims_grounded", 0.1)];
+const v2NoConfidence: JudgmentAnswer[] = [noul("complete_html", 0.9), noul("claims_grounded", null)];
 
 function v1Answers(overall: string): JudgmentAnswer[] {
   return [{ name: "overall", type: "choice", value: overall, confidence: 0.9 }];
@@ -187,7 +187,7 @@ describeEP("computeAgentJudgmentShadowStats (embedded DB)", () => {
     await scenario({ v1: "low_risk", shadow: v2LowRisk, validator: "failed" });
     // c4: 섀도 행 없음(관측 미실행)
     await scenario({ v1: "low_risk", validator: "completed" });
-    // c5: 섀도 행 있으나 verdict 계산 불가(confidence 결측)
+    // c5: 섀도 행 있으나 verdict 계산 불가(무답 null)
     await scenario({ v1: "low_risk", shadow: v2NoConfidence, validator: "completed" });
     // c6: 정답측 행 없음(unknown) + v1/v2 불일치
     await scenario({ v1: "needs_full_review", shadow: v2LowRisk });
@@ -236,8 +236,8 @@ describeEP("computeAgentJudgmentShadowStats (embedded DB)", () => {
     expect(stats.validatorFailed).toBe(0);
   });
 
-  it("confFloor 상향 시 judged 0 — 비율은 null", async () => {
-    const stats = await computeAgentJudgmentShadowStats(db, { companyId, days: 7, confFloor: 0.95 });
+  it("noulYesFloor 상향 시 judged 0 — 비율은 null", async () => {
+    const stats = await computeAgentJudgmentShadowStats(db, { companyId, days: 7, noulYesFloor: 0.95 });
     expect(stats.judged).toBe(0);
     expect(stats.skipCandidates).toBe(0);
     expect(stats.skipCandidateRate).toBeNull();
