@@ -100,6 +100,7 @@ import { createNativeWorkflowScheduler } from "./services/workflow/native-schedu
 import { createNativeWorkflowReconciler } from "./services/workflow/reconciler.js";
 import { createAgentWikiEvolutionLoop, resolveAgentWikiEvolutionOwnership } from "./services/agent-skill-optimizer.js";
 import { createPlanQaShadowLoop, resolvePlanQaShadowOwnership } from "./services/judgment/plan-qa-shadow.js";
+import { createAgentJudgmentShadowLoop, resolveAgentShadowOwnership } from "./services/judgment/agent-judgment-shadow-loop.js";
 import { seedAgentJudgmentTool } from "./services/judgment/agent-judgment-tool.js";
 import { seedHtmlPreflightTool } from "./services/judgment/html-preflight-tool.js";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
@@ -994,6 +995,18 @@ export async function createApp(
     void seedHtmlPreflightTool(db).catch((err) => {
       logger.error({ err }, "Failed to seed html-preflight tool");
     });
+  }
+
+  // 판단 계층 stage 2 — agent-judgment 섀도 리플레이(캘리브레이션 수집). 같은 게이트
+  // (PAPERCLIP_JUDGMENT_ENABLED)에서 plan-qa 섀도와 병렬 등록된다. 별도 정의 이름
+  // "agent-judgment-shadow"로 감사행만 남기며 실판정(agent-judgment)·실행제어와 무접촉이다.
+  // [300줄 초과 레거시 예외] plan-qa 섀도 등록 블록의 병렬 선례 최소 추가(4줄).
+  const agentShadowLoop = resolveAgentShadowOwnership().enabled
+    ? createAgentJudgmentShadowLoop({ db })
+    : null;
+  agentShadowLoop?.start();
+  if (agentShadowLoop) {
+    process.once("exit", () => agentShadowLoop.stop());
   }
 
   pluginScheduler.start();
