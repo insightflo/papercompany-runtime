@@ -3897,6 +3897,44 @@ export async function syncWorkflowRunStateWithOutcome(
   let stepRuns = materialization.rows;
   const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
+  // [terminal-parent dispatch guard v1] 종결 부모 아래 late sync 는 늦은 선행 완료 근거만
+  //   transition ledger 에 기록하고 파생 변이(reset/skip-propagation/revive/launch)를 공식
+  //   재개까지 보류한다. 2026-09-23 RCA: 가드 없이는 sync 가 issue-less tool 후속을
+  //   running+queued 로 materialize 한 뒤 reopen guard 가 부활만 거부해, 큐 selector
+  //   (parent running)와 어긋난 좀비 큐 행이 공식 재개 전까지 claim 되지 않았다(26.2h QA 사례).
+  //   실행 권위 없음(규칙 8/9) — 후속 작업 생성은 회복 경로의 소관이며, 보류 사실은 구조화
+  //   활동으로 남긴다. failed 는 공식 resume/retry CAS 로 재개된다(가드는 재개를 막지 않는다).
+  const reopenGuardEnabled = await isRunReopenGuardEnabled(db);
+  if (reopenGuardEnabled && TERMINAL_WORKFLOW_STATUSES.has(context.run.status)) {
+    await recordWorkflowStepStatusTransitions(db, {
+      companyId: context.run.companyId,
+      missionId: context.run.missionId,
+      workflowRunId: context.run.id,
+      source: normalizedSource,
+      priorStatusByStepRunId,
+      stepRuns,
+    });
+    try {
+      await logActivity(db, {
+        companyId: context.run.companyId,
+        actorType: "system",
+        actorId: "dag-engine",
+        action: "workflow_run.terminal_parent_sync_deferred",
+        entityType: "workflow_run",
+        entityId: context.run.id,
+        details: {
+          runStatus: context.run.status,
+          source: normalizedSource,
+          lateChangedStepRunCount: stepRuns.filter((stepRun) => stepRun.status !== priorStatusByStepRunId.get(stepRun.id)).length,
+        },
+      });
+    } catch {
+      // 감사 실패가 fail-closed 결과(무변경)를 바꾸지 않는다.
+    }
+    const snapshot = await getWorkflowExecutionResultSnapshot(db, runId);
+    if (!snapshot) throw new Error(`Workflow run ${runId} not found`);
+    return { kind: "synced", result: snapshot };
+  }
   const v1Enforcement = await isHeartbeatFinalizationV1Enabled(db);
   // [B2 좁은 회복 채널] v1 이 켜진 sync 에서만 이슈 상태 스냅샷을 적재한다(legacy 비용 없음).
   const issueStatusByIssueId = v1Enforcement
@@ -4289,9 +4327,8 @@ export async function syncWorkflowRunStateWithOutcome(
     }
   }
 
-  // [run-reopen-guard v1] 플래그는 sync 당 1회 읽는다(legacy 경로의 추가 I/O 를 이 한 번으로 제한).
+  // [run-reopen-guard v1] 플래그는 sync 당 1회 읽는다(terminal-parent 가드에서 읽은 값을 재사용).
   const terminalBoundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
-  const reopenGuardEnabled = await isRunReopenGuardEnabled(db);
   const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled, reopenGuardEnabled);
   // [workflow child step] 자식 run 종말 → 부모 waiting 스텝 마감 훅. 훅 실패는 sync 를 깨뜨리지 않는다
   //   (reconciler 가 회복). 훅은 자기 waiting 스텝만 마감한다(규칙 7/8).
