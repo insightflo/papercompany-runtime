@@ -7,6 +7,7 @@ import {
   activityLog,
   createDb,
   instanceSettings,
+  issues,
   workflowStepRuns,
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
@@ -93,7 +94,7 @@ describeEP("run-reopen-guard v1", () => {
         ],
       });
 
-    it("flag ON: failed run with a live step stays failed — refusal recorded, no revive", async () => {
+    it("flag ON: failed run with a live step stays failed — sync deferred with audit, no revive", async () => {
       await setRunReopenGuardFlag(db, true);
       const world = await seedFailedRunWithLiveStep("failed");
       const seeded = await runOf(db, world.runId);
@@ -106,9 +107,18 @@ describeEP("run-reopen-guard v1", () => {
       // 무변경 증거 — 가드는 쓰기를 하지 않으므로 시드된 startedAt/completedAt 가 그대로다.
       expect(run?.startedAt?.toISOString()).toBe(seeded?.startedAt?.toISOString());
       expect(run?.completedAt).toBe(seeded?.completedAt ?? null);
-      const refusals = await refusalsOf(db, world.runId);
-      expect(refusals).toHaveLength(1);
-      expect(JSON.stringify(refusals[0]?.details)).toContain("recompute revive refused");
+      // [terminal-parent dispatch guard v1] 종결 부모 sync 는 시도 후 거부가 아니라 시도 자체가
+      //   없다 — refusal 대신 보류(deferred) 감사 1건으로 계약을 기록한다.
+      const deferred = (await db.select().from(activityLog).where(eq(activityLog.entityId, world.runId)))
+        .filter((row) => row.action === "workflow_run.terminal_parent_sync_deferred");
+      expect(deferred).toHaveLength(1);
+      expect(await refusalsOf(db, world.runId)).toHaveLength(0);
+      // 파생 변이 부재 — live review step 이 실행되지 않고(이슈 생성 없음), step 상태가 그대로다.
+      const [reviewRow] = await db.select().from(workflowStepRuns)
+        .where(eq(workflowStepRuns.id, world.stepRunIdsByStep.review!));
+      expect(reviewRow?.status).toBe("running");
+      expect(reviewRow?.issueId).toBeNull();
+      expect(await db.select().from(issues).where(eq(issues.originRunId, world.runId))).toHaveLength(0);
     });
 
     it("flag OFF (legacy regression): the same recompute revives the run to running", async () => {
