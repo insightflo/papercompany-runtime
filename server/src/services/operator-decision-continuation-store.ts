@@ -1,4 +1,4 @@
-import { and, asc, eq, lte, or } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -10,13 +10,18 @@ import {
 const LEASE_MS = 30_000;
 const BATCH_SIZE = 20;
 
+// [coalesce 금지 계약 키] 이 접두사 wake 는 연산자 결정 후속 처리의 유일 전달 수단이다.
+// quality/native-wake.ts 의 isBoundedExecutionWakeKey 가 이 키를 coalesce 금지 대상으로
+// 강제한다(활성 run 에 합쳐져 유실되는 것을 금지). 키 형식은 claimPending 과 단일 출처로 유지한다.
+export const OPERATOR_DECISION_WAKE_PREFIX = "operator-decision-wake:";
+
 type Continuation = typeof operatorDecisionContinuations.$inferSelect;
 
 export function operatorDecisionContinuationStore(db: Db) {
   async function claimPending(row: Continuation, workerId: string, now: Date) {
     const attempt = row.attemptCount + 1;
     if (attempt > row.maxAttempts) return null;
-    const idempotencyKey = `operator-decision-wake:${row.operatorDecisionId}:g${row.generation}:a${attempt}`;
+    const idempotencyKey = `${OPERATOR_DECISION_WAKE_PREFIX}${row.operatorDecisionId}:g${row.generation}:a${attempt}`;
     return db.update(operatorDecisionContinuations).set({
       state: "leased",
       attemptCount: attempt,
@@ -84,10 +89,15 @@ export function operatorDecisionContinuationStore(db: Db) {
     )).returning().then((rows) => rows[0] ?? null);
   }
 
+  // [전달 보장 증거만 인정] coalesced 는 활성 run 에 합쳐졌을 뿐 전달 보장이 없다 — 해당 run 이
+  //   깨움을 소비하지 않고 끝나면 영구 유실된다(2026-09-24 CMP-199 사고). queued/deferred 는
+  //   승격 기계(startNextQueuedRunForAgent·실행 완료 프로모션)가 반드시 런으로 만들고, completed 는
+  //   이미 런이 실행됐다는 영수증이다. coalesced/failed/cancelled 는 증거에서 제외해 재시도한다.
   async function findProof(companyId: string, idempotencyKey: string) {
     return db.select().from(agentWakeupRequests).where(and(
       eq(agentWakeupRequests.companyId, companyId),
       eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+      inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "completed"]),
     )).then((rows) => rows[0] ?? null);
   }
 

@@ -10,6 +10,11 @@
 import { and, asc, eq, like } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
+// [operator decision wake] 연산자 결정 후속 continuation wake. 활성 run 에 coalesce 되면 해당
+//   run 이 소비 없이 끝날 때 영구 유실되고 continuation 은 accepted 로 오판한다(2026-09-24
+//   CMP-199 사고) — 결정 반영은 authority 전달이므로 coalesce 금지 대상에 포함한다.
+//   접두사 단일 출처: services/operator-decision-continuation-store.ts
+import { OPERATOR_DECISION_WAKE_PREFIX } from "../operator-decision-continuation-store.js";
 
 export const QUALITY_WAKE_PREFIX = "quality-action-wake:";
 
@@ -66,10 +71,11 @@ export function parsePlanQaResubmissionWakeKey(key: string | null | undefined): 
   return { issueId: match[1]!, decisionHash: match[2]!, generation: Number(match[3]), attempt: Number(match[4]) };
 }
 
-/** 병합·coalesce 금지 대상 키: 품질 조치 wake 와 PLAN-QA 재제출 wake. */
+/** 병합·coalesce 금지 대상 키: 품질 조치 wake, PLAN-QA 재제출 wake, 연산자 결정 continuation wake. */
 export function isBoundedExecutionWakeKey(key: string | null | undefined): boolean {
   return isQualityWakeKey(key)
-    || (typeof key === "string" && key.startsWith(PLAN_QA_RESUBMIT_WAKE_PREFIX));
+    || (typeof key === "string" && key.startsWith(PLAN_QA_RESUBMIT_WAKE_PREFIX))
+    || (typeof key === "string" && key.startsWith(OPERATOR_DECISION_WAKE_PREFIX));
 }
 
 export type QualityAttemptRow = {
