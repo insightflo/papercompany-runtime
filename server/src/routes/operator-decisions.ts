@@ -10,6 +10,9 @@ import {
   retryOperatorDecisionContinuationSchema,
 } from "@paperclipai/shared/validators/operator-decision";
 import { forbidden, unauthorized } from "../errors.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import { logActivity } from "../services/activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 import { operatorDecisionReadService } from "../services/operator-decisions-read.js";
 import {
@@ -36,6 +39,7 @@ export function operatorDecisionRoutes(db: Db) {
   const router = Router();
   const read = operatorDecisionReadService(db);
   const write = operatorDecisionWriteService(db);
+  const heartbeat = heartbeatService(db);
 
   router.post(
     "/companies/:companyId/operator-decisions",
@@ -79,7 +83,63 @@ export function operatorDecisionRoutes(db: Db) {
       const decision = await read.getRequired(req.params.id as string);
       assertCompanyAccess(req, decision.companyId);
       const userId = boardUserId(req);
-      res.json({ data: await write.resolve(decision.id, req.body, userId) });
+      const result = await write.resolve(decision.id, req.body, userId);
+      // 즉시 assignee 웨이크업 — 승인 즉시 후속 완료 처리가 이어지도록 한다.
+      // (operator_decision_continuations 재시도 스케줄은 안전망으로 유지 — 백오프 지연 방지)
+      if (result.decision.issueId) {
+        const assignee = await db
+          .select({ assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(eq(issues.id, result.decision.issueId))
+          .then((rows) => rows[0]?.assigneeAgentId ?? null);
+        if (assignee) {
+          try {
+            const wake = await heartbeat.wakeup(assignee, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "operator_decision_resolved_assignee_wakeup",
+              payload: {
+                operatorDecisionId: result.decision.id,
+                issueId: result.decision.issueId,
+                mutation: "operator_decision_resolved",
+              },
+              idempotencyKey: `operator-decision-resolved:${result.decision.id}`,
+            });
+            await logActivity(db, {
+              companyId: decision.companyId,
+              actorType: "user",
+              actorId: userId,
+              action: "operator_decision.assignee_wakeup_queued",
+              entityType: "operator_decision",
+              entityId: result.decision.id,
+              details: {
+                schemaVersion: 1,
+                operatorDecisionId: result.decision.id,
+                issueId: result.decision.issueId,
+                assigneeAgentId: assignee,
+                wakeupId: wake?.id ?? null,
+              },
+            });
+          } catch (err) {
+            logger.warn({ err, operatorDecisionId: result.decision.id }, "assignee wakeup after operator decision resolve failed — continuation retry remains");
+            await logActivity(db, {
+              companyId: decision.companyId,
+              actorType: "user",
+              actorId: userId,
+              action: "operator_decision.assignee_wakeup_failed",
+              entityType: "operator_decision",
+              entityId: result.decision.id,
+              details: {
+                schemaVersion: 1,
+                operatorDecisionId: result.decision.id,
+                issueId: result.decision.issueId,
+                error: String((err as any)?.message ?? err).slice(0, 200),
+              },
+            });
+          }
+        }
+      }
+      res.json({ data: result });
     },
   );
 
