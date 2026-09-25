@@ -805,6 +805,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         "- Comment on failed, stale, undispatched, or blocked steps with the current judgement.",
         "- Retry failed workflow steps when retry is safe and within the retry limit.",
         "- Recover/replan toward completion, or escalate/report impossible states with evidence.",
+        "- When every non-oversight issue of the mission is done, verify the work products and complete this oversight issue — completing it closes the mission. If completion evidence is missing, wake the responsible step agent instead of waiting silently.",
       ].join("\n"),
       missionId: mission.id,
       originKind: "mission_main_executor_oversight",
