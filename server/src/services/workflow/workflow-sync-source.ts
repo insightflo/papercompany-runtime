@@ -27,6 +27,7 @@ export const WORKFLOW_SYNC_SOURCES = [
   "mission_owner_recovery",
   "workflow_qa_cap_acceptance",
   "workflow_source_issue_resume",
+  "workflow_resume_qa_rearm",
 ] as const;
 
 export type WorkflowSyncSource = (typeof WORKFLOW_SYNC_SOURCES)[number];

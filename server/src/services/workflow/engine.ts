@@ -6,8 +6,9 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { companies } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { activityLog, companies, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { issueService } from "../issues.js";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
@@ -234,8 +235,75 @@ async function assertWorkflowToolReadiness(
 }
 
 /**
- * Workflow service singleton.
+ * [QA rework re-arm] 공식 resume 에서 "failed 스텝 + blocked 이슈" 조합을 재무장한다.
+ *
+ * 배경(2026-09-25 락 순환 사고, mission 90605444 run b7728a08): 게이트 반려(request_changes
+ * verdict) 후 운영자/에이전트 재작업 대기 상태에서는 run failed → 툴 스코프 잠금
+ * (tool_progress_scope_replaced) → 에이전트가 계약대로 이슈 blocked 유지 → sync 가
+ * blocked→failed 재판정 → resume 이 즉시 재실패하는 순환이 생긴다. 수동 탈출은
+ * "wake → in_progress 전환 틈 → resume" 레이스였고, 이를 resume CAS 로 흡수한다.
+ *
+ * 재무장 조건(좁게 유지): failed 스텝의 linked issue 가 blocked 이고, 그 step run 에
+ * 현재 세대 workflow_validation_verdict(event_type=workflow_validation_verdict,
+ * verdict=request_changes) 가 장부에 기록돼 있을 때만 blocked → in_progress 로 되돌린다.
+ * verdict 없는 blocked 는 운영자/에이전트 판단 영역이므로 건드리지 않는다.
  */
+export async function rearmBlockedQaIssuesForResume(
+  db: Db,
+  input: { companyId: string; runId: string },
+): Promise<Array<{ issueId: string; stepRunId: string }>> {
+  const failedStepRuns = await db
+    .select({ id: workflowStepRuns.id, issueId: workflowStepRuns.issueId })
+    .from(workflowStepRuns)
+    .where(and(
+      eq(workflowStepRuns.workflowRunId, input.runId),
+      eq(workflowStepRuns.status, "failed"),
+    ));
+  const rearmed: Array<{ issueId: string; stepRunId: string }> = [];
+  for (const stepRun of failedStepRuns) {
+    if (!stepRun.issueId) continue;
+    const [issue] = await db
+      .select({ id: issues.id, companyId: issues.companyId, status: issues.status, identifier: issues.identifier })
+      .from(issues)
+      .where(and(eq(issues.id, stepRun.issueId), eq(issues.companyId, input.companyId)))
+      .limit(1);
+    if (!issue || issue.status !== "blocked") continue;
+    const [verdictEvent] = await db
+      .select({ id: workflowTransitionEvents.id })
+      .from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, stepRun.id),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+        eq(workflowTransitionEvents.verdict, "request_changes"),
+      ))
+      .limit(1);
+    if (!verdictEvent) continue;
+    await issueService(db).update(issue.id, {
+      status: "in_progress",
+      workflowSyncSource: "workflow_resume_qa_rearm",
+    });
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: "system",
+      actorId: "workflow-resume",
+      action: "workflow_run.qa_rework_rearmed",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        schemaVersion: 1,
+        workflowRunId: input.runId,
+        workflowStepRunId: stepRun.id,
+        verdictEventId: verdictEvent.id,
+        issueIdentifier: issue.identifier ?? null,
+        previousStatus: "blocked",
+        nextStatus: "in_progress",
+      },
+    });
+    rearmed.push({ issueId: issue.id, stepRunId: stepRun.id });
+  }
+  return rearmed;
+}
+
 export const workflowService = {
   /**
    * Create a new workflow definition.
@@ -453,7 +521,8 @@ export const workflowService = {
   /**
    * Resume a workflow run through the native server DAG execution path.
    */
-  async resumeRun(
+  
+async resumeRun(
     db: Db,
     input: { runId: string; companyId: string },
   ): Promise<WorkflowExecutionResult> {
@@ -490,6 +559,11 @@ export const workflowService = {
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
     if (!run) {
       throw new Error(`Workflow run not found: ${input.runId}`);
+    }
+    // [QA rework re-arm] failed run 의 resume 에서 반려 verdict 가 있는 blocked 이슈를
+    //   in_progress 로 되돌려 재작업 루프가 살아나게 한다(위 rearmBlockedQaIssuesForResume 참조).
+    if (existingRun.status === "failed") {
+      await rearmBlockedQaIssuesForResume(db, { companyId: input.companyId, runId: run.id });
     }
     // [control node resume recovery] failed control node(IF/complete) 는 executeWorkflowControlNode 의
     //   CAS(status=pending) 재클레임이 불가해 resume 만으로는 재평가되지 않는다. 재실행 전 pending 으로
