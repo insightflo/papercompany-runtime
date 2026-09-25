@@ -190,6 +190,7 @@ import {
 import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization/authority-transfer.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
+import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
 import {
   assertIssueResumeScopeIdentity,
@@ -580,6 +581,70 @@ export async function recordHeartbeatRunTerminalTransitionEvent(
     reason: run.errorCode ?? run.error ?? "run_terminal",
     reasonCode: run.errorCode ?? "run_terminal",
     idempotencyKey: `queue-run-completed:${run.id}:${run.status}`,
+  });
+}
+
+// [CMP-199 coalesced wake 유실] 종료된 런에 병합(coalesced)된 채 활성 런이 컨텍스트를 소비하지 않고
+// 끝나면 깨움이 영구 유실된다. operator-decision-wake:* 키의 coalesced 행은 런 종료 시
+// queued 로 되돌려 기존 승격 경로(promoteQueuedWakeupRequestsForAgent)가 다시 전달하게 한다.
+// 조건부 UPDATE(status='coalesced' AND run_id 일치)로 멱등: 같은 런을 두 번 sweep 하면 두 번째는 0건.
+export async function requeueCoalescedWakeupsForFinishedRun(
+  db: Db,
+  input: { companyId: string; runId: string },
+): Promise<number> {
+  return withTxTimeout(db, async (tx) => {
+    const rows = await tx
+      .select({
+        id: agentWakeupRequests.id,
+        idempotencyKey: agentWakeupRequests.idempotencyKey,
+        issueIdFromPayload: sql<string | null>`${agentWakeupRequests.payload} ->> 'issueId'`,
+      })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.runId, input.runId),
+        eq(agentWakeupRequests.status, "coalesced"),
+        sql`${agentWakeupRequests.idempotencyKey} like ${OPERATOR_DECISION_WAKE_PREFIX + "%"}`,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt));
+
+    let requeuedCount = 0;
+    for (const row of rows) {
+      const updated = await tx
+        .update(agentWakeupRequests)
+        .set({
+          status: "queued",
+          runId: null,
+          coalescedCount: sql`${agentWakeupRequests.coalescedCount} + 1`,
+          finishedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(agentWakeupRequests.id, row.id),
+          eq(agentWakeupRequests.companyId, input.companyId),
+          eq(agentWakeupRequests.runId, input.runId),
+          eq(agentWakeupRequests.status, "coalesced"),
+        ))
+        .returning({ id: agentWakeupRequests.id })
+        .then((updatedRows) => updatedRows[0] ?? null);
+      if (!updated) continue;
+
+      await tx.insert(activityLog).values({
+        companyId: input.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        action: "agent_wakeup.coalesced_requeued",
+        entityType: row.issueIdFromPayload ? "issue" : "wakeup_request",
+        entityId: row.issueIdFromPayload ?? row.id,
+        details: {
+          wakeupRequestId: row.id,
+          idempotencyKey: row.idempotencyKey,
+          runId: input.runId,
+        },
+      });
+      requeuedCount += 1;
+    }
+    return requeuedCount;
   });
 }
 
@@ -8457,6 +8522,23 @@ export function heartbeatService(db: Db) {
             await settleHeartbeatAfterExecution(db, terminalRun, new Date()).catch((settlementErr) => {
               logger.warn({ err: settlementErr, runId: run.id }, "failed to settle heartbeat after execution cleanup");
             });
+            // [CMP-199] 런 행이 종말이 된 뒤 이 런에 coalesce 되어 있던 operator-decision-wake 깨움을
+            // queued 로 되돌린다. 아래 startNextQueuedRunForAgent 가 같은 호출에서 승격하게 하기 위해
+            // 그 전에 실행한다. 재큐 실패가 finalization 을 깨뜨리지 않게 격리한다.
+            try {
+              const requeuedCount = await requeueCoalescedWakeupsForFinishedRun(db, {
+                companyId: terminalRun.companyId,
+                runId: terminalRun.id,
+              });
+              if (requeuedCount > 0) {
+                logger.info(
+                  { runId: terminalRun.id, requeuedCount },
+                  "requeued coalesced operator-decision wakeups for finished run",
+                );
+              }
+            } catch (err) {
+              logger.warn({ err, runId: terminalRun.id }, "failed to requeue coalesced wakeups for finished run");
+            }
             // The earlier status finalization intentionally keeps an unsettled v1 run in the slot.
             // Recompute after cleanup so settlement releases it; not_ready remains occupied by design.
             await finalizeAgentStatus(
