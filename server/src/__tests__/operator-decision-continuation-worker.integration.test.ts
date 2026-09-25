@@ -137,4 +137,42 @@ describeDb("operator decision continuation worker", () => {
     expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({ state: "exhausted", attemptCount: 3 });
     expect(wakeup).toHaveBeenCalledTimes(3);
   });
+
+  // [2026-09-24 CMP-199 사고 재발 방지] 활성 run 에 합병된 coalesced wake 는 전달 보장이 없다
+  //   (해당 run 이 소비 없이 끝나면 영구 유실). 증거 불인정 → 재시도 → 정상 queued wake 로
+  //   수렴해야 한다.
+  it("does not accept a coalesced wakeup as durable proof and converges on a delivered attempt", async () => {
+    await db.update(operatorDecisionContinuations)
+      .set({ nextAttemptAt: new Date("2026-07-29T12:00:00Z") })
+      .where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId));
+    const wakeups: Array<{ idempotencyKey: string; status: string }> = [];
+    const wakeup = vi.fn(async (targetAgentId: string, options: Record<string, unknown>) => {
+      const status = wakeups.length === 0 ? "coalesced" : "queued";
+      await db.insert(agentWakeupRequests).values({
+        companyId, agentId: targetAgentId, source: "automation", status,
+        triggerDetail: "system", reason: "operator_decision_resolved",
+        payload: options.payload as Record<string, unknown>,
+        requestedByActorType: "user", requestedByActorId: "board",
+        idempotencyKey: options.idempotencyKey as string,
+        issueId,
+      });
+      wakeups.push({ idempotencyKey: options.idempotencyKey as string, status });
+    });
+    const worker = operatorDecisionContinuationWorker(db, { wakeup, workerId: "coal" });
+
+    // a1: 활성 run 합병(coalesced) — 전달 증거 불인정, 5s 뒤 재시도 예약
+    await worker.pollOnce(new Date("2026-07-29T12:00:00Z"));
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "pending", attemptCount: 1, errorCode: "dispatch_failed",
+    });
+
+    // a2(+6s): 전용 queued run 이 만들어진 경우 — 전달 증거 인정
+    await worker.pollOnce(new Date("2026-07-29T12:00:06Z"));
+    const [continuation] = await db.select().from(operatorDecisionContinuations);
+    expect(continuation).toMatchObject({ state: "accepted", attemptCount: 2 });
+    expect(wakeups.map((w) => w.idempotencyKey)).toEqual([
+      `operator-decision-wake:${decisionId}:g1:a1`,
+      `operator-decision-wake:${decisionId}:g1:a2`,
+    ]);
+  });
 });
