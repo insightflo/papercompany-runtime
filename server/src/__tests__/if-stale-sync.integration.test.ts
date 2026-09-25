@@ -4,7 +4,9 @@
 //   2026-09-25 run 16dac130: IF 평가(20:13:59)가 상류 이슈 완료(20:17:45)보다 앞서 잘못된
 //   false-branch 로 고정 → 다음 날 수동 resume 으로만 복구됐다. resetStaleIfControlNodesForResume
 //   을 syncWorkflowRunStateWithOutcome 이 재사용하므로, resume 없이 일반 sync 만으로 재평가와
-//   브랜치 정정이 닫히는지 확인한다.
+//   브랜치 정정이 닫히는지 확인한다. 배치는 launch loop 이후(관찰/재평가 분리): stale 를 관찰한
+//   sync 는 리셋만 하고, 재평가는 다음 sync, 부활·발사는 그 다음 sync 에서 수렴한다(공식 재작업
+//   경로의 한 패스 한 레벨 계약 유지 — workflow-mirror-dag-retry-rework 참조).
 //   기존 workflow-control-node-execution.test.ts 의 시딩 방식을 따르되, false-branch 를
 //   issue-backed step(fallback-work)로 둬서 시드 시점에 run 이 running(비종결) 상태로 남게
 //   하는 것이 차이점이다 — 종결 run 은 terminal-parent 가드가 파생변이를 보류하기 때문.
@@ -142,7 +144,7 @@ describeEmbeddedPostgres("sync-path stale IF re-evaluation (if-stale-sync)", () 
     return { companyId, agentId, runId, artifactPath, result, stepRuns, producerIssueId: producerRun.issueId! };
   }
 
-  it("a) 소스 산물이 평가 시점 이후 갱신되면 일반 sync 만으로 stale IF 를 리셋·재평가해 true-branch 로 정정한다", async () => {
+  it("a) 소스 산물이 평가 시점 이후 갱신되면 일반 sync 만으로 stale IF 를 리셋·재평가해 true-branch 로 정정한다(다음 sync 수렴)", async () => {
     const seeded = await seedRun("empty");
     const ifRun = seeded.stepRuns.find((row) => row.stepId === "if-decision")!;
     expect(ifRun.status).toBe("completed");
@@ -161,31 +163,41 @@ describeEmbeddedPostgres("sync-path stale IF re-evaluation (if-stale-sync)", () 
       .set({ updatedAt: new Date() })
       .where(eq(issueWorkProducts.issueId, seeded.producerIssueId));
 
-    // resume 없이 일반 sync 경로 — syncWorkflowRunForIssue → syncWorkflowRunStateWithOutcome.
+    // 1차 sync — 관찰: stale verdict 만 폐기한다(pending 리셋, controlNodeResult 삭제).
+    //   재평가는 다음 sync 의 launch loop 가 수행한다(한 패스 한 레벨 — 공식 재작업 경로의
+    //   resume 레벨 계약과 동일 속도. launch 안에서 재평가까지 끝내면 기존 재작업 계약과 충돌한다).
     const first = await syncWorkflowRunForIssue(db, seeded.producerIssueId);
     expect(first?.status).not.toBe("failed");
 
     const afterFirst = await db.select().from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, seeded.runId));
     const afterFirstIf = afterFirst.find((row) => row.stepId === "if-decision")!;
-    // 동일 sync 패스에서 재평가되어 verdict 가 갱신된 소스 기준 condition_true 로 바뀐다.
-    expect(afterFirstIf.status).toBe("completed");
-    const reevaluated = readControlNodeResult(afterFirstIf.metadata)!;
-    expect(reevaluated).toMatchObject({ outcome: "condition_true" });
-    expect(Date.parse(reevaluated.evaluatedAt)).toBeGreaterThan(Date.parse(evaluatedAt));
-    // skip 부활·launch 는 기존 엔진 계약대로 다음 sync 패스에서 진행된다(한 패스 한 레벨).
-    expect(afterFirst.find((row) => row.stepId === "selected-work")!.status).toBe("skipped");
+    expect(afterFirstIf.status).toBe("pending");
+    expect(readControlNodeResult(afterFirstIf.metadata)).toBeNull(); // verdict 폐기 확인
 
-    // 후속 일반 sync 에서 true-branch 부활 + 발사로 마무리.
+    // 2차 sync — 재평가: 갱신된 소스 기준 condition_true 로 verdict 가 새로 쓰인다.
     const second = await syncWorkflowRunState(db, seeded.runId);
     expect(second.status).not.toBe("failed");
     const afterSecond = await db.select().from(workflowStepRuns)
       .where(eq(workflowStepRuns.workflowRunId, seeded.runId));
-    const selected = afterSecond.find((row) => row.stepId === "selected-work")!;
+    const afterSecondIf = afterSecond.find((row) => row.stepId === "if-decision")!;
+    expect(afterSecondIf.status).toBe("completed");
+    const reevaluated = readControlNodeResult(afterSecondIf.metadata)!;
+    expect(reevaluated).toMatchObject({ outcome: "condition_true" });
+    expect(Date.parse(reevaluated.evaluatedAt)).toBeGreaterThan(Date.parse(evaluatedAt));
+    // 재평가 시점에는 아직 skip 부활이 일어나지 않는다(한 패스 한 레벨).
+    expect(afterSecond.find((row) => row.stepId === "selected-work")!.status).toBe("skipped");
+
+    // 3차 sync — 부활·발사: true-branch 가 살아나 마무리된다.
+    const third = await syncWorkflowRunState(db, seeded.runId);
+    expect(third.status).not.toBe("failed");
+    const afterThird = await db.select().from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, seeded.runId));
+    const selected = afterThird.find((row) => row.stepId === "selected-work")!;
     expect(selected.status).toBe("pending");
     expect(selected.issueId).toBeTruthy();
     // 재평가된 verdict 는 후속 sync 에서 재리셋 없이 안정적으로 유지된다.
-    expect(readControlNodeResult(afterSecond.find((row) => row.stepId === "if-decision")!.metadata))
+    expect(readControlNodeResult(afterThird.find((row) => row.stepId === "if-decision")!.metadata))
       .toMatchObject({ outcome: "condition_true" });
   });
 

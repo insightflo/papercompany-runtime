@@ -3899,28 +3899,6 @@ export async function syncWorkflowRunStateWithOutcome(
   let stepRuns = materialization.rows;
   const priorStatusByStepRunId = new Map(stepRuns.map((stepRun) => [stepRun.id, stepRun.status]));
   stepRuns = await syncStepRunsFromIssueState(db, stepRuns, context.steps, context);
-  // [if-stale-sync] 일반 sync 경로의 stale IF 재평가 — 완료된 IF verdict 가 평가 시점(controlNodeResult
-  //   .evaluatedAt) 이후 갱신된 소스 work product 후보를 소비했으면 pending 리셋해 아래 launch loop 의
-  //   executeWorkflowControlNode CAS 재평가로 잇는다. 기존엔 resume 경로(resumeRun)에만 장치가 있어
-  //   선행 이슈 완료가 IF 평가보다 늦는 레이스에서 false-branch 가 다음 수동 resume 까지 고정됐다
-  //   (2026-09-25, run 16dac130). 재사용 함수는 resume 무관하게 설계되어 있다(신선도 미확시 보수 유지).
-  //   터미널 run 은 아래 terminal-parent 가드의 파생변이 보류 원칙을 깨지 않는다(가드 early-return
-  //   경로에서는 호출되지 않는다). skip 부활·launch 는 기존 엔진 계약대로 다음 sync 패스에서 진행된다.
-  if (!TERMINAL_WORKFLOW_STATUSES.has(context.run.status)) {
-    try {
-      const staleIfResetCount = await resetStaleIfControlNodesForResume({
-        db,
-        companyId: context.run.companyId,
-        workflowRunId: runId,
-        steps: context.steps,
-      });
-      if (staleIfResetCount > 0) {
-        stepRuns = await reloadWorkflowStepRunsForSameRun(db, stepRuns);
-      }
-    } catch (error) {
-      logger.warn({ err: error, workflowRunId: runId }, "stale IF control-node reset failed; continuing sync");
-    }
-  }
   // [terminal-parent dispatch guard v1] 종결 부모 아래 late sync 는 늦은 선행 완료 근거만
   //   transition ledger 에 기록하고 파생 변이(reset/skip-propagation/revive/launch)를 공식
   //   재개까지 보류한다. 2026-09-23 RCA: 가드 없이는 sync 가 issue-less tool 후속을
@@ -4351,6 +4329,32 @@ export async function syncWorkflowRunStateWithOutcome(
     }
   }
 
+  // [if-stale-sync] 일반 sync 경로의 stale IF 재평가(관찰/재평가 분리) — 완료된 IF verdict 가
+  //   평가 시점(controlNodeResult.evaluatedAt) 이후 갱신된 소스 work product 후보를 소비했으면
+  //   pending 리셋만 수행한다. 재평가는 다음 sync 의 launch loop(executeWorkflowControlNode CAS)가
+  //   수행하고, skip 부활·launch 는 그 다음 sync 패스에서 진행된다(한 패스 한 레벨 — resume 계약과
+  //   동일한 수렴 속도). launch loop 안에서 재평가까지 끝내면 공식 재작업 경로(산물 재등록 → agent_api
+  //   sync → 수동/공식 resume)가 모델링한 레벨 구분이 한 패스 앞당겨져 기존 계약(workflow-mirror-dag
+  //   -retry-rework: resume 1회차 재평가·2회차 부활)과 충돌한다(2026-09-25, run 16dac130 레이스는
+  //   resume 없이 다음 sync 들으로 자동 수렴). 터미널 run 은 terminal-parent 가드의 파생변이 보류
+  //   원칙을 깨지 않는다(가드 early-return 경로와 종결 run 모두 미호출). 재사용 함수는 resume 무관하게
+  //   설계되어 있다(신선도 미확시 보수 유지). finalize 전에 실행해 pending IF 를 run 종결 판정에
+  //   반영시키고, transition ledger 도 completed→pending 을 기록한다.
+  if (!TERMINAL_WORKFLOW_STATUSES.has(context.run.status)) {
+    try {
+      const staleIfResetCount = await resetStaleIfControlNodesForResume({
+        db,
+        companyId: context.run.companyId,
+        workflowRunId: runId,
+        steps: context.steps,
+      });
+      if (staleIfResetCount > 0) {
+        stepRuns = await reloadWorkflowStepRunsForSameRun(db, stepRuns);
+      }
+    } catch (error) {
+      logger.warn({ err: error, workflowRunId: runId }, "stale IF control-node reset failed; continuing sync");
+    }
+  }
   // [run-reopen-guard v1] 플래그는 sync 당 1회 읽는다(terminal-parent 가드에서 읽은 값을 재사용).
   const terminalBoundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
   const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled, reopenGuardEnabled);
