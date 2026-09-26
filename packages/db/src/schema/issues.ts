@@ -39,6 +39,8 @@ export const issues = pgTable(
     executionRunId: uuid("execution_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     executionAgentNameKey: text("execution_agent_name_key"),
     executionLockedAt: timestamp("execution_locked_at", { withTimezone: true }),
+    lastOperatorInstructionAt: timestamp("last_operator_instruction_at", { withTimezone: true }),
+    lastOperatorInstructionCommentId: uuid("last_operator_instruction_comment_id"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id),
     createdByUserId: text("created_by_user_id"),
     issueNumber: integer("issue_number"),
