@@ -3373,6 +3373,62 @@ function fireWikiRecord(
     );
 }
 
+/**
+ * [run-status fencing v1] heartbeat_runs 상태 전이의 중앙 작성자.
+ * opts.expectedStatuses 를 넘기면 compare-and-set 이 된다: 현재 상태가 목록에 없는
+ * 행은 갱신되지 않고(죽은/취소된 실행자의 늦은 상태 기록이 새 상태를 덮어쓰는
+ * 좀비쓰기 방지), 폐기 사실을 logger.info 로 남긴다. 미전달 시 기존 무조건 갱신
+ * 동작을 유지한다(호환). 갱신 성공 시의 파생 기록(shadow/live event/종말 이벤트/
+ * finalization)은 기존 setRunStatus 와 동일하게 수행된다.
+ */
+export async function setHeartbeatRunStatus(
+  db: Db,
+  runId: string,
+  status: string,
+  patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+  opts?: { expectedStatuses?: string[] },
+) {
+  const expectedStatuses = opts?.expectedStatuses?.length ? opts.expectedStatuses : null;
+  const updated = await db
+    .update(heartbeatRuns)
+    .set({ status, ...patch, updatedAt: new Date() })
+    .where(
+      expectedStatuses
+        ? and(eq(heartbeatRuns.id, runId), inArray(heartbeatRuns.status, expectedStatuses))
+        : eq(heartbeatRuns.id, runId),
+    )
+    .returning()
+    .then((rows) => rows[0] ?? null);
+  if (!updated && expectedStatuses) {
+    logger.info({ runId, attempted: status, expectedStatuses }, "fenced run-status write discarded");
+  }
+  if (updated) await recordHeartbeatTerminalOutcomeShadow(db, updated);
+
+  if (updated) {
+    publishLiveEvent({
+      companyId: updated.companyId,
+      type: "heartbeat.run.status",
+      payload: {
+        runId: updated.id,
+        agentId: updated.agentId,
+        status: updated.status,
+        invocationSource: updated.invocationSource,
+        triggerDetail: updated.triggerDetail,
+        error: updated.error ?? null,
+        errorCode: updated.errorCode ?? null,
+        startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+        finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+      },
+    });
+  }
+
+  // [Task 6C] queue_run_completed event for terminal status
+  if (updated) await recordHeartbeatRunTerminalTransitionEvent(db, updated);
+  if (updated) await maybeRecordTerminalFinalization(db, updated, new Date());
+
+  return updated;
+}
+
 export function heartbeatService(db: Db) {
   // [instant-advance v1.2] fire-and-forget 진행 모듈에 db 주입(미주입 요청은 no-op).
   configureInstantWorkflowAdvanceDb(db);
@@ -4460,38 +4516,9 @@ export function heartbeatService(db: Db) {
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    opts?: { expectedStatuses?: string[] },
   ) {
-    const updated = await db
-      .update(heartbeatRuns)
-      .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runId))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    if (updated) await recordHeartbeatTerminalOutcomeShadow(db, updated);
-
-    if (updated) {
-      publishLiveEvent({
-        companyId: updated.companyId,
-        type: "heartbeat.run.status",
-        payload: {
-          runId: updated.id,
-          agentId: updated.agentId,
-          status: updated.status,
-          invocationSource: updated.invocationSource,
-          triggerDetail: updated.triggerDetail,
-          error: updated.error ?? null,
-          errorCode: updated.errorCode ?? null,
-          startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
-          finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
-        },
-      });
-    }
-
-    // [Task 6C] queue_run_completed event for terminal status
-    if (updated) await recordHeartbeatRunTerminalTransitionEvent(db, updated);
-    if (updated) await maybeRecordTerminalFinalization(db, updated, new Date());
-
-    return updated;
+    return setHeartbeatRunStatus(db, runId, status, patch, opts);
   }
 
   // Evidence-only backfill for runs that were terminalized externally
@@ -5305,7 +5332,7 @@ export function heartbeatService(db: Db) {
               error: `Issue ${issueRow.status} but adapter child did not exit; terminated`,
               errorCode: "issue_done_child_not_exited",
               finishedAt: now,
-            });
+            }, { expectedStatuses: ["running"] });
             // Agent self-learning wiki (Phase 1): adapter 자식 미종료 패턴 기록 (non-blocking).
             fireWikiRecord(wikiSvc, {
               companyId: run.companyId,
@@ -5342,7 +5369,7 @@ export function heartbeatService(db: Db) {
           error: timeoutMessage,
           errorCode: "execution_stale_timeout",
           finishedAt: now,
-        });
+        }, { expectedStatuses: ["running"] });
         await setWakeupStatus(run.wakeupRequestId, "timed_out", {
           finishedAt: now,
           error: timeoutMessage,
@@ -5397,7 +5424,7 @@ export function heartbeatService(db: Db) {
           const detachedRun = await setRunStatus(run.id, "running", {
             error: detachedMessage,
             errorCode: DETACHED_PROCESS_ERROR_CODE,
-          });
+          }, { expectedStatuses: ["running"] });
           if (detachedRun) {
             await appendRunEvent(detachedRun, await nextRunEventSeq(detachedRun.id), {
               eventType: "lifecycle",
@@ -5445,7 +5472,7 @@ export function heartbeatService(db: Db) {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
         errorCode: "process_lost",
         finishedAt: now,
-      });
+      }, { expectedStatuses: ["running"] });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: now,
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
@@ -5553,7 +5580,7 @@ export function heartbeatService(db: Db) {
           error: staleQueuedMessage,
           errorCode: "stale_queued",
           finishedAt: now,
-        });
+        }, { expectedStatuses: ["queued"] });
         await setWakeupStatus(run.wakeupRequestId, "failed", {
           finishedAt: now,
           error: staleQueuedMessage,
@@ -6464,7 +6491,7 @@ export function heartbeatService(db: Db) {
         error: "Agent not found",
         errorCode: "agent_not_found",
         finishedAt: new Date(),
-      });
+      }, { expectedStatuses: ["running"] });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: new Date(),
         error: "Agent not found",
@@ -8133,7 +8160,7 @@ export function heartbeatService(db: Db) {
                     : (adapterResult.errorCode ?? "adapter_failed")
                   : null,
           ...terminalEvidence,
-        });
+        }, { expectedStatuses: ["running"] });
 
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
         finishedAt: latestTerminalRun?.finishedAt ?? new Date(),
@@ -8351,7 +8378,7 @@ export function heartbeatService(db: Db) {
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
-      });
+      }, { expectedStatuses: ["running"] });
       await setWakeupStatus(run.wakeupRequestId, "failed", {
         finishedAt: new Date(),
         error: message,
@@ -10901,7 +10928,7 @@ export function heartbeatService(db: Db) {
       finishedAt: new Date(),
       error: reason,
       errorCode: "cancelled",
-    });
+    }, { expectedStatuses: ["queued", "running"] });
 
     await setWakeupStatus(run.wakeupRequestId, "cancelled", {
       finishedAt: new Date(),
@@ -10935,7 +10962,7 @@ export function heartbeatService(db: Db) {
         finishedAt: new Date(),
         error: reason,
         errorCode: "cancelled",
-      });
+      }, { expectedStatuses: ["queued", "running"] });
 
       await setWakeupStatus(run.wakeupRequestId, "cancelled", {
         finishedAt: new Date(),
