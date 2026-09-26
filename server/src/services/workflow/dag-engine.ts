@@ -27,6 +27,7 @@ import {
 } from "./workflow-sync-source.js";
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
+import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
 import {
   dispatchWorkflowChildStep,
   isWorkflowChildStep,
@@ -1255,21 +1256,22 @@ async function syncStepRunsFromIssueState(
 
     if (Object.keys(patch).length === 0) continue;
     const metadataCleanupCondition = patch.metadata
-      ? and(
-        eq(workflowStepRuns.status, stepRun.status),
-        eq(workflowStepRuns.metadata, stepRun.metadata),
-      )
+      ? eq(workflowStepRuns.metadata, stepRun.metadata)
       : undefined;
     // 늦은 이슈 완료가 종결/재설정된 세대의 스텝 행을 덮어쓰지 않게 하는 소비 지점 울타리.
     // 세대가 바뀌었다면 이 패치는 0행으로 흐르고, 이후 reload 가 실제 상태를 반영한다.
-    await db
-      .update(workflowStepRuns)
-      .set(patch)
-      .where(and(
-        eq(workflowStepRuns.id, stepRun.id),
+    // [step-status fencing v1] 세대 울타리에 스냅샷 status CAS 를 추가 — load 이후 같은 세대
+    //   안에서 상태가 이미 옮겨간 행을 늦은 소비자가 덮어쓰는 좀비쓰기를 막는다(0행 폐기+로그).
+    await setWorkflowStepRunStatus(db, {
+      stepRunId: stepRun.id,
+      status: desiredStatus,
+      patch,
+      expectedStatuses: [stepRun.status],
+      extraConditions: [
         eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
-        metadataCleanupCondition,
-      ));
+        ...(metadataCleanupCondition ? [metadataCleanupCondition] : []),
+      ],
+    });
   }
 
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
@@ -1296,14 +1298,17 @@ async function resetUnlaunchedTerminalStepRuns(
   );
   if (unlaunchedTerminal.length === 0) return stepRuns;
 
-  await db
-    .update(workflowStepRuns)
-    .set({
+  // [step-status fencing v1] skipped/failed → pending 리셋을 행별 status CAS 로 — 리셋 도중
+  //   다른 실행자가 이미 상태를 옮긴 행을 pending 으로 되돌리는 좀비쓰기를 막는다.
+  //   폐기된 행은 이후 reload 가 실제 상태로 수렴시킨다.
+  for (const stepRun of unlaunchedTerminal) {
+    await setWorkflowStepRunStatus(db, {
+      stepRunId: stepRun.id,
       status: "pending",
-      startedAt: null,
-      completedAt: null,
-    })
-    .where(inArray(workflowStepRuns.id, unlaunchedTerminal.map((stepRun) => stepRun.id)));
+      patch: { startedAt: null, completedAt: null },
+      expectedStatuses: ["skipped", "failed"],
+    });
+  }
 
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
 }
@@ -2417,10 +2422,11 @@ async function blockToolStepRunForConcurrency(input: {
   runningCount: number;
   now: Date;
 }): Promise<void> {
-  await input.db
-    .update(workflowStepRuns)
-    .set({
-      status: "pending",
+  // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
+  await setWorkflowStepRunStatus(input.db, {
+    stepRunId: input.stepRun.id,
+    status: "pending",
+    patch: {
       metadata: {
         ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
         concurrencyBlocked: {
@@ -2430,8 +2436,9 @@ async function blockToolStepRunForConcurrency(input: {
           checkedAt: input.now.toISOString(),
         },
       },
-    })
-    .where(eq(workflowStepRuns.id, input.stepRun.id));
+    },
+    expectedStatuses: [input.stepRun.status],
+  });
 }
 
 async function completeToolStepRunFromCache(input: {
@@ -2461,15 +2468,17 @@ async function completeToolStepRunFromCache(input: {
   };
   delete metadata.concurrencyBlocked;
 
-  await input.db
-    .update(workflowStepRuns)
-    .set({
-      status: "completed",
+  // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
+  await setWorkflowStepRunStatus(input.db, {
+    stepRunId: input.stepRun.id,
+    status: "completed",
+    patch: {
       startedAt: input.stepRun.startedAt ?? input.now,
       completedAt: input.now,
       metadata,
-    })
-    .where(eq(workflowStepRuns.id, input.stepRun.id));
+    },
+    expectedStatuses: [input.stepRun.status],
+  });
 }
 
 async function failToolStepRun(
@@ -2513,10 +2522,12 @@ async function failToolStepRunWithDispatchError(input: {
   };
   delete metadata.concurrencyBlocked;
 
-  const [updated] = await input.db
-    .update(workflowStepRuns)
-    .set({
-      status: "failed",
+  // [step-status fencing v1] 스냅샷 status CAS — 폐기 시 전이 기록(provenance)도 함께 생략되어
+  //   낡은 fromStatus 가 ledger 에 남지 않는다.
+  const updated = await setWorkflowStepRunStatus(input.db, {
+    stepRunId: input.stepRun.id,
+    status: "failed",
+    patch: {
       startedAt: input.stepRun.startedAt ?? input.now,
       completedAt: input.now,
       lastDispatchAttemptAt: input.now,
@@ -2524,12 +2535,9 @@ async function failToolStepRunWithDispatchError(input: {
       lastDispatchErrorSummary: input.error,
       lastDispatchRequestId: input.requestId,
       metadata,
-    })
-    .where(eq(workflowStepRuns.id, input.stepRun.id))
-    .returning({
-      id: workflowStepRuns.id,
-      transitionVersion: workflowStepRuns.statusTransitionVersion,
-    });
+    },
+    expectedStatuses: [input.stepRun.status],
+  });
   if (updated && input.provenance) {
     await recordWorkflowStepStatusTransition(input.db, {
       companyId: input.provenance.run.companyId,
@@ -2540,8 +2548,8 @@ async function failToolStepRunWithDispatchError(input: {
       fromStatus: input.stepRun.status,
       toStatus: "failed",
       source: input.provenance.source,
-      transitionVersion: updated.transitionVersion > input.stepRun.statusTransitionVersion
-        ? updated.transitionVersion
+      transitionVersion: updated.statusTransitionVersion > input.stepRun.statusTransitionVersion
+        ? updated.statusTransitionVersion
         : null,
     });
   }
@@ -2681,10 +2689,12 @@ async function startIssueLessToolStepRun(input: {
   };
   delete metadata.concurrencyBlocked;
 
-  await db
-    .update(workflowStepRuns)
-    .set({
-      status: "running",
+  // [step-status fencing v1] 스냅샷 status CAS — 이미 다른 실행자가 전이시킨 행으로의
+  //   늦은 running 덮어쓰기(running 재기입 + requestId 교체)를 폐기한다.
+  await setWorkflowStepRunStatus(db, {
+    stepRunId: stepRun.id,
+    status: "running",
+    patch: {
       startedAt: stepRun.startedAt ?? now,
       completedAt: null,
       lastDispatchAttemptAt: now,
@@ -2693,8 +2703,9 @@ async function startIssueLessToolStepRun(input: {
       lastDispatchErrorSummary: null,
       lastDispatchRequestId: requestId,
       metadata,
-    })
-    .where(eq(workflowStepRuns.id, stepRun.id));
+    },
+    expectedStatuses: [stepRun.status],
+  });
 
   return true;
 }
@@ -4317,10 +4328,14 @@ export async function syncWorkflowRunStateWithOutcome(
     if (launchedStepsTerminal && unlaunchedPendingSteps.length > 0) {
       const now = new Date();
       for (const stepRun of unlaunchedPendingSteps) {
-        await db
-          .update(workflowStepRuns)
-          .set({ status: "skipped", completedAt: now })
-          .where(eq(workflowStepRuns.id, stepRun.id));
+        // [step-status fencing v1] pending → skipped 만 허용 — 스냅샷 이후 launch 가
+        //   running 으로 옮긴 행을 skipped 로 덮어쓰지 않는다.
+        await setWorkflowStepRunStatus(db, {
+          stepRunId: stepRun.id,
+          status: "skipped",
+          patch: { completedAt: now },
+          expectedStatuses: ["pending"],
+        });
       }
       stepRuns = await db
         .select()
