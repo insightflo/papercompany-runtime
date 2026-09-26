@@ -25,6 +25,10 @@ import {
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { resolvePiSessionsDir, resolvePiSkillsDir } from "./runtime-paths.js";
+import {
+  DEFAULT_OPERATOR_INTERRUPT_POLL_MS,
+  startOperatorInterruptPolling,
+} from "./operator-interrupt.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,6 +62,17 @@ function parseModelId(model: string | null): string | null {
 // the next run retries. Override with PAPERCLIP_PI_SKILLS_INJECT_TTL_MS.
 const DEFAULT_SKILLS_INJECT_TTL_MS = 600_000;
 const piSkillsInjectOkUntil = new Map<string, number>();
+
+// Operator interrupt inbox poll interval. Production default 5s; tests and
+// local debugging may lower it. Values below 20ms are treated as unset so a
+// stray env var cannot spin the loop.
+function resolveOperatorInterruptPollMs(): number {
+  const raw = process.env.PAPERCLIP_OPERATOR_INTERRUPT_POLL_MS;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_OPERATOR_INTERRUPT_POLL_MS;
+  const parsed = Number(raw.trim());
+  if (!Number.isFinite(parsed) || parsed < 20) return DEFAULT_OPERATOR_INTERRUPT_POLL_MS;
+  return parsed;
+}
 
 export function resetPiSkillsInjectCacheForTests(): void {
   piSkillsInjectOkUntil.clear();
@@ -231,6 +246,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
     (typeof context.issueId === "string" && context.issueId.trim().length > 0 && context.issueId.trim()) ||
     null;
+  // Operator interrupt inbox candidates: prefer context.issueId (matches the
+  // server-side issue-<issueId>.json key), fall back to wakeTaskId — taskId is
+  // set from the wake payload issueId for issue-scoped runs.
+  const operatorInterruptIssueIds = [
+    ...new Set(
+      [
+        typeof context.issueId === "string" ? context.issueId.trim() : "",
+        wakeTaskId ?? "",
+      ].filter((value) => value.length > 0),
+    ),
+  ];
   const wakeReason =
     typeof context.wakeReason === "string" && context.wakeReason.trim().length > 0
       ? context.wakeReason.trim()
@@ -588,20 +614,43 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const spawnStart = process.hrtime.bigint();
     spawnStartedAt = spawnStart;
-    const proc = await runChildProcess(runId, command, args, {
-      cwd,
-      env: runtimeEnv,
-      timeoutSec,
-      graceSec,
-      fatalOnLogError: true,
-      onSpawn: async (meta) => {
-        timing.spawnMs = hrElapsedMs(spawnStart);
-        if (onSpawn) await onSpawn(meta);
+    // Operator interrupt inbox: poll mid-run for user comments left on this
+    // run's issue and inject them into the live child stdin as extra RPC
+    // prompt commands. Polling is cleaned up when the attempt settles.
+    let writeStdinChunk: ((chunk: string) => boolean) | null = null;
+    const interruptPoller = startOperatorInterruptPolling({
+      agentHome,
+      issueIds: operatorInterruptIssueIds,
+      intervalMs: resolveOperatorInterruptPollMs(),
+      writeStdin: (chunk) => writeStdinChunk?.(chunk) ?? false,
+      onWarn: (err, message) => {
+        void onLog("stdout", `[paperclip] ${message}: ${err instanceof Error ? err.message : String(err)}\n`).catch(
+          () => {},
+        );
       },
-      onLog: bufferedOnLog,
-      stdin: buildRpcStdin(),
-      stdinRelease,
     });
+    let proc: Awaited<ReturnType<typeof runChildProcess>>;
+    try {
+      proc = await runChildProcess(runId, command, args, {
+        cwd,
+        env: runtimeEnv,
+        timeoutSec,
+        graceSec,
+        fatalOnLogError: true,
+        onSpawn: async (meta) => {
+          timing.spawnMs = hrElapsedMs(spawnStart);
+          if (onSpawn) await onSpawn(meta);
+        },
+        onLog: bufferedOnLog,
+        stdin: buildRpcStdin(),
+        stdinRelease,
+        stdinOnReady: (write) => {
+          writeStdinChunk = write;
+        },
+      });
+    } finally {
+      interruptPoller.stop();
+    }
     timing.exitMs = hrElapsedMs(spawnStart);
     clearFinalAgentEndTimer();
     
