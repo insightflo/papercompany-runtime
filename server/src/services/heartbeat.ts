@@ -41,6 +41,11 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { mergeAgentConfig } from "./agents.js";
+import {
+  executeFencedEffect,
+  HEARTBEAT_ADAPTER_EXECUTE_EFFECT_KIND,
+  resolveNextDispatchGeneration,
+} from "./effect-envelope.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { companySkillService } from "./company-skills.js";
@@ -4800,7 +4805,14 @@ export function heartbeatService(db: Db) {
             triggerDetail: "system",
             status: "queued",
           wakeupRequestId: wakeupRequest.id,
-          contextSnapshot: retryContextSnapshot,
+          contextSnapshot: {
+            ...retryContextSnapshot,
+            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
+              agentId: run.agentId,
+              issueId,
+              taskKey,
+            }),
+          },
           sessionIdBefore: sessionBefore,
           retryOfRunId: run.id,
           processLossRetryCount: (run.processLossRetryCount ?? 0) + 1,
@@ -4958,7 +4970,14 @@ export function heartbeatService(db: Db) {
           triggerDetail: "system",
           status: "queued",
           wakeupRequestId: wakeupRequest.id,
-          contextSnapshot: fallbackContextSnapshot,
+          contextSnapshot: {
+            ...fallbackContextSnapshot,
+            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
+              agentId: run.agentId,
+              issueId,
+              taskKey,
+            }),
+          },
           sessionIdBefore: sessionBefore,
           retryOfRunId: run.id,
           processLossRetryCount: run.processLossRetryCount ?? 0,
@@ -6394,7 +6413,14 @@ export function heartbeatService(db: Db) {
           triggerDetail: promotedTriggerDetail,
           status: "queued",
           wakeupRequestId: request.id,
-          contextSnapshot: promotedContextSnapshot,
+          contextSnapshot: {
+            ...promotedContextSnapshot,
+            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
+              agentId: agent.id,
+              issueId: promotedIssueId,
+              taskKey: promotedTaskKey,
+            }),
+          },
           sessionIdBefore: sessionBefore,
           ...(resubmissionExecutionEpoch !== null ? { executionEpoch: resubmissionExecutionEpoch } : {}),
         })
@@ -7835,20 +7861,66 @@ export function heartbeatService(db: Db) {
         }
       }
 
-      const adapterResult = await adapter.execute({
-        runId: run.id,
-        agent: { ...agent, adapterConfig: runtimeConfig },
-        runtime: runtimeForAdapter,
-        config: runtimeConfig,
-        context,
-        onLog,
-        onMeta: onAdapterMeta,
-        onSessionUpdate: onAdapterSessionUpdate,
-        onSpawn: async (meta) => {
-          await persistRunProcessMetadata(run.id, meta);
+      // [effect envelope] adapter 실행 경계 멱역 펜스(로드맵 3/5). 동일 논리 효과
+      //   (anchor=발주 정체성 + generation=공인 재시도 세대 + params=실행 설정)의 이중
+      //   실행 방지 — 실행 전 내구 intent, 실행 후 CAS applied. skipped_replay 면
+      //   code=fenced_effect_replay_skipped 예외로 실패 종결한다. 일시 재시도·fallback
+      //   큐잉은 errorCode==='adapter_failed' 조건이므로 이 코드에서 자동 억제된다.
+      const fencedAdapterExecution = await executeFencedEffect(db, {
+        companyId: agent.companyId,
+        effectKind: HEARTBEAT_ADAPTER_EXECUTE_EFFECT_KIND,
+        anchor: {
+          agentId: agent.id,
+          issueId: issueId ?? null,
+          taskKey: taskKey ?? null,
+          // 앵커 없는 런(timer 깨움 등)은 안정 앵커 부재로 오탐 펜스 위험이 있어
+          // 런 고유 id 로 각 디스패치를 구분한다(사실상 비펜스, 장부 기록은 유지).
+          ...(issueId || taskKey ? {} : { unanchoredDispatchRunId: run.id }),
+          wakeReason: readNonEmptyString(context.wakeReason) ?? null,
+          workflowRunId: readNonEmptyString(context.workflowRunId) ?? null,
+          stepId: readNonEmptyString(context.workflowStepId ?? context.stepId) ?? null,
         },
-        authToken: authToken ?? undefined,
+        generation: {
+          processLossRetryCount: run.processLossRetryCount ?? 0,
+          fallbackAttempt: resolveAdapterFallbackAttempt(context),
+          workflowExecutionGeneration: run.workflowExecutionGeneration ?? null,
+          dispatchGeneration:
+            typeof context.dispatchGeneration === "number" && Number.isFinite(context.dispatchGeneration)
+              ? context.dispatchGeneration
+              : null,
+        },
+        params: {
+          adapterType: agent.adapterType,
+          command: readNonEmptyString(runtimeConfig.command) ?? null,
+          model: readNonEmptyString(runtimeConfig.model) ?? null,
+          provider: readNonEmptyString(runtimeConfig.provider) ?? null,
+        },
+        attemptRunId: run.id,
+        execute: () =>
+          adapter.execute({
+            runId: run.id,
+            agent: { ...agent, adapterConfig: runtimeConfig },
+            runtime: runtimeForAdapter,
+            config: runtimeConfig,
+            context,
+            onLog,
+            onMeta: onAdapterMeta,
+            onSessionUpdate: onAdapterSessionUpdate,
+            onSpawn: async (meta) => {
+              await persistRunProcessMetadata(run.id, meta);
+            },
+            authToken: authToken ?? undefined,
+          }),
       });
+      if (fencedAdapterExecution.outcome === "skipped_replay") {
+        throw Object.assign(
+          new Error(
+            `fenced effect replay skipped: adapter execution for this effect already recorded (status=${fencedAdapterExecution.status}, priorAttemptRunId=${fencedAdapterExecution.attemptRunId ?? "unknown"}, effectId=${fencedAdapterExecution.effectId})`,
+          ),
+          { code: "fenced_effect_replay_skipped" },
+        );
+      }
+      const adapterResult = fencedAdapterExecution.value;
       for (const line of [
         ...evaluateRuntimeGuardLines("stdout", "", true),
         ...evaluateRuntimeGuardLines("stderr", "", true),
@@ -9708,7 +9780,14 @@ export function heartbeatService(db: Db) {
             triggerDetail: promotedTriggerDetail,
             status: "queued",
             wakeupRequestId: deferred.id,
-            contextSnapshot: promotedContextSnapshot,
+            contextSnapshot: {
+              ...promotedContextSnapshot,
+              dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
+                agentId: deferredAgent.id,
+                issueId: issue.id,
+                taskKey: promotedTaskKey,
+              }),
+            },
             sessionIdBefore: sessionBefore,
           })
           .returning()
@@ -10569,7 +10648,14 @@ export function heartbeatService(db: Db) {
             triggerDetail,
             status: "queued",
             wakeupRequestId: wakeupRequest.id,
-            contextSnapshot: enrichedContextSnapshot,
+            contextSnapshot: {
+              ...enrichedContextSnapshot,
+              dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
+                agentId: agentId,
+                issueId,
+                taskKey,
+              }),
+            },
             sessionIdBefore: sessionBefore,
           })
           .returning()
@@ -10774,7 +10860,14 @@ export function heartbeatService(db: Db) {
         triggerDetail,
         status: "queued",
         wakeupRequestId: wakeupRequest.id,
-        contextSnapshot: enrichedContextSnapshot,
+        contextSnapshot: {
+          ...enrichedContextSnapshot,
+          dispatchGeneration: await resolveNextDispatchGeneration(db, {
+            agentId: agentId,
+            issueId,
+            taskKey,
+          }),
+        },
         sessionIdBefore: sessionBefore,
       })
       .returning()

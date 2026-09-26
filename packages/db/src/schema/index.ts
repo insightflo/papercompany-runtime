@@ -155,3 +155,5 @@ export { evaluatorCandidateRuns } from "./evaluator_candidate_runs.js";
 export { qualityDailyReports } from "./quality_daily_reports.js";
 export { strategyPlaybookEntries } from "./strategy_playbook_entries.js";
 export { judgmentDefinitions, judgmentCalls } from "./judgment.js";
+export { effectIntents } from "./effect_intents.js";
+export type { EffectIntent, NewEffectIntent } from "./effect_intents.js";
