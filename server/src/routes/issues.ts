@@ -48,6 +48,7 @@ import { buildContextSafeFileViews } from "../services/context-safe-file-views.j
 import { buildMaintenanceDecisionContext } from "../services/maintenance/decision-context.js";
 import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
+import { deliverOperatorInterruptForIssueComment } from "../services/operator-interrupt.js";
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
@@ -1839,6 +1840,25 @@ export function issueRoutes(db: Db, storage: StorageService) {
       userId: actor.actorType === "user" ? actor.actorId : undefined,
       enqueuePlanQaWakeup,
     });
+
+    // Operator interrupt inbox: a user comment on an issue with an active
+    // (queued/running) run drops a file the pi_local adapter polls mid-run,
+    // so the operator's message reaches the live session instead of waiting
+    // for the next wake prompt. Best-effort — never blocks comment creation.
+    if (actor.actorType === "user") {
+      try {
+        await deliverOperatorInterruptForIssueComment({
+          db,
+          companyId: currentIssue.companyId,
+          issueId: currentIssue.id,
+          commentId: comment.id,
+          body: comment.body,
+          createdAt: comment.createdAt ?? null,
+        });
+      } catch (err) {
+        logger.warn({ err, issueId: currentIssue.id, commentId: comment.id }, "failed to deliver operator interrupt for issue comment");
+      }
+    }
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>

@@ -843,6 +843,13 @@ export async function runChildProcess(
     onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
     stdin?: string;
     /**
+     * Called once, right after the initial `stdin` payload is written and the
+     * stream is still open. Receives a guarded writer for mid-run stdin
+     * injection (e.g. operator interrupt prompts into a live `pi --mode rpc`
+     * child). The writer returns false once stdin is closed/destroyed.
+     */
+    stdinOnReady?: (write: (chunk: string) => boolean) => void;
+    /**
      * Hold stdin open after writing `stdin` until this promise resolves, then
      * close it. Required for children that treat stdin EOF as an immediate
      * shutdown signal mid-run (pi --mode rpc accepts the prompt, starts the
@@ -896,6 +903,23 @@ export async function runChildProcess(
 
         if (opts.stdin != null && child.stdin) {
           child.stdin.write(opts.stdin);
+          const writeStdinChunk = (chunk: string): boolean => {
+            const stdin = child.stdin;
+            if (!stdin || stdin.destroyed || !stdin.writable) return false;
+            try {
+              stdin.write(chunk);
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          if (opts.stdinOnReady) {
+            try {
+              opts.stdinOnReady(writeStdinChunk);
+            } catch (err) {
+              onLogError(err, runId, "stdinOnReady callback failed");
+            }
+          }
           if (opts.stdinRelease) {
             let stdinClosed = false;
             const closeStdin = () => {

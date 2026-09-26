@@ -18,6 +18,7 @@ if (argv.includes("--list-models")) {
 }
 const capturePath = process.env.PI_TEST_CAPTURE_PATH;
 const attemptPath = process.env.PI_TEST_ATTEMPT_PATH;
+const holdMs = Number(process.env.PI_TEST_HOLD_MS || "25");
 // Real pi (rpc mode) consumes the prompt without stdin EOF; the adapter holds
 // stdin open until the run settles, so read stdin asynchronously and proceed
 // once the prompt chunk arrives (debounced for split writes).
@@ -65,7 +66,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   input += chunk;
   if (proceedTimer) clearTimeout(proceedTimer);
-  proceedTimer = setTimeout(proceed, 25);
+  proceedTimer = setTimeout(proceed, holdMs);
 });
 `;
   await fs.writeFile(commandPath, script, "utf8");
@@ -84,6 +85,8 @@ function buildContext(input: {
   unknownSession?: boolean;
   structuredError?: boolean;
   runtime?: AdapterExecutionContext["runtime"];
+  context?: Record<string, unknown>;
+  holdMs?: number;
 }): AdapterExecutionContext {
   return {
     runId: "run-1",
@@ -112,9 +115,10 @@ function buildContext(input: {
         ...(input.structuredError ? { PI_TEST_STRUCTURED_ERROR: "1" } : {}),
         ...(input.explicitApiKey ? { PAPERCLIP_API_KEY: input.explicitApiKey } : {}),
         ...(input.providerApiKey ? { ANTHROPIC_API_KEY: input.providerApiKey } : {}),
+        ...(input.holdMs ? { PI_TEST_HOLD_MS: String(input.holdMs) } : {}),
       },
     },
-    context: {},
+    context: input.context ?? {},
     authToken: input.authToken,
     onLog: async () => {},
   };
@@ -353,6 +357,67 @@ describe("pi_local execute contract", () => {
       expect(result.sessionId).toContain(path.join(home, ".pi", "paperclips"));
       expect(result.sessionParams).toEqual({ sessionId: result.sessionId, cwd });
     } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("injects a queued operator interrupt into the live child stdin exactly once", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-execute-interrupt-"));
+    const cwd = path.join(root, "workspace");
+    const home = path.join(root, "home");
+    const agentHome = path.join(root, "agent-home");
+    const command = path.join(root, "pi");
+    const capture = path.join(root, "capture.json");
+    const issueId = "99999999-9999-4999-8999-999999999999";
+    const inboxPath = path.join(agentHome, "interrupts", `issue-${issueId}.json`);
+    await fs.mkdir(cwd, { recursive: true });
+    await fs.mkdir(home, { recursive: true });
+    await fs.mkdir(path.dirname(inboxPath), { recursive: true });
+    await fs.writeFile(
+      inboxPath,
+      JSON.stringify({
+        commentId: "comment-42",
+        body: "stop the wide scan now",
+        createdAt: "2026-09-26T10:00:00.000Z",
+        issueId,
+      }),
+      "utf8",
+    );
+    await writeFakePi(command);
+    const previousPollMs = process.env.PAPERCLIP_OPERATOR_INTERRUPT_POLL_MS;
+    process.env.PAPERCLIP_OPERATOR_INTERRUPT_POLL_MS = "40";
+
+    try {
+      const result = await execute(
+        buildContext({
+          command,
+          cwd,
+          home,
+          capturePath: capture,
+          holdMs: 300,
+          context: {
+            issueId,
+            paperclipWorkspace: { cwd, source: "agent_home", agentHome },
+          },
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      const captured = JSON.parse(await fs.readFile(capture, "utf8")) as { input: string };
+      const lines = captured.input.trim().split("\n");
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0])).toEqual({ type: "prompt", message: expect.any(String) });
+      const interrupt = JSON.parse(lines[1]) as { type: string; message: string };
+      expect(interrupt.type).toBe("prompt");
+      expect(interrupt.message).toContain("[OPERATOR INTERRUPT — highest priority, act on this now]");
+      expect(interrupt.message).toContain("stop the wide scan now");
+      expect(interrupt.message).toContain("이 지시는 현재 작업 범위 내에서 우선 반영하라");
+      // Exactly one interrupt line — the inbox file is consumed, not re-injected.
+      expect(captured.input.split("OPERATOR INTERRUPT").length - 1).toBe(1);
+      await expect(fs.access(inboxPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousPollMs === undefined) delete process.env.PAPERCLIP_OPERATOR_INTERRUPT_POLL_MS;
+      else process.env.PAPERCLIP_OPERATOR_INTERRUPT_POLL_MS = previousPollMs;
       await fs.rm(root, { recursive: true, force: true });
     }
   });
