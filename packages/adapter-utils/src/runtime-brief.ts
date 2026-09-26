@@ -197,6 +197,26 @@ function buildRecentIssueCommentsBrief(value: unknown) {
   ], "\n");
 }
 
+function buildUnconsumedOperatorInstructionsBrief(value: unknown) {
+  const instructions = Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    : [];
+  const lines = instructions
+    .map((entry) => {
+      const body = asString(entry.body);
+      if (!body) return null;
+      // 본문은 wake 조립 시점에 이미 capWakeRecentCommentBody로 제한됐으므로 여기서 재절단하지 않는다.
+      return `- [${asString(entry.createdAt) ?? "unknown"}] ${body}`;
+    })
+    .filter((line): line is string => line !== null);
+  if (lines.length === 0) return null;
+
+  return joinPromptSections([
+    "Unconsumed operator instructions (highest priority — apply before other work):",
+    ...lines,
+  ], "\n");
+}
+
 function artifactRefForWorkProduct(product: Record<string, unknown>) {
   const metadata = asRecord(product.metadata);
   return (
@@ -542,6 +562,10 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const workflowToolContractLine = buildWorkflowToolContractBrief(context);
   // [QA rework] rework contract가 최신 QA feedback을 이미 가지면 최근 코멘트는 중복이므로 억제(prompt dilution 방지).
   const recentIssueCommentsLine = isReworkMode ? null : buildRecentIssueCommentsBrief(context.paperclipIssueRecentComments);
+  // [operator instruction cursor] 미소비 운영자 지시 — rework 모드에서도 억제하지 않는 최우선 블록.
+  const unconsumedOperatorInstructionsLine = buildUnconsumedOperatorInstructionsBrief(
+    context.paperclipOperatorInstructionsUnconsumed,
+  );
   const hermesChatLine = buildHermesChatBrief(context.paperclipHermesChat);
 
   const taskKey = asString(manifest?.taskKey ?? context.taskKey);
@@ -771,6 +795,8 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     taskKey || issueId || projectId || allowedKeys.length > 0 || handoffSummary
       ? "Paperclip runtime brief:"
       : null,
+    // [operator instruction cursor] 커서 이후 미소비 운영자 지시를 rework 헤더보다 앞선 최상단에.
+    unconsumedOperatorInstructionsLine,
     // [QA rework] rework 모드면 최우선 블록을 brief 선두에 배치(긴 runtime/issue 컨텍스트보다 먼저).
     ...reworkHeaderLines,
     ...runawayRecoveryLines,

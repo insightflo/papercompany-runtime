@@ -98,10 +98,11 @@ import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
 import { applyInstructionInjectionLedger } from "./instruction-injection-ledger.js";
 
+import { refreshStepInputManifest } from "./wake-context-hygiene.js";
 import {
-  capWakeRecentCommentBody,
-  refreshStepInputManifest,
-} from "./wake-context-hygiene.js";
+  advanceOperatorInstructionCursor,
+  assembleIssueCommentContext,
+} from "./operator-instruction-cursor.js";
 import {
   NO_PROGRESS_RUN_SCAN_LIMIT,
   hasRunProgressEvidence,
@@ -7065,34 +7066,15 @@ export function heartbeatService(db: Db) {
       })(),
     };
     context.paperclipWorkspaces = resolvedWorkspace.workspaceHints;
-    if (issueId) {
-      const recentIssueComments = await db
-        .select({
-          id: issueComments.id,
-          authorAgentId: issueComments.authorAgentId,
-          authorUserId: issueComments.authorUserId,
-          body: issueComments.body,
-          createdAt: issueComments.createdAt,
-        })
-        .from(issueComments)
-        .where(and(eq(issueComments.issueId, issueId), eq(issueComments.companyId, agent.companyId)))
-        .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
-        .limit(5);
-      if (recentIssueComments.length > 0) {
-        context.paperclipIssueRecentComments = recentIssueComments.map((comment) => ({
-          id: comment.id,
-          authorType: comment.authorUserId ? "controller" : comment.authorAgentId ? "agent" : "unknown",
-          authorAgentId: comment.authorAgentId,
-          authorUserId: comment.authorUserId,
-          body: capWakeRecentCommentBody(comment.body),
-          createdAt: comment.createdAt.toISOString(),
-        }));
-      } else {
-        delete context.paperclipIssueRecentComments;
-      }
-    } else {
-      delete context.paperclipIssueRecentComments;
-    }
+    // [operator instruction cursor] 최근 코멘트 5개(표시용 창) + 커서 이후 미소비 운영자
+    //   지시(보장 전달용)를 함께 조립한다. 반환값은 이번 실행에 포함된 미소비 중 최신
+    //   코멘트 id — 어댑터 실행 직전 커서 전진에 사용한다.
+    const operatorInstructionCursorCommentId = await assembleIssueCommentContext(
+      db,
+      agent.companyId,
+      issueId,
+      context,
+    );
     // [runaway recovery] 이 이슈의 직전 실행이 폭주(재고민 루프)로 종료됐다면, 이번 실행
     //   프롬프트 선두에 회복 지시를 붙인다(런타임 브리프가 렌더). 6시간 창 — 오래된 폭주는
     //   새 컨텍스트에서 무의미하므로 제외.
@@ -7806,6 +7788,25 @@ export function heartbeatService(db: Db) {
         return;
       }
       run = acknowledged;
+
+      // [operator instruction cursor] 어댑터 호출 경계 소비(adapter-boundary consumption,
+      //   not model-receipt proof). 모든 사전 검사를 통과해 실제 어댑터 실행 직전에만
+      //   커서를 전진한다(전진 전용, 순서쌍 비교). 실패해도 실행은 계속(로그만).
+      if (issueId && operatorInstructionCursorCommentId) {
+        try {
+          await advanceOperatorInstructionCursor(
+            db,
+            agent.companyId,
+            issueId,
+            operatorInstructionCursorCommentId,
+          );
+        } catch (err) {
+          logger.warn(
+            { err, companyId: agent.companyId, issueId, runId: run.id },
+            "failed to advance operator instruction cursor before adapter execution",
+          );
+        }
+      }
 
       const adapterResult = await adapter.execute({
         runId: run.id,
