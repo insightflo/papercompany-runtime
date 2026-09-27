@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { logger } from "../../middleware/logger.js";
 import { issueService } from "../issues.js";
+import { operatorApprovalWaitService } from "../operator-approval-wait.js";
 import { workProductService } from "../work-products.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
@@ -1095,6 +1096,12 @@ export function createSupervision({ db, deps, ownerActions }: {
       }
     };
 
+    // [approval-waiting marker] 미션 이슈 전체에 대해 pending 운영자 결정/승인 대기 여부를
+    // 배치 1회 판정한다 — 대기 중 이슈는 stale 이 아니라 사람 대기로 분류한다(스캔 N+1 금지).
+    const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
+      missionIssues.map((issue) => issue.id),
+    );
+
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
       if (issue.originKind === "mission_plan_qa") continue;
@@ -1114,6 +1121,9 @@ export function createSupervision({ db, deps, ownerActions }: {
       const isStaleQueueStatus = issue.status === "todo" || issue.status === "backlog";
       const isRecoverableQueueSource = isStaleQueueStatus && issue.originKind !== "mission_main_executor_unblock";
       const isStaleInProgressSource = issue.status === "in_progress" && issue.originKind !== "mission_main_executor_unblock";
+      // [approval-waiting marker] pending 결정/승인이 있으면 사람 대기 — stale 판정에서 면제한다.
+      const operatorApprovalWait = approvalWaitByIssueId.get(issue.id);
+      const isWaitingOnOperatorApproval = operatorApprovalWait?.waiting === true;
       const isRejectedPlanningIssue = issue.originKind === "mission_main_executor_plan" && issue.id === rejectedPlanningIssueId;
       const activePlanGateReason = activePlanRecoveryGateReason(activePlan, issue, stepRowsForIssue);
 
@@ -1129,7 +1139,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         continue;
       }
 
-      if (isStaleInProgressSource && ageMs >= staleAfterMs && !issueLive) {
+      if (isStaleInProgressSource && ageMs >= staleAfterMs && !issueLive && !isWaitingOnOperatorApproval) {
         const latestFailedRun = failedRunsForIssue
           .slice()
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
@@ -1230,6 +1240,15 @@ export function createSupervision({ db, deps, ownerActions }: {
             safeToAutoApply: false,
           });
         }
+      }
+
+      // [approval-waiting marker] 사람 대기 중인 in_progress 이슈는 stale 오판 대신
+      // 대기 사실을 관찰 가능한 파인딩으로 남긴다(회복 이슈 생성/재시도 추천 없음).
+      if (isStaleInProgressSource && ageMs >= staleAfterMs && !issueLive && isWaitingOnOperatorApproval) {
+        findings.push(
+          `operator_approval_waiting: ${label} is in_progress and waiting on a pending operator decision/approval` +
+            ` (decisions=${operatorApprovalWait?.operatorDecisionIds.join(",") || "none"}, approvals=${operatorApprovalWait?.approvalIds.join(",") || "none"}) — not stale — ${issue.title}`,
+        );
       }
 
       if (input.dispatchStalledOwnerActionWakeups && issue.originKind === "mission_main_executor_unblock" && isStaleQueueStatus && ageMs >= staleAfterMs && !issueLive) {
