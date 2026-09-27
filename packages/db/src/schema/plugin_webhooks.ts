@@ -6,6 +6,7 @@ import {
   timestamp,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { plugins } from "./plugins.js";
 import type { PluginWebhookDeliveryStatus } from "@paperclipai/shared";
@@ -61,5 +62,13 @@ export const pluginWebhookDeliveries = pgTable(
     pluginIdx: index("plugin_webhook_deliveries_plugin_idx").on(table.pluginId),
     statusIdx: index("plugin_webhook_deliveries_status_idx").on(table.status),
     keyIdx: index("plugin_webhook_deliveries_key_idx").on(table.webhookKey),
+    // Receipt uniqueness: one row per (plugin, endpoint, external delivery id).
+    // Postgres treats NULLs as distinct, so deliveries without an external_id
+    // (legacy path) are never deduplicated.
+    externalIdx: uniqueIndex("plugin_webhook_deliveries_external_idx").on(
+      table.pluginId,
+      table.webhookKey,
+      table.externalId,
+    ),
   }),
 );

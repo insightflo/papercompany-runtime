@@ -41,6 +41,7 @@ import { registerPluginCatalogRoutes } from "./plugin-catalog.js";
 import { registerPluginConfigRoutes } from "./plugin-config-routes.js";
 import { registerPluginDiagnosticsRoutes } from "./plugin-diagnostics-routes.js";
 import { registerPluginLifecycleRoutes } from "./plugin-lifecycle-routes.js";
+import { ingestWebhookDelivery } from "../services/plugin-webhook-receipt.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
@@ -2041,7 +2042,12 @@ export function pluginRoutes(
    * endpoints must be publicly accessible for external callers. Signature
    * verification is the plugin's responsibility.
    *
-   * Response: `{ deliveryId: string, status: string }`
+   * Deduplication: deliveries carrying the same external delivery id (see
+   * `plugin-webhook-receipt.ts`) are dispatched to the worker exactly once;
+   * later arrivals answer with the existing receipt and status `duplicate`.
+   * A failed receipt accepts one redispatch per provider retry.
+   *
+   * Response: `{ deliveryId: string, status: "success" | "failed" | "duplicate" }`
    * Errors:
    * - 404 if plugin not found or endpointKey not declared
    * - 400 if plugin is not in ready state or lacks webhooks.receive capability
@@ -2098,7 +2104,6 @@ export function pluginRoutes(
     }
 
     // Step 5: Extract request data
-    const requestId = randomUUID();
     const rawHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
       if (typeof value === "string") {
@@ -2116,68 +2121,20 @@ export function pluginRoutes(
     const parsedBody = req.body as unknown;
     const payload = (req.body as Record<string, unknown> | undefined) ?? {};
 
-    // Step 6: Record the delivery in the database
-    const startedAt = new Date();
-    const [delivery] = await db
-      .insert(pluginWebhookDeliveries)
-      .values({
-        pluginId: plugin.id,
-        webhookKey: endpointKey,
-        status: "pending",
-        payload,
-        headers: rawHeaders,
-        startedAt,
-      })
-      .returning({ id: pluginWebhookDeliveries.id });
+    // Step 6: Record the receipt (deduplicated by external delivery id) and
+    // dispatch to the worker exactly once. Duplicate arrivals return the
+    // existing receipt without a worker call.
+    const result = await ingestWebhookDelivery(db, webhookDeps.workerManager, {
+      pluginId: plugin.id,
+      endpointKey,
+      headers: rawHeaders,
+      reqHeaders: req.headers as Record<string, string | string[]>,
+      rawBody,
+      parsedBody,
+      payload,
+    });
 
-    // Step 7: Dispatch to the worker via handleWebhook RPC
-    try {
-      await webhookDeps.workerManager.call(plugin.id, "handleWebhook", {
-        endpointKey,
-        headers: req.headers as Record<string, string | string[]>,
-        rawBody,
-        parsedBody,
-        requestId,
-      });
-
-      // Step 8: Update delivery record to success
-      const finishedAt = new Date();
-      const durationMs = finishedAt.getTime() - startedAt.getTime();
-      await db
-        .update(pluginWebhookDeliveries)
-        .set({
-          status: "success",
-          durationMs,
-          finishedAt,
-        })
-        .where(eq(pluginWebhookDeliveries.id, delivery.id));
-
-      res.status(200).json({
-        deliveryId: delivery.id,
-        status: "success",
-      });
-    } catch (err) {
-      // Step 8 (error): Update delivery record to failed
-      const finishedAt = new Date();
-      const durationMs = finishedAt.getTime() - startedAt.getTime();
-      const errorMessage = err instanceof Error ? err.message : String(err);
-
-      await db
-        .update(pluginWebhookDeliveries)
-        .set({
-          status: "failed",
-          durationMs,
-          error: errorMessage,
-          finishedAt,
-        })
-        .where(eq(pluginWebhookDeliveries.id, delivery.id));
-
-      res.status(502).json({
-        deliveryId: delivery.id,
-        status: "failed",
-        error: errorMessage,
-      });
-    }
+    res.status(result.httpStatus).json(result.body);
   });
 
   // ===========================================================================

@@ -853,6 +853,7 @@ Rules:
 3. Signature verification happens in plugin code using secret refs resolved by the host.
 4. Every delivery is recorded.
 5. Webhook handling must be idempotent.
+6. Receipt deduplication (host-side): when the host can extract an external delivery id — header `x-delivery-id`, header `x-webhook-id`, or top-level payload field `deliveryId` — one receipt row exists per `(plugin, endpoint, external id)` and the worker is dispatched exactly once for it. Repeat arrivals answer `200 { deliveryId, status: "duplicate" }` without a worker call. A receipt that ended `failed` accepts one redispatch per provider retry (row reused, still one row). Deliveries without an extractable id keep the legacy behavior of one receipt per HTTP request. Payload field `id` is deliberately not an extraction source: some providers reuse the same object id across distinct deliveries, and a false-positive match would drop real deliveries.
 
 ## 19. UI Extension Model
 
@@ -1179,6 +1180,13 @@ Indexes:
 - `(plugin_job_id, started_at desc)`
 
 ### `plugin_webhook_deliveries`
+
+> Implementation note: the shipped implementation of this table predates this
+> section and is authoritative for the V1 surface. It uses `webhook_key`,
+> `external_id` (optional provider delivery id), `headers`, `payload`, and
+> statuses `pending | success | failed`, plus a unique receipt index on
+> `(plugin_id, webhook_key, external_id)` — NULL `external_id` rows are never
+> deduplicated (Postgres NULL-distinct semantics). See §18 rule 6.
 
 - `id` uuid pk
 - `plugin_id` uuid fk `plugins.id` not null
