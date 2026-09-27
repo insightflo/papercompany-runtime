@@ -452,6 +452,11 @@ Human review contract:
 - The UI requires the reviewer to acknowledge that context before an approval or operator-decision action is enabled. The server independently enforces the same condition and rejects incomplete packets or missing acknowledgement.
 - Incomplete legacy approvals remain visible for diagnosis. They cannot be approved; a general approval may still be rejected so a malformed request can be closed safely.
 
+Approval-waiting observability marker (derived, read-only):
+
+- Issues and runs waiting on a human expose a derived `waitingOnOperatorApproval` field (`{waiting, operatorDecisionIds, approvalIds}`) on issue list/detail, heartbeat-run detail, and workflow-run detail reads. It is computed at read time from pending `operator_decisions` and unresolved `approvals` joined via `issue_approvals` — never stored, and never an execution authority.
+- Stale/reaper sweeps (execution timeout, stale queued runs/wakeups) and mission supervision's `stale_in_progress` verdicts must treat entities whose source issue has a pending operator decision or unresolved approval as waiting on a human, not stuck. When the decision or approval resolves or is cancelled, prior policy behavior resumes unchanged.
+
 ## 7.11 `activity_log`
 
 - `id` uuid pk

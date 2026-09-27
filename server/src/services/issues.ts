@@ -38,6 +38,11 @@ import { getDefaultCompanyGoal } from "./goals.js";
 import { type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
+import {
+  NOT_WAITING_ON_OPERATOR_APPROVAL,
+  operatorApprovalWaitService,
+  type OperatorApprovalWaitMarker,
+} from "./operator-approval-wait.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { recordHumanOperatorRequestEvent } from "./missions/human-operator-alert-events.js";
 import { resyncIssueExecutionCardAfterIssueUpdate } from "./issue-execution-cards/resync.js";
@@ -263,6 +268,10 @@ type IssueActiveRunRow = {
 };
 type IssueWithLabels = IssueRow & { labels: IssueLabelRow[]; labelIds: string[] };
 type IssueWithLabelsAndRun = IssueWithLabels & { activeRun: IssueActiveRunRow | null };
+// [approval-waiting marker] 파생 필드 — 저장 없음, 조회 시점 조인 계산(operator-approval-wait.ts).
+type IssueWithApprovalWait = IssueWithLabelsAndRun & {
+  waitingOnOperatorApproval: OperatorApprovalWaitMarker;
+};
 type IssueUserCommentStats = {
   issueId: string;
   myLastCommentAt: Date | null;
@@ -684,6 +693,17 @@ function withActiveRuns(
   return issueRows.map((row) => ({
     ...row,
     activeRun: row.executionRunId ? (runMap.get(row.executionRunId) ?? null) : null,
+  }));
+}
+
+// [approval-waiting marker] 이슈 행에 파생 마커를 부착한다(배치 조회 결과 전개 — 저장 아님).
+function withOperatorApprovalWait(
+  issueRows: IssueWithLabelsAndRun[],
+  waitMap: Map<string, OperatorApprovalWaitMarker>,
+): IssueWithApprovalWait[] {
+  return issueRows.map((row) => ({
+    ...row,
+    waitingOnOperatorApproval: waitMap.get(row.id) ?? NOT_WAITING_ON_OPERATOR_APPROVAL,
   }));
 }
 
@@ -1173,7 +1193,12 @@ export function issueService(db: Db) {
         .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt));
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
-      const withRuns = withActiveRuns(withLabels, runMap);
+      const withRunsBase = withActiveRuns(withLabels, runMap);
+      // [approval-waiting marker] 목록 응답에 파생 필드 부착 — 배치 1회 판정.
+      const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
+        withRunsBase.map((row) => row.id),
+      );
+      const withRuns = withOperatorApprovalWait(withRunsBase, approvalWaitByIssueId);
       if (!contextUserId || withRuns.length === 0) {
         return withRuns;
       }

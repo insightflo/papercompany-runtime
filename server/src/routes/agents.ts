@@ -54,6 +54,10 @@ import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import {
+  NOT_WAITING_ON_OPERATOR_APPROVAL,
+  safeMarkerForIssue,
+} from "../services/operator-approval-wait.js";
 import { evaluateFileViewFreshness } from "../services/context-safe-file-views.js";
 import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
 import {
@@ -2244,7 +2248,12 @@ export function agentRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, run.companyId);
-    res.json(redactCurrentUserValue(run, await getCurrentUserRedactionOptions()));
+    // [approval-waiting marker] 런의 이슈에 pending 운영자 결정/승인이 있으면 파생 필드로 노출(저장 아님).
+    // 관찰 용도라 판정 실패 시 본체 조회를 깨뜨리지 않는다.
+    const approvalWait = run.issueId
+      ? await safeMarkerForIssue(db, run.issueId)
+      : NOT_WAITING_ON_OPERATOR_APPROVAL;
+    res.json(redactCurrentUserValue({ ...run, waitingOnOperatorApproval: approvalWait }, await getCurrentUserRedactionOptions()));
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {

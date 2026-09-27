@@ -49,6 +49,7 @@ import { buildMaintenanceDecisionContext } from "../services/maintenance/decisio
 import { logMaintenanceDecisionActionMismatch } from "../services/maintenance/decision-audit.js";
 import { syncSrbSourceIssueStatus } from "../services/srb/source-status-sync.js";
 import { deliverOperatorInterruptForIssueComment } from "../services/operator-interrupt.js";
+import { safeMarkerForIssue } from "../services/operator-approval-wait.js";
 import { createPlanQaWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 import { resolveWorkProductBrowserOpenTarget, resolveWorkProductLocalFilePath } from "../services/work-products.js";
 import { resolveAgentWorkProductRouteGuard } from "../services/issue-execution-cards/work-product-route-guard.js";
@@ -598,8 +599,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       ? await executionWorkspacesSvc.getById(issue.executionWorkspaceId)
       : null;
     const workProducts = await workProductsSvc.listForIssue(issue.id);
+    // [approval-waiting marker] 상세 응답에 파생 필드 부착 — 저장 아님, 조회 시점 조인 계산.
+    const approvalWait = await safeMarkerForIssue(db, issue.id);
     res.json({
       ...issue,
+      waitingOnOperatorApproval: approvalWait,
       goalId: goal?.id ?? issue.goalId,
       ancestors,
       ...documentPayload,

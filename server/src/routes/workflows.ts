@@ -21,6 +21,10 @@ import { validate } from "../middleware/validate.js";
 import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
 import { logActivity } from "../services/activity-log.js";
 import { issueService } from "../services/issues.js";
+import {
+  NOT_WAITING_ON_OPERATOR_APPROVAL,
+  safeMarkerForWorkflowRun,
+} from "../services/operator-approval-wait.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
@@ -517,7 +521,9 @@ export function workflowRoutes(db: Db) {
       throw notFound("Workflow run not found");
     }
     const stepRuns = await workflowService.listStepRuns(db, runId);
-    res.json({ run: serializeRun(run), stepRuns: stepRuns.map(serializeStepRun) });
+    // [approval-waiting marker] 파생 필드 — 관찰 용도라 판정 실패 시 본체 조회를 깨뜨리지 않는다.
+    const approvalWait = await safeMarkerForWorkflowRun(db, run.companyId, run.id);
+    res.json({ run: { ...serializeRun(run), waitingOnOperatorApproval: approvalWait }, stepRuns: stepRuns.map(serializeStepRun) });
   });
 
   router.get("/workflow-runs/:runId/detail", async (req, res) => {
@@ -555,6 +561,7 @@ export function workflowRoutes(db: Db) {
       }
     }
     const stepDefinitionById = new Map((definition?.steps ?? []).map((step) => [step.id, workflowStepForUi(step, agentNameById)]));
+    const approvalWait = await safeMarkerForWorkflowRun(db, run.companyId, run.id);
     const serializedStepRuns = stepRuns.map((stepRun) => {
       const stepDefinition = stepDefinitionById.get(stepRun.stepId);
       const workProducts = stepRun.issueId ? workProductsByIssueId.get(stepRun.issueId) ?? [] : [];
@@ -569,7 +576,7 @@ export function workflowRoutes(db: Db) {
     });
 
     res.json({
-      run: serializeRun(run),
+      run: { ...serializeRun(run), waitingOnOperatorApproval: approvalWait },
       stepRuns: serializedStepRuns,
       workflow: definition ? workflowDefinitionForUi(definition, agentNameById) : null,
     });

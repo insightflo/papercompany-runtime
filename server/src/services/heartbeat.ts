@@ -204,6 +204,7 @@ import {
   type ShutdownFlushSummary,
 } from "./shutdown-flush.js";
 import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
+import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
 import {
   assertIssueResumeScopeIdentity,
@@ -5472,6 +5473,12 @@ export function heartbeatService(db: Db) {
 
     const reaped: string[] = [];
 
+    // [approval-waiting marker] running 런의 이슈에 pending 운영자 결정/승인이 있으면
+    // '멈춤(stuck)'이 아니라 '사람 대기'다 — 배치 판정 후 타임아웃 회수에서 면제한다(스캔 N+1 금지).
+    const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
+      activeRuns.map((row) => row.run.issueId).filter((issueId): issueId is string => Boolean(issueId)),
+    );
+
     for (const { run, adapterType } of activeRuns) {
       const trackedProcess = runningProcesses.get(run.id) ?? null;
       const hasActiveExecution = activeRunExecutions.has(run.id);
@@ -5516,6 +5523,23 @@ export function heartbeatService(db: Db) {
         if (stepAwareTimeoutMs <= 0) continue;
         const refTime = new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < stepAwareTimeoutMs) continue;
+
+        // [approval-waiting marker] 실행이 pending 운영자 결정/승인 대기 중이면 stuck 이 아니다.
+        // 프로세스는 살아있고 사람 결정에 막혀 있으므로 타임아웃/kill 을 보류한다(자동취소 금지).
+        const approvalWait = run.issueId ? approvalWaitByIssueId.get(run.issueId) : undefined;
+        if (approvalWait?.waiting) {
+          logger.info(
+            {
+              runId: run.id,
+              issueId: run.issueId,
+              operatorDecisionIds: approvalWait.operatorDecisionIds,
+              approvalIds: approvalWait.approvalIds,
+              activeExecutionTimeoutMs,
+            },
+            "run is waiting on a pending operator decision/approval; skipping stale execution timeout",
+          );
+          continue;
+        }
 
         if (trackedProcess) {
           trackedProcess.child.kill("SIGTERM");
@@ -5778,6 +5802,11 @@ export function heartbeatService(db: Db) {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.status, "queued"));
 
+      // [approval-waiting marker] queued 런도 이슈에 pending 결정/승인이 있으면 사람 대기다.
+      const queuedApprovalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
+        queuedRuns.map((run) => run.issueId).filter((issueId): issueId is string => Boolean(issueId)),
+      );
+
       for (const run of queuedRuns) {
         if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
 
@@ -5790,6 +5819,23 @@ export function heartbeatService(db: Db) {
 
         const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
         if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
+
+        // [approval-waiting marker] pending 운영자 결정/승인 대기 중인 이슈의 queued 런은
+        // phantom 이 아니라 사람 대기다 — 결정 해결 시 continuation 이 재대기열한다.
+        const queuedApprovalWait = run.issueId ? queuedApprovalWaitByIssueId.get(run.issueId) : undefined;
+        if (queuedApprovalWait?.waiting) {
+          logger.info(
+            {
+              runId: run.id,
+              issueId: run.issueId,
+              operatorDecisionIds: queuedApprovalWait.operatorDecisionIds,
+              approvalIds: queuedApprovalWait.approvalIds,
+              queuedStaleThresholdMs,
+            },
+            "queued run is waiting on a pending operator decision/approval; skipping stale_queued reap",
+          );
+          continue;
+        }
 
         const staleQueuedMessage = `Queued heartbeat run exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without starting`;
         const failedRun = await setRunStatus(run.id, "failed", {
@@ -5846,6 +5892,7 @@ export function heartbeatService(db: Db) {
           id: agentWakeupRequests.id,
           companyId: agentWakeupRequests.companyId,
           agentId: agentWakeupRequests.agentId,
+          issueId: agentWakeupRequests.issueId,
           createdAt: agentWakeupRequests.createdAt,
         })
         .from(agentWakeupRequests)
@@ -5857,9 +5904,29 @@ export function heartbeatService(db: Db) {
           ),
         );
 
+      // [approval-waiting marker] 고아 queued 웨이크업도 대상 이슈가 사람 대기 중이면 회수하지 않는다.
+      const orphanApprovalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
+        staleOrphanWakeups.map((request) => request.issueId).filter((issueId): issueId is string => Boolean(issueId)),
+      );
+
       const orphanAffectedAgentIds = new Set<string>();
       const orphanReapedIds: string[] = [];
       for (const request of staleOrphanWakeups) {
+        const orphanApprovalWait = request.issueId
+          ? orphanApprovalWaitByIssueId.get(request.issueId)
+          : undefined;
+        if (orphanApprovalWait?.waiting) {
+          logger.info(
+            {
+              wakeupRequestId: request.id,
+              issueId: request.issueId,
+              operatorDecisionIds: orphanApprovalWait.operatorDecisionIds,
+              approvalIds: orphanApprovalWait.approvalIds,
+            },
+            "queued orphan wakeup is waiting on a pending operator decision/approval; skipping stale reap",
+          );
+          continue;
+        }
         const orphanMessage = `stale_queued: queued wakeup exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without a heartbeat run (mission dedup without heartbeatRuns)`;
         const failed = await db
           .update(agentWakeupRequests)
