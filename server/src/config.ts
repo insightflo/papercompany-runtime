@@ -71,6 +71,7 @@ export interface Config {
   storageS3ForcePathStyle: boolean;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  shutdownFlushTimeoutMs: number;
   companyDeletionEnabled: boolean;
 }
 
@@ -255,6 +256,14 @@ export function loadConfig(): Config {
     storageS3ForcePathStyle,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    // [checkpoint+graceful shutdown] 종료 플러시(내구 마킹+재시도 대기열)의 독립 데드라인.
+    // 이중 타이머의 flush 측 — 초과분은 스킵하고 로그(미마킹 런은 기존 reaper 가 회수).
+    // 0이면 플러시 비활성(기존 동작). 기본 3초: 총 종료시간 ≈ max(child grace 2s, 3s)+PG stop ≪ systemd 기본 90s.
+    shutdownFlushTimeoutMs: (() => {
+      const raw = process.env.PAPERCLIP_SHUTDOWN_FLUSH_TIMEOUT_MS;
+      if (raw === undefined || raw === "" || Number.isNaN(Number(raw))) return 3000;
+      return Math.max(0, Math.min(60000, Number(raw)));
+    })(),
     companyDeletionEnabled,
   };
 }

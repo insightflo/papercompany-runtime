@@ -651,8 +651,11 @@ export async function startServer(): Promise<StartedServer> {
     });
   });
 
+  // [checkpoint+graceful shutdown] heartbeatService 는 scheduler 활성 여부와 무관하게 항상 생성한다:
+  // SIGTERM/SIGINT 종료 플러시(markRunsShutdownInterrupted)가 이 인스턴스를 필요로 하고,
+  // scheduler 가 꺼진 경우에도(이론상 tracked child 없음) 플러시 호출부가 단순해진다.
+  const heartbeat = heartbeatService(db as any);
   if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any);
     const routines = routineService(db as any);
     heartbeatScheduler = createHeartbeatScheduler({
       heartbeat,
@@ -673,9 +676,27 @@ export async function startServer(): Promise<StartedServer> {
     const childGraceMs = 2000;
     try {
       heartbeatScheduler?.stop();
-      // tracked adapter child 회수: SIGTERM → grace → SIGKUL(exit 전 확실히 종료).
-      // (child.killed 는 kill() 호출 즉시 true 가 되어 신뢰할 수 없으므로 SIGKILL 은 무조건 시도.)
       const trackedEntries = Array.from(runningProcesses.entries());
+      // [checkpoint+graceful shutdown] 스케줄러 정지 후, child SIGTERM 과 병렬로 종료 플러시 —
+      // 이 프로세스가 추적 중인 running 런에 내구 마킹(failed+shutdown_interrupted, #277 CAS 경로)
+      // + process_lost 동일 정합의 재시도 대기열 등록. 이중 타이머: flush 는 자체 데드라인
+      // (PAPERCLIP_SHUTDOWN_FLUSH_TIMEOUT_MS, 기본 3s) 후 나머지 스킵+로그 — 미마킹 런은 기존
+      // reaper 가 회수(안전 장전). 총 종료시간 ≈ max(child grace 2s, flush ≤3s) + PG stop.
+      const flushTimeoutMs = config.shutdownFlushTimeoutMs;
+      const flushPromise: Promise<import("./services/shutdown-flush.js").ShutdownFlushSummary | null> =
+        trackedEntries.length > 0 && flushTimeoutMs > 0
+          ? heartbeat
+              .markRunsShutdownInterrupted(
+                trackedEntries.map(([runId]) => runId),
+                { signal, deadlineMs: flushTimeoutMs },
+              )
+              .catch((err) => {
+                logger.error({ err }, "Shutdown flush failed; unmarked runs left for reaper recovery");
+                return null;
+              })
+          : Promise.resolve(null);
+      // tracked adapter child 회수: SIGTERM → grace → SIGKILL(exit 전 확실히 종료).
+      // (child.killed 는 kill() 호출 즉시 true 가 되어 신뢰할 수 없으므로 SIGKILL 은 무조건 시도.)
       for (const tracked of trackedEntries.map((entry) => entry[1])) {
         try {
           if (!tracked.child.killed) tracked.child.kill("SIGTERM");
@@ -683,8 +704,16 @@ export async function startServer(): Promise<StartedServer> {
           // best-effort: child may already be gone
         }
       }
+      const [flushSummary] = await Promise.all([
+        flushPromise,
+        trackedEntries.length > 0
+          ? new Promise((resolve) => setTimeout(resolve, childGraceMs))
+          : Promise.resolve(),
+      ]);
+      if (flushSummary) {
+        logger.info({ flushSummary }, "Shutdown flush complete");
+      }
       if (trackedEntries.length > 0) {
-        await new Promise((resolve) => setTimeout(resolve, childGraceMs));
         for (const [runId, tracked] of trackedEntries) {
           try {
             tracked.child.kill("SIGKILL");
