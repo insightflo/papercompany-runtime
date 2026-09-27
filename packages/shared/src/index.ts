@@ -860,6 +860,7 @@ export {
 
 export { humanReviewEvidenceRefSchema, humanReviewPacketSchema, readHumanReviewPacket, type HumanReviewPacketInput } from "./validators/human-review.js";
 export { toolProgressPolicySchema, toolProgressEventSchema, type ToolProgressPolicy, type ToolProgressEvent } from "./validators/tool-progress.js";
+export { shutdownCheckpointSchema, type ShutdownCheckpoint } from "./validators/shutdown-checkpoint.js";
 
 export {
   finiteCount,

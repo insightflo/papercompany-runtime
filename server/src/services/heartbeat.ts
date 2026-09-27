@@ -196,6 +196,13 @@ import {
 import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization/authority-transfer.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
+import {
+  SHUTDOWN_INTERRUPTED_ERROR_CODE,
+  buildShutdownCheckpoint,
+  emptyFlushSummary,
+  remainingMs,
+  type ShutdownFlushSummary,
+} from "./shutdown-flush.js";
 import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
 import {
@@ -5305,6 +5312,143 @@ export function heartbeatService(db: Db) {
     }
   }
 
+  // [checkpoint+graceful shutdown] SIGTERM/SIGINT 종료 플러시 — 이 프로세스가 추적 중이던 running 런을
+  // 내구 마킹(failed + shutdown_interrupted)하고 process_lost 와 동일 정합의 회수(정확히 1회 재시도,
+  // 소진 시 fallback/릴리즈)를 대기열에 넣는다. 마킹은 #277 CAS 경로(expectedStatuses=["running"]) —
+  // 늙은 프로세스의 flush 가 새 런타임 상태를 덮어쓰지 않는다(split-brain 방지). 체크포인트 참조
+  // 레코드(zod v1 strict)는 마킹과 같은 CAS 쓰기에 원자 첨부된다. 미마킹 런(데드라인 초과/오류)은
+  // running 유지 → 기존 reaper 가 회수(안전 장전). 마킹 후 재시도 등록 전 죽는 창은 reaper 백스톱이 회수.
+  async function markRunsShutdownInterrupted(
+    runIds: string[],
+    opts: { signal: "SIGINT" | "SIGTERM"; deadlineMs: number },
+  ): Promise<ShutdownFlushSummary> {
+    const summary = emptyFlushSummary();
+    const deadlineAt = Date.now() + Math.max(0, opts.deadlineMs);
+    for (const runId of runIds) {
+      summary.considered += 1;
+      if (remainingMs(deadlineAt) <= 0) {
+        summary.skippedDeadline += 1;
+        continue;
+      }
+      try {
+        const run = await getRun(runId);
+        if (!run || run.status !== "running") {
+          // 이미 종단 상태면 덮어쓰지 않는다(CAS 와 동일한 펜스 의미 — 사전 검사).
+          summary.fenced += 1;
+          continue;
+        }
+        const agent = await getAgent(run.agentId);
+        const retryPlanned = Boolean(agent) && (run.processLossRetryCount ?? 0) < 1;
+        const interruptedAt = new Date();
+        const lastPid = runningProcesses.get(runId)?.child.pid ?? run.processPid ?? null;
+        const checkpoint = await buildShutdownCheckpoint({
+          db,
+          run,
+          signal: opts.signal,
+          lastPid,
+          retryPlanned,
+          interruptedAt,
+        });
+        if (!checkpoint.ok) {
+          logger.warn(
+            { runId, issues: checkpoint.issues },
+            "shutdown flush: checkpoint record rejected by schema; marking without checkpoint attachment",
+          );
+        }
+        const shutdownMessage = `Graceful ${opts.signal} shutdown interrupted run; last pid ${lastPid ?? "unknown"}`;
+        const finalizedRun = await setRunStatus(
+          run.id,
+          "failed",
+          {
+            error: shutdownMessage,
+            errorCode: SHUTDOWN_INTERRUPTED_ERROR_CODE,
+            finishedAt: interruptedAt,
+            ...(checkpoint.ok
+              ? {
+                  contextSnapshot: {
+                    ...parseObject(run.contextSnapshot),
+                    shutdownCheckpoint: checkpoint.checkpoint,
+                  },
+                }
+              : {}),
+          },
+          { expectedStatuses: ["running"] },
+        );
+        await setWakeupStatus(run.wakeupRequestId, "failed", {
+          finishedAt: interruptedAt,
+          error: shutdownMessage,
+        });
+        if (!finalizedRun) {
+          summary.fenced += 1;
+          continue;
+        }
+        summary.marked += 1;
+
+        // process_lost 후처리 미터 — 재시도 의미론 동일 정합(정확히 1회, retryCount 소진 규칙 동일).
+        // 종료 중이므로 finalizeAgentStatus/startNextQueuedRunForAgent(새 실행 촉발)은 하지 않는다.
+        let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
+        let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        if (retryPlanned && agent) {
+          retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, interruptedAt);
+          if (retriedRun) summary.retried += 1;
+        } else {
+          const fallback = agent ? resolveAdapterFallbackConfig(agent.adapterConfig) : null;
+          const fallbackAttempt = resolveAdapterFallbackAttempt(run.contextSnapshot);
+          if (agent && fallback && fallbackAttempt < fallback.maxAttempts) {
+            fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, interruptedAt, {
+              fallbackCommand: fallback.command,
+              fallbackProvider: fallback.provider,
+              fallbackModel: fallback.model,
+              fallbackThinking: resolveAdapterFallbackThinking(fallback, fallbackAttempt + 1),
+              fallbackReason: SHUTDOWN_INTERRUPTED_ERROR_CODE,
+            });
+            if (fallbackRun) summary.fallbackQueued += 1;
+          }
+        }
+        if (!retriedRun && !fallbackRun) {
+          try {
+            await releaseIssueExecutionAndPromote(finalizedRun, { skipLocked: true });
+            summary.released += 1;
+          } catch (err) {
+            logger.warn(
+              { err, runId: run.id },
+              "shutdown flush: failed to release+promote run; issue lock reaper will recover",
+            );
+          }
+        }
+        await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "warn",
+          message: retriedRun
+            ? `${shutdownMessage}; queued retry ${retriedRun.id}`
+            : fallbackRun
+              ? `${shutdownMessage}; queued adapter fallback ${fallbackRun.id}`
+              : shutdownMessage,
+          payload: {
+            ...(lastPid !== null ? { lastPid } : {}),
+            ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
+            ...(fallbackRun ? { fallbackRunId: fallbackRun.id } : {}),
+          },
+        });
+      } catch (err) {
+        summary.errors += 1;
+        logger.warn(
+          { err, runId },
+          "shutdown flush: failed to mark run; leaving run for reaper recovery",
+        );
+      }
+    }
+    summary.deadlineExceeded = summary.skippedDeadline > 0;
+    if (summary.deadlineExceeded || summary.errors > 0) {
+      logger.warn(
+        { summary },
+        "shutdown flush incomplete: unmarked runs stay running and will be recovered by the reaper",
+      );
+    }
+    return summary;
+  }
+
   async function reapOrphanedRuns(opts?: {
     staleThresholdMs?: number;
     activeExecutionTimeoutMs?: number;
@@ -5573,6 +5717,59 @@ export function heartbeatService(db: Db) {
       } catch (err) {
         logger.warn({ err, runId: run.id }, "failed to finalize process-lost run; continuing sweep");
       }
+    }
+
+    // [checkpoint+graceful shutdown 백스톱] 종료 플러시가 마킹(failed+shutdown_interrupted)까지는
+    // 커밋했으나 재시도 등록 직전에 프로세스가 죽거나 데드라인에 걸린 런의 회수 사각지대 방어.
+    // 이 스캔이 없으면 마킹된 런은 위 running 스캔 대상에서 빠져 아무도 회수하지 못한다(요구사항:
+    // 종료 시 마킹된 런은 기존 회수 경로에 반드시 진입해야 한다). 조건 — processLossRetryCount<1
+    // (재시도 자격, 소진 규칙 동일) + 후계 런(retryOfRunId, retry/fallback 공통) 부재 → 정확히 1회.
+    // retryCount 소진 마킹 런의 fallback 누락은 여기서 보충하지 않는다(이슈 락은
+    // reapStalledIssueExecutionLocks 가 회수 — 데드라인 스킵 시 의도된 우아한 강등).
+    try {
+      const interruptedRuns = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.status, "failed"),
+            eq(heartbeatRuns.errorCode, SHUTDOWN_INTERRUPTED_ERROR_CODE),
+            sql`${heartbeatRuns.processLossRetryCount} < 1`,
+          ),
+        )
+        .limit(50);
+      for (const run of interruptedRuns) {
+        try {
+          if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
+          const successors = await db
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.retryOfRunId, run.id))
+            .limit(1);
+          if (successors.length > 0) continue;
+          const agent = await getAgent(run.agentId);
+          if (!agent) continue;
+          const retriedRun = await enqueueProcessLossRetry(run, agent, now);
+          if (retriedRun) {
+            await setWakeupStatus(run.wakeupRequestId, "failed", {
+              finishedAt: now,
+              error: run.error ?? "shutdown_interrupted recovered by backstop",
+            });
+            await appendRunEvent(run, await nextRunEventSeq(run.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: `Recovered shutdown-interrupted run; queued retry ${retriedRun.id}`,
+              payload: { retryRunId: retriedRun.id },
+            });
+            reaped.push(run.id);
+          }
+        } catch (err) {
+          logger.warn({ err, runId: run.id }, "failed to recover shutdown-interrupted run; continuing sweep");
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "shutdown-interrupted backstop scan failed; continuing sweep");
     }
 
     if (queuedStaleThresholdMs > 0) {
@@ -11290,6 +11487,8 @@ export function heartbeatService(db: Db) {
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+
+    markRunsShutdownInterrupted,
 
     reapStaleBusyMissionRuntimes,
 

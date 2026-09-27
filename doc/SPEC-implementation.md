@@ -952,6 +952,7 @@ Required UX behaviors:
 - Node 20+
 - `DATABASE_URL` optional
 - if unset, auto-use PGlite and push schema
+- `PAPERCLIP_SHUTDOWN_FLUSH_TIMEOUT_MS` optional (default `3000`, `0` disables): on SIGINT/SIGTERM the server durably marks its tracked running runs as `failed`/`shutdown_interrupted` (run-status CAS) and queues the same exactly-once process-loss retry as the reaper, in parallel with child SIGTERM; unmarked runs stay `running` and are recovered by the existing reaper after restart.
 
 ## 15.2 Migrations
 
