@@ -36,6 +36,7 @@ import type { Db } from "@paperclipai/db";
 import { issueComments, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import {
+  classifyStepActivation,
   conditionalEdgeHolds,
   resolveEdges,
   workflowHasConditionalEdges,
@@ -255,11 +256,25 @@ export async function applyBackEdgeReworkPass(
       const terminal = !!qaRun && TERMINAL_STEP_RUN_STATUSES.has(qaRun.status);
       // rejected = 이 QA 가 terminal 이며 when(qa_request_changes) 이 성립(verdict=request_changes).
       const rejected = conditionalEdgeHolds(edge, pred);
-      return { edge, qaRun, pred, terminal, rejected };
+      // [2026-09-26 런 72c54dc8] sibling QA 가 이번 세대에 영원히 발화 불가능하면(순방향 선행이 모두
+      //   terminal 인데 만족 edge 없음 = classifyStepActivation.skippable — 예: 반려된 sibling QA 의
+      //   하위에 순차 배치된 QA) 그 sibling 은 verdict 를 절대 내지 못한다. running 중이 아니면
+      //   barrier 가 이를 기다리는 것은 교착일 뿐이고, 5분 deadlock reconciler 가 pending 꼬리를 skip
+      //   하며 런을 failed 종결시킨다(미션 에스컬레이션 RES-6672). 발화 불가능 sibling 은 barrier 에서
+      //   제외한다(버전 미소모·rejected 카운트 불가 — verdict 가 없으므로). waiting/runnable sibling 은
+      //   기존 coalesce 계약대로 barrier 를 계속 잡는다.
+      const unreachable = !terminal
+        && qaRun?.status !== "running"
+        && (() => {
+          const qaStep = steps.find((candidate) => candidate.id === edge.stepId);
+          return qaStep ? classifyStepActivation(qaStep, predsByStepId).skippable : false;
+        })();
+      return { edge, qaRun, pred, terminal, rejected, unreachable };
     });
     // barrier: sibling QA 중 pending/running(또는 아직 stepRun 자체가 없는) 이 있으면 이번 sync 에는
     //   리셋하지 않고 다음 tick 에 재평가. conservative — 모든 relevant QA 가 끝난 뒤에만 rework.
-    if (!siblingQas.every((q) => q.terminal)) continue;
+    //   단, 이번 세대에 발화 불가능(unreachable)한 sibling 은 verdict 도착을 기다릴 수 없으므로 제외.
+    if (!siblingQas.every((q) => q.terminal || q.unreachable)) continue;
     const rejectedQasRaw = siblingQas.filter((q) => q.rejected);
     if (rejectedQasRaw.length === 0) continue; // 전원 pass(또는 반려 아님) → rework 없이 forward
 
