@@ -42,6 +42,13 @@ import { registerPluginConfigRoutes } from "./plugin-config-routes.js";
 import { registerPluginDiagnosticsRoutes } from "./plugin-diagnostics-routes.js";
 import { registerPluginLifecycleRoutes } from "./plugin-lifecycle-routes.js";
 import { ingestWebhookDelivery } from "../services/plugin-webhook-receipt.js";
+import {
+  claimToolExecutionReceipt,
+  completeToolExecutionReceipt,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  normalizeIdempotencyKey,
+  releaseToolExecutionReceipt,
+} from "../services/plugin-tool-execution-receipt.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
@@ -331,6 +338,12 @@ interface PluginToolExecuteRequest {
   parameters?: unknown;
   /** Agent run context. */
   runContext: ToolRunContext;
+  /**
+   * Optional stable effect key for one logical tool call: retries with the
+   * same key replay the recorded response instead of re-executing the tool
+   * (see PLUGIN_SPEC.md §13.10 — tool execution idempotency).
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -990,11 +1003,13 @@ export function pluginRoutes(
    * - `tool`: Fully namespaced tool name (e.g., "acme.linear:search-issues")
    * - `parameters`: Parameters matching the tool's declared JSON Schema
    * - `runContext`: Agent run context with agentId, runId, companyId, and optional projectId
+   * - `idempotencyKey`: Optional stable effect key — retries with the same key replay the recorded response (x-idempotent-replay) instead of re-executing
    *
    * Response: `ToolExecutionResult`
    * Errors:
    * - 400 if request validation fails
    * - 404 if tool is not found
+   * - 409 if an execution with the same idempotency key is already in progress
    * - 501 if tool dispatcher is not configured
    * - 502 if the plugin worker is unavailable or the RPC call fails
    */
@@ -1023,6 +1038,19 @@ export function pluginRoutes(
         error: '"runContext" must include agentId, runId, and companyId',
       });
       return;
+    }
+
+    // [tool execution idempotency] Optional caller-supplied effect key.
+    //   No key → legacy behavior, no receipt rows. Bad key → 400, no execution.
+    let idempotencyKey: string | null = null;
+    if (body.idempotencyKey !== undefined) {
+      idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
+      if (idempotencyKey === null) {
+        res.status(400).json({
+          error: `"idempotencyKey" must be a non-empty string of at most ${IDEMPOTENCY_KEY_MAX_LENGTH} characters`,
+        });
+        return;
+      }
     }
 
     assertCompanyAccess(req, runContext.companyId);
@@ -1074,6 +1102,73 @@ export function pluginRoutes(
       assertBoard(req);
     }
 
+    // [tool execution idempotency] Receipt adjudication runs after authorization
+    //   but before any execution: the unique (company, run, tool, key) claim insert
+    //   makes exactly one concurrent request the executor. A completed receipt
+    //   replays its recorded response; a fresh executing receipt answers 409; a
+    //   stale one (crashed execution) is taken over and re-executed.
+    let receiptId: string | null = null;
+    if (idempotencyKey !== null) {
+      const decision = await claimToolExecutionReceipt(db, {
+        companyId: runContext.companyId,
+        runId: String(runContext.runId),
+        tool,
+        idempotencyKey,
+        parameters,
+      });
+      if (decision.kind === "replay") {
+        res.status(decision.status).set("x-idempotent-replay", "true").json(decision.body);
+        return;
+      }
+      if (decision.kind === "in-progress") {
+        res
+          .status(409)
+          .json({ error: "Tool execution already in progress for this idempotency key" });
+        return;
+      }
+      receiptId = decision.receiptId;
+    }
+
+    /**
+     * Single emission point for terminal responses produced by real tool
+     * execution (plugin dispatcher or core workflow tool). Applies tool-result
+     * hygiene exactly where the legacy path applied it, records the terminal
+     * response on the idempotency receipt (condensed body — replay equals the
+     * first response), then emits. Early returns that never execute anything
+     * (validation / authorization / not-found / unconfigured dispatcher) stay
+     * outside this helper and never complete a receipt.
+     */
+    const emitExecuted = async (
+      status: number,
+      body: Record<string, unknown>,
+      options: {
+        errorPath?: "error" | "result.error";
+        condense?: boolean;
+        workflowRunId?: string | null;
+        stepId?: string | null;
+      } = {},
+    ) => {
+      const finalBody =
+        options.condense === false
+          ? body
+          : condenseDuplicateToolErrorBody({
+              runId: runContext.runId,
+              tool,
+              status,
+              body,
+              errorPath: options.errorPath,
+            }).body;
+      if (receiptId !== null) {
+        await completeToolExecutionReceipt(db, receiptId, {
+          status,
+          body: finalBody,
+          workflowRunId: options.workflowRunId ?? null,
+          stepId: options.stepId ?? null,
+        });
+      }
+      res.status(status).json(finalBody);
+    };
+
     if (registeredTool) {
       try {
         const result = await toolDeps!.toolDispatcher.executeTool(
@@ -1083,33 +1178,17 @@ export function pluginRoutes(
         );
         // [tool result hygiene] 같은 run에서 같은 도구가 같은 에러를 반복하면 본문을 1줄 요약으로
         //   축소해 에이전트 세션 히스토리 누적을 막는다(첫 발생은 전문 유지). 스텝 증거 경로와 무관.
-        res.json(
-          condenseDuplicateToolErrorBody({
-            runId: runContext.runId,
-            tool,
-            status: 200,
-            body: result as unknown as Record<string, unknown>,
-            errorPath: "result.error",
-          }).body,
-        );
+        await emitExecuted(200, result as unknown as Record<string, unknown>, {
+          errorPath: "result.error",
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
 
         // Distinguish between "worker not running" (502) and other errors (500)
         if (message.includes("not running") || message.includes("worker")) {
-          res.status(502).json(condenseDuplicateToolErrorBody({
-            runId: runContext.runId,
-            tool,
-            status: 502,
-            body: { error: message },
-          }).body);
+          await emitExecuted(502, { error: message });
         } else {
-          res.status(500).json(condenseDuplicateToolErrorBody({
-            runId: runContext.runId,
-            tool,
-            status: 500,
-            body: { error: message },
-          }).body);
+          await emitExecuted(500, { error: message });
         }
       }
       return;
@@ -1130,19 +1209,23 @@ export function pluginRoutes(
         stepEnv,
       });
       if (coreResult.status !== 404 || coreResult.body.source === "core") {
-        res.status(coreResult.status).json(
-          condenseDuplicateToolErrorBody({
-            runId: runContext.runId,
-            tool,
-            status: coreResult.status,
-            body: coreResult.body as Record<string, unknown>,
-          }).body,
-        );
+        await emitExecuted(coreResult.status, coreResult.body as Record<string, unknown>, {
+          workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
+          stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
+        });
         return;
+      }
+      // 404 without core source: no tool matched, nothing executed. Release
+      // this request's own claim so the same key stays usable for a valid call.
+      if (receiptId !== null) {
+        await releaseToolExecutionReceipt(db, receiptId);
+        receiptId = null;
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: message });
+      // Fail closed: the execution branch failed after claiming, so record the
+      // 500 (replay on same-key retry) instead of risking a re-execution.
+      await emitExecuted(500, { error: message }, { condense: false });
       return;
     }
 

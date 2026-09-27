@@ -595,6 +595,17 @@ The host provides:
 
 The worker executes the tool and returns a typed result (string content, structured data, or error).
 
+### 13.11 Tool Execution Idempotency (HTTP)
+
+The host route `POST /api/plugins/tools/execute` accepts an optional request field `idempotencyKey` (string, 1–200 chars after trim) that callers generate once per logical tool call and reuse across retries of that same call (e.g. after a lost HTTP response). When present:
+
+- One receipt row exists per `(company, run, tool, idempotencyKey)`. The first claim executes the tool and records the terminal response (status + condensed body).
+- A retry of a completed receipt replays the recorded response unchanged with header `x-idempotent-replay: true` — the tool is never re-executed.
+- A receipt still `executing` and younger than 10 minutes answers `409 { "error": "Tool execution already in progress for this idempotency key" }` without executing.
+- A receipt `executing` for 10 minutes or longer is treated as a crashed execution: the claim is taken over and the tool is re-executed.
+- Responses that never executed anything (validation `400`, authorization `401/403`, tool-not-found `404`, unconfigured dispatcher `501`) leave no receipt row.
+- Key stability is the caller's responsibility: reusing one key for two different logical tool calls silently turns the second into a replay of the first. Requests without a key keep the legacy non-idempotent behavior.
+
 ## 14. SDK Surface
 
 Plugins do not talk to the DB directly.
@@ -1206,6 +1217,29 @@ Indexes:
 
 - `(plugin_id, received_at desc)`
 - `(plugin_id, endpoint_key, received_at desc)`
+
+### `plugin_tool_execution_receipts`
+
+Idempotency receipts for `POST /api/plugins/tools/execute` (see §13.11). One row per `(company_id, run_id, tool, idempotency_key)`; `run_id` is the raw run-context string (no FK). `status` is `executing | completed`; `result_status`/`result_body` hold the recorded terminal response (body stored post-condense), `claimed_at` drives the 10-minute stale takeover, and `workflow_run_id`/`step_id` are trace-only metadata from the workflow step env when present.
+
+- `id` uuid pk
+- `company_id` uuid fk `companies.id` not null (cascade)
+- `run_id` text not null
+- `tool` text not null
+- `idempotency_key` text not null
+- `status` text not null, check `in ('executing','completed')`
+- `request_parameters` jsonb not null default `{}`
+- `result_status` int null
+- `result_body` jsonb null
+- `claimed_at` timestamptz not null default now
+- `completed_at` timestamptz null
+- `workflow_run_id` uuid null
+- `step_id` text null
+
+Indexes:
+
+- unique `(company_id, run_id, tool, idempotency_key)`
+- `(company_id)`
 
 ### `plugin_entities` (optional but recommended)
 
