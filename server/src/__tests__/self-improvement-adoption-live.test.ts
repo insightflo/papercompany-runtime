@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
-import { activityLog, companies, companySkills, createDb } from "@paperclipai/db";
+import { eq, inArray } from "drizzle-orm";
+import { activityLog, companies, companySkills, createDb, issueComments, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -304,6 +305,121 @@ describeEP("self-improvement adoption live wiring (planner→executor→ledger)"
     // 형식 검증.
     await expect(svc.recordGateVerdict({ companyId, gateOwner: "x", candidateHash: "nothash", verdict: "PASS", createdByAgentId: peerAgentId })).rejects.toThrow(/candidateHash/);
     await expect(svc.recordGateVerdict({ companyId, gateOwner: "x", candidateHash: hash, verdict: "MAYBE", createdByAgentId: peerAgentId })).rejects.toThrow(/PASS or FAIL/);
+  });
+
+  // [자동수선 리뷰 3점] 적용 성공 → 활동로그 before/after 해시 + producerAgentId,
+  //   원천 이슈(같은 회사)에 시스템 코멘트 통지(본문에 해시 포함, 저자 필드 없음).
+  it("records before/after content hashes and notifies the source issue with a system comment", async () => {
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "후보 원천 이슈", status: "todo" });
+    const producerAgentId = randomUUID();
+    const before = await currentMarkdown();
+
+    const svc = selfImprovementAdoptionService(db);
+    const result = await svc.apply({
+      companyId,
+      candidates: [candidate({
+        producerAgentId,
+        sourceIssueId: issueId,
+        proposedEdit: { operation: "add", section: "Validation checklist", content: "- 생산자 통지 해시 증명" },
+      })],
+      gateVerdicts: passVerdicts,
+      actor: { type: "board" },
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.applied).toHaveLength(1);
+    const expectedBefore = createHash("sha256").update(before).digest("hex");
+    const expectedAfter = createHash("sha256").update(await currentMarkdown()).digest("hex");
+    expect(result.applied[0]?.contentHashBefore).toBe(expectedBefore);
+    expect(result.applied[0]?.contentHashAfter).toBe(expectedAfter);
+
+    const [log] = await db.select().from(activityLog).where(eq(activityLog.action, "company_skill.adoption_applied"));
+    expect(log?.details?.contentHashBefore).toBe(expectedBefore);
+    expect(log?.details?.contentHashAfter).toBe(expectedAfter);
+    expect(log?.details?.producerAgentId).toBe(producerAgentId);
+
+    const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comment?.companyId).toBe(companyId);
+    expect(comment?.authorAgentId).toBeNull();
+    expect(comment?.authorUserId).toBeNull();
+    expect(comment?.body).toContain(expectedBefore);
+    expect(comment?.body).toContain(expectedAfter);
+    expect(comment?.body).toContain(result.candidateHashes[0]!);
+    expect(comment?.body).toContain(producerAgentId);
+  });
+
+  // [같은 주체 상관오류] 패치를 생산한 에이전트가 남긴 판정은 그 후보에 자격이 없다.
+  it("disqualifies verdicts recorded by the candidate producer (same-entity re-review)", async () => {
+    const svc = selfImprovementAdoptionService(db);
+    const { agents: agentsTable } = await import("@paperclipai/db");
+    const producerAgentId = randomUUID();
+    const submitterAgentId = randomUUID();
+    await db.insert(agentsTable).values([
+      { id: producerAgentId, companyId, name: "Patch Producer", role: "worker", status: "active", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+      { id: submitterAgentId, companyId, name: "Adoption Submitter 2", role: "owner", status: "active", adapterType: "claude_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} },
+    ]);
+
+    // 이 테스트 전용 패치 내용으로 해시를 분리한다(이전 테스트의 판정 원장 오염 방지).
+    const producerCandidate = candidate({
+      producerAgentId,
+      proposedEdit: { operation: "add", section: "Validation checklist", content: "- 같은 주체 재검수 차단 증명" },
+    });
+    const dry = await svc.dryRun({ companyId, candidates: [producerCandidate] });
+    const hash = dry.candidateHashes[0]!;
+
+    await svc.recordGateVerdict({ companyId, gateOwner: "peer:validator", candidateHash: hash, verdict: "PASS", createdByAgentId: producerAgentId });
+    const before = await currentMarkdown();
+    const rejected = await svc.apply({
+      companyId,
+      candidates: [producerCandidate],
+      actor: { type: "agent", agentId: submitterAgentId },
+    });
+
+    expect(rejected.applied).toHaveLength(0);
+    expect(rejected.diagnostics).toEqual([
+      {
+        code: "same_entity_verdict_rejected",
+        candidateIndex: 0,
+        message: expect.stringContaining("selfImprovementCandidates[0]"),
+      },
+    ]);
+    expect(await currentMarkdown()).toBe(before);
+  });
+
+  // [생산자 통지 실패] 타 회사/존재하지 않는 원천 이슈 — 패치는 적용, 진단만 노출, 코멘트 없음.
+  it("keeps the patch applied but reports producer_notify_failed for foreign or missing source issues", async () => {
+    const foreignIssueId = randomUUID();
+    await db.insert(issues).values({ id: foreignIssueId, companyId: otherCompanyId, title: "타 회사 이슈", status: "todo" });
+    const missingIssueId = randomUUID();
+
+    const svc = selfImprovementAdoptionService(db);
+    const result = await svc.apply({
+      companyId,
+      candidates: [
+        candidate({
+          sourceIssueId: foreignIssueId,
+          proposedEdit: { operation: "add", section: "Validation checklist", content: "- 타 회사 원천 통지 실패" },
+        }),
+        candidate({
+          sourceIssueId: missingIssueId,
+          proposedEdit: { operation: "add", section: "Validation checklist", content: "- 존재하지 않는 원천 통지 실패" },
+        }),
+      ],
+      gateVerdicts: passVerdicts,
+      actor: { type: "board" },
+    });
+
+    expect(result.applied).toHaveLength(2);
+    expect(result.diagnostics.map((d) => ({ code: d.code, candidateIndex: d.candidateIndex }))).toEqual([
+      { code: "producer_notify_failed", candidateIndex: 0 },
+      { code: "producer_notify_failed", candidateIndex: 1 },
+    ]);
+    const markdown = await currentMarkdown();
+    expect(markdown).toContain("- 타 회사 원천 통지 실패");
+    expect(markdown).toContain("- 존재하지 않는 원천 통지 실패");
+    const comments = await db.select().from(issueComments).where(inArray(issueComments.issueId, [foreignIssueId, missingIssueId]));
+    expect(comments).toEqual([]);
   });
 
   it("finds related knowledge patterns for the owner unblock trigger (company-scoped)", async () => {

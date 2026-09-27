@@ -16,7 +16,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { activityLog, adoptionGateVerdicts, companySkills } from "@paperclipai/db";
+import { activityLog, adoptionGateVerdicts, companySkills, issueComments, issues } from "@paperclipai/db";
 import { unprocessable } from "../errors.js";
 import { assertAdoptionCandidatesNotQualityLinked } from "./quality/write-guard.js";
 import { companySkillService, parseFrontmatterMarkdown } from "./company-skills.js";
@@ -37,6 +37,13 @@ import {
   type SelfImprovementAdoptionAppliedEntry,
   type SelfImprovementAdoptionExecutorDiagnostic,
 } from "./self-improvement-adoption-executor.js";
+
+/** [자동수선] 서비스 단 진단 — 판정 원장 소비·생산자 통지 단계에서만 발생. */
+export type SelfImprovementAdoptionServiceDiagnostic = {
+  code: "same_entity_verdict_rejected" | "producer_notify_failed";
+  candidateIndex: number;
+  message: string;
+};
 
 const CANDIDATES_MAX = 50;
 const GATE_VERDICTS_MAX = 100;
@@ -67,8 +74,19 @@ export function adoptionCandidateHash(candidate: Record<string, unknown>): strin
 
 export type SelfImprovementAdoptionApplyResult = {
   applied: SelfImprovementAdoptionAppliedEntry[];
-  diagnostics: Array<SelfImprovementAdoptionPlannerDiagnostic | SelfImprovementAdoptionExecutorDiagnostic>;
+  diagnostics: Array<
+    SelfImprovementAdoptionPlannerDiagnostic
+    | SelfImprovementAdoptionExecutorDiagnostic
+    | SelfImprovementAdoptionServiceDiagnostic
+  >;
 };
+
+/** 후보 선택 필드(producerAgentId/sourceIssueId) 정규화 — 없으면 null. */
+function optionalCandidateRef(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
 
 function stableFrontmatter(markdown: string) {
   return JSON.stringify(parseFrontmatterMarkdown(markdown).frontmatter);
@@ -129,13 +147,14 @@ export function selfImprovementAdoptionService(db: Db) {
     return candidates.map((candidate) => adoptionCandidateHash(candidate as Record<string, unknown>));
   }
 
-  /** [에이전트 경로] 판정 원장에서 후보별 PASS 해석 — 자기 인증 차단(제출자 ≠ 판정자) + 신선도. */
+  /** [에이전트 경로] 판정 원장에서 후보별 PASS 해석 — 자기 인증 차단(제출자 ≠ 판정자) + 신선도
+   *   + 같은 주체 상관오류 완화(후보 생산자가 직접 남긴 판정은 그 후보에 자격 없음). */
   async function resolveRegisteredVerdicts(input: {
     companyId: string;
     candidateHashes: string[];
     candidates: SelfImprovementCandidate[];
     submitterAgentId: string | null;
-  }): Promise<AdoptionGateVerdict[]> {
+  }): Promise<{ verdicts: AdoptionGateVerdict[]; sameEntityRejected: number[] }> {
     const cutoff = new Date(Date.now() - VERDICT_FRESHNESS_MS);
     const rows = input.candidateHashes.length > 0
       ? await db
@@ -150,17 +169,27 @@ export function selfImprovementAdoptionService(db: Db) {
     const fresh = rows.filter((row) => row.createdAt >= cutoff);
 
     const verdicts: AdoptionGateVerdict[] = [];
+    const sameEntityRejected: number[] = [];
     for (let index = 0; index < input.candidates.length; index += 1) {
       const candidate = input.candidates[index]!;
       const hash = input.candidateHashes[index]!;
       const gateOwner = typeof candidate.gateOwner === "string" ? candidate.gateOwner : "";
-      const qualifies = fresh.some((row) =>
+      const producerAgentId = optionalCandidateRef((candidate as Record<string, unknown>).producerAgentId);
+      const matched = fresh.filter((row) =>
         row.candidateHash === hash
         && row.gateOwner === gateOwner
         && (row.createdByAgentId == null || row.createdByAgentId !== input.submitterAgentId));
-      if (qualifies) verdicts.push({ gateOwner, verdict: "PASS", candidateHash: hash });
+      // 같은 주체 배제 — 패치를 생산한 에이전트가 남긴 판정은 그 후보에 자격 없음.
+      //   원장 row의 createdByAgentId가 null(보드 기록)이면 그대로 허용.
+      const qualifies = matched.filter((row) =>
+        producerAgentId === null || row.createdByAgentId == null || row.createdByAgentId !== producerAgentId);
+      if (qualifies.length > 0) {
+        verdicts.push({ gateOwner, verdict: "PASS", candidateHash: hash });
+      } else if (matched.length > 0) {
+        sameEntityRejected.push(index);
+      }
     }
-    return verdicts;
+    return { verdicts, sameEntityRejected };
   }
 
   /** 후보/판정 입력 형태 검증 — 계약 위반은 422로 실패 닫힘(무음 무시 금지). */
@@ -303,19 +332,39 @@ export function selfImprovementAdoptionService(db: Db) {
       const candidateHashes = hashCandidates(candidates);
 
       let gateVerdicts: AdoptionGateVerdict[];
+      let sameEntityRejected: number[] = [];
       if (input.actor.type === "agent") {
-        gateVerdicts = await resolveRegisteredVerdicts({
+        const resolved = await resolveRegisteredVerdicts({
           companyId: input.companyId,
           candidateHashes,
           candidates,
           submitterAgentId: input.actor.agentId ?? null,
         });
+        gateVerdicts = resolved.verdicts;
+        sameEntityRejected = resolved.sameEntityRejected;
       } else {
         gateVerdicts = (Array.isArray(input.gateVerdicts) ? input.gateVerdicts : []) as AdoptionGateVerdict[];
       }
 
       const assetRegistry = await buildAssetRegistry(input.companyId);
       const planned = buildSelfImprovementAdoptionPlan({ candidates, assetRegistry, gateVerdicts, candidateHashes });
+
+      // [같은 주체 상관오류] 같은 주체 배제로 자격을 잃은 후보는 planner의 gate_not_passed 대신
+      //   명시 진단으로 치환한다. 치환은 표시용 진단 중복 제거일 뿐 — 적용 제외 판정 자체는
+      //   위 resolveRegisteredVerdicts의 구조화 로직이 내렸다(규칙 8: 메시지 파싱은 실행 근거 아님).
+      const sameEntityRejectedSet = new Set(sameEntityRejected);
+      const sameEntityDiagnostics: SelfImprovementAdoptionServiceDiagnostic[] = sameEntityRejected.map((index) => ({
+        code: "same_entity_verdict_rejected",
+        candidateIndex: index,
+        message: `selfImprovementCandidates[${index}] producer agent recorded the matching gate verdict itself; same-entity re-review is disqualified`,
+      }));
+      const plannedDiagnostics = sameEntityRejected.length === 0
+        ? planned.diagnostics
+        : planned.diagnostics.filter((diagnostic) => {
+          if (diagnostic.code !== "gate_not_passed") return true;
+          const match = /^selfImprovementCandidates\[(\d+)\]/.exec(diagnostic.message);
+          return !(match && sameEntityRejectedSet.has(Number(match[1])));
+        });
 
       const writtenSkillIds = new Map<string, string>();
       const executed = await applySelfImprovementAdoptionPlan({
@@ -325,9 +374,14 @@ export function selfImprovementAdoptionService(db: Db) {
         impactRecorder: makeImpactRecorder(input.companyId),
       });
 
+      const serviceDiagnostics: SelfImprovementAdoptionServiceDiagnostic[] = [...sameEntityDiagnostics];
       for (const appliedEntry of executed.applied) {
         const skillId = writtenSkillIds.get(appliedEntry.resolvedRef);
         if (!skillId) continue;
+        const sourceCandidate = candidates[appliedEntry.candidateIndex] as Record<string, unknown> | undefined;
+        const producerAgentId = sourceCandidate ? optionalCandidateRef(sourceCandidate.producerAgentId) : null;
+        const sourceIssueId = sourceCandidate ? optionalCandidateRef(sourceCandidate.sourceIssueId) : null;
+        const gateOwner = planned.plan.find((entry) => entry.candidateIndex === appliedEntry.candidateIndex)?.gateOwner ?? null;
         await db.insert(activityLog).values({
           companyId: input.companyId,
           actorType: "system",
@@ -339,13 +393,60 @@ export function selfImprovementAdoptionService(db: Db) {
             skillKey: appliedEntry.resolvedRef,
             operation: appliedEntry.operation,
             section: appliedEntry.section,
-            gateOwner: planned.plan.find((entry) => entry.candidateIndex === appliedEntry.candidateIndex)?.gateOwner ?? null,
+            gateOwner,
             adoptedFromPatternIds: appliedEntry.adoptedFromPatternIds,
+            contentHashBefore: appliedEntry.contentHashBefore,
+            contentHashAfter: appliedEntry.contentHashAfter,
+            ...(producerAgentId ? { producerAgentId } : {}),
           },
         });
+
+        // [생산자 통지] 원천 이슈(같은 회사)에 시스템 코멘트 — 표시면일 뿐 런타임이 다시 파싱하지
+        //   않는다(규칙 8). 통지 실패는 패치를 되돌리지 않고 진단으로만 노출한다.
+        if (sourceIssueId) {
+          try {
+            const [issue] = await db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, input.companyId)));
+            if (!issue) {
+              serviceDiagnostics.push({
+                code: "producer_notify_failed",
+                candidateIndex: appliedEntry.candidateIndex,
+                message: `candidate ${appliedEntry.candidateIndex} source issue ${sourceIssueId} was not found in company ${input.companyId}`,
+              });
+            } else {
+              await db.insert(issueComments).values({
+                companyId: input.companyId,
+                issueId: sourceIssueId,
+                body: [
+                  "자기개선 채택이 적용되었습니다 (system notification).",
+                  "",
+                  `- 스킬: ${appliedEntry.resolvedRef}`,
+                  `- 작업: ${appliedEntry.operation} — ${appliedEntry.section}`,
+                  `- 게이트 오너: ${gateOwner ?? "unknown"}`,
+                  `- 후보 해시: ${candidateHashes[appliedEntry.candidateIndex] ?? "unknown"}`,
+                  `- 적용 전 내용 해시: ${appliedEntry.contentHashBefore}`,
+                  `- 적용 후 내용 해시: ${appliedEntry.contentHashAfter}`,
+                  `- 생산자 에이전트: ${producerAgentId ?? "unknown"}`,
+                ].join("\n"),
+              });
+            }
+          } catch (error) {
+            serviceDiagnostics.push({
+              code: "producer_notify_failed",
+              candidateIndex: appliedEntry.candidateIndex,
+              message: `candidate ${appliedEntry.candidateIndex} producer notification failed for issue ${sourceIssueId}: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+        }
       }
 
-      return { applied: executed.applied, diagnostics: [...planned.diagnostics, ...executed.diagnostics], candidateHashes };
+      return {
+        applied: executed.applied,
+        diagnostics: [...plannedDiagnostics, ...executed.diagnostics, ...serviceDiagnostics],
+        candidateHashes,
+      };
     },
 
     recordGateVerdict,

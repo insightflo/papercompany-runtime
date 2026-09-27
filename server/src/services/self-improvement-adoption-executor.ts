@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { SelfImprovementAdoptionPlanEntry } from "./self-improvement-adoption-planner.js";
 
 export type SelfImprovementAdoptionAssetStore = {
@@ -40,6 +42,9 @@ export type SelfImprovementAdoptionAppliedEntry = {
   section: string;
   validationVerdict: "PASS";
   applied: true;
+  /** [자동수선 증거] 패치 적용 직전/직후 자산 내용의 sha256(hex) — 활동로그 증거 원천. */
+  contentHashBefore: string;
+  contentHashAfter: string;
   /** [Phase 2] 이 채택의 근거가 된 지식 위키 패턴 카드 id — impact 원장 adoptedFrom 원천. */
   adoptedFromPatternIds: string[];
 };
@@ -72,6 +77,10 @@ export type ApplySelfImprovementAdoptionPlanResult = {
 type PatchResult =
   | { ok: true; content: string }
   | { ok: false; code: "missing_patch_content" | "unsupported_operation" | "section_not_found"; message: string };
+
+function sha256Hex(content: string) {
+  return createHash("sha256").update(content).digest("hex");
+}
 
 function normalizePatchContent(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -257,6 +266,8 @@ export async function applySelfImprovementAdoptionPlan({
       section: entry.proposedEdit.section,
       validationVerdict: "PASS",
       applied: true,
+      contentHashBefore: sha256Hex(currentContent),
+      contentHashAfter: sha256Hex(patchResult.content),
       adoptedFromPatternIds: patternIds,
     });
   }

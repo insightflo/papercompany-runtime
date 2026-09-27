@@ -814,6 +814,59 @@ describe("buildMissionOwnerPlanRevisionDraft", () => {
     }
   });
 
+  // [자동수선 근거] 선택 필드 producerAgentId/sourceIssueId — 정상 통과 / 빈 문자열·비문자열·초과 → invalid_candidate_contract.
+  it("accepts optional producerAgentId/sourceIssueId and rejects malformed values", () => {
+    const base = {
+      assetType: "skill",
+      assetRef: "research-news-synthesis",
+      evidenceSource: ["issue:planning-1"],
+      pattern: "Repeatedly missed source freshness labels.",
+      proposedEdit: { operation: "add", section: "Validation checklist" },
+      validationPlan: "Replay against reference notes.",
+      gateOwner: "peer:validator",
+      autoAdoptionResult: "queued_for_validation",
+    };
+
+    const valid = buildMissionOwnerPlanRevisionDraft({
+      decision: {
+        ...baseDecision,
+        selfImprovementCandidates: [{ ...base, producerAgentId: "agent-42", sourceIssueId: "issue-7" }],
+      },
+      ...baseArgs,
+    });
+    expect(valid).toEqual({
+      ok: true,
+      draft: expect.objectContaining({
+        refs: expect.objectContaining({
+          selfImprovementCandidates: [{ ...base, producerAgentId: "agent-42", sourceIssueId: "issue-7" }],
+        }),
+      }),
+    });
+
+    const invalidValues = [
+      { producerAgentId: "" },
+      { producerAgentId: "   " },
+      { producerAgentId: 42 },
+      { producerAgentId: "x".repeat(101) },
+      { sourceIssueId: "" },
+      { sourceIssueId: null },
+      { sourceIssueId: ["issue-7"] },
+      { sourceIssueId: "x".repeat(101) },
+    ];
+    for (const invalid of invalidValues) {
+      const result = buildMissionOwnerPlanRevisionDraft({
+        decision: { ...baseDecision, selfImprovementCandidates: [{ ...base, ...invalid }] },
+        ...baseArgs,
+      });
+      expect(result).not.toEqual({ ok: true, draft: expect.anything() });
+      if (!result.ok) {
+        expect(
+          result.diagnostics.some((d) => /selfImprovementCandidates\[0\]\.(producerAgentId|sourceIssueId)/.test(d.message)),
+        ).toBe(true);
+      }
+    }
+  });
+
   it("requires rejectedEditNote only when self-improvement candidates are rejected", () => {
     const validBaseCandidate = {
       assetType: "skill",

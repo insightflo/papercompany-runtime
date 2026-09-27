@@ -129,6 +129,8 @@ Self-improvement candidate:
 
 Agents may propose these candidates during closeout. For bounded internal asset updates, adoption should be automatic once evidence, bounded patch, and validation gate pass; do not wait for user approval. Agents still must not silently mutate skills, rules, KB, workflow definitions, role harnesses, publish targets, or adapter configuration outside the current issue scope or without an agent/peer gate verdict. External side effects such as push, deploy, publish, credentials, or destructive cleanup remain outside this automatic adoption path.
 
+Self-improvement candidates may also carry two optional provenance fields: `producerAgentId` (the agent that produced the candidate) and `sourceIssueId` (the issue where the candidate was proposed). When an adoption is applied, the activity log records sha256 content hashes of the asset before and after the patch plus the producer when known, and a system comment is posted to the source issue within the same company (display only). A gate verdict recorded by the same agent that produced the candidate does not qualify that candidate — production and re-review must come from different entities.
+
 ### Adoption state and executor boundary
 
 Candidate storage and Mission Detail display are read-only surfaces. They do not apply patches. A future adoption executor should be a separate, approval-bounded runtime path with these gates:
