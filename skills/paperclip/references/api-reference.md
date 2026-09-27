@@ -241,9 +241,22 @@ POST /api/issues/{issueId}/workflow/verdict
 }
 ```
 
+On `request_changes`, include `findings` (one entry per blocking defect):
+
+```json
+{
+  "verdict": "request_changes",
+  "reason": "concise context",
+  "findings": [
+    { "id": "F1", "summary": "what is blocking", "layer": "artifact" }
+  ]
+}
+```
+
 Rules:
 
-- Valid verdicts are `pass` and `request_changes`.
+- Valid verdicts are `pass`, `request_changes`, and `insufficient_evidence` (`insufficient_evidence` records an abstention and does not satisfy the gate).
+- `request_changes` requires `findings`; each entry has `id`, `summary`, and `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). Keep `reason` concise.
 - Use this only on workflow QA or validation issues.
 - This writes the workflow validation ledger used by completion gates.
 

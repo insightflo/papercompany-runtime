@@ -141,7 +141,8 @@ function renderSourceScopeTag(findings: readonly WorkflowVerdictFinding[]): stri
  * [qa defect layer — 즉시 오너 에스컬레이션] findings 전부 source_data 인 generation 은 생산자 리셋/한도
  *   소모 없이 오너 카드로 즉시 넘긴다. 카드는 operator_decisions(기존 시스템)에 행만 추가하며, 해결 체인
  *   (continuation worker → owner wake → mission_owner_decision API)은 기존 것을 재사용한다(규칙 7).
- *   mission/oversight 이슈가 없으면 false 를 반환 — caller 는 기존 재작업 경로로 fail-closed 한다.
+ *   mission/oversight 이슈가 없거나 카드 확보에 실패하면(conflict/failed) false 를 반환 —
+ *   caller 는 기존 재작업 경로로 fail-closed 한다.
  */
 async function escalateQaSourceDefectToOwner(input: {
   readonly db: Db;
@@ -201,8 +202,10 @@ async function escalateQaSourceDefectToOwner(input: {
     },
   }).onConflictDoNothing();
 
-  // 2) interactive owner card — requestKey 멱등(회사+키 unique). 실패해도 라우팅 사실(1)은 남는다.
-  await ensureQaSourceDefectOwnerCard({
+  // 2) interactive owner card — requestKey 멱등(회사+키 unique). 카드 확보 실패(conflict/failed)면
+  //   에스컬레이션 성공이 아니다: false 를 반환해 caller 가 기존 재작업 경로로 fail-closed 한다.
+  //   라우팅 사실(1)은 어느 경우든 남는다(감사). created/replayed 만 카드 존재를 보증한다.
+  const card = await ensureQaSourceDefectOwnerCard({
     db,
     companyId: run.companyId,
     missionId: run.missionId,
@@ -214,7 +217,7 @@ async function escalateQaSourceDefectToOwner(input: {
     qaRefs,
     linkIssueId: oversight.id,
   });
-  return true;
+  return card.outcome === "created" || card.outcome === "replayed";
 }
 
 /**

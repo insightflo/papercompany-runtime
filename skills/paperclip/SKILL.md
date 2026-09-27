@@ -91,7 +91,7 @@ Workflow API closeout:
 
 - When your work creates a file artifact, register it with `POST /api/issues/{issueId}/workflow/artifacts` and an existing absolute local `path`. Do this after creating the file and before completing the issue.
 - When your workflow step publishes or verifies a public delivery URL, register that URL with `POST /api/issues/{issueId}/workflow/artifacts` using `type: "preview_url"` and `url`. Do this before completing the issue so delivery gates can read the official workProduct.
-- When your assignment is QA or validation, submit the official verdict with `POST /api/issues/{issueId}/workflow/verdict`. Valid verdicts: `pass`, `request_changes`.
+- When your assignment is QA or validation, submit the official verdict with `POST /api/issues/{issueId}/workflow/verdict`. Valid verdicts: `pass`, `request_changes`, `insufficient_evidence`. On `request_changes`, include `findings`: one entry per blocking defect with `id`, `summary`, `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). Keep `reason` concise.
 - Complete workflow execution issues with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.
 - Fallback only when the Workflow API is unavailable: leave a standalone final line `[ARTIFACT]: <absolute path>` for artifact recovery, then use the normal issue update route. Do not rely on transcript claims alone.
 If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
@@ -110,6 +110,10 @@ Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 POST /api/issues/{issueId}/workflow/verdict
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
 { "verdict": "pass", "reason": "Required checks passed." }
+
+POST /api/issues/{issueId}/workflow/verdict
+Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{ "verdict": "request_changes", "reason": "concise context", "findings": [{ "id": "F1", "summary": "what is blocking", "layer": "artifact" }] }
 
 POST /api/issues/{issueId}/workflow/complete
 Headers: X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
