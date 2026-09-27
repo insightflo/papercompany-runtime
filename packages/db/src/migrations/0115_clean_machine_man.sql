@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "plugin_webhook_deliveries_external_idx" ON "plugin_webhook_deliveries" USING btree ("plugin_id","webhook_key","external_id");
