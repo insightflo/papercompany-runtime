@@ -11036,130 +11036,156 @@ export function heartbeatService(db: Db) {
       return newRun;
     }
 
-    const activeRuns = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
-      .orderBy(desc(heartbeatRuns.createdAt));
+    // [mention-wake serialization] 잠긴 경로와 같은 입장 로직을 db/tx 양쪽에서 재사용한다.
+    // 논리·필드는 기존 제네릭 입장과 동일하고, 실행기(execDb)만 갈린다.
+    const admitUnlockedRun = async (execDb: Db) => {
+      const activeRuns = await execDb
+        .select()
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
+        .orderBy(desc(heartbeatRuns.createdAt));
 
-    const sameScopeQueuedRun = activeRuns.find(
-      (candidate) => candidate.status === "queued" && isSameTaskScope(runTaskKey(candidate), taskKey),
-    );
-    const sameScopeRunningRun = activeRuns.find(
-      (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
-    );
-    const shouldQueueFollowupForCommentWake =
-      Boolean(wakeCommentId) && Boolean(sameScopeRunningRun) && !sameScopeQueuedRun;
-
-    const coalescedTargetRun =
-      sameScopeQueuedRun ??
-      (shouldQueueFollowupForCommentWake ? null : sameScopeRunningRun ?? null);
-
-    if (coalescedTargetRun) {
-      const mergedContextSnapshot = mergeCoalescedContextSnapshot(
-        coalescedTargetRun.contextSnapshot,
-        contextSnapshot,
+      const sameScopeQueuedRun = activeRuns.find(
+        (candidate) => candidate.status === "queued" && isSameTaskScope(runTaskKey(candidate), taskKey),
       );
-      refreshStepInputManifest(mergedContextSnapshot, runTaskKey(coalescedTargetRun));
-      const mergedRun = await db
-        .update(heartbeatRuns)
+      const sameScopeRunningRun = activeRuns.find(
+        (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
+      );
+      const shouldQueueFollowupForCommentWake =
+        Boolean(wakeCommentId) && Boolean(sameScopeRunningRun) && !sameScopeQueuedRun;
+
+      const coalescedTargetRun =
+        sameScopeQueuedRun ??
+        (shouldQueueFollowupForCommentWake ? null : sameScopeRunningRun ?? null);
+
+      if (coalescedTargetRun) {
+        const mergedContextSnapshot = mergeCoalescedContextSnapshot(
+          coalescedTargetRun.contextSnapshot,
+          contextSnapshot,
+        );
+        refreshStepInputManifest(mergedContextSnapshot, runTaskKey(coalescedTargetRun));
+        const mergedRun = await execDb
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: mergedContextSnapshot,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
+          .returning()
+          .then((rows) => rows[0] ?? coalescedTargetRun);
+
+        await execDb.insert(agentWakeupRequests).values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "coalesced",
+          coalescedCount: 1,
+          ...typedQueueColumns,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+          runId: mergedRun.id,
+          finishedAt: new Date(),
+        });
+        return { run: mergedRun, coalesced: true };
+      }
+
+      const wakeupRequest = await execDb
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          ...typedQueueColumns,
+          status: "queued",
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      const wakeupMissionId = readNonEmptyString(enrichedContextSnapshot.missionId);
+      const wakeupEffectiveTaskKey = wakeupMissionId ? `mission:${wakeupMissionId}` : taskKey;
+      const sessionBefore = await resolveSessionBeforeForWakeup(agent, wakeupEffectiveTaskKey, {
+        missionId: wakeupMissionId,
+      });
+
+      const newRun = await execDb
+        .insert(heartbeatRuns)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          issueId,
+          invocationSource: source,
+          triggerDetail,
+          status: "queued",
+          wakeupRequestId: wakeupRequest.id,
+          contextSnapshot: {
+            ...enrichedContextSnapshot,
+            dispatchGeneration: await resolveNextDispatchGeneration(execDb, {
+              agentId: agentId,
+              issueId,
+              taskKey,
+            }),
+          },
+          sessionIdBefore: sessionBefore,
+        })
+        .returning()
+        .then((rows) => rows[0]);
+
+      await execDb
+        .update(agentWakeupRequests)
         .set({
-          contextSnapshot: mergedContextSnapshot,
+          runId: newRun.id,
           updatedAt: new Date(),
         })
-        .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
-        .returning()
-        .then((rows) => rows[0] ?? coalescedTargetRun);
+        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
 
-      await db.insert(agentWakeupRequests).values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        status: "coalesced",
-        coalescedCount: 1,
-        ...typedQueueColumns,
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-        runId: mergedRun.id,
-        finishedAt: new Date(),
+      return { run: newRun, coalesced: false };
+    };
+
+    // [mention-wake serialization] issueId 있는 코멘트-멘션 우회 깨움의 런 입장도 잠긴
+    // 경로와 같은 직렬화 객체 — 같은 이슈 행 FOR UPDATE + withTxTimeout — 아래에서
+    // 실행한다(동시 멘션 깨움의 런 중복 입장과 세대 경쟁, 멘션 × 일반 깨움의 교차-커밋
+    // 경쟁을 입장 단계에서 차단). 우회 의미론은 유지: 이 트랜잭션은 issues 의
+    // executionRunId/executionLockedAt 등 어느 필드도 쓰지 않고 직렬화 잠금만 가져간다.
+    const admission = issueId
+      ? await withTxTimeout(
+          db,
+          async (tx) => {
+            await tx.execute(
+              sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
+            );
+            return admitUnlockedRun(tx as unknown as Db);
+          },
+          { label: "enqueueWakeup:mention-admission" },
+        )
+      : await admitUnlockedRun(db);
+
+    if (!admission.coalesced) {
+      publishLiveEvent({
+        companyId: admission.run.companyId,
+        type: "heartbeat.run.queued",
+        payload: {
+          runId: admission.run.id,
+          agentId: admission.run.agentId,
+          invocationSource: admission.run.invocationSource,
+          triggerDetail: admission.run.triggerDetail,
+          wakeupRequestId: admission.run.wakeupRequestId,
+        },
       });
-      return mergedRun;
+
+      await startNextQueuedRunForAgent(agent.id);
     }
 
-    const wakeupRequest = await db
-      .insert(agentWakeupRequests)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        ...typedQueueColumns,
-        status: "queued",
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-      })
-      .returning()
-      .then((rows) => rows[0]);
-
-    const wakeupMissionId = readNonEmptyString(enrichedContextSnapshot.missionId);
-    const wakeupEffectiveTaskKey = wakeupMissionId ? `mission:${wakeupMissionId}` : taskKey;
-    const sessionBefore = await resolveSessionBeforeForWakeup(agent, wakeupEffectiveTaskKey, {
-      missionId: wakeupMissionId,
-    });
-
-    const newRun = await db
-      .insert(heartbeatRuns)
-      .values({
-        companyId: agent.companyId,
-        agentId,
-        issueId,
-        invocationSource: source,
-        triggerDetail,
-        status: "queued",
-        wakeupRequestId: wakeupRequest.id,
-        contextSnapshot: {
-          ...enrichedContextSnapshot,
-          dispatchGeneration: await resolveNextDispatchGeneration(db, {
-            agentId: agentId,
-            issueId,
-            taskKey,
-          }),
-        },
-        sessionIdBefore: sessionBefore,
-      })
-      .returning()
-      .then((rows) => rows[0]);
-
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        runId: newRun.id,
-        updatedAt: new Date(),
-      })
-      .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-
-    publishLiveEvent({
-      companyId: newRun.companyId,
-      type: "heartbeat.run.queued",
-      payload: {
-        runId: newRun.id,
-        agentId: newRun.agentId,
-        invocationSource: newRun.invocationSource,
-        triggerDetail: newRun.triggerDetail,
-        wakeupRequestId: newRun.wakeupRequestId,
-      },
-    });
-
-    await startNextQueuedRunForAgent(agent.id);
-
-    return newRun;
+    return admission.run;
   }
 
   async function listProjectScopedRunIds(companyId: string, projectId: string) {
