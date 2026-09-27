@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { applySelfImprovementAdoptionPlan } from "../services/self-improvement-adoption-executor.js";
@@ -40,17 +41,18 @@ function makeMemoryAssetStore(initial: Record<string, string>) {
 
 describe("applySelfImprovementAdoptionPlan", () => {
   it("applies a bounded section patch only after validation PASS", async () => {
+    const initialContent = [
+      "# Research News Synthesis",
+      "",
+      "## Validation checklist",
+      "- Check title.",
+      "",
+      "## Pitfalls",
+      "- Do not overclaim.",
+      "",
+    ].join("\n");
     const assetStore = makeMemoryAssetStore({
-      "skills/research-news-synthesis/SKILL.md": [
-        "# Research News Synthesis",
-        "",
-        "## Validation checklist",
-        "- Check title.",
-        "",
-        "## Pitfalls",
-        "- Do not overclaim.",
-        "",
-      ].join("\n"),
+      "skills/research-news-synthesis/SKILL.md": initialContent,
     });
 
     const result = await applySelfImprovementAdoptionPlan({
@@ -71,11 +73,33 @@ describe("applySelfImprovementAdoptionPlan", () => {
         section: "Validation checklist",
         validationVerdict: "PASS",
         applied: true,
+        contentHashBefore: createHash("sha256").update(initialContent).digest("hex"),
+        contentHashAfter: createHash("sha256").update(assetStore.assets.get("skills/research-news-synthesis/SKILL.md")!).digest("hex"),
         adoptedFromPatternIds: [],
       },
     ]);
     expect(assetStore.writes).toHaveLength(1);
     expect(assetStore.assets.get("skills/research-news-synthesis/SKILL.md")).toContain("- Check title.\n- Verify source date");
+  });
+
+  // [자동수선 증거] applied entry의 before/after 해시는 실제 자산 내용의 sha256과 일치해야 한다.
+  it("records sha256 contentHashBefore/After matching the actual asset contents", async () => {
+    const initialContent = "# Research News Synthesis\n\n## Validation checklist\n- Check title.\n";
+    const assetStore = makeMemoryAssetStore({
+      "skills/research-news-synthesis/SKILL.md": initialContent,
+    });
+
+    const result = await applySelfImprovementAdoptionPlan({
+      plan: [basePlanEntry],
+      assetStore,
+      validationRunner: async () => ({ verdict: "PASS" }),
+    });
+
+    const expectedBefore = createHash("sha256").update(initialContent).digest("hex");
+    const expectedAfter = createHash("sha256").update(assetStore.writes[0]!.content).digest("hex");
+    expect(result.applied[0]?.contentHashBefore).toBe(expectedBefore);
+    expect(result.applied[0]?.contentHashAfter).toBe(expectedAfter);
+    expect(result.applied[0]?.contentHashBefore).not.toBe(result.applied[0]?.contentHashAfter);
   });
 
   it("fails closed and does not write when validation fails or the target section is missing", async () => {

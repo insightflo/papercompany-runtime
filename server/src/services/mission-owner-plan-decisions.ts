@@ -615,6 +615,17 @@ function validateSelfImprovementCandidateContract(
   if (!isNonEmptyString(candidate.gateOwner)) {
     diagnostics.push({ code: "invalid_candidate_contract", message: `${prefix}.gateOwner is required` });
   }
+  // [자동수선 근거] 선택 필드 — 값이 있으면 앞뒤 trim 기준 non-empty string이고 100자 이하.
+  for (const field of ["producerAgentId", "sourceIssueId"] as const) {
+    const value = candidate[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.trim() === "" || value.trim().length > 100) {
+      diagnostics.push({
+        code: "invalid_candidate_contract",
+        message: `${prefix}.${field} must be a non-empty string (max 100 chars) when present`,
+      });
+    }
+  }
   if (!isNonEmptyString(candidate.autoAdoptionResult) || !SELF_IMPROVEMENT_RESULTS.has(candidate.autoAdoptionResult)) {
     diagnostics.push({
       code: "invalid_candidate_contract",
