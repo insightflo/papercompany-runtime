@@ -1727,6 +1727,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(qaDescription).toContain("Workflow API closeout:");
     expect(qaDescription).toContain("/workflow/verdict");
     expect(qaDescription).toContain("/workflow/complete");
+    // [findings 계약 교육] closeout 도 findings 병기 계약을 가르친다 — 루브릭과 동일 스키마.
+    expect(qaDescription).toContain("`REQUEST_CHANGES` requires `findings`");
+    expect(qaDescription).toContain("one entry per blocking defect with `id`, `summary`, `layer`");
+    expect(qaDescription).toContain("`REQUEST_CHANGES` requires one findings entry per blocking defect");
     expect(qaDescription).not.toContain("Check Top25 rank coverage");
     expect(qaDescription).not.toContain("collection timestamp, fallback notes");
     expect(qaDescription).not.toContain("Deliverable output (use exactly this directory):");
@@ -1748,7 +1752,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("REQUEST_CHANGES only for an observed blocking defect");
     expect(rubric).toContain("A failed checklist item or probe is evidence to assess, not an automatic blocking verdict");
     expect(rubric).toContain("Return `PASS` when no blocking defect remains");
-    expect(rubric).toContain("Explain the material consequence that makes each requested change blocking");
+    // [findings 계약 교육] REQUEST_CHANGES 는 findings 병기가 공식 계약 — reason-글쩍 단독 가르침은 소멸.
+    expect(rubric).toContain("must carry `findings` — one entry per blocking defect");
+    expect(rubric).toContain("`artifact` = the produced deliverable, `source_data` = upstream source data");
+    expect(rubric).toContain("mislayered findings are themselves recorded as verdict-quality defects");
+    expect(rubric).toContain("Keep `reason` to concise human context");
+    expect(rubric).not.toContain("REQUEST_CHANGES: <specific gaps>");
+    expect(rubric).not.toContain("End the final answer with one clear verdict");
     expect(rubric).not.toContain("Return `PASS` only when the dependency workProducts meet every criterion above");
     expect(rubric).not.toContain("when any criterion is missing, ambiguous, stale, or unsupported");
     expect(rubric).not.toContain("5-axis scoring");

@@ -97,7 +97,7 @@ export function synthesizeDeliveryVerificationGateStep(input: {
       "",
       buildDeliveryVerificationCriteria(),
       "",
-      "Finish your run output with exactly one standalone final line: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
+      "Submit the official verdict via the Workflow API: `PASS` or `REQUEST_CHANGES` with `findings` — one entry (`id`, `summary`, `layer`) per blocking defect. A prose final line is not a submission.",
     ].join("\n"),
   };
 }

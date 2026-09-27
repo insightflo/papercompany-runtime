@@ -632,7 +632,7 @@ async function writeQaRubricMarkdown(input: {
           "## Missing dependency hard-stop",
           "",
           ...input.missingDependencyWorkProductLines,
-          "- If this step needs the missing dependency deliverable, return `REQUEST_CHANGES: <specific missing workProduct>` instead of guessing from the filesystem.",
+          "- If this step needs the missing dependency deliverable, submit `REQUEST_CHANGES` with a findings entry naming the missing workProduct instead of guessing from the filesystem.",
           "",
         ]
       : []),
@@ -640,8 +640,9 @@ async function writeQaRubricMarkdown(input: {
     "",
     "- Read the dependency workProduct files directly when paths are provided.",
     "- Return `PASS` when no blocking defect remains, even if nonblocking limitations or optional improvements remain.",
-    "- Return `REQUEST_CHANGES: <specific gaps>` only for blocking defects. Explain the material consequence that makes each requested change blocking.",
-    "- End the final answer with one clear verdict: `PASS` or `REQUEST_CHANGES: <specific gaps>`.",
+    "- On `REQUEST_CHANGES`, the verdict API body must carry `findings` — one entry per blocking defect: `id`, `summary`, `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). `findings` are the durable rework checklist; mislayered findings are themselves recorded as verdict-quality defects.",
+    "- Keep `reason` to concise human context; detailed defect content belongs in `findings`. Example body: `{\"verdict\":\"request_changes\",\"findings\":[{\"id\":\"F1\",\"summary\":\"...\",\"layer\":\"artifact|source_data\"}]}`",
+    "- `INSUFFICIENT_EVIDENCE` records an abstention (name the missing evidence in `reason`); it does not satisfy this gate.",
     "",
   ].join("\n");
   await writeFile(input.filePath, body, "utf8");
@@ -661,6 +662,7 @@ function buildWorkflowApiCloseoutLines(input: {
   }
   if (input.requiresVerdict) {
     lines.push("- Submit the official `PASS`, `REQUEST_CHANGES`, or `INSUFFICIENT_EVIDENCE` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");
+    lines.push("- `REQUEST_CHANGES` requires `findings`: one entry per blocking defect with `id`, `summary`, `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). Example: `{\"verdict\":\"request_changes\",\"findings\":[{\"id\":\"F1\",\"summary\":\"...\",\"layer\":\"artifact\"}]}`. Keep `reason` concise.");
     lines.push("- Use `INSUFFICIENT_EVIDENCE` only when the evidence needed to judge is genuinely missing; list what is missing in `reason` (required). It records an abstention — it does not satisfy this gate and does not trigger producer rework.");
   }
   lines.push("- Complete this workflow issue with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.");
@@ -834,7 +836,7 @@ async function commentOnValidationRecheckQueued(input: {
             "",
             "Missing dependency hard-stop:",
             ...missingWorkProductLines,
-            "- If this validation needs a missing dependency deliverable, return `REQUEST_CHANGES: <specific missing workProduct>`.",
+            "- If this validation needs a missing dependency deliverable, submit `REQUEST_CHANGES` with a findings entry naming the missing workProduct.",
           ]
         : []),
     ].join("\n"),
@@ -1635,7 +1637,7 @@ async function createWorkflowStepIssue(input: {
     qaRubricPath ? "QA grading rubric:" : null,
     qaRubricPath ? `- ${qaRubricPath}` : null,
     qaRubricPath ? "- Read the rubric file before judging the dependency workProducts. Do not invent extra criteria in the issue body." : null,
-    qaRubricPath ? "- Finish with exactly `PASS` or `REQUEST_CHANGES: <specific gaps>`." : null,
+    qaRubricPath ? "- Submit the official verdict via the Workflow API closeout below; `REQUEST_CHANGES` requires one findings entry per blocking defect." : null,
     qaRubricPath ? null : renderedStepDescription,
     ...buildStepContractDescriptionLines({ contract: input.step.contract, run: input.run }),
     ...structuralGateCoverageLines,

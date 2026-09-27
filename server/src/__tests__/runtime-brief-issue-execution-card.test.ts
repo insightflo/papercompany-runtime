@@ -60,6 +60,21 @@ describe("buildPaperclipRuntimeBrief issue execution card", () => {
     expect(brief).toContain("Agent instructions injection: compact (instructionhash123)");
   });
 
+  it("flags findings on REQUEST_CHANGES in the verdict closeout when a verdict is required", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      paperclipIssueExecutionCardHash: "cardhash-verdict",
+      paperclipIssueExecutionCard: {
+        requiredOutputs: {
+          verdict: { required: true, ledger: "workflow_validation_verdict", allowed: ["PASS", "REQUEST_CHANGES", "INSUFFICIENT_EVIDENCE"] },
+        },
+        workflow: { stepId: "qa-validate", runId: "run-abc", dependencyStepIds: [] },
+      },
+    });
+    // [findings 계약 교육] 카드 표면도 루브릭/closeout 과 동일 계약을 가리킨다(3표면 일관).
+    expect(brief).toContain("submit verdict with /workflow/verdict (+findings on REQUEST_CHANGES)");
+    expect(brief).toContain("complete with /workflow/complete");
+  });
+
   it("omits the card section when no execution card is present", () => {
     const brief = buildPaperclipRuntimeBrief({
       paperclipIssueExecutionCardHash: null,
