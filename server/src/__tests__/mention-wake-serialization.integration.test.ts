@@ -88,32 +88,49 @@ describeDb("mention-wake admission serialization", () => {
       .set({ status: "failed", finishedAt: new Date(), error: "test-teardown-drain" })
       .where(inArray(heartbeatRuns.status, ["queued", "running"]));
     await new Promise((resolve) => setTimeout(resolve, 100));
-    await db.delete(activityLog);
-    await db.delete(workflowTransitionEvents);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(costEvents);
-    await db.delete(executionWorkspaces);
-    await db.delete(workspaceRuntimeServices);
-    await db.delete(issueWorkProducts);
-    await db.delete(issueDocuments);
-    await db.delete(documentRevisions);
-    await db.delete(documents);
-    await db.delete(issueComments);
-    await db.delete(qualityReviewItems);
-    await db.delete(issues);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(agentKbGrants);
-    await db.delete(knowledgeBases);
-    await db.delete(companySecretVersions);
-    await db.delete(companySecrets);
-    await db.delete(agentTaskSessions);
-    await db.delete(agentRuntimeState);
-    await db.delete(toolDefinitions);
-    await db.delete(companySkills);
-    await db.delete(assets);
-    await db.delete(agents);
-    await db.delete(companies);
+    // [플레이크 루트원인(c)] 이전 테스트의 백그라운드 승격/실행 셋업이 delete 사이에 자식 행
+    //   (agent_runtime_state, company_skills, ...)을 재생성해 FK 위반으로 beforeEach 가 죽는
+    //   경합 — 전체 삭제 체인을 유계 재시도로 감싸 흡수한다(새 자식부터 다시 지우며 수렴).
+    const deleteAll = async () => {
+      await db.delete(activityLog);
+      await db.delete(workflowTransitionEvents);
+      await db.delete(heartbeatRunEvents);
+      await db.delete(costEvents);
+      await db.delete(executionWorkspaces);
+      await db.delete(workspaceRuntimeServices);
+      await db.delete(issueWorkProducts);
+      await db.delete(issueDocuments);
+      await db.delete(documentRevisions);
+      await db.delete(documents);
+      await db.delete(issueComments);
+      await db.delete(qualityReviewItems);
+      await db.delete(issues);
+      await db.delete(heartbeatRuns);
+      await db.delete(agentWakeupRequests);
+      await db.delete(agentKbGrants);
+      await db.delete(knowledgeBases);
+      await db.delete(companySecretVersions);
+      await db.delete(companySecrets);
+      await db.delete(agentTaskSessions);
+      await db.delete(agentRuntimeState);
+      await db.delete(toolDefinitions);
+      await db.delete(companySkills);
+      await db.delete(assets);
+      await db.delete(agents);
+      await db.delete(companies);
+    };
+    let teardownError: unknown = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        await deleteAll();
+        teardownError = null;
+        break;
+      } catch (error) {
+        teardownError = error;
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    if (teardownError) throw teardownError;
     companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Mention Co", issuePrefix: `M${companyId.slice(0, 4)}` });
     assigneeId = randomUUID();
@@ -125,7 +142,9 @@ describeDb("mention-wake admission serialization", () => {
       id: issueId,
       companyId,
       title: "Mention work",
-      status: "open",
+      // [플레이크 루트원인] 체크아웃 가능 상태로 생성해야 한다 — ISSUE_RUN_START_STATUSES 에
+      //   'open' 이 없어서, 일반 깨움이 먼저 이기면 CAS 가 조용히 0행 처리되고 (b)가 확률 실패했다.
+      status: "todo",
       assigneeAgentId: assigneeId,
     });
   });
@@ -255,7 +274,7 @@ describeDb("mention-wake admission serialization", () => {
     expect(issue.executionLockedAt).toBeNull();
     expect(issue.executionAgentNameKey).toBeNull();
     expect(issue.checkoutRunId).toBeNull();
-    expect(issue.status).toBe("open");
+    expect(issue.status).toBe("todo");
 
     const [runRow] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
     expect(runRow).toBeTruthy();

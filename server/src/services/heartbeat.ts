@@ -10636,6 +10636,17 @@ export function heartbeatService(db: Db) {
           });
         }
 
+        // [checkout CAS 미적용 가시화] 이슈 상태가 ISSUE_RUN_START_STATUSES 밖(예: 'open')이면
+        //   위 CAS 는 조용히 0행 처리된다 — 런은 입장했지만 실행락(issues.execution*)은 걸리지
+        //   않았다. 호환을 위해 동작은 그대로 두되(승격/실행은 계속), 이 상태를 진단 이벤트로
+        //   노출해 무잠금 입장이 조용히 사라지지 않게 한다(mention-wake 플레이크 RCA 2026-09-28).
+        if (!startedIssue) {
+          logger.warn(
+            { issueId: issue.id, issueStatus: issue.status, runId: newRun.id, agentId },
+            "issue checkout CAS matched no row: run admitted without execution lock",
+          );
+        }
+
         return { kind: "queued" as const, run: newRun };
       });
 
