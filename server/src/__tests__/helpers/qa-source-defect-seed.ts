@@ -33,11 +33,24 @@ export type QaSourceDefectSeedDb = ReturnType<typeof createDb>;
 export async function seedQaSourceDefectScenario(
   db: QaSourceDefectSeedDb,
   findings: unknown[] | null,
+  options?: {
+    /** 직전 세대 반려 findings — 지정 시 같은 QA stepRun 에 더 이른 판정 이벤트를 적재한다(재발 감지용). */
+    readonly priorFindings?: unknown[] | null;
+    /** 직전 세대 판정 관측 시각(기본: 생산자 완료 이전 10분 — 세대 경계 가드 통과). */
+    readonly priorObservedAt?: Date;
+  },
 ) {
-  return insertScenario(db, findings);
+  return insertScenario(db, findings, options);
 }
 
-async function insertScenario(db: QaSourceDefectSeedDb, findings: unknown[] | null) {
+async function insertScenario(
+  db: QaSourceDefectSeedDb,
+  findings: unknown[] | null,
+  options?: {
+    readonly priorFindings?: unknown[] | null;
+    readonly priorObservedAt?: Date;
+  },
+) {
   const companyId = randomUUID();
   const ownerId = randomUUID();
   const missionId = randomUUID();
@@ -83,6 +96,33 @@ async function insertScenario(db: QaSourceDefectSeedDb, findings: unknown[] | nu
   const [qaStepRun] = await db.insert(workflowStepRuns).values({
     workflowRunId: runId, stepId: "qa-validate", companyId, issueId: qaIssue[0]!.id, status: "failed",
   }).returning({ id: workflowStepRuns.id });
+
+  // [qa layer feedback loop] 직전 세대 반려 이벤트(선택) — 같은 QA stepRun 행 재사용 모델에서
+  //   세대별 판정이 누적되는 상황을 시드한다. 기본 관측 시각은 생산자 완료 이전(정상 재발 시나리오).
+  if (options?.priorFindings) {
+    const priorHeartbeatId = randomUUID();
+    const priorObservedAt = options.priorObservedAt ?? new Date(Date.now() - 600_000);
+    await db.insert(heartbeatRuns).values({
+      id: priorHeartbeatId, companyId, agentId: ownerId, issueId: qaIssue[0]!.id, status: "succeeded",
+      startedAt: new Date(priorObservedAt.getTime() - 60_000), finishedAt: priorObservedAt,
+    });
+    await db.insert(workflowTransitionEvents).values({
+      companyId, missionId, workflowRunId: runId, workflowStepRunId: qaStepRun!.id, issueId: qaIssue[0]!.id,
+      heartbeatRunId: priorHeartbeatId, eventType: "workflow_validation_verdict", layer: "workflow_validation",
+      verdict: "request_changes", decision: "request_changes", reason: "workflow_api", reasonCode: "workflow_api",
+      createdAt: priorObservedAt,
+      idempotencyKey: `src-defect-verdict-prior:${qaStepRun!.id}`,
+      payload: {
+        kind: "workflow_validation_verdict",
+        workflowRunId: runId,
+        stepRunId: qaStepRun!.id,
+        issueId: qaIssue[0]!.id,
+        verdict: "request_changes",
+        reason: "prior generation rejection.",
+        findings: options.priorFindings,
+      },
+    });
+  }
 
   // Official workflow_api request_changes verdict bound to a checked-out heartbeat run scoped to the QA issue.
   const qaHeartbeatId = randomUUID();

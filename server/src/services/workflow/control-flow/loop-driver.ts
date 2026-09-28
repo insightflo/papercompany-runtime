@@ -15,9 +15,11 @@
  *   1. cancelled 거부 / conditional edge 없으면 no-op.
  *   2. 각 step 중 back-edge 를 가진 terminal step 에 대해:
  *      classifyStepActivation.runnable && iteration_index<maxIterations → resetStepRunForRework(attempt archive).
- *   2b. [qa defect layer routing] 반려 QA 의 공식 findings 전부 source_data(원천 데이터 결함) 면
- *      생산자 리셋/한도 소모 없이 즉시 오너 카드(operator_decisions)로 에스컬레이션하고 이 step 을 skip.
- *      혼재(artifact 포함)면 기존 재작업 경로 + 오너 카드 병행, 미제출(구버전 판정)이면 카드 없이 기존 경로.
+ *   2b. [qa defect layer routing] 반려 QA 의 공식 findings 의 유효 계층(재발 승격 반영)이 전부
+ *      source_data(원천 데이터 결함) 면 생산자 리셋/한도 소모 없이 즉시 오너 카드(operator_decisions)
+ *      로 에스컬레이션하고 이 step 을 skip. 혼재(artifact 포함)면 기존 재작업 경로 + 오너 카드 병행,
+ *      미제출(구버전 판정)이면 카드 없이 기존 경로. 재발(직전 세대 같은 finding id)은 유효 계층
+ *      source_data 로 승격된다(qa layer feedback loop — 선언 계층은 판정 payload 에 불변).
  *   3. 리셋 발생 시 stepRuns 재조회 반환.
  * [외부 연결] consumer: dag-engine.ts syncWorkflowRunState(skip-pass 직후, launch while-loop 직전).
  *   의존: edge-condition(classifyStepActivation/resolveEdges/workflowHasConditionalEdges, PredFacts),
@@ -47,10 +49,10 @@ import { resetStepRunForRework } from "./step-reset.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
-import { buildWorkflowReworkContract, renderWorkflowReworkComment } from "./rework-contract.js";
+import { buildWorkflowReworkContract, renderSourceScopeTag, renderWorkflowReworkComment, applyRecurrencePromotion } from "./rework-contract.js";
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
-import { loadWorkflowApiFeedback, loadWorkflowApiFindings } from "../validation-verdict-ledger.js";
+import { loadWorkflowApiFeedback, loadWorkflowApiFindings, loadPriorRejectedFindings } from "../validation-verdict-ledger.js";
 import { tryQaRemediationPass } from "./qa-remediation.js";
 import { readCapBoostAmount, type StepIterationAttempt } from "./types.js";
 import {
@@ -126,15 +128,12 @@ async function loadQaReworkFeedback(input: {
 interface RejectedQaWithFindings {
   readonly qaStepId: string;
   readonly qaIssueId: string | null;
+  /** 선언 계층 findings — 판정 이벤트 payload 원본(감사/카드 입력). 불변 값이다(설계 §4.4). */
   readonly findings: readonly WorkflowVerdictFinding[] | null;
-}
-
-/** findings 병기 태그 — 원천 결함 항목을 생산자 재작업 계약 feedback 에 구조적으로 병기한다(표시 전용). */
-function renderSourceScopeTag(findings: readonly WorkflowVerdictFinding[]): string {
-  const lines = findings
-    .filter((finding) => finding.layer === "source_data")
-    .map((finding) => `- (${finding.id}) ${finding.summary}`);
-  return ["#### [생산자 범위 밖 — 원천 데이터 결함] 아래 항목은 원천(수집) 산출물 결함으로 생산자가 고칠 수 없습니다. 원천 라우팅 대상입니다:", ...lines].join("\n");
+  /** 유효 계층 findings — 재발 승격 반영. 라우팅/remediation 판정/태그 렌더 기준. */
+  readonly effectiveFindings: readonly WorkflowVerdictFinding[] | null;
+  /** 재발 승격된 finding id(선언 artifact → 유효 source_data 로 승격된 항목만). */
+  readonly promotedFindingIds: readonly string[];
 }
 
 /**
@@ -197,6 +196,8 @@ async function escalateQaSourceDefectToOwner(input: {
       iteration: input.iteration,
       maxIterations: input.maxIterations,
       findings,
+      // [qa layer feedback loop] 재발 승격 근거(감사/표시 전용) — findings 는 선언 계층 원본 그대로.
+      promotedFindingIds: input.rejectedQas.flatMap((qa) => qa.promotedFindingIds),
       qaRefs,
       cardRequestKey: requestKey,
     },
@@ -298,10 +299,13 @@ export async function applyBackEdgeReworkPass(
     const currentIteration = stepRun.iterationIndex ?? 0;
 
     // [qa defect layer routing] 각 fresh 반려 QA 의 구조화 findings 를 공식 verdict 이벤트에서만 로드한다.
-    //   (a) findings 전부 source_data → 생산자 리셋 스킵/한도 미소모 + 즉시 오너 카드 에스컬레이션.
-    //   (b) artifact 계층 혼재 → 기존 재작업 경로(리셋)를 그대로 밟되 오너 카드를 병행 생성하고,
-    //       source_data 항목은 재작업 계약 feedback 에 '생산자 범위 밖' 태그로 병기한다.
+    //   (a) 유효 계층 전부 source_data(선언 원천 전부 또는 재발 승격) → 생산자 리셋 스킵/한도 미소모 +
+    //       즉시 오너 카드 에스컬레이션.
+    //   (b) 유효 계층 혼재 → 기존 재작업 경로(리셋)를 그대로 밟되 오너 카드를 병행 생성하고, 유효
+    //       source_data 항목(선언+재발 승격)은 재작업 계약 feedback 에 '생산자 범위 밖' 태그로 병기한다.
     //   (c) findings 미제출(구버전 판정) → 기존 동작 100% 유지, 카드 없음(fail-closed).
+    //   [qa layer feedback loop] 재발 감지는 fresh 반려(filterFreshRejectedQas 통과)에만 적용하고,
+    //   세대 경계 가드(직전 판정이 이번 생산자 세대 완료 이전 관측)는 ledger 헬퍼가 담당한다(§4.4).
     const rejectedWithFindings: RejectedQaWithFindings[] = [];
     for (const q of rejectedQas) {
       // 구조 권위 경로: QA issue/run/stepRun 바인딩이 온전할 때만 공식 verdict 이벤트에서 findings 를 읽는다.
@@ -314,15 +318,30 @@ export async function applyBackEdgeReworkPass(
             workflowStepRunId: q.qaRun.id,
           })
         : null;
+      // 직전 세대 반려 findings — 같은 finding id 완전 일치 항목을 재발로 승격한다(유효 계층 계산).
+      const priorFindings = q.qaRun?.issueId && q.qaRun?.id && producerCompletedAt
+        ? await loadPriorRejectedFindings({
+            db,
+            companyId: run.companyId,
+            issueId: q.qaRun.issueId,
+            workflowRunId: q.qaRun.workflowRunId ?? run.id,
+            workflowStepRunId: q.qaRun.id,
+            notAfter: producerCompletedAt,
+          })
+        : null;
+      const promotion = applyRecurrencePromotion(findings, priorFindings);
       rejectedWithFindings.push({
         qaStepId: q.edge.stepId,
         qaIssueId: q.qaRun?.issueId ?? null,
         findings,
+        effectiveFindings: findings ? promotion.findings : null,
+        promotedFindingIds: promotion.promotedFindingIds,
       });
     }
     const allFindingsPresent = rejectedWithFindings.every((qa) => (qa.findings?.length ?? 0) > 0);
+    // 계층 판정은 유효 계층 기준 — 재발 승격 항목도 source_data 로 센다(선언 계층은 payload 에 불변).
     const allSourceData = allFindingsPresent
-      && rejectedWithFindings.every((qa) => qa.findings!.every((finding) => finding.layer === "source_data"));
+      && rejectedWithFindings.every((qa) => qa.effectiveFindings!.every((finding) => finding.layer === "source_data"));
     if (allFindingsPresent) {
       // 구조화 findings 가 있으면(원천-only 또는 혼합) 오너 카드를 띄운다 — 원천-only 는 리셋을 대체하고,
       //       혼합은 기존 재작업 경로와 병행한다(운영자가 원천 부분을 조기에 볼 수 있다).
@@ -354,8 +373,10 @@ export async function applyBackEdgeReworkPass(
     //   remediations 미제출/하드블록 게이트/시도 상한 초과면 not_applicable → 아래 기존 재작업 경로로 폴백.
     //   "waiting" = 해당 verdict 들은 이미 remediation 적용된 상태(재QA 대기 중) → 재작업도 스킵.
     if (input.refireQaStep) {
+      // [qa layer feedback loop] 유효 계층 findings 를 넘긴다 — 재발 승격 항목이 있으면 선언 source_data 와
+      //   동일 취급으로 not_applicable 이 발동한다(기계적 수정이 원천 결함을 고칠 수 없으므로).
       const findingsByQaStepId = new Map<string, readonly WorkflowVerdictFinding[] | null>(
-        rejectedWithFindings.map((r) => [r.qaStepId, r.findings]),
+        rejectedWithFindings.map((r) => [r.qaStepId, r.effectiveFindings]),
       );
       const remediation = await tryQaRemediationPass({
         db,
@@ -390,7 +411,11 @@ export async function applyBackEdgeReworkPass(
     const qaFeedbacks = [];
     for (const q of rejectedQas) {
       const layered = rejectedWithFindings.find((r) => r.qaStepId === q.edge.stepId) ?? null;
-      const sourceFindings = layered?.findings?.filter((finding) => finding.layer === "source_data") ?? [];
+      const promotedIds = new Set(layered?.promotedFindingIds ?? []);
+      // 유효 계층이 source_data 인 항목(선언 원천 + 재발 승격)이 하나라도 있으면 태그를 병기한다.
+      const hasSourceScopeItems = !!layered?.findings?.some(
+        (finding) => finding.layer === "source_data" || promotedIds.has(finding.id),
+      );
       const baseFeedback = await loadQaReworkFeedback({
         db,
         companyId: run.companyId,
@@ -398,8 +423,8 @@ export async function applyBackEdgeReworkPass(
         workflowRunId: q.qaRun?.workflowRunId ?? null,
         workflowStepRunId: q.qaRun?.id ?? null,
       });
-      const feedback = sourceFindings.length > 0 && layered?.findings
-        ? [baseFeedback, renderSourceScopeTag(layered.findings)].filter((part) => part !== null).join("\n\n")
+      const feedback = hasSourceScopeItems && layered?.findings
+        ? [baseFeedback, renderSourceScopeTag(layered.findings, promotedIds)].filter((part) => part !== null).join("\n\n")
         : baseFeedback;
       qaFeedbacks.push({
         qaStepId: q.edge.stepId,
