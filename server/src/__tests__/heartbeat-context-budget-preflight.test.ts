@@ -128,6 +128,27 @@ async function startTempDatabase() {
   return { connectionString, instance, dataDir };
 }
 
+/** [플레이크 RCA 2026-09-28] 런 종단 이후 wakeup 행 상태 전환(claimed→failed 등)은 비동기
+ *   사후 기록이라 고정 sleep 후 읽으면 부하 시 아직 claimed 인 채로 읽힌다 — 유계 폴링으로 대기. */
+async function waitForWakeupStatus(
+  db: ReturnType<typeof createDb>,
+  wakeupRequestId: string,
+  expected: string,
+  deadlineMs = 5_000,
+) {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const row = await db
+      .select({ status: agentWakeupRequests.status })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    if (row?.status === expected) return row;
+    if (Date.now() >= deadline) return row;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 async function waitForRunTerminal(heartbeat: ReturnType<typeof heartbeatService>, runId: string) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -4564,13 +4585,7 @@ describe("heartbeat context budget preflight", () => {
     expect(finalized.errorCode).toBe("context_budget_exceeded");
     expect(finalized.error).toContain("exceeds budget");
     expect(finalized.wakeupRequestId).toBeTruthy();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const wakeup = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, finalized.wakeupRequestId!))
-      .then((rows) => rows[0] ?? null);
+    const wakeup = await waitForWakeupStatus(db, finalized.wakeupRequestId!, "failed");
     expect(wakeup?.status).toBe("failed");
   });
 

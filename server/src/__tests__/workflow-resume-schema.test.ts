@@ -43,7 +43,9 @@ describeEmbeddedPostgres("workflow resume storage schema", () => {
     });
     writers = buildResumeSchemaWriters(db, scope);
     (writers as unknown as { workProductId: string }).workProductId = seededWorkProductId;
-  }, 60_000);
+  // [플레이크 RCA 2026-09-28] 임베디드 PG 기동+마이그레이션이 CI 샤드 부하에서 60s를 넘은 사례(B-7 CI) —
+  //   같은 fixture 계열(execdef/resume-cu)의 120k~180k 선례에 맞춘다.
+  }, 180_000);
   afterAll(async () => {
     if (fixture?.supported) await fixture.cleanup();
   });
