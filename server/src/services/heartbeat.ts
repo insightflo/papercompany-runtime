@@ -193,7 +193,8 @@ import {
   claimQueuedHeartbeatRun,
   recordHeartbeatTerminalOutcomeShadow,
 } from "./heartbeat-finalization/shadow-writes.js";
-import { maybeTransferHeartbeatAuthorityToChild } from "./heartbeat-finalization/authority-transfer.js";
+import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
+import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetryEnqueueDeps } from "./heartbeat-retry-enqueue.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
 import {
@@ -1060,10 +1061,6 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
   const preferredIndex = rows.findIndex((row) => row.id === preferredWorkspaceId);
   if (preferredIndex <= 0) return rows;
   return [rows[preferredIndex]!, ...rows.slice(0, preferredIndex), ...rows.slice(preferredIndex + 1)];
-}
-
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 /**
@@ -2264,21 +2261,6 @@ function parseIssueAssigneeAdapterOverrides(
   };
 }
 
-function deriveTaskKey(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-  payload: Record<string, unknown> | null | undefined,
-) {
-  return (
-    readNonEmptyString(contextSnapshot?.taskKey) ??
-    readNonEmptyString(contextSnapshot?.taskId) ??
-    readNonEmptyString(contextSnapshot?.issueId) ??
-    readNonEmptyString(payload?.taskKey) ??
-    readNonEmptyString(payload?.taskId) ??
-    readNonEmptyString(payload?.issueId) ??
-    null
-  );
-}
-
 function hasWorkflowQaReworkContract(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
@@ -2565,12 +2547,6 @@ function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbac
   };
 }
 
-function resolveAdapterFallbackAttempt(contextRaw: unknown) {
-  const context = parseObject(contextRaw);
-  const parsed = Math.floor(asNumber(context.fallbackAttempt, 0));
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-}
-
 function shouldApplyAdapterFallbackConfig(input: {
   run: typeof heartbeatRuns.$inferSelect;
   context: Record<string, unknown>;
@@ -2683,12 +2659,6 @@ function terminateRecordedProcess(pid: number | null | undefined, signal: NodeJS
 function truncateDisplayId(value: string | null | undefined, max = 128) {
   if (!value) return null;
   return value.length > max ? value.slice(0, max) : value;
-}
-
-function normalizeAgentNameKey(value: string | null | undefined) {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim().toLowerCase();
-  return normalized.length > 0 ? normalized : null;
 }
 
 const defaultSessionCodec: AdapterSessionCodec = {
@@ -4730,326 +4700,9 @@ export function heartbeatService(db: Db) {
     return updated;
   }
 
-  async function enqueueProcessLossRetry(
-    run: typeof heartbeatRuns.$inferSelect,
-    agent: typeof agents.$inferSelect,
-    now: Date,
-    opts?: { kind?: "process_lost" | "adapter_failed_transient" },
-  ) {
-    const kind = opts?.kind ?? "process_lost";
-    const retryWakeReason = kind === "adapter_failed_transient" ? "adapter_failed_retry" : "process_lost_retry";
-    const retryReasonValue = kind === "adapter_failed_transient" ? "adapter_failed" : "process_lost";
-    const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
-    let retryMissionId = readNonEmptyString(contextSnapshot.missionId);
-    let retryWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
-    let retryStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
-    if (issueId && (!retryMissionId || !retryWorkflowRunId || !retryStepId)) {
-      const issueContext = await db
-        .select({
-          missionId: issues.missionId,
-          workflowRunId: workflowStepRuns.workflowRunId,
-          stepId: workflowStepRuns.stepId,
-        })
-        .from(issues)
-        .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
-        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-        .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      retryMissionId = retryMissionId ?? issueContext?.missionId ?? null;
-      retryWorkflowRunId = retryWorkflowRunId ?? issueContext?.workflowRunId ?? null;
-      retryStepId = retryStepId ?? issueContext?.stepId ?? null;
-    }
-    const taskKey = deriveTaskKey(contextSnapshot, null);
-    const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey, {
-      missionId: retryMissionId,
-    });
-    const retryContextSnapshot = {
-      ...contextSnapshot,
-      ...(issueId ? { issueId } : {}),
-      ...(retryMissionId ? { missionId: retryMissionId } : {}),
-      ...(retryWorkflowRunId ? { workflowRunId: retryWorkflowRunId } : {}),
-      ...(retryStepId ? { workflowStepId: retryStepId, stepId: retryStepId } : {}),
-      retryOfRunId: run.id,
-      wakeReason: retryWakeReason,
-      retryReason: retryReasonValue,
-    };
-
-    const queued = await withTxTimeout(db, async (tx) => {
-      const wakeupRequest = await tx
-        .insert(agentWakeupRequests)
-        .values({
-          companyId: run.companyId,
-          agentId: run.agentId,
-          source: "automation",
-          triggerDetail: "system",
-          reason: retryWakeReason,
-          payload: {
-            ...(issueId ? { issueId } : {}),
-            retryOfRunId: run.id,
-          },
-          status: "queued",
-          requestedByActorType: "system",
-          requestedByActorId: null,
-          requestKind: retryWakeReason,
-          issueId: issueId ?? null,
-          missionId: retryMissionId ?? null,
-          workflowRunId: retryWorkflowRunId ?? null,
-          // retryStepId 는 stepId(text) 이지 workflow_step_runs.id(UUID)가 아님 → null.
-          workflowStepRunId: null,
-          updatedAt: now,
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-        const retryRun = await tx
-          .insert(heartbeatRuns)
-          .values({
-            companyId: run.companyId,
-            agentId: run.agentId,
-            issueId,
-            invocationSource: "automation",
-            triggerDetail: "system",
-            status: "queued",
-          wakeupRequestId: wakeupRequest.id,
-          contextSnapshot: {
-            ...retryContextSnapshot,
-            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-              agentId: run.agentId,
-              issueId,
-              taskKey,
-            }),
-          },
-          sessionIdBefore: sessionBefore,
-          retryOfRunId: run.id,
-          processLossRetryCount: (run.processLossRetryCount ?? 0) + 1,
-          updatedAt: now,
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          runId: retryRun.id,
-          updatedAt: now,
-        })
-        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-      await maybeTransferHeartbeatAuthorityToChild(tx, {
-        parent: run,
-        childRunId: retryRun.id,
-        childWakeupRequestId: wakeupRequest.id,
-        now,
-        reason: retryWakeReason,
-      });
-
-      if (issueId) {
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: retryRun.id,
-            executionAgentNameKey: normalizeAgentNameKey(agent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
-      }
-
-      return retryRun;
-    });
-
-    publishLiveEvent({
-      companyId: queued.companyId,
-      type: "heartbeat.run.queued",
-      payload: {
-        runId: queued.id,
-        agentId: queued.agentId,
-        invocationSource: queued.invocationSource,
-        triggerDetail: queued.triggerDetail,
-        wakeupRequestId: queued.wakeupRequestId,
-      },
-    });
-
-    await appendRunEvent(queued, 1, {
-      eventType: "lifecycle",
-      stream: "system",
-      level: "warn",
-      message: kind === "adapter_failed_transient"
-        ? "Queued automatic retry after transient adapter failure"
-        : "Queued automatic retry after orphaned child process was confirmed dead",
-      payload: {
-        retryOfRunId: run.id,
-      },
-    });
-
-    return queued;
-  }
-
-  async function enqueueAdapterFallbackRun(
-    run: typeof heartbeatRuns.$inferSelect,
-    agent: typeof agents.$inferSelect,
-    now: Date,
-    input: {
-      fallbackCommand: string;
-      fallbackProvider?: string;
-      fallbackModel?: string;
-      fallbackThinking?: string;
-      fallbackReason: string;
-    },
-  ) {
-    const contextSnapshot = parseObject(run.contextSnapshot);
-    const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
-    let fallbackMissionId = readNonEmptyString(contextSnapshot.missionId);
-    let fallbackWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
-    let fallbackStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
-    if (issueId && (!fallbackMissionId || !fallbackWorkflowRunId || !fallbackStepId)) {
-      const issueContext = await db
-        .select({
-          missionId: issues.missionId,
-          workflowRunId: workflowStepRuns.workflowRunId,
-          stepId: workflowStepRuns.stepId,
-        })
-        .from(issues)
-        .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
-        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-        .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      fallbackMissionId = fallbackMissionId ?? issueContext?.missionId ?? null;
-      fallbackWorkflowRunId = fallbackWorkflowRunId ?? issueContext?.workflowRunId ?? null;
-      fallbackStepId = fallbackStepId ?? issueContext?.stepId ?? null;
-    }
-
-    const fallbackAttempt = resolveAdapterFallbackAttempt(contextSnapshot) + 1;
-    const fallbackContextSnapshot = {
-      ...contextSnapshot,
-      ...(issueId ? { issueId } : {}),
-      ...(fallbackMissionId ? { missionId: fallbackMissionId } : {}),
-      ...(fallbackWorkflowRunId ? { workflowRunId: fallbackWorkflowRunId } : {}),
-      ...(fallbackStepId ? { workflowStepId: fallbackStepId, stepId: fallbackStepId } : {}),
-      retryOfRunId: run.id,
-      fallbackOfRunId: run.id,
-      fallbackReason: input.fallbackReason,
-      fallbackAttempt,
-      fallbackCommand: input.fallbackCommand,
-      ...(input.fallbackProvider ? { fallbackProvider: input.fallbackProvider } : {}),
-      ...(input.fallbackModel ? { fallbackModel: input.fallbackModel } : {}),
-      ...(input.fallbackThinking ? { fallbackThinking: input.fallbackThinking } : {}),
-      wakeReason: "adapter_fallback",
-    };
-    const taskKey = deriveTaskKey(fallbackContextSnapshot, null);
-    const sessionBefore = await resolveSessionBeforeForWakeup(agent, taskKey, {
-      missionId: fallbackMissionId,
-    });
-
-    const queued = await withTxTimeout(db, async (tx) => {
-      const wakeupRequest = await tx
-        .insert(agentWakeupRequests)
-        .values({
-          companyId: run.companyId,
-          agentId: run.agentId,
-          source: "automation",
-          triggerDetail: "system",
-          reason: "adapter_fallback",
-          payload: {
-            ...(issueId ? { issueId } : {}),
-            fallbackOfRunId: run.id,
-            fallbackReason: input.fallbackReason,
-          },
-          status: "queued",
-          requestedByActorType: "system",
-          requestedByActorId: null,
-          requestKind: "adapter_fallback",
-          issueId: issueId ?? null,
-          missionId: fallbackMissionId ?? null,
-          updatedAt: now,
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-      const fallbackRun = await tx
-        .insert(heartbeatRuns)
-        .values({
-          companyId: run.companyId,
-          agentId: run.agentId,
-          issueId,
-          invocationSource: "automation",
-          triggerDetail: "system",
-          status: "queued",
-          wakeupRequestId: wakeupRequest.id,
-          contextSnapshot: {
-            ...fallbackContextSnapshot,
-            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-              agentId: run.agentId,
-              issueId,
-              taskKey,
-            }),
-          },
-          sessionIdBefore: sessionBefore,
-          retryOfRunId: run.id,
-          processLossRetryCount: run.processLossRetryCount ?? 0,
-          updatedAt: now,
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          runId: fallbackRun.id,
-          updatedAt: now,
-        })
-        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-      await maybeTransferHeartbeatAuthorityToChild(tx, {
-        parent: run,
-        childRunId: fallbackRun.id,
-        childWakeupRequestId: wakeupRequest.id,
-        now,
-        reason: "adapter_fallback",
-      });
-
-      if (issueId) {
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: fallbackRun.id,
-            executionAgentNameKey: normalizeAgentNameKey(agent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
-      }
-
-      return fallbackRun;
-    });
-
-    publishLiveEvent({
-      companyId: queued.companyId,
-      type: "heartbeat.run.queued",
-      payload: {
-        runId: queued.id,
-        agentId: queued.agentId,
-        invocationSource: queued.invocationSource,
-        triggerDetail: queued.triggerDetail,
-        wakeupRequestId: queued.wakeupRequestId,
-      },
-    });
-
-    await appendRunEvent(queued, 1, {
-      eventType: "lifecycle",
-      stream: "system",
-      level: "warn",
-      message: "Queued adapter fallback after primary adapter retry was exhausted",
-      payload: {
-        fallbackOfRunId: run.id,
-        fallbackReason: input.fallbackReason,
-        fallbackAttempt,
-      },
-    });
-
-    return queued;
-  }
+  // [B-7 재시도 함수군 추출] enqueueProcessLossRetry/enqueueAdapterFallbackRun 은
+  //   heartbeat-retry-enqueue.ts 로 기계적 이동했다(동작 무변경). deps 는 이 팩토리 클로저를 그대로 주입.
+  const retryEnqueueDeps: HeartbeatRetryEnqueueDeps = { db, resolveSessionBeforeForWakeup, appendRunEvent };
 
   function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
     const runtimeConfig = parseObject(agent.runtimeConfig);
@@ -5390,13 +5043,13 @@ export function heartbeatService(db: Db) {
         let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
         let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
         if (retryPlanned && agent) {
-          retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, interruptedAt);
+          retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, finalizedRun, agent, interruptedAt);
           if (retriedRun) summary.retried += 1;
         } else {
           const fallback = agent ? resolveAdapterFallbackConfig(agent.adapterConfig) : null;
           const fallbackAttempt = resolveAdapterFallbackAttempt(run.contextSnapshot);
           if (agent && fallback && fallbackAttempt < fallback.maxAttempts) {
-            fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, interruptedAt, {
+            fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, finalizedRun, agent, interruptedAt, {
               fallbackCommand: fallback.command,
               fallbackProvider: fallback.provider,
               fallbackModel: fallback.model,
@@ -5683,7 +5336,7 @@ export function heartbeatService(db: Db) {
       if (shouldRetry) {
         const agent = await getAgent(run.agentId);
         if (agent) {
-          retriedRun = await enqueueProcessLossRetry(finalizedRun, agent, now);
+          retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, finalizedRun, agent, now);
         }
       } else {
         const agent = await getAgent(run.agentId);
@@ -5694,7 +5347,7 @@ export function heartbeatService(db: Db) {
           Boolean(fallback) &&
           fallbackAttempt < fallback!.maxAttempts;
         if (agent && fallback && shouldFallback) {
-          fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, now, {
+          fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, finalizedRun, agent, now, {
             fallbackCommand: fallback.command,
             fallbackProvider: fallback.provider,
             fallbackModel: fallback.model,
@@ -5773,7 +5426,7 @@ export function heartbeatService(db: Db) {
           if (successors.length > 0) continue;
           const agent = await getAgent(run.agentId);
           if (!agent) continue;
-          const retriedRun = await enqueueProcessLossRetry(run, agent, now);
+          const retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, run, agent, now);
           if (retriedRun) {
             await setWakeupStatus(run.wakeupRequestId, "failed", {
               finishedAt: now,
@@ -8613,7 +8266,7 @@ export function heartbeatService(db: Db) {
             !isTerminalAdapterFallbackConfigurationFailure(finalizedRun) &&
             // fallback 실행 자체의 실패는 fallback 시도 카운팅을 존중해 재시도하지 않는다.
             !readNonEmptyString(parseObject(finalizedRun.contextSnapshot).fallbackOfRunId)
-              ? await enqueueProcessLossRetry(finalizedRun, agent, new Date(), {
+              ? await enqueueProcessLossRetry(retryEnqueueDeps, finalizedRun, agent, new Date(), {
                   kind: "adapter_failed_transient",
                 }).then(
                   (retryRun) => {
@@ -8639,7 +8292,7 @@ export function heartbeatService(db: Db) {
           if (!transientRetryQueued) {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
           if (fb && shouldQueueRunFailureAdapterFallback({ run: finalizedRun, fallback: fb })) {
-            const fallbackRun = await enqueueAdapterFallbackRun(finalizedRun, agent, new Date(), {
+            const fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, finalizedRun, agent, new Date(), {
               fallbackCommand: fb.command,
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
@@ -8734,7 +8387,7 @@ export function heartbeatService(db: Db) {
         if (errorCode === "adapter_failed") {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
           if (fb && shouldQueueRunFailureAdapterFallback({ run: failedRun, fallback: fb })) {
-            const fallbackRun = await enqueueAdapterFallbackRun(failedRun, agent, new Date(), {
+            const fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, failedRun, agent, new Date(), {
               fallbackCommand: fb.command,
               fallbackProvider: fb.provider,
               fallbackModel: fb.model,
@@ -11156,6 +10809,10 @@ export function heartbeatService(db: Db) {
     // 실행한다(동시 멘션 깨움의 런 중복 입장과 세대 경쟁, 멘션 × 일반 깨움의 교차-커밋
     // 경쟁을 입장 단계에서 차단). 우회 의미론은 유지: 이 트랜잭션은 issues 의
     // executionRunId/executionLockedAt 등 어느 필드도 쓰지 않고 직렬화 잠금만 가져간다.
+    // [dispatchGeneration 비잠금 창 폐쇄] issueId 없는 taskKey 전용 경로도 같은
+    //   withTxTimeout 안에서 입장한다 — resolveNextDispatchGeneration 의 어드바이저리
+    //   트랜잭션 락이 count→insert 창을 직렬화하려면 입장 전체가 한 트랜잭션이어야 한다.
+    //   입장 본문은 짧은 쿼리들뿐(외부 호출 없음)이라 타임아웃 상한 안에서 끝난다.
     const admission = issueId
       ? await withTxTimeout(
           db,
@@ -11167,7 +10824,11 @@ export function heartbeatService(db: Db) {
           },
           { label: "enqueueWakeup:mention-admission" },
         )
-      : await admitUnlockedRun(db);
+      : await withTxTimeout(
+          db,
+          async (tx) => admitUnlockedRun(tx as unknown as Db),
+          { label: "enqueueWakeup:taskkey-admission" },
+        );
 
     if (!admission.coalesced) {
       publishLiveEvent({

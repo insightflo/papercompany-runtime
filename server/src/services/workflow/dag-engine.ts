@@ -2487,21 +2487,6 @@ async function completeToolStepRunFromCache(input: {
   });
 }
 
-async function failToolStepRun(
-  db: Db,
-  stepRun: typeof workflowStepRuns.$inferSelect,
-  now: Date,
-): Promise<void> {
-  await db
-    .update(workflowStepRuns)
-    .set({
-      status: "failed",
-      startedAt: stepRun.startedAt ?? now,
-      completedAt: now,
-    })
-    .where(eq(workflowStepRuns.id, stepRun.id));
-}
-
 async function failToolStepRunWithDispatchError(input: {
   db: Db;
   step: WorkflowStep;
