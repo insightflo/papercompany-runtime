@@ -10636,14 +10636,16 @@ export function heartbeatService(db: Db) {
           });
         }
 
-        // [checkout CAS 미적용 가시화] 이슈 상태가 ISSUE_RUN_START_STATUSES 밖(예: 'open')이면
-        //   위 CAS 는 조용히 0행 처리된다 — 런은 입장했지만 실행락(issues.execution*)은 걸리지
-        //   않았다. 호환을 위해 동작은 그대로 두되(승격/실행은 계속), 이 상태를 진단 이벤트로
-        //   노출해 무잠금 입장이 조용히 사라지지 않게 한다(mention-wake 플레이크 RCA 2026-09-28).
+        // [checkout CAS 미적용 — 정상 경로(2026-09-28 검토 확정)] 이슈 상태가
+        //   ISSUE_RUN_START_STATUSES 밖(done/cancelled — 종단 후 깨움)이면 위 CAS 는 0행
+        //   처리되고 런은 실행락 없이 입장한다. 실측(A1 14일): 재할당(874)·워크플로 재개(180)·
+        //   종결 마무리(92)·회수/재시도·오너 결정 등 의도적 운영 경로로 일 평균 ~130건 —
+        //   거부 전환은 운영 규손이라 기각. 락은 진행 중 실행 직렬화용이며 종단 후 깨움은
+        //   락 없이 실행이 설계다. debug 로그만 남겨 진단 표면을 유지한다.
         if (!startedIssue) {
-          logger.warn(
+          logger.debug(
             { issueId: issue.id, issueStatus: issue.status, runId: newRun.id, agentId },
-            "issue checkout CAS matched no row: run admitted without execution lock",
+            "issue checkout CAS matched no row: run admitted without execution lock (post-terminal wake)",
           );
         }
 
