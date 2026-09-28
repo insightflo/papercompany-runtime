@@ -15,8 +15,10 @@
 
 import type { Db } from "@paperclipai/db";
 import { and, eq, like, ne } from "drizzle-orm";
-import { operatorDecisions } from "@paperclipai/db";
+import { operatorDecisions, workflowStepRuns } from "@paperclipai/db";
 import { resolveEdges, type EdgeBearingStep } from "./control-flow/edge-condition.js";
+import { applyRecurrencePromotion, type QaRecurrencePromotion } from "./control-flow/rework-contract.js";
+import { loadPriorRejectedFindings } from "./validation-verdict-ledger.js";
 import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 
@@ -60,10 +62,15 @@ function buildCardCreateInput(input: {
   readonly qaRefs: readonly QaSourceDefectCardQaRef[];
   readonly missionId: string | null;
   readonly linkIssueId: string | null;
+  /** [qa layer feedback loop] 재발 승격된 finding id — 표시 마커([source_data*])/팩트 렌더에만 쓴다. */
+  readonly promotedFindingIds?: readonly string[];
 }) {
+  const promotedIds = new Set(input.promotedFindingIds ?? []);
   const findingsSorted = [...input.findings].sort((left, right) => left.id.localeCompare(right.id));
   const qaRefsSorted = [...input.qaRefs].sort((left, right) => left.qaStepId.localeCompare(right.qaStepId));
-  const findingsLines = findingsSorted.map((finding) => `- [${finding.layer}] (${finding.id}) ${finding.summary}`);
+  const layerBadge = (finding: WorkflowVerdictFinding) => `${finding.layer}${promotedIds.has(finding.id) ? "*" : ""}`;
+  const findingsLines = findingsSorted.map((finding) => `- [${layerBadge(finding)}] (${finding.id}) ${finding.summary}`);
+  const promotedCount = findingsSorted.filter((finding) => promotedIds.has(finding.id)).length;
   const sourceOnly = findingsSorted.every((finding) => finding.layer === "source_data");
   const qaList = qaRefsSorted
     .map((ref) => `- QA step \`${ref.qaStepId}\`${ref.qaIssueId ? ` (issue ${ref.qaIssueId})` : ""}`)
@@ -71,9 +78,12 @@ function buildCardCreateInput(input: {
 
   const layerFact = {
     label: "결함 계층",
-    value: findingsSorted.length === 0
-      ? "미제출(구버전 판정)"
-      : sourceOnly ? "전부 source_data(원천 데이터 결함)" : "혼합(artifact + source_data)",
+    value: [
+      findingsSorted.length === 0
+        ? "미제출(구버전 판정)"
+        : sourceOnly ? "전부 source_data(원천 데이터 결함)" : "혼합(artifact + source_data)",
+      ...(promotedCount > 0 ? [`재발 승격 ${promotedCount}건(직전 반려 같은 finding id 재발)`] : []),
+    ].join(" — "),
     status: "known" as const,
   };
   const iterationFact = {
@@ -98,7 +108,7 @@ function buildCardCreateInput(input: {
       ...commonFacts,
       ...findingsSorted.slice(0, 8).map((finding) => ({
         label: `결함 ${finding.id}`.slice(0, 80),
-        value: `[${finding.layer}] ${finding.summary}`.slice(0, 200),
+        value: `[${layerBadge(finding)}] ${finding.summary}`.slice(0, 200),
         status: "known" as const,
       })),
     ],
@@ -252,7 +262,16 @@ export async function ensureQaSourceDefectOwnerCard(input: {
   /** continuation wake 대상 이슈(mission owner agent 가 assignee 인 이슈 — oversight/qa-cap owner action). */
   readonly linkIssueId: string | null;
 }): Promise<EnsureQaSourceDefectCardResult> {
-  const createInput = buildCardCreateInput(input);
+  // [qa layer feedback loop — 카드 결정성] 재발 승격(유효 계층) 계산을 카드 빌더 입력 직전 이 지점에서
+  //   1회만 수행한다. 두 생성 지점((a) loop-driver, (b) supervision cap 경로) 모두 선언 findings 만
+  //   넘기므로 같은 generation 에 대한 카드 내용(requestHash)이 구조적으로 동일해진다(replay 승인 보장,
+  //   설계 §4.2.4). 조회 실패/미충족 시 승격 없음(선언 계층 그대로 — 보수 fail-closed).
+  const promotion = await resolveRecurrencePromotion(input);
+  const createInput = buildCardCreateInput({
+    ...input,
+    findings: promotion.findings,
+    promotedFindingIds: promotion.promotedFindingIds,
+  });
   const write = operatorDecisionWriteService(input.db);
 
   // [supersede] 같은 (run, producer) 의 다른 requestKey 중 아직 pending 인 카드를 취소한다.
@@ -288,6 +307,65 @@ interface CleanupStepRun {
   readonly stepId: string;
   readonly status: string;
   readonly iterationIndex?: number | null;
+}
+
+/**
+ * [qa layer feedback loop — 카드 입력 직전 승격 1회] 이 카드 generation 의 재발 승격을 계산한다.
+ *   qaRefs 각 QA 라인의 직전 세대 반려 findings(같은 stepRun 의 최신 판정 바로 이전 이벤트)와
+ *   finding id 가 완전 일치하는 항목만 승격하며, 세대 경계 가드(직전 판정이 이번 생산자 세대
+ *   완료 이전 관측)는 loadPriorRejectedFindings 가 담당한다. 순수 계산은 applyRecurrencePromotion
+ *   (rework-contract) — loop-driver 라우팅과 동일 함수/동일 입력으로 같은 값을 얻는다.
+ */
+async function resolveRecurrencePromotion(input: {
+  readonly db: Db;
+  readonly companyId: string;
+  readonly workflowRunId: string;
+  readonly producerStepId: string;
+  readonly findings: readonly WorkflowVerdictFinding[];
+  readonly qaRefs: readonly QaSourceDefectCardQaRef[];
+}): Promise<QaRecurrencePromotion> {
+  const identity: QaRecurrencePromotion = { findings: input.findings, promotedFindingIds: [] };
+  if (input.findings.length === 0) return identity;
+  try {
+    const [producerRun] = await input.db
+      .select({ completedAt: workflowStepRuns.completedAt })
+      .from(workflowStepRuns)
+      .where(and(
+        // (workflowRunId, stepId) 는 유일 인덱스 — 세대 간 재사용되는 이 stepRun 행이 정확히 1건.
+        eq(workflowStepRuns.workflowRunId, input.workflowRunId),
+        eq(workflowStepRuns.stepId, input.producerStepId),
+      ))
+      .limit(1);
+    if (!producerRun?.completedAt) return identity;
+    const priorFindings: WorkflowVerdictFinding[] = [];
+    for (const ref of input.qaRefs) {
+      if (!ref.qaIssueId) continue;
+      const [qaRun] = await input.db
+        .select({ id: workflowStepRuns.id })
+        .from(workflowStepRuns)
+        .where(and(
+          eq(workflowStepRuns.workflowRunId, input.workflowRunId),
+          eq(workflowStepRuns.stepId, ref.qaStepId),
+          eq(workflowStepRuns.issueId, ref.qaIssueId),
+        ))
+        .limit(1);
+      if (!qaRun) continue;
+      const prior = await loadPriorRejectedFindings({
+        db: input.db,
+        companyId: input.companyId,
+        issueId: ref.qaIssueId,
+        workflowRunId: input.workflowRunId,
+        workflowStepRunId: qaRun.id,
+        notAfter: producerRun.completedAt,
+      });
+      if (prior) priorFindings.push(...prior);
+    }
+    if (priorFindings.length === 0) return identity;
+    return applyRecurrencePromotion(input.findings, priorFindings);
+  } catch {
+    // 승격 조회 실패가 카드 생성 경로를 깨뜨리지 않게 한다(보수: 승격 없음 — 기존 라우팅 유지).
+    return identity;
+  }
 }
 
 interface CleanupStepRunRow {

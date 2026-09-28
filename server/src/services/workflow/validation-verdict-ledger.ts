@@ -296,17 +296,29 @@ export async function loadWorkflowApiFeedback(input: {
  *   stdout, and prose are never parsed. Returns null when the latest authoritative request_changes
  *   verdict carries no schema-valid findings (legacy verdicts stay on the existing rework path).
  */
-export async function loadWorkflowApiFindings(input: {
+export type OfficialFindingsQueryInput = {
   readonly db: Pick<Db, "select">;
   readonly companyId: string;
   readonly issueId: string;
   readonly workflowRunId: string;
   readonly workflowStepRunId: string;
-}): Promise<WorkflowVerdictFinding[] | null> {
-  const [row] = await input.db
+};
+
+/**
+ * [internal] loadWorkflowApiFindings / loadPriorRejectedFindings 공통 조회 — 같은
+ *   (companyId, issueId, workflowRunId, workflowStepRunId) 의 공식 workflow_api request_changes
+ *   판정 이벤트를 createdAt desc, id desc 로 읽고 `skipLatest` 번째(0=이번 세대, 1=직전 세대)
+ *   이벤트의 findings 를 파싱한다. 파싱/스코프 검증 규칙은 양쪽이 완전히 동일하다.
+ */
+async function loadOfficialRequestChangesFindingsRow(
+  input: OfficialFindingsQueryInput,
+  skipLatest: 0 | 1,
+): Promise<{ findings: WorkflowVerdictFinding[]; observedAt: Date | null } | null> {
+  const rows = await input.db
     .select({
       payload: workflowTransitionEvents.payload,
       heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
+      createdAt: workflowTransitionEvents.createdAt,
     })
     .from(workflowTransitionEvents)
     .where(and(
@@ -320,7 +332,8 @@ export async function loadWorkflowApiFindings(input: {
       isNotNull(workflowTransitionEvents.heartbeatRunId),
     ))
     .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id))
-    .limit(1);
+    .limit(skipLatest + 1);
+  const row = rows[skipLatest];
   if (!row) return null;
   if (!(await heartbeatRunScopedToIssue(input.db, row.heartbeatRunId, { companyId: input.companyId, issueId: input.issueId }))) {
     return null;
@@ -329,7 +342,33 @@ export async function loadWorkflowApiFindings(input: {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const parsed = workflowVerdictFindingsSchema.safeParse(raw);
   if (!parsed.success) return null;
-  return parsed.data;
+  return { findings: parsed.data, observedAt: row.createdAt instanceof Date ? row.createdAt : null };
+}
+
+export async function loadWorkflowApiFindings(input: OfficialFindingsQueryInput): Promise<WorkflowVerdictFinding[] | null> {
+  const row = await loadOfficialRequestChangesFindingsRow(input, 0);
+  return row?.findings ?? null;
+}
+
+/**
+ * [qa layer feedback loop — 재발 감지] 직전 세대 반려 findings — 최신(=이번 세대) 판정 이벤트를
+ *   제외한 바로 1건 이전 공식 request_changes 이벤트의 findings 를 반환한다(없으면 null).
+ *   v1 은 직전 1건만 대조한다(any-prior 확장은 운영 데이터 확보 후 재검토 — 설계 §4.1).
+ *   `notAfter`(=이번 생산자 세대 완료 시각) 를 주면 세대 경계 가드가 적용된다: 직전 이벤트가 그
+ *   시각 이후에 관측됐다면 생산자 재작업 없이 같은 세대 산출물이 재판정된 것이므로 재발 근거로
+ *   인정하지 않는다(null) — filterFreshRejectedQas 와 같은 관측시각 보수 원리(설계 §4.4).
+ */
+export async function loadPriorRejectedFindings(
+  input: OfficialFindingsQueryInput & { readonly notAfter?: Date },
+): Promise<WorkflowVerdictFinding[] | null> {
+  const prior = await loadOfficialRequestChangesFindingsRow(input, 1);
+  if (!prior) return null;
+  // 관측시각 보수 판정(설계 §4.4): 가드 시각을 알 수 없거나(null) 직전 판정이 이번 생산자 세대
+  //   완료 이후에 관측됐다면 재발 근거로 인정하지 않는다.
+  if (input.notAfter && (prior.observedAt === null || prior.observedAt.getTime() > input.notAfter.getTime())) {
+    return null;
+  }
+  return prior.findings;
 }
 
 

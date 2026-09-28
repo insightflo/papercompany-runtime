@@ -1,6 +1,64 @@
 import { buildQaReworkArtifactInstructionLine } from "../../work-products/artifact-registration-instructions.js";
+import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 
 export const WORKFLOW_REWORK_CONTRACT_KIND = "workflow_qa_rework";
+
+/** [qa layer feedback loop] 재발 승격 계산 결과 — `findings` 는 유효(effective) 계층이 반영된 값. */
+export type QaRecurrencePromotion = {
+  readonly findings: readonly WorkflowVerdictFinding[];
+  readonly promotedFindingIds: readonly string[];
+};
+
+/**
+ * [qa layer feedback loop — 유효 계층 계산] 이번 세대 findings 중 직전 세대 findings 와 finding id 가
+ *   완전 일치하는 항목은 재발로 판정해 라우팅상 source_data 로 승격한다(id 문자열 완전 일치만 —
+ *   summary 유사도/프로즈 비교 금지, 규칙 8). 승격은 라우팅/표시 계산에만 쓰며 판정 이벤트 payload 의
+ *   선언 계층은 불변이다(설계 §4.4). 순수 함수 — loop-driver 라우팅과 오너 카드 빌더 입력 직전에서
+ *   동일 입력으로 호출되어 두 카드 생성 지점의 내용(requestHash)을 구조적으로 일치시킨다.
+ */
+export function applyRecurrencePromotion(
+  current: readonly WorkflowVerdictFinding[] | null,
+  prior: readonly WorkflowVerdictFinding[] | null,
+): QaRecurrencePromotion {
+  if (!current || current.length === 0 || !prior || prior.length === 0) {
+    return { findings: current ?? [], promotedFindingIds: [] };
+  }
+  const priorIds = new Set(prior.map((finding) => finding.id));
+  const promotedFindingIds: string[] = [];
+  const findings = current.map((finding) => {
+    if (finding.layer !== "source_data" && priorIds.has(finding.id)) {
+      promotedFindingIds.push(finding.id);
+      return { ...finding, layer: "source_data" as const };
+    }
+    return finding;
+  });
+  return { findings, promotedFindingIds };
+}
+
+/**
+ * findings 병기 태그 — 유효 계층이 source_data 인 항목을 생산자 재작업 계약 feedback 에 구조적으로
+ *   병기한다(표시 전용). 재발 승격 항목(promotedFindingIds)은 '생산자 범위 밖(재발 승격)' 태그로
+ *   구분해 렌더한다. 재발이 없으면 기존 포맷과 바이트 단위로 동일하다(회귀 불변).
+ */
+export function renderSourceScopeTag(
+  findings: readonly WorkflowVerdictFinding[],
+  promotedFindingIds: ReadonlySet<string> = new Set(),
+): string {
+  const declaredLines = findings
+    .filter((finding) => finding.layer === "source_data" && !promotedFindingIds.has(finding.id))
+    .map((finding) => `- (${finding.id}) ${finding.summary}`);
+  const promotedLines = findings
+    .filter((finding) => promotedFindingIds.has(finding.id))
+    .map((finding) => `- (${finding.id}) ${finding.summary}`);
+  return [
+    ...(declaredLines.length > 0
+      ? ["#### [생산자 범위 밖 — 원천 데이터 결함] 아래 항목은 원천(수집) 산출물 결함으로 생산자가 고칠 수 없습니다. 원천 라우팅 대상입니다:", ...declaredLines]
+      : []),
+    ...(promotedLines.length > 0
+      ? ["#### [생산자 범위 밖(재발 승격)] 아래 항목은 직전 반려와 같은 finding id 로 재발했습니다(재작업 후에도 해소되지 않음) — 원천 데이터 결함으로 승격되어 생산자가 고칠 수 없습니다. 원천 라우팅 대상입니다:", ...promotedLines]
+      : []),
+  ].join("\n");
+}
 
 export type QaReworkFeedback = {
   readonly qaStepId: string;

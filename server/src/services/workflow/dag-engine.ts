@@ -641,6 +641,7 @@ async function writeQaRubricMarkdown(input: {
     "- Read the dependency workProduct files directly when paths are provided.",
     "- Return `PASS` when no blocking defect remains, even if nonblocking limitations or optional improvements remain.",
     "- On `REQUEST_CHANGES`, the verdict API body must carry `findings` — one entry per blocking defect: `id`, `summary`, `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). `findings` are the durable rework checklist; mislayered findings are themselves recorded as verdict-quality defects.",
+    "- On re-review, reuse the same finding id when the same defect persists — recurring findings are automatically promoted to source_data routing (producer rework budget is not consumed for them).",
     "- Keep `reason` to concise human context; detailed defect content belongs in `findings`. Example body: `{\"verdict\":\"request_changes\",\"findings\":[{\"id\":\"F1\",\"summary\":\"...\",\"layer\":\"artifact|source_data\"}]}`",
     "- `INSUFFICIENT_EVIDENCE` records an abstention (name the missing evidence in `reason`); it does not satisfy this gate.",
     "",
@@ -663,6 +664,7 @@ function buildWorkflowApiCloseoutLines(input: {
   if (input.requiresVerdict) {
     lines.push("- Submit the official `PASS`, `REQUEST_CHANGES`, or `INSUFFICIENT_EVIDENCE` verdict with `POST /api/issues/{issueId}/workflow/verdict` before completion.");
     lines.push("- `REQUEST_CHANGES` requires `findings`: one entry per blocking defect with `id`, `summary`, `layer` (`artifact` = the produced deliverable, `source_data` = upstream source data). Example: `{\"verdict\":\"request_changes\",\"findings\":[{\"id\":\"F1\",\"summary\":\"...\",\"layer\":\"artifact\"}]}`. Keep `reason` concise.");
+    lines.push("- On re-review, reuse the same finding id when the same defect persists — recurring findings are automatically promoted to source_data routing (producer rework budget is not consumed for them).");
     lines.push("- Use `INSUFFICIENT_EVIDENCE` only when the evidence needed to judge is genuinely missing; list what is missing in `reason` (required). It records an abstention — it does not satisfy this gate and does not trigger producer rework.");
   }
   lines.push("- Complete this workflow issue with `POST /api/issues/{issueId}/workflow/complete` after required artifact or verdict records exist.");
