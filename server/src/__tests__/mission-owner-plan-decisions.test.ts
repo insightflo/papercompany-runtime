@@ -3725,7 +3725,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     // tool-bearing unit 으로 PAQO step 가 toolNames 를 갖게 한다. 그래야
     //   assertWorkflowToolStepsReady(dag-engine.ts:189) 가 early-return 하지 않고
     //   executor null 을 검사(198-200)해서 throw 한다. executor 자체를 throw 시켜도
-    //   dag-engine 이 삼키기 때문에(2196 catch → failToolStepRun, return false),
+    //   dag-engine 이 삼키기 때문에(2196 catch → failToolStepRunWithDispatchError, return false),
     //   전파하려면 반드시 null-executor 경로로 ensurePaqo 를 터뜨려야 한다.
     await db.update(companies).set({ workProductRoot: "/tmp/paperclip-test-work-products" }).where(eq(companies.id, companyId));
     // plugin 을 등록해 tool 을 "selectable" 로 만든다. 그래야 createDefinition 이 통과하고,

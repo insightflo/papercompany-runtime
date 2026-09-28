@@ -80,6 +80,11 @@ export const heartbeatRuns = pgTable(
     unsettledFinalizationIdx: index("heartbeat_runs_unsettled_finalization_idx")
       .on(table.companyId, table.finalizationVersion)
       .where(sql`${table.finalizationVersion} > 0 and ${table.settledAt} is null`),
+    // [B-7 백스톱 스캔] 종료-중단(failed+shutdown_interrupted) 런 회수 스윕(heartbeat.ts,
+    //   스윕당 1회 LIMIT 50)이 전체 스캔하지 않도록 하는 부분 인덱스.
+    shutdownInterruptedIdx: index("heartbeat_runs_shutdown_interrupted_idx")
+      .on(table.createdAt)
+      .where(sql`${table.status} = 'failed' and ${table.errorCode} = 'shutdown_interrupted'`),
     companyCreatedIdx: index("heartbeat_runs_company_created_idx").on(
       table.companyId,
       table.createdAt,

@@ -1,0 +1,1 @@
+CREATE INDEX "heartbeat_runs_shutdown_interrupted_idx" ON "heartbeat_runs" USING btree ("created_at") WHERE "heartbeat_runs"."status" = 'failed' and "heartbeat_runs"."error_code" = 'shutdown_interrupted';

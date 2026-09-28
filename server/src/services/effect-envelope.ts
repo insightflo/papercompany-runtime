@@ -103,7 +103,13 @@ function readNonEmpty(value: unknown): string | null {
  * 런 생성 트랜잭션 안에서 호출해 contextSnapshot.dispatchGeneration 으로 스탬프한다.
  * 순차적 의도적 재디스패치는 항상 새 서수(새 세대)로 실행되고, 동시 중복 디스패치는
  * 서로 커밋 전을 관측해 같은 서수를 받아 펜스된다. 이슈 스코프 깨움은 이슈 행
- * FOR UPDATE 직렬화 안에서 호출된다(비직렬 경로의 좁은 허위 양성 창은 계획 문서 참조).
+ * FOR UPDATE 직렬화 안에서 호출된다.
+ *
+ * [B-7 비잠금 enqueue 창 폐쇄] count 직전에 같은 연결(입력 db=호출자 tx)에서 앵커 단위
+ *   어드바이저리 트랜잭션 락을 잡아 count→insert 창을 직렬화한다. 호출부 heartbeat.ts
+ *   6곳 전부 withTxTimeout 트랜잭션 안(재시도/폴백 enqueue, 승격 2곳, 일반 입장 이슈/taskKey
+ *   양 경로 — 이슈 스코프는 #284 이슈 행 FOR UPDATE와 이중이지만 무해).
+ *   hashtext 충돌은 과잉 직렬화(무해)만 유발한다.
  */
 export async function resolveNextDispatchGeneration(
   db: Db,
@@ -112,6 +118,9 @@ export async function resolveNextDispatchGeneration(
   const anchorIssueId = readNonEmpty(input.issueId);
   const anchorTaskKey = readNonEmpty(input.taskKey);
   if (!anchorIssueId && !anchorTaskKey) return 1;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${`dispatchgen:${input.agentId}:${anchorIssueId ?? anchorTaskKey}`}))`,
+  );
   const [row] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(heartbeatRuns)
