@@ -1731,6 +1731,9 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(qaDescription).toContain("`REQUEST_CHANGES` requires `findings`");
     expect(qaDescription).toContain("one entry per blocking defect with `id`, `summary`, `layer`");
     expect(qaDescription).toContain("`REQUEST_CHANGES` requires one findings entry per blocking defect");
+    // [remediations 계약 교육] 클로짓아웃 표면도 가르친다 — 루브릭과 동일 계약.
+    expect(qaDescription).toContain("`REQUEST_CHANGES` may attach `remediations` only when every defect is a purely mechanical string replacement");
+    expect(qaDescription).toContain("`find` must occur exactly once in the file");
     expect(qaDescription).not.toContain("Check Top25 rank coverage");
     expect(qaDescription).not.toContain("collection timestamp, fallback notes");
     expect(qaDescription).not.toContain("Deliverable output (use exactly this directory):");
@@ -1754,6 +1757,13 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     expect(rubric).toContain("Return `PASS` when no blocking defect remains");
     // [findings 계약 교육] REQUEST_CHANGES 는 findings 병기가 공식 계약 — reason-글쩍 단독 가르침은 소멸.
     expect(rubric).toContain("must carry `findings` — one entry per blocking defect");
+    // [remediations 계약 교육] 순수 기계적 결함의 remediations 계약도 엔진 표면이 가르친다
+    //   — 참조 파일 수작업 오버레이(MECHANICAL_REMEDIATION_CONTRACT_V1) 제거 근거.
+    expect(rubric).toContain("also attach `remediations` to the REQUEST_CHANGES body");
+    expect(rubric).toContain("{\"op\":\"string_replace\"");
+    expect(rubric).toContain("max 20 items");
+    expect(rubric).toContain("falls back to producer rework");
+    expect(rubric).toContain("do not attach `remediations`");
     expect(rubric).toContain("`artifact` = the produced deliverable, `source_data` = upstream source data");
     expect(rubric).toContain("mislayered findings are themselves recorded as verdict-quality defects");
     expect(rubric).toContain("Keep `reason` to concise human context");
