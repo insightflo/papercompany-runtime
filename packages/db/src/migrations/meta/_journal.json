@@ -813,6 +813,20 @@
       "when": 1790523427935,
       "tag": "0116_curved_molecule_man",
       "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1790610000000,
+      "tag": "0117_shutdown_interrupted_backstop_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1790690000000,
+      "tag": "0118_operator_card_fk_cleanup",
+      "breakpoints": true
     }
   ]
 }
