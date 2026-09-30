@@ -14,6 +14,8 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, qualityActions } from "@paperclipai/db";
+import { insertWorkflowWakeRequest } from "../heartbeat-workflow-wake.js";
+import { preserveWorkflowAttemptProof } from "../heartbeat-finalization/workflow-attempt-proof.js";
 export {
   nextPlanQaResubmissionExecutionEpoch,
   planQaResubmissionPromotionAcceptancePatch,
@@ -123,7 +125,7 @@ export async function queuePausedAgentWakeupRequest(
   let wakeupRequestId: string | null = null;
   if (input.typedQueueColumns.issueId) {
     const existingQueuedWake = await db
-      .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount })
+      .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount, payload: agentWakeupRequests.payload })
       .from(agentWakeupRequests)
       .where(and(
         eq(agentWakeupRequests.companyId, input.companyId),
@@ -140,7 +142,7 @@ export async function queuePausedAgentWakeupRequest(
       await db
         .update(agentWakeupRequests)
         .set({
-          payload: input.payload,
+          payload: preserveWorkflowAttemptProof(existingQueuedWake.payload, input.payload),
           coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
           updatedAt: new Date(),
         })
@@ -150,9 +152,7 @@ export async function queuePausedAgentWakeupRequest(
   }
 
   if (!wakeupRequestId) {
-    const inserted = await db
-      .insert(agentWakeupRequests)
-      .values({
+    const inserted = await insertWorkflowWakeRequest(db, {
         companyId: input.companyId,
         agentId: input.agentId,
         source: input.source,
@@ -164,9 +164,7 @@ export async function queuePausedAgentWakeupRequest(
         requestedByActorType: input.requestedByActorType,
         requestedByActorId: input.requestedByActorId,
         idempotencyKey: input.idempotencyKey,
-      })
-      .returning({ id: agentWakeupRequests.id })
-      .then((rows) => rows[0] ?? null);
+      }).then((rows) => rows[0] ?? null);
     wakeupRequestId = inserted?.id ?? null;
   }
 

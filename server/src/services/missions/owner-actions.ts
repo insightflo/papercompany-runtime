@@ -24,8 +24,8 @@ import { buildMissionRuleContext } from "./mission-rule-context.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { listMissionExecutionSourceSnapshots } from "./mission-execution-sources.js";
 import { pruneStaleWorkflowExecutionUnits, type PluginWorkflowRunData, type PluginWorkflowStepRunData } from "./plugin-workflow.js";
-import { classifyToolStepFailure, getWorkflowStepToolNames, type ToolStepFailureClassification } from "./tool-step-failure.js";
-import { buildToolStepRecoveryDescription } from "./tool-step-recovery-description.js";
+import type { ToolStepFailureClassification } from "./tool-step-failure.js";
+import { ensureToolRecoveryCard } from "./tool-recovery-card.js";
 import { asTrimmedString } from "./utils.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -664,60 +664,8 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     step: WorkflowStep | null;
     workflowName: string;
   }): Promise<{ issue: IssueRow; created: boolean; classification: ToolStepFailureClassification; toolNames: string[] }> {
-    const marker = `tool-step-recovery:${input.run.id}:${input.stepRun.stepId}`;
-    const existingRows = await db
-      .select()
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, input.mission.companyId),
-        eq(issues.missionId, input.mission.id),
-        eq(issues.originKind, "mission_main_executor_unblock"),
-        eq(issues.originId, input.oversightIssue.id),
-        isNull(issues.hiddenAt),
-      ))
-      .orderBy(asc(issues.createdAt), asc(issues.id));
-    const existing = existingRows.find((issue) => (issue.description ?? "").includes(marker));
-    const classification = classifyToolStepFailure(input.step, input.stepRun);
-    const toolNames = getWorkflowStepToolNames(input.step);
-    if (existing) {
-      return { issue: existing, created: false, classification, toolNames };
-    }
-
-    const displayStepName = input.step?.name?.trim() || input.stepRun.stepId;
-    const recoveryParentId = input.oversightIssue.parentId ? undefined : input.oversightIssue.id;
-    const recoveryIssue = await createMissionOwnerActionIssue(input.mission.companyId, {
-      assigneeAgentId: input.mission.ownerAgentId,
-      description: buildToolStepRecoveryDescription({
-        marker,
-        missionTitle: input.mission.title,
-        workflowName: input.workflowName,
-        workflowRunId: input.run.id,
-        stepId: input.stepRun.stepId,
-        displayStepName,
-        toolNames,
-        classification,
-      }),
-      missionId: input.mission.id,
-      originKind: "mission_main_executor_unblock",
-      originId: input.oversightIssue.id,
-      parentId: recoveryParentId,
-      priority: "high",
-      status: "todo",
-      title: `[Owner Action] Tool step failed: ${input.stepRun.stepId}`,
-    });
-
-    if (deps.onOwnerActionCreated) {
-      void Promise.resolve(deps.onOwnerActionCreated({
-        mission: input.mission,
-        issue: recoveryIssue,
-        sourceIssue: input.oversightIssue,
-        reason: "tool_step_failure_recovery_created",
-      })).catch((err) => {
-        logger.warn({ err, missionId: input.mission.id, issueId: recoveryIssue.id }, "failed to notify owner about tool step recovery action");
-      });
-    }
-
-    return { issue: recoveryIssue, created: true, classification, toolNames };
+    return ensureToolRecoveryCard(db, deps, input, (tx, companyId, data) =>
+      createOwnerActions({ db: tx, deps: {} }).createMissionOwnerActionIssue(companyId, data));
   }
 
   async function ensureMainExecutorOversightIssue(

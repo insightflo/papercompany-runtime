@@ -481,17 +481,14 @@ const isReviveBlockedTerminal = (status: string): boolean =>
 /**
  * Resume a workflow run through the native server DAG engine.
  *
- * [run-reopen-guard v1] 플래그 on: cancelled·completed·aborted·timed-out 종결 run 은 어떤 쓰기도
- * 없이(부작용 0) 409 로 거부된다. failed·running 만 재개하며, 이때 상태 CAS(inArray) +
- * dispatchAuthorityVersion 범프로 경합을 안전하게 만든다. CAS 가 빈 반환하면(경합) run 을
- * 재조회해 분류한다 — 종결이면 not_allowed, 허용 집합 밖 비종결(예: pending)이면 재시도해도
- * 같은 결과인 결정적 거부, 그 외에만 재시도 가능한 conflict. 플래그 off 는 기존 plain 쓰기다.
  */
-export async function resumeWorkflowRun(
-  db: Db,
-  id: string,
-  companyId: string,
-): Promise<WorkflowRun | null> {
+export async function resumeWorkflowRun(db: Db, id: string, companyId: string): Promise<WorkflowRun | null> {
+  return db.transaction(async (tx) => {
+    await lockUnreplacedRun(tx as unknown as Db, id, companyId);
+    return resumeUnreplacedWorkflowRun(tx as unknown as Db, id, companyId);
+  });
+}
+async function resumeUnreplacedWorkflowRun(db: Db, id: string, companyId: string): Promise<WorkflowRun | null> {
   const scope = and(eq(workflowRuns.id, id), eq(workflowRuns.companyId, companyId));
   if (!(await isRunReopenGuardEnabled(db))) {
     const [run] = await db
@@ -535,7 +532,7 @@ export async function resumeWorkflowRun(
         requestedBy: "board",
         now: new Date(),
       });
-      if (recovery.kind === "recovered" || recovery.kind === "already_consumed") {
+      if (recovery.kind === "recovered") {
         const [recovered] = await db.select().from(workflowRuns).where(scope).limit(1);
         return recovered ? mapWorkflowRun(recovered) : null;
       }
@@ -546,7 +543,7 @@ export async function resumeWorkflowRun(
       if (recovery.kind === "decision_mismatch") {
         throw new HttpError(409, `workflow_run_resume_decision_mismatch: recorded decision ${recovery.existingDecision}`);
       }
-      // not_terminal / missing_decision → 아래 기존 CAS 경로로 폴백(경합·레거시).
+      throw new HttpError(409, `workflow_run_resume_denied: ${recovery.kind}`);
     }
   }
 
@@ -585,3 +582,4 @@ export async function resumeWorkflowRun(
   }
   throw new HttpError(409, "workflow_run_resume_conflict");
 }
+import { lockUnreplacedRun } from "./run-replacement-guard.js";

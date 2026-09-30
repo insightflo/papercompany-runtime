@@ -24,6 +24,7 @@ import { seedQualityFixture, type QualityFixture } from "./helpers/quality-fixtu
 import { deliverQualityIntent, cancelQualityIntent, readQualityCancellation } from "../services/quality/native-delivery.js";
 import { ensureCanonicalQualityExecution } from "../services/quality/native-records.js";
 import type { Db } from "@paperclipai/db";
+import { expectCancelledAdapterBoundary } from "./helpers/quality-cancel-boundary.js";
 
 const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
 vi.mock("../adapters/index.js", () => ({
@@ -500,9 +501,10 @@ describeQualityDb("Quality native cancel", () => {
       // 계약 1: 40P01 탈출이 없다(교찰 희생 측이 취소였다면 cancelQualityIntent 가 기각한다).
       expect(cancelError).toBeNull();
 
-      // 계약 2: 러너가 직렬화를 무사히 통과해 어댑터에 도달했다(희생 측이 러너였다면 도달하지 못한다).
-      const runnerReachedAdapter = await pollUntil(20_000, async () => executeSpy.mock.calls.length > callsBefore);
-      expect(runnerReachedAdapter).toBe(true);
+      // 계약 2: 직렬화 이후 실행 직전 경계에 도달했으나, 이미 확정된 취소로 실행이 차단된다.
+      // 정확한 실행의 영구 기록을 확인하므로 교착/세팅 실패를 무호출 성공으로 오인하지 않는다.
+      await expectCancelledAdapterBoundary(db, seeded.companyId, runId);
+      expect(executeSpy.mock.calls.length).toBe(callsBefore);
 
       // 계약 3: 취소 확인과 종말 상태가 보존된다.
       const final = await readQualityCancellation(db, { companyId: seeded.companyId, actionId: seeded.actionId });
@@ -515,17 +517,7 @@ describeQualityDb("Quality native cancel", () => {
         .from(issues).where(eq(issues.id, linkedIssue!.id));
       expect(issueAfter!.executionRunId).toBeNull();
       expect(issueAfter!.checkoutRunId).toBeNull();
-
-      // 어댑터 게이트 해제 후 완료 경로가 종말 상태를 되찾지 않고 증거만 채운다(정착 — 티어다운 잔업 방지).
-      adapterGate.release();
-      const settled = await pollUntil(20_000, async () => {
-        const [evidence] = await db.select({ exitCode: heartbeatRuns.exitCode }).from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, runId));
-        return evidence?.exitCode !== null && evidence?.exitCode !== undefined;
-      });
-      expect(settled).toBe(true);
-      const finalAfterCompletion = await readQualityCancellation(db, { companyId: seeded.companyId, actionId: seeded.actionId });
-      expect(finalAfterCompletion.runStatus).toBe("cancelled");
+      // 실행은 위에서 정착했다. 어댑터가 시작되지 않았으므로 exitCode 는 생성되지 않는다.
     } finally {
       if (!barrierResolved) {
         barrier.gate.settle("rollback");
@@ -607,8 +599,8 @@ describeQualityDb("Quality native cancel", () => {
       await cancelOutcome;
 
       expect(cancelError).toBeNull();
-      const runnerReachedAdapter = await pollUntil(20_000, async () => executeSpy.mock.calls.length > callsBefore);
-      expect(runnerReachedAdapter).toBe(true);
+      await expectCancelledAdapterBoundary(db, seeded.companyId, runId);
+      expect(executeSpy.mock.calls.length).toBe(callsBefore);
       const final = await readQualityCancellation(db, { companyId: seeded.companyId, actionId: seeded.actionId });
       expect(final.cancelledConfirmed).toBe(true);
       expect(final.runStatus).toBe("cancelled");
@@ -616,17 +608,7 @@ describeQualityDb("Quality native cancel", () => {
         .from(issues).where(eq(issues.id, linkedIssue!.id));
       expect(issueAfter!.executionRunId).toBeNull();
       expect(issueAfter!.checkoutRunId).toBeNull();
-
-      // 어댑터 게이트 해제 후 완료 경로가 종말 상태를 되찾지 않고 증거만 채운다(정착 — 티어다운 잔업 방지).
-      adapterGate.release();
-      const settled = await pollUntil(20_000, async () => {
-        const [evidence] = await db.select({ exitCode: heartbeatRuns.exitCode }).from(heartbeatRuns)
-          .where(eq(heartbeatRuns.id, runId));
-        return evidence?.exitCode !== null && evidence?.exitCode !== undefined;
-      });
-      expect(settled).toBe(true);
-      const finalAfterCompletion = await readQualityCancellation(db, { companyId: seeded.companyId, actionId: seeded.actionId });
-      expect(finalAfterCompletion.runStatus).toBe("cancelled");
+      // 실행은 위에서 정착했다. 어댑터가 시작되지 않았으므로 exitCode 는 생성되지 않는다.
     } finally {
       if (!barrierResolved) {
         barrier.gate.settle("rollback");

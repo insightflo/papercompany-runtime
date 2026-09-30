@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
 import { findAcceptedWakeProof } from "./source-issue-cap-override-authority.js";
+import { queueCapRecovery } from "./cap-recovery-queue.js";
 import { isCapOverrideWakeUniqueConflict } from "./cap-override-wakeup-conflict.js";
 
 export async function enqueueCapOverrideWake(input: {
@@ -37,7 +38,7 @@ export async function enqueueCapOverrideWake(input: {
   let wakeAccepted = false;
   let failureReason = "wake_not_accepted";
   try {
-    wakeAccepted = await (input.wakeFn ?? wakeExistingWorkflowStepIssue)({
+    wakeAccepted = await (input.wakeFn ?? queueCapRecovery)({
       db: input.db,
       run: input.run,
       definition: input.definition,

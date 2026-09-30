@@ -16,7 +16,7 @@ import { applyRunInputDerivations } from "./run-input-derivations.js";
  * 이 모듈은 큐/런/스케줄/승인 실행 의미를 건드리지 않는다.
  */
 
-export type WorkflowRunInputPolicy = { legacyTextRequired?: boolean };
+export type WorkflowRunInputPolicy = { legacyTextRequired?: boolean; actor?: import("express").Request["actor"] };
 
 export class WorkflowRunInputValidationError extends Error {
   readonly details: WorkflowRunInputErrorDetails;

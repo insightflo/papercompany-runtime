@@ -191,7 +191,7 @@ export async function registerWorkflowArtifact(input: {
       summary: input.data.summary ?? null,
       metadata: previewUrlMetadata(input.data, input.actor.runId, input.delegation),
       createdByRunId: input.actor.runId,
-    });
+    }, input.delegation);
     if (!product) {
       throw unprocessable("Workflow preview_url workProduct could not be registered");
     }
@@ -233,7 +233,7 @@ export async function registerWorkflowArtifact(input: {
       ...delegationMetadata(input.delegation),
     },
     createdByRunId: input.actor.runId,
-  });
+  }, input.delegation);
   if (!product) {
     throw unprocessable("Workflow artifact path must point to an existing local file");
   }

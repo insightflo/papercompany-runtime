@@ -9,7 +9,10 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, companies, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { issueService } from "../issues.js";
-import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
+import { createAdmittedWorkflowRun } from "./agent-run-create.js";
+import { lockUnreplacedRun } from "./run-replacement-guard.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
 import { normalizeWorkflowRunInputs, type WorkflowRunInputPolicy } from "./run-input-normalization.js";
@@ -382,9 +385,7 @@ export const workflowService = {
     return deleteWorkflowDefinition(db, id);
   },
 
-  /**
-   * Trigger (create and execute) a workflow run.
-   */
+  /** Trigger (create and execute) a workflow run. */
   async trigger(
     db: Db,
     input: CreateWorkflowRunInput,
@@ -397,10 +398,11 @@ export const workflowService = {
     if (workflow.companyId !== input.companyId) {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
-    // [run-input boundary] 회사 귀속 확인 직후, 도구 준비/미션/스토어 순서보다 앞에서
-    // 실행 입력을 정규화한다(기본값 → 파생 → 검증). 정책은 내부 선택 인자이며 공개
-    // 스키마가 아니다. 웹훅만 {legacyTextRequired:true}를 전달하고, 나머지 호출자는
-    // 기본값({})을 쓴다. triggerSource 등 클라이언트 값으로 정책을 추론하지 않는다.
+    await assertAgentReplacementRequired(db, input, policy.actor);
+    if (input.replacementIntent) {
+      const admitted = await admitReplacement(db, input, policy.actor);
+      return admitted.replay ? (await getWorkflowExecutionResultSnapshot(db, admitted.run.id))! : executeWorkflowRun(db, admitted.run.id);
+    }
     input = { ...input, metadata: normalizeWorkflowRunInputs(workflow.runInputs, input.metadata, policy) };
     await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
     const [company] = await db
@@ -414,9 +416,7 @@ export const workflowService = {
       ?? new Date().toISOString().slice(0, 10);
     await assertNoImplicitDuplicateScheduledWorkflowRun(db, input, workflow, runDate);
     const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
-    const run = await createWorkflowRun(db, runInput);
-    // [Task5a2a] post-create oversight 는 캡처 실행정의(이름/step ids)로 구성된다 — 정의가
-    //   이후 바뀌어도 oversight 가 캡처 그래프와 일치한다. legacy run 은 기존 current-name 동작.
+    const run = await createAdmittedWorkflowRun(db, runInput, policy.actor);
     await ensureCreatedRunOversight(db, run);
     return executeWorkflowRun(db, run.id);
   },
@@ -556,18 +556,16 @@ async resumeRun(
     //   missing/corrupt snapshot 은 run 상태/startedAt/reset 이 전혀 없이 422 로 거절된다.
     const execution = await loadExecutionDefinition(db, existingRun.id, { requireHistorical: false });
     await assertWorkflowToolReadiness(db, input.companyId, execution.steps);
+    const resumedId = await db.transaction(async (tx) => {
+    const db = tx as unknown as Db;
+    await lockUnreplacedRun(db, input.runId, input.companyId);
     const run = await resumeWorkflowRun(db, input.runId, input.companyId);
     if (!run) {
       throw new Error(`Workflow run not found: ${input.runId}`);
     }
-    // [QA rework re-arm] failed run 의 resume 에서 반려 verdict 가 있는 blocked 이슈를
-    //   in_progress 로 되돌려 재작업 루프가 살아나게 한다(위 rearmBlockedQaIssuesForResume 참조).
     if (existingRun.status === "failed") {
       await rearmBlockedQaIssuesForResume(db, { companyId: input.companyId, runId: run.id });
     }
-    // [control node resume recovery] failed control node(IF/complete) 는 executeWorkflowControlNode 의
-    //   CAS(status=pending) 재클레임이 불가해 resume 만으로는 재평가되지 않는다. 재실행 전 pending 으로
-    //   리셋해 현 상태로 다시 평가되게 한다.
     await resetFailedControlNodesForResume({
       db,
       workflowRunId: run.id,
@@ -582,7 +580,9 @@ async resumeRun(
       workflowRunId: run.id,
       steps: execution.steps,
     });
-    return executeWorkflowRun(db, run.id);
+    return run.id;
+    });
+    return syncWorkflowRunState(db, resumedId, "workflow_execution", { requireRunning: true });
   },
 
   /**

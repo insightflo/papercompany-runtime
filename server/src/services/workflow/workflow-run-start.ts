@@ -7,9 +7,8 @@
 //   기존 plain 실행 경로를 유지하되, plain 시작 UPDATE 는 명시적 no-child 가드를 갖는다 —
 //   자식 표지 run 은 이 문장에 도달할 수 없고 자식 시작은 임대 소유 변이로만 일어난다(D5).
 // [authority] 내구 레코드(workflow_runs.child_start_* / invocation / step rows)만이 권위(규칙 7/8).
-import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { workflowRuns } from "@paperclipai/db";
+import { claimPlainWorkflowStart } from "./plain-start-claim.js";
 import type { ChildStartFence } from "./workflow-child-start-state.js";
 import {
   acquireWorkflowChildStartLease,
@@ -150,45 +149,9 @@ export async function executeWorkflowRunStart(
     // materializer 의 영수증 소비가 결정적 fence 다.
     syncOptions = { childStartFence: fence };
   } else {
-    const startedAt = new Date();
-    await db.transaction(async (tx) => {
-      const txDb = tx as unknown as Db;
-      // [D5] plain 시작 UPDATE — 자식 표지 run 은 도달할 수 없다(triggered-by/부모 포인터/
-      //   invocation 역참조 가드). 자식 시작은 임대 소유 변이로만 일어난다.
-      const [startedRun] = await txDb
-        .update(workflowRuns)
-        .set({ status: "running", startedAt, completedAt: null })
-        .where(and(
-          eq(workflowRuns.id, runId),
-          eq(workflowRuns.companyId, context.run.companyId),
-          // 취소된 run 을 무조건 running 으로 되돌리지 않는다(workflow child fix2 P1-2).
-          sql`${workflowRuns.status} <> 'cancelled'`,
-          // 명시적 no-child 가드 — 자식 표지/참조가 하나라도 있으면 이 문장은 0행이다.
-          sql`${workflowRuns.triggeredBy} <> 'workflow-step'`,
-          sql`${workflowRuns.parentRunId} is null`,
-          sql`${workflowRuns.parentStepRunId} is null`,
-          sql`not exists (
-            select 1 from workflow_step_invocations wrc_i where wrc_i.child_run_id = ${workflowRuns.id})`,
-        ))
-        .returning({
-          id: workflowRuns.id,
-          companyId: workflowRuns.companyId,
-          missionId: workflowRuns.missionId,
-          startedAt: workflowRuns.startedAt,
-        });
-      if (!startedRun?.startedAt) {
-        if (context.run.status === "cancelled") {
-          throw new Error(`Workflow run ${runId} is cancelled; refusing to start execution.`);
-        }
-        throw new Error(`Workflow run disappeared before execution start: ${runId}`);
-      }
-      await hooks.activateMission(txDb, {
-        companyId: startedRun.companyId,
-        missionId: startedRun.missionId,
-        workflowRunId: startedRun.id,
-        startedAt: startedRun.startedAt,
-      });
-    });
+    const claim = await claimPlainWorkflowStart(db, runId, hooks);
+    if (claim !== "started") return { kind: claim, result: await hooks.snapshot(db, runId) };
+    syncOptions = { requireRunning: true };
   }
 
   // sync 소유 결과를 타입으로 전달한다 — 'started'는 이 호출이 materialization 을 소유했을 때만

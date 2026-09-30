@@ -1,4 +1,7 @@
-import { integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { approvals } from "./approvals.js";
+import { workflowTransitionEvents } from "./workflow_transition_events.js";
 import { companies } from "./companies.js";
 import { workflowRuns } from "./workflow_runs.js";
 import { workflowTerminalDecisions } from "./workflow_terminal_decisions.js";
@@ -21,12 +24,23 @@ export const workflowRecoveryAuthorities = pgTable(
     recoveryKind: text("recovery_kind").notNull(),
     requestReference: text("request_reference"),
     requestedBy: text("requested_by").notNull(),
+    ownerDecisionEventId: uuid("owner_decision_event_id").references(() => workflowTransitionEvents.id, { onDelete: "restrict" }),
+    operatorApprovalId: uuid("operator_approval_id").references(() => approvals.id, { onDelete: "restrict" }),
+    replacementRunId: uuid("replacement_run_id").references(() => workflowRuns.id, { onDelete: "restrict" }),
+    requestHash: text("request_hash"),
+    replacementContract: jsonb("replacement_contract").$type<Record<string, unknown>>(),
     status: text("status").notNull().default("consumed"), // [봇 지적 기록] 현재는 'consumed' 단일값 — 향후 revoked 확장 대비 예약.
     consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
     resultingAuthorityVersion: integer("resulting_authority_version").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    replacementTargetUq: uniqueIndex("workflow_recovery_replacement_target_uq").on(table.replacementRunId),
+    replacementApprovalUq: uniqueIndex("workflow_recovery_replacement_approval_uq").on(table.operatorApprovalId),
+    replacementRequired: check("workflow_recovery_replacement_required", sql`${table.recoveryKind} <> 'replacement_from_start_v1' or (
+      ${table.ownerDecisionEventId} is not null and ${table.operatorApprovalId} is not null and ${table.replacementRunId} is not null
+      and ${table.requestHash} is not null and ${table.requestReference} is not null and ${table.replacementContract} is not null
+      and ${table.status} = 'consumed' and ${table.resultingAuthorityVersion} = ${table.targetAuthorityVersion})`),
     // 1회 소비 — 같은 (run, 대상 버전) 복구 권한은 정확히 하나.
     runVersionUq: uniqueIndex("workflow_recovery_authorities_run_version_uq").on(
       table.companyId,

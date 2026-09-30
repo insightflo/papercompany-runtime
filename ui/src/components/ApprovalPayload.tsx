@@ -1,11 +1,13 @@
 import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, GitBranch } from "lucide-react";
 import { formatCents } from "../lib/utils";
+import { ReplacementApprovalPayload } from "./ReplacementApprovalPayload";
 
 export const typeLabel: Record<string, string> = {
   hire_agent: "Hire Agent",
   approve_ceo_strategy: "CEO Strategy",
   budget_override_required: "Budget Override",
   external_automation: "External Automation",
+  workflow_replacement: "교체 실행 승인",
 };
 
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
@@ -176,6 +178,7 @@ export function ExternalAutomationPayload({ payload }: { payload: Record<string,
 }
 
 export function ApprovalPayloadRenderer({ type, payload }: { type: string; payload: Record<string, unknown> }) {
+  if (type === "workflow_replacement") return <ReplacementApprovalPayload payload={payload} />;
   if (type === "hire_agent") return <HireAgentPayload payload={payload} />;
   if (type === "budget_override_required") return <BudgetOverridePayload payload={payload} />;
   if (type === "external_automation") return <ExternalAutomationPayload payload={payload} />;

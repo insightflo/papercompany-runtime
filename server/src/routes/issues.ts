@@ -862,7 +862,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, {
       ...req.body,
-      projectId: req.body.projectId ?? issue.projectId ?? null,
+      projectId: req.body.projectId ?? issue.projectId ?? null, createdByRunId: actor.runId ?? null,
     });
     if (!product) {
       res.status(422).json({ error: "Invalid work product payload" });

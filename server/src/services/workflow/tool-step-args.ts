@@ -1,4 +1,7 @@
 import path from "node:path";
+import { withSelectedInputTransaction } from "./selected-input-transaction.js";
+import { resolveSelectedPaths } from "./workproduct-selector.js";
+import { resolveQaReceiptPath } from "./qa-artifact-consumer.js";
 import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workflowStepOutputBindings, workflowStepRuns } from "@paperclipai/db";
@@ -8,12 +11,13 @@ import {
   pinWorkProductForStep,
 } from "./workflow-output-binding.js";
 import { isWorkProductBindingEnabled } from "./run-reopen-guard-flag.js";
-
 type WorkflowArgStep = {
   id: string;
   dependencies?: string[];
   dependsOn?: string[];
   toolArgs?: unknown;
+  workProductSelectors?: unknown;
+  toolArtifactContract?: unknown;
 };
 
 type WorkflowArgRun = {
@@ -72,13 +76,13 @@ function assertPinnedProductConsumable(input: {
   return path.resolve(pinnedPath);
 }
 
-export async function resolveWorkflowToolStepArgs(input: {
+export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (input: {
   db: Db;
   run: WorkflowArgRun;
   step: WorkflowArgStep;
   workflowSteps: WorkflowArgStep[];
   consumerStepRunId?: string | null;
-}): Promise<unknown> {
+}): Promise<unknown> => {
   const args = input.step.toolArgs ?? {};
   const runMetadata = input.run.metadata ?? {};
   const references = collectArtifactReferences(args);
@@ -95,12 +99,13 @@ export async function resolveWorkflowToolStepArgs(input: {
 
   const pathsByStepId = new Map<string, string>();
   const pinByStepRun = input.consumerStepRunId
-    ? await isWorkProductBindingEnabled(input.db)
+    ? Boolean(input.step.workProductSelectors) || await isWorkProductBindingEnabled(input.db)
     : false;
   // [의도적 예외 명시 — 봇 bug·medium] condition-tool-source(IF condition source)와
   //   workflow-child-dispatch-precheck(사전 렌더) 호출부는 소비 스텝런 신원이 없어 핀이
   //   생략된다 — 이 단계(스테이지 A)는 스텝런 신원이 있는 tool-step dispatch 경로에만 핀한다.
   //   두 경로의 핀 지원은 신원 연결 설계 후 후속 PR 로 확장한다(플래그 JSDoc 참조).
+  const pinIds = new Map<string, string>();
   if (pinByStepRun) {
     // [봇 performance·medium 교정] 참조별 select 대신 한 번의 inArray 조회로 핀 맵을 만든다.
     const pinnedRows = await input.db
@@ -120,15 +125,16 @@ export async function resolveWorkflowToolStepArgs(input: {
         inArray(workflowStepOutputBindings.referencedStepId, Array.from(references)),
       ));
     for (const pinned of pinnedRows) {
-      // 핀이 존재하면 그것이 이 참조의 유일한 해석이다 — 소비 불가능하면 조용히 최신
-      //   대표로 재해석하지 않고 식별 오류로 실패한다(archived 는 여전히 읽는다).
+      pinIds.set(pinned.referencedStepId, pinned.workProductId);
       pathsByStepId.set(
         pinned.referencedStepId,
         assertPinnedProductConsumable(pinned),
       );
     }
   }
-  const products = await input.db
+  const selected = await resolveSelectedPaths(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id,
+    selectors: input.step.workProductSelectors, references, pins: pinIds });
+  const allProducts = await input.db
     .select({
       id: issueWorkProducts.id,
       stepId: workflowStepRuns.stepId,
@@ -146,13 +152,7 @@ export async function resolveWorkflowToolStepArgs(input: {
       not(eq(issueWorkProducts.status, "archived")),
     ))
     .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt), desc(issueWorkProducts.id));
-  // [봇 bug·medium 교정] (a) 핀 삽입은 병렬로, (b) already_pinned 이 떠도 결과를 버리지
-  //   않는다 — DB 핀이 이 참조의 유일한 해석이므로, 방금 해석한 것과 다르면 핀된 산출물
-  //   경로로 맵을 되돌린다(제3자 동시 핀이 이긴 경우의 정합성). 핀 대상이 소실/무효면
-  //   위 핀 로드 경로와 동일한 식별 오류로 실패한다.
-  // [봇 bug·medium 교정] 참조별 핀 대상은 정렬 순 첫 행(대표/최신 — 비핀 폴백 루프와 동일
-  //   해석) 하나로 한정한다 — 같은 유니크 키에 여러 insert 가 경합하면 승자가 비결정적이
-  //   되고 낡은/비대표 산출물이 영구히 핀될 수 있다.
+  const products = allProducts.filter(p => !selected.has(p.stepId) || selected.get(p.stepId)!.product.id === p.id);
   const pinCandidates: typeof products = [];
   const candidateStepIds = new Set<string>();
   for (const product of products) {
@@ -170,7 +170,7 @@ export async function resolveWorkflowToolStepArgs(input: {
         workflowRunId: input.run.id,
         consumerStepRunId: input.consumerStepRunId!,
         referencedStepId: product.stepId,
-        workProductId: product.id,
+        workProductId: product.id, sourceExecutionGeneration: selected.get(product.stepId)?.producer.executionGeneration,
       }).then((result) => ({ product, result }))))
     : [];
   for (const product of products) {
@@ -182,6 +182,7 @@ export async function resolveWorkflowToolStepArgs(input: {
   for (const { product, result } of pinResults) {
     if (result.kind !== "already_pinned") continue;
     if (result.workProductId === product.id) continue;
+    if (selected.has(product.stepId)) throw new Error("workproduct_selector_pin_conflict");
     let pinnedRow = (await input.db
       .select({ provider: issueWorkProducts.provider, metadata: issueWorkProducts.metadata, url: issueWorkProducts.url })
       .from(issueWorkProducts)
@@ -220,12 +221,7 @@ export async function resolveWorkflowToolStepArgs(input: {
     );
   }
 
-  // [의도적 예외 — 봇 bug·medium 문서화] 네이티브 폴백(스텝 metadata.toolResult.artifactPath)은
-  //   issue_work_products 행을 거치지 않아 work_product_id 가 없다 — 이 단계 핀 대상이 아니다.
-  //   세대 CAS(PR-3)가 이 경로의 낡은 결과를 이미 차단한다. 행 기반 핀 확장은 후속 설계.
-  // 네이티브 tool 스텝 폴백: issue 없이 실행된 스텝은 위 조인에 걸리지 않는다.
-  // 툴 실행기가 기록한 스텝 런 metadata.toolResult.artifactPath(구조화 DB 레코드)를
-  // 그대로 사용한다. 최신 완료 런 우선 — 재시도 시 metadata가 덮어쓰기된 최신 값 유지.
+  // QA contracts require a server receipt; legacy non-QA tools keep their existing transport.
   const unresolvedStepIds = Array.from(references).filter((stepId) => !pathsByStepId.has(stepId));
   if (unresolvedStepIds.length > 0) {
     const stepRunRows = await input.db
@@ -238,6 +234,10 @@ export async function resolveWorkflowToolStepArgs(input: {
       .orderBy(desc(workflowStepRuns.completedAt), desc(workflowStepRuns.id));
     for (const row of stepRunRows) {
       if (pathsByStepId.has(row.stepId)) continue;
+      if (row.metadata?.toolArtifactRequest || row.metadata?.toolArtifactReceipt || input.workflowSteps.find(s => s.id === row.stepId)?.toolArtifactContract) {
+        pathsByStepId.set(row.stepId, await resolveQaReceiptPath(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId: row.stepId }));
+        continue;
+      }
       const toolResult = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
         ? (row.metadata as Record<string, unknown>).toolResult
         : null;
@@ -256,7 +256,7 @@ export async function resolveWorkflowToolStepArgs(input: {
   }
 
   return renderChecked(args, input.run.runDate ?? "", input.run.id, pathsByStepId, runMetadata);
-}
+});
 
 /**
  * [fix2 P2-7] 렌더 후 미해결 {$childInputs.*} 토큰은 fail-closed — enqueue/실행 이전에

@@ -2,8 +2,8 @@
 //
 // [purpose] T3 레거시 보존 회귀:
 //   1) 원본 완료/취소 mission 의 도메인 행이 정식 연결 생성 전후로 동일하다(원본 불변).
-//   2) 일반(non-quality) DAG 경로는 기존 의미(이슈 생성 → 그 안에서 깨우기 → 이후 step 연결)를 유지한다.
-//      — 깨우는 시점에 step 연결은 아직 커밋되지 않았다(관찰로 증명).
+//   2) 일반(non-quality) DAG 경로는 새 계약(이슈 생성 → step 연결 commit → 원본 깨우기)을 유지한다.
+//      — 원본 wake 는 커밋된 step 연결을 본다(관찰로 증명).
 //   3) Quality 대상 DAG 는 issue+step 연결 commit → 깨우기 순서다.
 //      — 깨우는 시점에 step 연결이 이미 커밋되어 있다(관찰로 증명).
 
@@ -123,7 +123,7 @@ describeQualityDb("Quality canonical — legacy semantics preserved", () => {
     expect(binding.missionId).not.toBe(cancelledMissionId);
   });
 
-  it("keeps the general DAG path: wake fires during issue creation, before the step binding commits", async () => {
+  it("keeps the general DAG path: original wake fires after the step binding commits and sees the durable binding", async () => {
     const db = owned.db;
     const companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: `LegacyCo-${companyId.slice(0, 8)}`, issuePrefix: `LG${companyId.slice(0, 4)}` });
@@ -146,10 +146,10 @@ describeQualityDb("Quality canonical — legacy semantics preserved", () => {
     expect(wakes.length).toBeGreaterThan(0);
     const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, stepRun!.issueId!)));
     expect(issue!.originKind).toBe("workflow_execution");
-    // 기존 의미 보존: 깨우는 시점에는 아직 step 연결이 커밋돼 있지 않다.
+    // 새 계약(시도 증명 스코프): 원본 wake 는 커밋된 step 연결을 본다(연결 후 깨우기, claim 이후 채택 금지).
     const observed = wakeProbe.observations.slice(observationsBefore).find((o) => o.issueId === stepRun!.issueId);
     expect(observed).toBeDefined();
-    expect(observed!.boundStepRunIdAtWake).toBeNull();
+    expect(observed!.boundStepRunIdAtWake).toBe(stepRun!.id);
   });
 
   it("binds quality DAG step issues before waking (binding committed at wake time)", async () => {

@@ -2,6 +2,8 @@ import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 
+import { lockCapRecovery } from "./cap-recovery-safety.js";
+
 const EVENT_TYPE = "owner_cap_override_retry";
 const P = workflowTransitionEvents.payload;
 
@@ -171,6 +173,7 @@ export async function restoreCapOverrideSnapshotInTransaction(
   input: RestoreCapOverrideSnapshotInput,
 ): Promise<void> {
   const snapshot = input.snapshot;
+  await lockCapRecovery(db, input.companyId, snapshot.run.id);
   const forwardedIssueUpdatedAt = new Date(input.forwardedIssueUpdatedAt);
   if (Number.isNaN(forwardedIssueUpdatedAt.getTime())) throw new Error("cap-override-rollback-invalid-forward-time");
 

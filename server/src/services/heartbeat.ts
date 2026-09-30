@@ -190,12 +190,14 @@ import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.
 import { isHeartbeatFinalizationV1Enabled } from "./heartbeat-finalization/flag.js";
 import {
   acknowledgeHeartbeatRunBeforeAdapter,
-  claimQueuedHeartbeatRun,
   recordHeartbeatTerminalOutcomeShadow,
 } from "./heartbeat-finalization/shadow-writes.js";
 import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
 import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetryEnqueueDeps } from "./heartbeat-retry-enqueue.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
+import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
+import { preserveWorkflowAttemptProof, withoutWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
+import { assertHeartbeatRecoveryAdmission, claimHeartbeatWithRecoveryGuard, executeHeartbeatWithRecoveryGuard } from "./heartbeat-recovery-guard.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
 import {
   SHUTDOWN_INTERRUPTED_ERROR_CODE,
@@ -213,6 +215,7 @@ import {
   resolveHeartbeatResumeScopeFence,
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
+import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -4727,44 +4730,11 @@ export function heartbeatService(db: Db) {
 
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
     if (run.status !== "queued") return run;
-    const agent = await getAgent(run.agentId);
-    if (!agent) {
-      await cancelRunInternal(run.id, "Cancelled because the agent no longer exists");
-      return null;
-    }
-    if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
-      await cancelRunInternal(run.id, "Cancelled because the agent is not invokable");
-      return null;
-    }
-
-    const context = parseObject(run.contextSnapshot);
-    const budgetBlock = await budgets.getInvocationBlock(run.companyId, run.agentId, {
-      issueId: readNonEmptyString(context.issueId),
-      projectId: readNonEmptyString(context.projectId),
-    });
-    if (budgetBlock) {
-      await cancelRunInternal(run.id, budgetBlock.reason);
-      return null;
-    }
-
-    const missionIdForRun = readNonEmptyString(context.missionId);
-    if (missionIdForRun) {
-      try {
-        await assertMissionRuntimeAcceptsWork(db, {
-          companyId: run.companyId,
-          missionId: missionIdForRun,
-        });
-      } catch (err) {
-        await cancelRunInternal(
-          run.id,
-          err instanceof Error ? err.message : "Cancelled because mission is terminal",
-        );
-        return null;
-      }
-    }
-
     const claimedAt = new Date();
-    const claimed = await claimQueuedHeartbeatRun(db, run, claimedAt);
+    const claimed = await claimHeartbeatWithRecoveryGuard(db, run, claimedAt).catch(async (err) => {
+      await cancelRunInternal(run.id, err instanceof Error ? err.message : "Heartbeat claim refused", false);
+      return null;
+    });
     if (!claimed) return null;
 
     // [Task 6C] queue_run_started event (queued→running transition)
@@ -6099,6 +6069,15 @@ export function heartbeatService(db: Db) {
     wakeupRequestId: string,
   ) {
     return withTxTimeout(db, async (tx) => {
+      const [observed] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
+      if (!observed) return null;
+      try {
+        await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...observed, contextSnapshot: parseObject(observed.payload)[DEFERRED_WAKE_CONTEXT_KEY] });
+      } catch (err) {
+        await tx.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date(), error: err instanceof Error ? err.message : "Recovery admission refused", updatedAt: new Date() })
+          .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
+        return null;
+      }
       await tx.execute(sql`select id from agent_wakeup_requests where id = ${wakeupRequestId} for update`);
       const request = await tx
         .select()
@@ -7813,7 +7792,7 @@ export function heartbeatService(db: Db) {
           provider: readNonEmptyString(runtimeConfig.provider) ?? null,
         },
         attemptRunId: run.id,
-        execute: () =>
+        execute: () => executeHeartbeatWithRecoveryGuard(db, run, () =>
           adapter.execute({
             runId: run.id,
             agent: { ...agent, adapterConfig: runtimeConfig },
@@ -7827,7 +7806,7 @@ export function heartbeatService(db: Db) {
               await persistRunProcessMetadata(run.id, meta);
             },
             authToken: authToken ?? undefined,
-          }),
+          })),
       });
       if (fencedAdapterExecution.outcome === "skipped_replay") {
         throw Object.assign(
@@ -8368,12 +8347,9 @@ export function heartbeatService(db: Db) {
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
       }, { expectedStatuses: ["running"] });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: new Date(),
-        error: message,
-      });
 
       if (failedRun) {
+        await failWakeupForFailedHeartbeat(db, failedRun);
         await finalizeHermesChatRun(db, failedRun.id).catch((finalizeErr) => {
           logger.warn({ err: finalizeErr, runId: failedRun.id }, "failed to finalize Hermes chat failure response");
         });
@@ -8569,7 +8545,7 @@ export function heartbeatService(db: Db) {
 
   async function releaseIssueExecutionAndPromote(
     run: typeof heartbeatRuns.$inferSelect,
-    options: { readonly skipLocked?: boolean } = {},
+    options: { readonly skipLocked?: boolean; readonly resumeQueue?: boolean } = {},
   ) {
     const postTransactionWorkflowIssueSyncIssueIds = new Set<string>();
     const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
@@ -9943,15 +9919,15 @@ export function heartbeatService(db: Db) {
       },
     });
 
-    await startNextQueuedRunForAgent(promotedRun.agentId);
+    if (options.resumeQueue !== false) await startNextQueuedRunForAgent(promotedRun.agentId);
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
-    const contextSnapshot: Record<string, unknown> = { ...(opts.contextSnapshot ?? {}) };
+    const contextSnapshot: Record<string, unknown> = withoutWorkflowAttemptProof(opts.contextSnapshot ?? {})!;
     const reason = opts.reason ?? null;
-    const payload = opts.payload ?? null;
+    const payload = withoutWorkflowAttemptProof(opts.payload ?? null);
     const {
       contextSnapshot: enrichedContextSnapshot,
       issueIdFromPayload,
@@ -10022,7 +9998,6 @@ export function heartbeatService(db: Db) {
             .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
             .then((rows) => rows[0]?.missionId ?? null)
         : null);
-    const finalizationV1Enabled = await isHeartbeatFinalizationV1Enabled(db);
     const requestedWorkflowRunId = readNonEmptyString(enrichedContextSnapshot.workflowRunId)
       ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowRunId"] as string)
       ?? null;
@@ -10030,7 +10005,6 @@ export function heartbeatService(db: Db) {
       ?? readNonEmptyString((payload as Record<string, unknown> | null)?.["workflowStepRunId"] as string)
       ?? null;
     const workflowLink = await resolveWorkflowExecutionLink(db, {
-      enabled: finalizationV1Enabled,
       companyId: agent.companyId,
       issueId: issueId ?? null,
       workflowRunId: requestedWorkflowRunId,
@@ -10169,6 +10143,7 @@ export function heartbeatService(db: Db) {
       });
 
       const outcome = await withTxTimeout(db, async (tx) => {
+        await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );
@@ -10290,7 +10265,7 @@ export function heartbeatService(db: Db) {
               [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
             };
             const existingQueuedPlanRework = await tx
-              .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount })
+              .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount, payload: agentWakeupRequests.payload })
               .from(agentWakeupRequests)
               .where(and(
                 eq(agentWakeupRequests.companyId, agent.companyId),
@@ -10305,10 +10280,10 @@ export function heartbeatService(db: Db) {
             if (existingQueuedPlanRework) {
               await tx
                 .update(agentWakeupRequests)
-                .set({ payload: planReworkQueuedPayload, coalescedCount: (existingQueuedPlanRework.coalescedCount ?? 0) + 1, updatedAt: new Date() })
+                .set({ payload: preserveWorkflowAttemptProof(existingQueuedPlanRework.payload, planReworkQueuedPayload), coalescedCount: (existingQueuedPlanRework.coalescedCount ?? 0) + 1, updatedAt: new Date() })
                 .where(eq(agentWakeupRequests.id, existingQueuedPlanRework.id));
             } else {
-              await tx.insert(agentWakeupRequests).values({
+              await insertWorkflowWakeRequest(tx as unknown as Db, {
                 companyId: agent.companyId,
                 agentId,
                 source,
@@ -10430,7 +10405,7 @@ export function heartbeatService(db: Db) {
             return { kind: "deferred" as const };
           }
 
-          await tx.insert(agentWakeupRequests).values({
+          await insertWorkflowWakeRequest(tx as unknown as Db, {
             companyId: agent.companyId,
             agentId,
             source,
@@ -10520,7 +10495,7 @@ export function heartbeatService(db: Db) {
               return { kind: "deferred" as const };
             }
 
-            await tx.insert(agentWakeupRequests).values({
+            await insertWorkflowWakeRequest(tx as unknown as Db, {
               companyId: agent.companyId,
               agentId,
               source,
@@ -10537,9 +10512,7 @@ export function heartbeatService(db: Db) {
           }
         }
 
-        const wakeupRequest = await tx
-          .insert(agentWakeupRequests)
-          .values({
+        const wakeupRequest = await insertWorkflowWakeRequest(tx as unknown as Db, {
             companyId: agent.companyId,
             agentId,
             source,
@@ -10551,9 +10524,7 @@ export function heartbeatService(db: Db) {
             requestedByActorType: opts.requestedByActorType ?? null,
             requestedByActorId: opts.requestedByActorId ?? null,
             idempotencyKey: opts.idempotencyKey ?? null,
-          })
-          .returning()
-          .then((rows) => rows[0]);
+          }).then((rows) => rows[0]);
 
         const newRun = await tx
           .insert(heartbeatRuns)
@@ -10759,9 +10730,7 @@ export function heartbeatService(db: Db) {
         return { run: mergedRun, coalesced: true };
       }
 
-      const wakeupRequest = await execDb
-        .insert(agentWakeupRequests)
-        .values({
+      const wakeupRequest = await insertWorkflowWakeRequest(execDb, {
           companyId: agent.companyId,
           agentId,
           source,
@@ -10773,9 +10742,7 @@ export function heartbeatService(db: Db) {
           requestedByActorType: opts.requestedByActorType ?? null,
           requestedByActorId: opts.requestedByActorId ?? null,
           idempotencyKey: opts.idempotencyKey ?? null,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+        }).then((rows) => rows[0]);
 
       const wakeupMissionId = readNonEmptyString(enrichedContextSnapshot.missionId);
       const wakeupEffectiveTaskKey = wakeupMissionId ? `mission:${wakeupMissionId}` : taskKey;
@@ -10830,6 +10797,7 @@ export function heartbeatService(db: Db) {
       ? await withTxTimeout(
           db,
           async (tx) => {
+            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
             await tx.execute(
               sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
             );
@@ -10839,7 +10807,10 @@ export function heartbeatService(db: Db) {
         )
       : await withTxTimeout(
           db,
-          async (tx) => admitUnlockedRun(tx as unknown as Db),
+          async (tx) => {
+            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
+            return admitUnlockedRun(tx as unknown as Db);
+          },
           { label: "enqueueWakeup:taskkey-admission" },
         );
 
@@ -10961,7 +10932,7 @@ export function heartbeatService(db: Db) {
     return wakeupIds.length;
   }
 
-  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane") {
+  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", resumeQueue = true) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (run.status !== "running" && run.status !== "queued") return run;
@@ -10999,12 +10970,12 @@ export function heartbeatService(db: Db) {
         level: "warn",
         message: "run cancelled",
       });
-      await releaseIssueExecutionAndPromote(cancelled);
+      await releaseIssueExecutionAndPromote(cancelled, { resumeQueue });
     }
 
     runningProcesses.delete(run.id);
     await finalizeAgentStatus(run.agentId, "cancelled");
-    await startNextQueuedRunForAgent(run.agentId);
+    if (resumeQueue) await startNextQueuedRunForAgent(run.agentId);
     return cancelled;
   }
 

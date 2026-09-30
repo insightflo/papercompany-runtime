@@ -639,13 +639,9 @@ describe("workflow routes", () => {
       });
 
     expect(accepted.status).toBe(201);
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), expect.not.objectContaining({ scheduledSlotId: expect.anything() }));
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      workflowId: WORKFLOW_ID,
-      companyId: COMPANY_ID,
-      triggerSource: "api",
-      parentIssueId: PARENT_ISSUE_ID,
-    }));
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[1]).not.toHaveProperty("scheduledSlotId");
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[1]).toMatchObject({ workflowId: WORKFLOW_ID, companyId: COMPANY_ID, triggerSource: "api", parentIssueId: PARENT_ISSUE_ID });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
     expect(logActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "workflow_run.created" }));
   });
 
@@ -678,7 +674,7 @@ describe("workflow routes", () => {
     expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(3);
     const calls = mockWorkflowService.trigger.mock.calls;
     for (const [index] of forms.entries()) {
-      expect(calls[index]!.length).toBe(2);
+      expect(calls[index]![2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
       expect(calls[index]![1].metadata).toEqual({ url: forms[index] });
     }
   });
@@ -701,7 +697,7 @@ describe("workflow routes", () => {
     expect(res.status).toBe(201);
     expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(1);
     const triggerCall = mockWorkflowService.trigger.mock.calls[0]!;
-    expect(triggerCall.length).toBe(2);
+    expect(triggerCall[2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
     expect(triggerCall[1].metadata).toEqual({ url: "https://youtu.be/dQw4w9WgXcQ", videoId: "custom12345_" });
   });
 

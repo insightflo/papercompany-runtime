@@ -172,27 +172,9 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     executeSpy.mockReset();
     let claimed!: () => void;
     let resume!: () => void;
-    let executed!: () => void;
     const claimObserved = new Promise<void>((resolve) => { claimed = resolve; });
     const resumeA = new Promise<void>((resolve) => { resume = resolve; });
-    const executionObserved = new Promise<void>((resolve) => { executed = resolve; });
-    let executionState: { wakeCount: number; runCount: number; auditStatus: unknown } | null = null;
-    executeSpy.mockImplementation(async () => {
-      if (!executionState) {
-        const wakes = await exactWakes(s);
-        const runs = wakes[0]
-          ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0].id))
-          : [];
-        const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, auditId));
-        executionState = {
-          wakeCount: wakes.length,
-          runCount: runs.length,
-          auditStatus: (audit!.payload as Record<string, unknown>).status,
-        };
-        executed();
-      }
-      return { ...successfulAdapterResult(), exitCode: 1, errorMessage: "intentional production-path stop" };
-    });
+    executeSpy.mockImplementation(async () => successfulAdapterResult());
     const first = dispatchCapOverrideWake(db, {
       companyId: s.companyId, auditId, auditIdempotencyKey: `cap-override:${s.ownerDecisionEventId}`,
       payload, wakeKey: `cap-override-wake:${s.ownerDecisionEventId}`,
@@ -206,17 +188,18 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
       payload: { ...(claimedAudit!.payload as Record<string, unknown>), dispatchStartedAt: "2020-01-01T00:00:00.000Z" },
     }).where(eq(workflowTransitionEvents.id, auditId));
     const secondResult = await callProduction(s);
-    await executionObserved;
     resume();
     const firstResult = await first;
 
-    expect(executionState).toEqual(expect.objectContaining({ wakeCount: 1, runCount: 1 }));
-    expect(["dispatching", "accepted"]).toContain(executionState!.auditStatus);
+    expect(executeSpy).not.toHaveBeenCalled();
+    const [acceptedAudit] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, auditId));
+    expect(acceptedAudit.payload.status).toBe("accepted");
     expect([firstResult, secondResult].filter((result) => result.kind === "cap_override_applied")).toHaveLength(1);
     expect([firstResult, secondResult].filter((result) => result.kind === "cap_override_already_applied")).toHaveLength(1);
     const wakes = await exactWakes(s);
     expect(wakes).toHaveLength(1);
-    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id))).toHaveLength(1);
+    expect(wakes[0].status).toBe("queued");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id))).toHaveLength(0);
     await drainHeartbeatRuns(db);
   });
 
@@ -246,15 +229,14 @@ describeEP("cap-override shared lease/wake race + authority/shape proof", () => 
     expect(result).toEqual(expect.objectContaining({ kind: "report_only", reason: "cap_override_queue_rolled_back" }));
     expect(executeSpy).not.toHaveBeenCalled();
     const wakes = await exactWakes(s);
-    expect(wakes).toHaveLength(1);
-    expect(wakes[0]!.status).toBe("skipped");
+    expect(wakes).toHaveLength(0);
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, s.producerIssueId))).toHaveLength(0);
     expect(await reloadRun(db, s.workflowRunId)).toEqual(expect.objectContaining({ status: "failed" }));
     expect(await reloadStepRun(db, s.workflowRunId, PRODUCER)).toEqual(expect.objectContaining({ status: "completed", iterationIndex: MAX_ITER }));
     const [issue] = await db.select().from(issues).where(eq(issues.id, s.producerIssueId));
     expect(issue).toEqual(expect.objectContaining({ status: "done" }));
     const [audit] = await db.select({ payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(eq(workflowTransitionEvents.idempotencyKey, `cap-override:${s.ownerDecisionEventId}`));
-    expect(audit!.payload).toEqual(expect.objectContaining({ status: "rolled_back", rollbackReason: "wake_not_accepted" }));
+    expect(audit).toBeUndefined(); // Fresh refusal rolls back the audit insert too; no compensating writes.
   });
   it("missing step lookup after claim releases lease to pending", async () => {
     const missingStepRunId = randomUUID();

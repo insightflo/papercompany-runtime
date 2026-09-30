@@ -39,7 +39,7 @@ vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
 });
 
 import {
-  executeWorkflowRun,
+  executeWorkflowRunWithStartOutcome,
   setWorkflowToolStepExecutor,
   syncWorkflowRunState,
 } from "../services/workflow/dag-engine.js";
@@ -188,7 +188,7 @@ describeEP("workflow resume native entry (sync acceptance guard + shared readine
     expect(error.message).toContain("exactly one non-gate producer dependency");
   });
 
-  it("readiness alone never resets startedAt; executeWorkflowRun keeps original start behavior", async () => {
+  it("readiness and repeated initial start leave a running run unchanged and report busy", async () => {
     const graph = await seedNativeEntryGraph(fixture.sql, db, { prefix: "NES" });
     heartbeatWakeup.mockResolvedValue({ id: "start-wake" });
     await assertResumeExecutionReadiness({
@@ -201,10 +201,16 @@ describeEP("workflow resume native entry (sync acceptance guard + shared readine
     expect(unchanged.startedAt?.toISOString()).toBe("2026-09-08T01:00:00.000Z");
     expect(unchanged.status).toBe("running");
 
-    await executeWorkflowRun(db, graph.runId);
+    const before = await captureNativeScopedRecords(fixture.sql, graph.runId);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const outcome = await executeWorkflowRunWithStartOutcome(db, graph.runId);
+      expect(outcome.kind).toBe("busy");
+      expect(outcome.result.status).toBe("running");
+      expect(await captureNativeScopedRecords(fixture.sql, graph.runId)).toEqual(before);
+    }
     const [started] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, graph.runId));
-    expect(started.status).toBe("running");
-    expect(started.startedAt).not.toBeNull();
-    expect(started.startedAt!.getTime()).toBeGreaterThan(new Date("2026-09-08T01:00:00.000Z").getTime());
+    expect(started.startedAt?.toISOString()).toBe("2026-09-08T01:00:00.000Z");
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    expect(dispatchToolStep).not.toHaveBeenCalled();
   });
 });

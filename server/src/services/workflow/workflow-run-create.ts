@@ -16,8 +16,9 @@ import type { CreateWorkflowRunInput } from "./types.js";
 export async function createWorkflowRunWithDefinition(
   db: Db,
   input: CreateWorkflowRunInput,
+  reservedId?: string,
 ): Promise<typeof workflowRuns.$inferSelect> {
-  const id = crypto.randomUUID();
+  const id = reservedId ?? crypto.randomUUID();
   const now = new Date();
   return await db.transaction(async (tx) => {
     const [row] = await tx.insert(workflowRuns).values({

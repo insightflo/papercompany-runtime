@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workProductSelectorsSchema, toolArtifactContractSchema } from "./workflow-artifact.js";
 import { refineWorkflowChildStepContract } from "./workflow-child-contract.js";
 import { workflowConditionGroupSchema } from "./workflow-condition.js";
 import { workflowRunInputsSchema } from "./workflow-run-inputs.js";
@@ -103,8 +104,6 @@ export const workflowStepDefinitionSchema = z.object({
   description: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
-  // [workflow child step] n8n "Execute Workflow" — 같은 회사 대상 워크플로우 실행.
-  // targetWorkflowId 필수 여부는 type==="workflow" refine 에서 검증.
   targetWorkflowId: optionalUuidSchema,
   // [descope v1 D1] wait 는 생략(=true 정규화) 또는 리터럴 true 만 허용한다.
   // fire-and-forget(false) 은 정의 단계에서 거부된다(수입 false 도 invalid 로 표면화) —
@@ -135,6 +134,7 @@ export const workflowStepDefinitionSchema = z.object({
   qaType: z.string().trim().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/iu).optional(),
   toolName: z.string().optional(),
   toolArgs: z.unknown().optional(),
+  workProductSelectors: workProductSelectorsSchema.optional(), toolArtifactContract: toolArtifactContractSchema.optional(),
   tools: z.array(z.string()).optional(),
   toolNames: z.array(z.string()).optional(),
   allowedSearchScopes: z.array(z.string()).optional(),
@@ -344,8 +344,8 @@ export const workflowToolGrantSchema = z.object({
 }).strict();
 
 export type WorkflowToolGrantInput = z.infer<typeof workflowToolGrantSchema>;
-
-export const triggerWorkflowRunSchema = z.object({
+import { replacementIntentSchema } from "./workflow-replacement.js";
+export const triggerWorkflowRunSchema = z.object({ replacementIntent: replacementIntentSchema.optional(),
   missionId: z.string().uuid().optional(),
   triggeredBy: z.string().min(1).optional(),
   triggerSource: z.string().nullable().optional(),

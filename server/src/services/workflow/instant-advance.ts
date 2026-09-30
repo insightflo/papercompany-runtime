@@ -18,7 +18,7 @@ import { workflowRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
 import { isRunReopenGuardEnabled, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
-import { executeWorkflowRun } from "./workflow-run-execution.js";
+import { syncWorkflowRunState } from "./dag-engine.js";
 
 const TAG = "instant-advance";
 /** dirty 연쇄 재진행 상한 — 1회 요청 체인이 유도할 수 있는 최대 연속 진행 횟수. */
@@ -173,7 +173,7 @@ function startAdvance(db: Db, workflowRunId: string, chainCount: number, reopenG
         );
         return;
       }
-      await executeWorkflowRun(db, workflowRunId);
+      await syncWorkflowRunState(db, workflowRunId, "workflow_execution", { requireRunning: true });
       logger.info({ tag: TAG, workflowRunId, chainCount }, "advance finished");
     } catch (err) {
       // 진행 실패는 로그만 — 주기 틱이 폴백이다(재발사/보상 로직 없음).

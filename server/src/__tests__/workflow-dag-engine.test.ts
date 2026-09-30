@@ -2450,7 +2450,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       status: "pending",
     });
 
-    const result = await executeWorkflowRun(db, runId);
+    const result = await syncWorkflowRunState(db, runId, "workflow_execution", { requireRunning: true });
 
     expect(result.status).toBe("running");
     const issueRows = await db.select().from(issues).where(eq(issues.originRunId, runId));
@@ -2557,7 +2557,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       status: "pending",
     });
 
-    const result = await executeWorkflowRun(db, runId);
+    const result = await syncWorkflowRunState(db, runId, "workflow_execution", { requireRunning: true });
 
     expect(result.status).toBe("running");
     const [restoredIssue] = await db
@@ -7066,7 +7066,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       companyId,
       missionId,
       triggeredBy: "system",
-      status: "running",
+      status: "pending",
     });
     const oversightIssue = await missionService(db).ensureMainExecutorOversightIssue(
       { id: missionId, companyId, ownerAgentId: agentId, title: "Active Supervision Mission", description: null, status: "active", source: "workflow", createdAt: new Date(), updatedAt: new Date() },

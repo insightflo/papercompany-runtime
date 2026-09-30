@@ -1,3 +1,5 @@
+import { assertAgentReplacementRequired } from "../services/workflow/replacement-admission.js";
+import { assertPluginWorkflowActionAccess, nativeWorkflowActionKeys, normalizedWorkflowActionParams } from "./plugin-workflow-action-auth.js";
 /**
  * @fileoverview Plugin management REST API routes
  *
@@ -11,7 +13,7 @@
  * - Retrieving UI slot contributions for frontend rendering
  * - Discovering and executing plugin-contributed agent tools
  *
- * All routes require board-level authentication (assertBoard middleware).
+ * Board-only except authenticated native workflow replacement actions (shared admission).
  *
  * @module server/routes/plugins
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
@@ -474,34 +476,6 @@ export function pluginRoutes(
     };
   }
 
-  const nativeWorkflowActionKeys = new Set([
-    "create-workflow",
-    "update-workflow",
-    "delete-workflow",
-    "start-workflow",
-    "resume-run",
-    "cancel-run",
-    "abort-run",
-    "manual-complete",
-    "handle-tool-execution-result",
-  ]);
-
-  function normalizedWorkflowActionParams(
-    key: string,
-    body: ({
-      companyId?: string;
-      params?: Record<string, unknown>;
-      renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
-    } & Record<string, unknown>) | PluginBridgeActionRequest | undefined,
-  ): Record<string, unknown> {
-    if (body?.params && typeof body.params === "object") return body.params;
-    if (!body || !nativeWorkflowActionKeys.has(key)) return {};
-
-    const { renderEnvironment: _renderEnvironment, params: _params, key: _key, ...topLevelParams } =
-      body as Record<string, unknown>;
-    return topLevelParams;
-  }
-
   function parseNativeWorkflowExecutionMode(value: unknown): WorkflowExecutionMode | undefined {
     return value === "static_dag" || value === "dynamic_owner_plan" ? value : undefined;
   }
@@ -713,18 +687,12 @@ export function pluginRoutes(
       const triggeredBy = typeof params.triggerSource === "string" && params.triggerSource.trim()
         ? params.triggerSource.trim()
         : req.actor.type;
-      await refreshNativeWorkflowDefinitionFromPluginEntity({
-        companyId,
-        pluginId: input.pluginId,
-        workflowId,
-      });
-      const run = await workflowService.trigger(db, {
-        companyId,
-        workflowId,
-        missionId,
-        triggeredBy,
-      });
-      await updatePluginWorkflowDefinitionEntity({
+      const replacementIntent = params.replacementIntent as import("@paperclipai/shared/validators/workflow-replacement").ReplacementIntent | undefined;
+      const trigger = { companyId, workflowId, missionId, triggeredBy, replacementIntent, metadata: params.metadata as Record<string, unknown> | undefined };
+      await assertAgentReplacementRequired(db, trigger, req.actor);
+      if (!replacementIntent) await refreshNativeWorkflowDefinitionFromPluginEntity({ companyId, pluginId: input.pluginId, workflowId });
+      const run = await workflowService.trigger(db, trigger, { actor: req.actor });
+      if (!replacementIntent) await updatePluginWorkflowDefinitionEntity({
         companyId,
         pluginId: input.pluginId,
         workflowId,
@@ -1534,7 +1502,7 @@ export function pluginRoutes(
    * @see PLUGIN_SPEC.md §19.7 — Error Propagation Through The Bridge
    */
   router.post("/plugins/:pluginId/bridge/action", async (req, res) => {
-    assertBoard(req);
+    if (req.actor.type !== "agent") assertBoard(req);
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -1572,6 +1540,7 @@ export function pluginRoutes(
     }
 
     const actionParams = normalizedWorkflowActionParams(body.key, body);
+    assertPluginWorkflowActionAccess(req, plugin, body.key, actionParams, body);
     if (plugin.pluginKey === "insightflo.workflow-engine") {
       const handledNativeAction = await handleNativeWorkflowEngineAction({
         key: body.key,
@@ -1583,6 +1552,7 @@ export function pluginRoutes(
       });
       if (handledNativeAction) return;
     }
+    assertBoard(req); // Agents never fall through to a plugin worker.
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1779,7 +1749,7 @@ export function pluginRoutes(
    * @see PLUGIN_SPEC.md §19.7 — Error Propagation Through The Bridge
    */
   router.post("/plugins/:pluginId/actions/:key", async (req, res) => {
-    assertBoard(req);
+    if (req.actor.type !== "agent") assertBoard(req);
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -1816,6 +1786,7 @@ export function pluginRoutes(
     }
 
     const actionParams = normalizedWorkflowActionParams(key, body);
+    assertPluginWorkflowActionAccess(req, plugin, key, actionParams, body);
 
     if (plugin.pluginKey === "insightflo.workflow-engine") {
       const handledNativeAction = await handleNativeWorkflowEngineAction({
@@ -1828,6 +1799,7 @@ export function pluginRoutes(
       });
       if (handledNativeAction) return;
     }
+    assertBoard(req); // Agents never fall through to a plugin worker.
 
     try {
       const result = await bridgeDeps.workerManager.call(

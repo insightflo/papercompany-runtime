@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertRunNotReplaced } from "../run-replacement-guard.js";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, missions, workflowResumeRequests, workflowRuns } from "@paperclipai/db";
@@ -101,6 +102,7 @@ async function applyInsideLock(
   signer: ResumeApplySigner,
 ): Promise<ResumeRequestView> {
   const { tx, mission, run, steps } = context;
+  await assertRunNotReplaced(tx, run.id, body.companyId);
   const replay = await findReplayableRequest(tx, body, requestHash);
   if (replay) {
     return readResumeRequest(tx, { companyId: body.companyId, missionId: body.missionId, requestId: replay.id });

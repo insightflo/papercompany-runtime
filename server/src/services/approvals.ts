@@ -25,13 +25,14 @@ export function approvalService(db: Db) {
     };
   }
 
-  async function getExistingApproval(id: string) {
+  async function getExistingApproval(id: string, mutation = false) {
     const existing = await db
       .select()
       .from(approvals)
       .where(eq(approvals.id, id))
       .then((rows) => rows[0] ?? null);
     if (!existing) throw notFound("Approval not found");
+    if (mutation && existing.type === "workflow_replacement") throw unprocessable("Use the board-only workflow replacement approval endpoint");
     return existing;
   }
 
@@ -41,7 +42,7 @@ export function approvalService(db: Db) {
     decidedByUserId: string,
     decisionNote: string | null | undefined,
   ): Promise<ResolutionResult> {
-    const existing = await getExistingApproval(id);
+    const existing = await getExistingApproval(id, true);
     if (!canResolveStatuses.has(existing.status)) {
       if (existing.status === targetStatus) {
         return { approval: existing, applied: false };
@@ -93,15 +94,17 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .then((rows) => rows[0] ?? null),
 
-    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      db
+    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) => {
+      if (data.type === "workflow_replacement") throw unprocessable("Use the board-only workflow replacement proposal endpoint");
+      return db
         .insert(approvals)
         .values({ ...data, companyId })
         .returning()
-        .then((rows) => rows[0]),
+        .then((rows) => rows[0]);
+    },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const pending = await getExistingApproval(id);
+      const pending = await getExistingApproval(id, true);
       if (pending.status === "pending" || pending.status === "revision_requested") {
         assertApprovalCanBeApproved(pending.type, pending.payload as Record<string, unknown>);
       }
@@ -197,7 +200,7 @@ export function approvalService(db: Db) {
     },
 
     requestRevision: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const existing = await getExistingApproval(id);
+      const existing = await getExistingApproval(id, true);
       if (existing.status !== "pending") {
         throw unprocessable("Only pending approvals can request revision");
       }
@@ -218,7 +221,7 @@ export function approvalService(db: Db) {
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {
-      const existing = await getExistingApproval(id);
+      const existing = await getExistingApproval(id, true);
       if (existing.status !== "revision_requested") {
         throw unprocessable("Only revision requested approvals can be resubmitted");
       }

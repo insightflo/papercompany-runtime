@@ -11,10 +11,13 @@
 //     (V1 게이트 시) 자식 권한 이관 → 이슈 실행락 재지정까지 원자적으로 등록된다(부분 등록 금지).
 //   - dispatchGeneration 은 같은 트랜잭션에서 resolveNextDispatchGeneration 으로 스탬프한다(세대 계약).
 //   - 이 함수들은 새 런을 등록만 한다 — 실행 촉발(startNextQueuedRunForAgent)은 호출자 책임.
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { withTxTimeout } from "@paperclipai/db";
-import { agentWakeupRequests, agents, heartbeatRuns, issues, workflowStepRuns } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, issues } from "@paperclipai/db";
+import { retryContext } from "./heartbeat-retry-context.js";
+import { retryWorkflowIdentity } from "./heartbeat-finalization/producer-identity.js";
+import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
 import { parseObject } from "../adapters/utils.js";
 import { publishLiveEvent } from "./live-events.js";
 import { resolveNextDispatchGeneration } from "./effect-envelope.js";
@@ -62,26 +65,8 @@ export async function enqueueProcessLossRetry(
   const retryReasonValue = kind === "adapter_failed_transient" ? "adapter_failed" : "process_lost";
   const contextSnapshot = parseObject(run.contextSnapshot);
   const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
-  let retryMissionId = readNonEmptyString(contextSnapshot.missionId);
-  let retryWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
-  let retryStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
-  if (issueId && (!retryMissionId || !retryWorkflowRunId || !retryStepId)) {
-    const issueContext = await deps.db
-      .select({
-        missionId: issues.missionId,
-        workflowRunId: workflowStepRuns.workflowRunId,
-        stepId: workflowStepRuns.stepId,
-      })
-      .from(issues)
-      .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
-      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-      .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    retryMissionId = retryMissionId ?? issueContext?.missionId ?? null;
-    retryWorkflowRunId = retryWorkflowRunId ?? issueContext?.workflowRunId ?? null;
-    retryStepId = retryStepId ?? issueContext?.stepId ?? null;
-  }
+  const { missionId: retryMissionId, workflowRunId: retryWorkflowRunId, stepId: retryStepId } =
+    await retryContext(deps.db, run.companyId, issueId, contextSnapshot);
   const taskKey = deriveTaskKey(contextSnapshot, null);
   const sessionBefore = await deps.resolveSessionBeforeForWakeup(agent, taskKey, {
     missionId: retryMissionId,
@@ -98,9 +83,7 @@ export async function enqueueProcessLossRetry(
   };
 
   const queued = await withTxTimeout(deps.db, async (tx) => {
-    const wakeupRequest = await tx
-      .insert(agentWakeupRequests)
-      .values({
+    const wakeupRequest = await insertWorkflowWakeRequest(tx as unknown as Db, {
         companyId: run.companyId,
         agentId: run.agentId,
         source: "automation",
@@ -117,12 +100,9 @@ export async function enqueueProcessLossRetry(
         issueId: issueId ?? null,
         missionId: retryMissionId ?? null,
         workflowRunId: retryWorkflowRunId ?? null,
-        // retryStepId 는 stepId(text) 이지 workflow_step_runs.id(UUID)가 아님 → null.
-        workflowStepRunId: null,
+        ...await retryWorkflowIdentity(tx as unknown as Db, run),
         updatedAt: now,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+      }, run.id).then((rows) => rows[0]);
 
       const retryRun = await tx
         .insert(heartbeatRuns)
@@ -177,7 +157,7 @@ export async function enqueueProcessLossRetry(
         .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
     }
 
-    return retryRun;
+    return tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, retryRun.id)).then(rows => rows[0]!);
   });
 
   publishLiveEvent({
@@ -222,26 +202,8 @@ export async function enqueueAdapterFallbackRun(
 ) {
   const contextSnapshot = parseObject(run.contextSnapshot);
   const issueId = run.issueId ?? readNonEmptyString(contextSnapshot.issueId);
-  let fallbackMissionId = readNonEmptyString(contextSnapshot.missionId);
-  let fallbackWorkflowRunId = readNonEmptyString(contextSnapshot.workflowRunId);
-  let fallbackStepId = readNonEmptyString(contextSnapshot.workflowStepId) ?? readNonEmptyString(contextSnapshot.stepId);
-  if (issueId && (!fallbackMissionId || !fallbackWorkflowRunId || !fallbackStepId)) {
-    const issueContext = await deps.db
-      .select({
-        missionId: issues.missionId,
-        workflowRunId: workflowStepRuns.workflowRunId,
-        stepId: workflowStepRuns.stepId,
-      })
-      .from(issues)
-      .leftJoin(workflowStepRuns, eq(workflowStepRuns.issueId, issues.id))
-      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-      .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    fallbackMissionId = fallbackMissionId ?? issueContext?.missionId ?? null;
-    fallbackWorkflowRunId = fallbackWorkflowRunId ?? issueContext?.workflowRunId ?? null;
-    fallbackStepId = fallbackStepId ?? issueContext?.stepId ?? null;
-  }
+  const { missionId: fallbackMissionId, workflowRunId: fallbackWorkflowRunId, stepId: fallbackStepId } =
+    await retryContext(deps.db, run.companyId, issueId, contextSnapshot);
 
   const fallbackAttempt = resolveAdapterFallbackAttempt(contextSnapshot) + 1;
   const fallbackContextSnapshot = {
@@ -266,9 +228,7 @@ export async function enqueueAdapterFallbackRun(
   });
 
   const queued = await withTxTimeout(deps.db, async (tx) => {
-    const wakeupRequest = await tx
-      .insert(agentWakeupRequests)
-      .values({
+    const wakeupRequest = await insertWorkflowWakeRequest(tx as unknown as Db, {
         companyId: run.companyId,
         agentId: run.agentId,
         source: "automation",
@@ -285,10 +245,9 @@ export async function enqueueAdapterFallbackRun(
         requestKind: "adapter_fallback",
         issueId: issueId ?? null,
         missionId: fallbackMissionId ?? null,
+        ...await retryWorkflowIdentity(tx as unknown as Db, run),
         updatedAt: now,
-      })
-      .returning()
-      .then((rows) => rows[0]);
+      }, run.id).then((rows) => rows[0]);
 
     const fallbackRun = await tx
       .insert(heartbeatRuns)
@@ -343,7 +302,7 @@ export async function enqueueAdapterFallbackRun(
         .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId), eq(issues.executionRunId, run.id)));
     }
 
-    return fallbackRun;
+    return tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fallbackRun.id)).then(rows => rows[0]!);
   });
 
   publishLiveEvent({

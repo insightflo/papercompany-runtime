@@ -7,6 +7,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
+import { readAdmittedWorkflowIdentity } from "./producer-identity.js";
 
 const OWNER_LEASE_MS = 5 * 60 * 1000;
 type AuthorityDb = Pick<Db, "select" | "update" | "insert">;
@@ -51,6 +52,7 @@ export async function claimHeartbeatRunWithOwnerCapability(
   claimedAt: Date,
 ): Promise<HeartbeatRun | null> {
   return db.transaction(async (tx) => {
+    await readAdmittedWorkflowIdentity(tx as unknown as Db, run);
     const wake = await readWorkflowWake(tx, run.wakeupRequestId);
     const ownerId = executorOwnerId();
     const leaseToken = randomUUID();

@@ -1,10 +1,13 @@
 import { humanReviewPacketSchema, type Approval, type HumanReviewPacket } from "@paperclipai/shared";
 
+import { replacementHumanReview } from "./replacement-human-review";
+
 function text(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
 export function approvalHumanReview(approval: Approval): HumanReviewPacket | null {
+  if (approval.type === "workflow_replacement") return replacementHumanReview(approval);
   const payload = (approval.payload ?? {}) as Record<string, unknown>;
   const explicit = humanReviewPacketSchema.safeParse(payload.humanReview);
   if (explicit.success) return explicit.data;

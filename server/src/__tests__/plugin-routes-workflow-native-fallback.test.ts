@@ -555,12 +555,8 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), {
-      companyId: "company-1",
-      workflowId: "workflow-1",
-      missionId: "mission-1",
-      triggeredBy: "manual",
-    });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[1]).toMatchObject({ companyId: "company-1", workflowId: "workflow-1", missionId: "mission-1", triggeredBy: "manual" });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
     expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body).toEqual({
       data: {
@@ -747,12 +743,8 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       executionMode: "static_dag",
       steps: pluginSteps,
     });
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(db, {
-      companyId: "company-1",
-      workflowId: "workflow-1",
-      missionId: undefined,
-      triggeredBy: "manual-test",
-    });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[1]).toMatchObject({ companyId: "company-1", workflowId: "workflow-1", missionId: undefined, triggeredBy: "manual-test" });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
     expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body.data.runId).toBe("run-refreshed-1");
   });
@@ -855,12 +847,8 @@ describe("workflow-engine plugin native workflow fallbacks", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(mockWorkflowService.trigger).toHaveBeenCalledWith(expect.anything(), {
-      companyId: "company-1",
-      workflowId: "workflow-1",
-      missionId: undefined,
-      triggeredBy: "board",
-    });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[1]).toMatchObject({ companyId: "company-1", workflowId: "workflow-1", missionId: undefined, triggeredBy: "board" });
+    expect(mockWorkflowService.trigger.mock.calls[0]?.[2]).toMatchObject({ actor: { type: "board", userId: "board-user-1" } });
     expect(workerManager.call).not.toHaveBeenCalled();
     expect(res.body.data.runId).toBe("run-native-1");
   });

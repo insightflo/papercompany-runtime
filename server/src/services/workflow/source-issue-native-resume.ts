@@ -24,15 +24,11 @@ import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
-import { resumeWorkflowRun } from "./workflow-store.js";
-import { isRunRecoveryServiceEnabled } from "./run-reopen-guard-flag.js";
-import { evaluateRecoveryChannels } from "./run-terminal-recovery-gate.js";
-import { latestTerminalDecision, recoverTerminalRun } from "./run-recovery-authority.js";
+import { acceptSourceIssueRecovery } from "./source-issue-recovery-accept.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 import { restoreFailedSourceIssueWorkflowState } from "./source-issue-failed-state-restore.js";
-import { HttpError } from "../../errors.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts 와 동일. 이 상태의 wake/heartbeat 보유 시 중복 dispatch 금지.
 const LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution", "coalesced"] as const;
@@ -287,124 +283,10 @@ export async function dispatchSourceIssueNativeResume(
         stepId: step.id,
       };
     }
-    // [run-recovery-service v1 — PR-2b] 결정이 기록된 failed 종결 run 의 언블록 해결은
-    // 기록된 사실(회복 게이트) 승인 + 공식 복구(1회 소비)로만 되살린다. 게이트가 닫힌
-    // 종결(대기 중인 채널 없이 실패 확정)은 낡은 언블록으로 부활하지 않는다.
-    // 복구 경유 시 아래 레거시 resume 은 건너뛴다(이중 범프/스텝 CAS 오염 방지).
-    if (await isRunRecoveryServiceEnabled(db)) {
-      const latestDecision = await latestTerminalDecision(db, run.id, input.companyId);
-      if (latestDecision && latestDecision.decidedAuthorityVersion === run.dispatchAuthorityVersion) {
-        const gateStepRuns = await db
-          .select({
-            id: workflowStepRuns.id,
-            stepId: workflowStepRuns.stepId,
-            issueId: workflowStepRuns.issueId,
-            status: workflowStepRuns.status,
-            metadata: workflowStepRuns.metadata,
-          })
-          .from(workflowStepRuns)
-          .where(eq(workflowStepRuns.workflowRunId, run.id));
-        const gate = await evaluateRecoveryChannels(db, {
-          runId: run.id,
-          companyId: input.companyId,
-          missionId: run.missionId,
-          stepRuns: gateStepRuns,
-          now: new Date(),
-        });
-        if (gate.kind !== "open") {
-          return {
-            kind: "report_only",
-            reason: "wake_rejected",
-            workflowRunId: run.id,
-            workflowStepRunId: stepRun.id,
-            stepId: step.id,
-          };
-        }
-        const recovery = await recoverTerminalRun(db, {
-          runId: run.id,
-          companyId: input.companyId,
-          expectedAuthorityVersion: run.dispatchAuthorityVersion,
-          expectedDecision: latestDecision.decision,
-          recoveryKind: "source_issue_unblock",
-          requestReference: input.issueId,
-          requestedBy: "source_issue_unblock",
-          now: new Date(),
-        });
-        if (recovery.kind !== "recovered" && recovery.kind !== "already_consumed") {
-          return {
-            kind: "report_only",
-            reason: "wake_rejected",
-            workflowRunId: run.id,
-            workflowStepRunId: stepRun.id,
-            stepId: step.id,
-          };
-        }
-        // 공식 복구가 run 재개(상태 CAS + 권한버전 범프)를 수행했다 — 아래 resume 을 건너뛴다.
-        const [recoveredStep] = await db
-          .update(workflowStepRuns)
-          .set({ status: "running", completedAt: null })
-          .where(and(eq(workflowStepRuns.id, stepRun.id), eq(workflowStepRuns.status, "failed")))
-          .returning({ id: workflowStepRuns.id });
-        const [recoveredRunRow] = await db
-          .select()
-          .from(workflowRuns)
-          .where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, input.companyId)))
-          .limit(1);
-        if (!recoveredStep || !recoveredRunRow) {
-          await restoreFailedState();
-          return {
-            kind: "report_only",
-            reason: "wake_rejected",
-            workflowRunId: run.id,
-            workflowStepRunId: stepRun.id,
-            stepId: step.id,
-          };
-        }
-        wakeRun = recoveredRunRow;
-        handledByRecoveryService = true;
-      }
-    }
-    if (!handledByRecoveryService) {
-    // [봇 지적 교정] 재개 가드가 종결/경합으로 409 를 던지면 null 회로를 우회해 예외가 샌다 —
-    //   이 경로의 계약(실패 시 원상복구 + report_only)으로 흡수한다.
-    let resumedRun: Awaited<ReturnType<typeof resumeWorkflowRun>>;
-    try {
-      resumedRun = await resumeWorkflowRun(db, run.id, input.companyId);
-    } catch (error) {
-      if (error instanceof HttpError && error.status === 409) {
-        await restoreFailedState();
-        return {
-          kind: "report_only",
-          reason: "wake_rejected",
-          workflowRunId: run.id,
-          workflowStepRunId: stepRun.id,
-          stepId: step.id,
-        };
-      }
-      throw error;
-    }
-    const [resumedStep] = await db
-      .update(workflowStepRuns)
-      .set({ status: "running", completedAt: null })
-      .where(and(eq(workflowStepRuns.id, stepRun.id), eq(workflowStepRuns.status, "failed")))
-      .returning({ id: workflowStepRuns.id });
-    const [rawResumedRun] = await db
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, input.companyId)))
-      .limit(1);
-    if (!resumedRun || !resumedStep || !rawResumedRun) {
-      await restoreFailedState();
-      return {
-        kind: "report_only",
-        reason: "wake_rejected",
-        workflowRunId: run.id,
-        workflowStepRunId: stepRun.id,
-        stepId: step.id,
-      };
-    }
-    wakeRun = rawResumedRun;
-    }
+    const accepted = await acceptSourceIssueRecovery(db, { run, stepRunId: stepRun.id, issueId: input.issueId });
+    if (!accepted) return { kind: "report_only", reason: "wake_rejected", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: step.id };
+    wakeRun = accepted.run;
+    handledByRecoveryService = accepted.official;
   }
 
   // 6. 검증 완료 — wakeExistingWorkflowStepIssue 가 workflow_step_runnable/workflow_resume 계약으로

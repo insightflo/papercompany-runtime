@@ -17,8 +17,8 @@ const { executeWorkflowRunMock } = vi.hoisted(() => ({
   executeWorkflowRunMock: vi.fn(),
 }));
 
-vi.mock("../services/workflow/workflow-run-execution.js", () => ({
-  executeWorkflowRun: executeWorkflowRunMock,
+vi.mock("../services/workflow/dag-engine.js", () => ({
+  syncWorkflowRunState: executeWorkflowRunMock,
 }));
 
 import {
@@ -99,7 +99,7 @@ describe("instant-advance execution", () => {
     requestInstantWorkflowAdvance("wf-run-2");
     // 즉시 시작(완료 대기 아님 — fire-and-forget): 호출은 동기 관점에서 이미 발생.
     expect(executeWorkflowRunMock).toHaveBeenCalledTimes(1);
-    expect(executeWorkflowRunMock).toHaveBeenCalledWith(DUMMY_DB, "wf-run-2");
+    expect(executeWorkflowRunMock).toHaveBeenCalledWith(DUMMY_DB, "wf-run-2", "workflow_execution", { requireRunning: true });
     await flushMicrotasks();
     expect(executeWorkflowRunMock).toHaveBeenCalledTimes(1);
   });
