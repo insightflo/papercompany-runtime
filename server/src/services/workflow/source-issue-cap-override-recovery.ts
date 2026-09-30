@@ -12,9 +12,9 @@ const P = workflowTransitionEvents.payload;
 const str = (value: unknown): string | null => typeof value === "string" ? value : null;
 const rec = (value: unknown): Record<string, unknown> | null => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const pStr = (field: string, value: string | null): SQL => sql`${P}->>'${sql.raw(field)}' IS NOT DISTINCT FROM ${value}`;
-const rollback = (runId: string | null, stepRunId: string | null, stepId: string | null): SourceIssueNativeResumeOutcome => ({
+const refused = (runId: string | null, stepRunId: string | null, stepId: string | null): SourceIssueNativeResumeOutcome => ({
   kind: "report_only",
-  reason: "cap_override_queue_rolled_back",
+  reason: "wake_rejected",
   workflowRunId: runId,
   workflowStepRunId: stepRunId,
   stepId,
@@ -60,7 +60,7 @@ export async function recoverOwnerCapOverride(
     str(payload.ownerActionIssueId) !== input.ownerAction.ownerActionIssueId ||
     str(payload.missionId) !== input.ownerAction.missionId ||
     str(payload.decisionCommentId) !== input.ownerAction.decisionCommentId
-  ) return rollback(runId, stepRunId, stepId);
+  ) return refused(runId, stepRunId, stepId);
 
   if (status === "accepted") {
     const wakeId = str(payload.acceptedWakeupRequestId);
@@ -87,10 +87,10 @@ export async function recoverOwnerCapOverride(
       pStr("producerStepRunId", stepRunId),
       pStr("workflowRunId", runId),
     ));
-    return rollback(runId, stepRunId, stepId);
+    return refused(runId, stepRunId, stepId);
   }
-  if (status === "rolled_back") return rollback(runId, stepRunId, stepId);
-  if (status === "dispatching" && !isDispatchStale(payload.dispatchStartedAt)) return rollback(runId, stepRunId, stepId);
+  if (status === "rolled_back") return { kind: "report_only", reason: "cap_override_queue_rolled_back", workflowRunId: runId, workflowStepRunId: stepRunId, stepId };
+  if (status === "dispatching" && !isDispatchStale(payload.dispatchStartedAt)) return refused(runId, stepRunId, stepId);
   return dispatchCapOverrideWake(db, {
     companyId: input.companyId,
     auditId: audit.id,

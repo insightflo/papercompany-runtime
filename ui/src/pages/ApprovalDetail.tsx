@@ -87,7 +87,7 @@ export function ApprovalDetail() {
   };
 
   const approveMutation = useMutation({
-    mutationFn: () => approvalsApi.approve(approvalId!),
+    mutationFn: () => approvalsApi.approve(approval!),
     onSuccess: () => {
       setError(null);
       refresh();
@@ -97,7 +97,7 @@ export function ApprovalDetail() {
   });
 
   const rejectMutation = useMutation({
-    mutationFn: () => approvalsApi.reject(approvalId!),
+    mutationFn: () => approvalsApi.reject(approval!),
     onSuccess: () => {
       setError(null);
       refresh();
@@ -106,7 +106,7 @@ export function ApprovalDetail() {
   });
 
   const revisionMutation = useMutation({
-    mutationFn: () => approvalsApi.requestRevision(approvalId!),
+    mutationFn: () => approvalsApi.requestRevision(approval!),
     onSuccess: () => {
       setError(null);
       refresh();
@@ -115,7 +115,7 @@ export function ApprovalDetail() {
   });
 
   const resubmitMutation = useMutation({
-    mutationFn: () => approvalsApi.resubmit(approvalId!),
+    mutationFn: () => approvalsApi.resubmit(approval!),
     onSuccess: () => {
       setError(null);
       refresh();
@@ -186,7 +186,7 @@ export function ApprovalDetail() {
               <div>
                 <p className="text-sm text-green-800 dark:text-green-100 font-medium">Approval confirmed</p>
                 <p className="text-xs text-green-700 dark:text-green-200/90">
-                  Requesting agent was notified to review this approval and linked work items.
+                  {approval.type === "workflow_replacement" ? "교체 요청을 승인했습니다. 실제 생성·실행은 별도 요청과 현재 조건 재검사를 거칩니다." : "Requesting agent was notified to review this approval and linked work items."}
                 </p>
               </div>
             </div>
@@ -271,7 +271,7 @@ export function ApprovalDetail() {
                 size="sm"
                 className="bg-green-700 hover:bg-green-600 text-white"
                 onClick={() => approveMutation.mutate()}
-                disabled={approveMutation.isPending || !reviewPacket}
+                disabled={approveMutation.isPending || !reviewPacket || (approval.type === "workflow_replacement" && approval.status !== "pending")}
                 title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
               >
                 Approve

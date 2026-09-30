@@ -12,7 +12,7 @@ import { issueService } from "../issues.js";
 import { operatorApprovalWaitService } from "../operator-approval-wait.js";
 import { workProductService } from "../work-products.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
-import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep, syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
+import { syncWorkflowRunState, type WorkflowStep } from "../workflow/dag-engine.js";
 import { findLatestAuthorizedMissionOwnerPlanDecision, recordLatestAuthorizedMissionOwnerPlanDecision } from "../mission-owner-plan-decisions.js";
 import type { MissionRow } from "../missions.js";
 import type { createOwnerActions } from "./owner-actions.js";
@@ -30,8 +30,8 @@ import { buildMissionPlanningDescription } from "./mission-planning-description.
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, findCanonicalToolStepRecoveryIssue, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, parseToolStepRecoveryMarker, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
-import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
+import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
+import { applyOwnerToolRecovery, type OwnerToolRecoveryOutcome } from "./owner-tool-recovery.js";
 import { loadCompanySystemLanguage } from "./system-language.js";
 import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
 import { isIssueLessToolWorkflowStep } from "./tool-step-failure.js";
@@ -43,7 +43,7 @@ import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-sourc
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
-import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapProducerIssueRef, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
+import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "./qa-rework-cap-oversight-detection.js";
 import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
 import { ensureQaSourceDefectOwnerCard } from "../workflow/qa-source-defect-owner-card.js";
@@ -460,6 +460,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       });
     };
     const appliedActions: MissionOwnerSupervisionAppliedAction[] = [];
+    const recoveryOutcomes: OwnerToolRecoveryOutcome[] = [];
     const missionHasActiveHeartbeat = [...heartbeatRunsByIssueId.values()]
       .some((runs) => runs.some((run) => run.status === "queued" || run.status === "running"));
 
@@ -1377,124 +1378,15 @@ export function createSupervision({ db, deps, ownerActions }: {
         findings.push(`dispatch_omission: ${label} workflow step linked but heartbeat run_count=0 — ${issue.title}`);
       }
       if (issue.originKind === "mission_main_executor_unblock") {
-        const recoveryMarker = parseToolStepRecoveryMarker(issue.description);
-        if (recoveryMarker) {
-          const canonicalIssue = findCanonicalToolStepRecoveryIssue({
-            marker: recoveryMarker,
-            missionIssues,
-          });
-          if (canonicalIssue && canonicalIssue.id !== issue.id) {
-            const closed = input.applyOwnerDecisionActions
-              ? await ownerActions.closeDuplicateToolStepRecoveryIssue({
-                  issue,
-                  mission,
-                  canonicalIssue,
-                  runId: recoveryMarker.runId,
-                  stepId: recoveryMarker.stepId,
-                })
-              : false;
-            findings.push(closed
-              ? `tool_step_recovery_duplicate_closed: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${recoveryMarker.runId} step=${recoveryMarker.stepId}`
-              : `tool_step_recovery_duplicate_ignored: ${label} canonical=${canonicalIssue.identifier ?? canonicalIssue.id} run=${recoveryMarker.runId} step=${recoveryMarker.stepId}`);
-            continue;
-          }
-        }
-        const toolRecoveryCandidates = stepRows.filter((row) =>
-          row.stepRun.status === "failed" && issueLessToolRecoveryOwnsFailure(row),
-        );
-        const toolRecovery = issue.originId === oversightIssue.id && toolRecoveryCandidates.length === 1
-          ? toolRecoveryCandidates[0]!
-          : null;
-        if (toolRecovery && input.applyOwnerDecisionActions) {
-          const currentToolStepRow = toolRecovery;
-          const retryIdempotencyKey = `mission-native-tool-step-retry:${mission.id}:${issue.id}:${toolRecovery.run.id}:${toolRecovery.stepRun.stepId}`;
-          const sourceIssue = issue.originId ? missionIssueById.get(issue.originId) ?? null : null;
-          const authorizedRecovery = await loadAuthorizedNativeToolStepRecovery({
-            db,
-            companyId: mission.companyId,
-            missionId: mission.id,
-            missionOwnerAgentId: mission.ownerAgentId,
-            ownerActionIssue: issue,
-            sourceIssue,
-          });
-          if (currentToolStepRow.stepRun.status === "failed" && authorizedRecovery) {
-            const result = await completeWorkflowToolStepFromResult(db, {
-              companyId: mission.companyId,
-              stepRunId: currentToolStepRow.stepRun.id,
-              workflowRunId: toolRecovery.run.id,
-              stepId: toolRecovery.stepRun.stepId,
-              success: true,
-              stdout: `Recovered from registered workProduct ${authorizedRecovery.workProductId}`,
-              artifactPath: authorizedRecovery.artifactPath,
-              allowTerminalRecovery: true,
-            });
-            if (result) {
-              findings.push(`tool_step_recovery_result_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} artifact=${authorizedRecovery.artifactPath}`);
-              appliedActions.push({
-                type: "native_tool_step_recovery_result",
-                missionId: mission.id,
-                ownerActionIssueId: issue.id,
-                workflowRunId: toolRecovery.run.id,
-                stepId: toolRecovery.stepRun.stepId,
-                stepRunId: currentToolStepRow.stepRun.id,
-                artifactPath: authorizedRecovery.artifactPath,
-                resultStatus: result.status,
-              });
-              continue;
-            }
-          }
-          if (currentToolStepRow.stepRun.status === "failed" && !authorizedRecovery) {
-            findings.push(`tool_step_recovery_result_missing_evidence: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}; latest structured recover_artifact decision targeting a mission-scoped issue (recovery/source or a same-mission producer issue) and an official Workflow API workProduct are required`);
-          }
-          if (await hasRecoveryIdempotency(db, mission.companyId, retryIdempotencyKey)) {
-            if (currentToolStepRow.stepRun.status === "failed") {
-              const reopened = await ownerActions.reopenAppliedToolStepRecoveryIfRetryFailed({
-                issue,
-                mission,
-                runId: toolRecovery.run.id,
-                stepId: toolRecovery.stepRun.stepId,
-                stepRun: currentToolStepRow.stepRun,
-              });
-              findings.push(reopened
-                ? `tool_step_recovery_retry_failed_reopened: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}`
-                : `tool_step_recovery_retry_failed: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId}`);
-            }
-          } else {
-            const retryResult = await retryIssueLessToolWorkflowStep(db, {
-              companyId: mission.companyId,
-              runId: toolRecovery.run.id,
-              stepId: toolRecovery.stepRun.stepId,
-              // [run-recovery-service v1] 감독 재시도 멱등 키 — 공식 복구의 1회 소비 판정에 쓴다.
-              recoveryRequestReference: retryIdempotencyKey,
-            });
-            if (!retryResult) {
-              findings.push(`tool_step_recovery_not_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} is not a retryable unified-engine issue-less tool step`);
-            } else {
-              await recordRecoveryAction({
-                db,
-                companyId: mission.companyId,
-                missionId: mission.id,
-                issueId: issue.id,
-                workflowRunId: toolRecovery.run.id,
-                workflowStepRunId: retryResult.stepRunId,
-                stepId: toolRecovery.stepRun.stepId,
-                idempotencyKey: retryIdempotencyKey,
-                eventType: "mission_owner_tool_step_retry",
-                decision: "retry_source_issue",
-                resultStatus: retryResult.result.status,
-              });
-              findings.push(`tool_step_recovery_applied: ${label} run=${toolRecovery.run.id} step=${toolRecovery.stepRun.stepId} result=${retryResult.result.status}`);
-              appliedActions.push({
-                type: "native_tool_step_retry",
-                missionId: mission.id,
-                ownerActionIssueId: issue.id,
-                workflowRunId: toolRecovery.run.id,
-                stepId: toolRecovery.stepRun.stepId,
-                stepRunId: retryResult.stepRunId,
-                resultStatus: retryResult.result.status,
-              });
-            }
-          }
+        const toolRecovery = await applyOwnerToolRecovery({ db, mission, issue,
+          sourceIssue: issue.originId ? missionIssueById.get(issue.originId) ?? null : null,
+          stepRows, apply: Boolean(input.applyOwnerDecisionActions) });
+        if (toolRecovery) {
+          recoveryOutcomes.push(toolRecovery.outcome);
+          if (toolRecovery.appliedAction) appliedActions.push(toolRecovery.appliedAction);
+          findings.push(`tool_step_recovery_${toolRecovery.outcome.kind}: ${label} reason=${toolRecovery.outcome.reason}`);
+          // Missing/stale/consumed tool targets never fall through to generic issue retry.
+          continue;
         }
         // [structured authority] 자연어 comment parsing 제거 — loadLatestMissionOwnerDecision 만 권위.
         //   [P6 hybrid guard] AUTO(owner 미결정 grace default) rework 인지, 그리고 이 미션이 native loop(back-edge) 를
@@ -1585,20 +1477,19 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const target = missionIssues.find((mi) => (mi.identifier ?? null) === ref || mi.id === ref) ?? null;
                   return target && target.missionId === mission.id && !target.hiddenAt ? target.id : null;
                 };
-                sourceIssueId = resolveOwnerIssueRef(ownerReworkRef);
+                if (ownerDecision.recoveryTarget?.kind === "issue") {
+                  sourceIssueId = resolveOwnerIssueRef(ownerDecision.recoveryTarget.issueId);
+                  if (!sourceIssueId || [ownerReworkRef, ownerDecision.sourceIssueRef].some((ref) => ref && resolveOwnerIssueRef(ref) !== sourceIssueId)) {
+                    findings.push(`owner_action_target_conflict: ${label} — explicit target invalid or conflicting; no fallback`);
+                    break;
+                  }
+                } else sourceIssueId = resolveOwnerIssueRef(ownerReworkRef);
                 // AUTO grace default 의 sourceIssueRef 는 origin(QA) 이므로 producer rework 해석을 막지 않도록 skip.
                 if (!sourceIssueId && !autoDefaulted) {
                   sourceIssueId = resolveOwnerIssueRef(ownerDecision.sourceIssueRef);
                 }
                 let producerReworkResolved = false;
-                // [cap-oversight producer authority] qa-cap-oversight 이슈는 origin 이 oversight(스텝 없음)라
-                //   DAG 역추적이 producer 를 찾지 못한다. 시스템 생성 설명의 "Producer source issue:" 가
-                //   유일한 구조 경로 — 명시 reworkTarget 이 없을 때만 fallback 으로 쓴다.
-                if (!sourceIssueId && isQaReworkCapOversightIssue(issue.description)) {
-                  const capProducerRef = extractQaCapProducerIssueRef(issue.description);
-                  sourceIssueId = resolveOwnerIssueRef(capProducerRef);
-                  producerReworkResolved = sourceIssueId !== null;
-                }
+                // Explicit targets never fall back to description-derived producer identity.
                 // [Patch 2 cap-exhausted] producer rework budget. 기본 true = budget 을 알 수 없으면 기존 동작(skip) 유지.
                 //   producer 를 찾은 경우에만 iterationIndex vs max(producer back-edge maxIterations) 으로 계산한다.
                 let producerBudgetRemaining = true;
@@ -2063,7 +1954,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const failureReasonCode = await loadLatestFailureReasonCode(db, mission.companyId, sourceCandidate.id);
                   const artifactUpdatedAt = await loadActiveWorkProductUpdatedAt(db, mission.companyId, sourceCandidate.id);
                   const reworkAuth = authorizeProducerRework({
-                    ownerReworkRef,
+                    ownerReworkRef: ownerDecision.recoveryTarget?.kind === "issue" ? ownerDecision.recoveryTarget.issueId : ownerReworkRef,
                     failureReasonCode,
                     qaIssueId: authQaGateId,
                     validationVerdictsByIssueId,
@@ -2916,7 +2807,7 @@ export function createSupervision({ db, deps, ownerActions }: {
     }
 
     if (uniqueFindings.length === 0) {
-      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: false };
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, recoveryOutcomes, ownerActionExplanations, commented: false };
     }
 
     const findingsSignature = createHash("sha256")
@@ -2925,7 +2816,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       .slice(0, 16);
     const markerText = `mission-owner-supervision:${mission.id}:${now.toISOString().slice(0, 13)}:${findingsSignature}`;
     if (oversightBodies.includes(markerText)) {
-      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: false };
+      return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, recoveryOutcomes, ownerActionExplanations, commented: false };
     }
 
     await issueService(db).addComment(
@@ -2963,7 +2854,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       { agentId: mission.ownerAgentId },
     );
 
-    return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, ownerActionExplanations, commented: true };
+    return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, recoveryOutcomes, ownerActionExplanations, commented: true };
   }
 
   const ACTIVE_SUPERVISION_EXECUTION_STATUSES = new Set<MissionExecutionStatus>(["pending", "running", "failed", "cancelled", "timed_out"]);

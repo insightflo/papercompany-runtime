@@ -531,7 +531,7 @@ export async function createApp(
       success,
       stdout,
       data: coreResult.body.data,
-      artifactPath: coreResult.artifactPath,
+      artifactPath: coreResult.artifactPath, toolArtifactReceipt: coreResult.toolArtifactReceipt,
       stderr: coreResult.body.stderr ?? "",
       exitCode: success ? 0 : 1,
       error: success ? undefined : coreResult.body.error,

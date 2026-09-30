@@ -20,6 +20,7 @@ import {
   workflowTerminalDecisions,
 } from "@paperclipai/db";
 import { isTerminalRunStatus } from "./run-terminal-boundary-cause.js";
+import { lockUnreplacedRun } from "./run-replacement-guard.js";
 
 export type RunRecoveryKind =
   | "manual_resume"
@@ -75,11 +76,7 @@ export async function recoverTerminalRun(
   input: RecoverTerminalRunInput,
 ): Promise<RecoverTerminalRunResult> {
   return await db.transaction(async (tx): Promise<RecoverTerminalRunResult> => {
-    const [locked] = await tx
-      .select()
-      .from(workflowRuns)
-      .where(and(eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId)))
-      .for("update");
+    const locked = await lockUnreplacedRun(tx as unknown as Db, input.runId, input.companyId);
     if (!locked) return { kind: "not_found" };
     // 멱등 키 선점검이 상태/버전 검증보다 앞선다 — 같은 명령의 재시도는 이미 적용됐다는
     // 사실(already_consumed)을 그대로 돌려줘야 하며, 그 후 상태가 어찌 됐는지와 무관하다.

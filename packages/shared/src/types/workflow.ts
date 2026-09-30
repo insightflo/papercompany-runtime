@@ -45,6 +45,8 @@ export interface WorkflowStepDefinition {
   completionReason?: string;
   toolName?: string;
   toolArgs?: unknown;
+  workProductSelectors?: import("../validators/workflow-artifact.js").WorkProductSelectors;
+  toolArtifactContract?: import("../validators/workflow-artifact.js").ToolArtifactContract;
   tools?: string[];
   toolNames?: string[];
   allowedSearchScopes?: string[];

@@ -1,4 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { captureToolCallProvenance, recordToolCallProvenance, type ToolCallProvenance } from "./tool-call-provenance.js";
+import { prepareQaConsumer } from "./qa-artifact-consumer.js";
+import { verifyPublicationResult } from "./publication-result.js";
+import { executeQaByteTool } from "./qa-byte-transport.js";
+import { writeArtifactFile } from "./artifact-writer.js";
+import { captureQaDispatch } from "./qa-dispatch-guard.js";
+import { prepareQaArtifactRequest } from "./qa-artifact-request.js";
+import { toolDeploymentHashes, verifyQaArtifact } from "./qa-artifact-receipt.js";
+import type { ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
 import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
@@ -17,7 +26,8 @@ const execFile = promisify(execFileCallback);
 export type CoreWorkflowToolExecutionResult = {
   status: 200 | 403 | 404 | 422 | 500 | 501 | 503;
   artifactPath?: string;
-  body: { content?: string; data?: unknown; stderr?: string; tool?: string; source?: "core"; error?: string };
+  toolArtifactReceipt?: ToolArtifactReceipt;
+  body: { content?: string; data?: unknown; stderr?: string; tool?: string; source?: "core"; error?: string; invocationProvenance?: ToolCallProvenance | null };
 };
 export async function checkCoreWorkflowToolsAvailable(db: Db, input: { companyId: string; toolNames: string[] }): Promise<
   { available: true } | { available: false; reason: string }
@@ -107,21 +117,61 @@ export async function executeCoreWorkflowTool(input: {
   const envConfig = readObject(adapterConfig.env);
   const timeoutMs = typeof adapterConfig.timeoutMs === "number" && Number.isFinite(adapterConfig.timeoutMs)
     ? Math.max(1, Math.trunc(adapterConfig.timeoutMs)) : 120_000;
-  const executable = commandParts[0]!;
-  const allArgs = [...commandParts.slice(1), ...parametersToCliArgs(input.parameters)];
+  let executable = commandParts[0]!;
+  let invocationProvenance: ToolCallProvenance | null = null;
   try {
+    // Capture the consumer attempt before any awaited artifact validation.
+    let dispatch = typeof readObject(input.parameters).qaResultPath === "string" ? await captureQaDispatch(input) : null;
+    const qaRequest = await prepareQaArtifactRequest(input);
+    if (qaRequest) dispatch = qaRequest.dispatch;
+    const deployment = qaRequest ? await toolDeploymentHashes(commandParts, cwd) : null;
+    const prepared = qaRequest ?? await prepareQaConsumer(input);
+    const allArgs = [...commandParts.slice(1), ...parametersToCliArgs(prepared.parameters)];
+    const consumerRoot = "resultRoot" in prepared ? prepared.resultRoot : undefined;
+    const publicationScope = "publicationScope" in prepared ? prepared.publicationScope : undefined;
     const policy = readToolProgressPolicy(adapterConfig);
     const env = { ...process.env,
       ...Object.fromEntries(Object.entries(envConfig).map(([key, value]) => [key, String(value)])),
       PAPERCLIP_COMPANY_ID: input.companyId,
       ...(agentId ? { PAPERCLIP_AGENT_ID: agentId } : {}),
       ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}), ...(input.stepEnv ?? {}),
+      ...(qaRequest ? { PAPERCLIP_STEP_OUTPUT_DIR: qaRequest.snapshot.outputRoot,
+        PAPERCLIP_WORKFLOW_STEP_ID: qaRequest.snapshot.stepId, PAPERCLIP_EXECUTION_GENERATION: String(qaRequest.snapshot.executionGeneration),
+        PAPERCLIP_REQUEST_ID: input.requestId } : {}),
+      PAPERCOMPANY_QA_INPUT: prepared.inputBytes ? "stdin-v1" : undefined,
+      PAPERCOMPANY_QA_RESULT_FD: qaRequest || consumerRoot ? "4" : undefined,
+      PAPERCOMPANY_PUBLICATION_SCOPE: publicationScope ? JSON.stringify(publicationScope) : undefined,
+      ...(consumerRoot ? { PAPERCLIP_STEP_OUTPUT_DIR: consumerRoot.path } : {}),
     };
-    const { stdout, stderr } = policy
-      ? await executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
+    invocationProvenance = await captureToolCallProvenance({ ...input, toolId: tool.id, commandParts, cwd, env });
+    if (invocationProvenance?.executable.sha256) executable = invocationProvenance.executable.path;
+    await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
+    const invocation = () => policy
+      ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
-        policy, executable, args: allArgs, cwd, env })
-      : await execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs });
+        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot) })
+      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), timeoutMs })
+      : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs });
+    const result = await (dispatch && !policy ? (await dispatch.launch(invocation)).result : invocation());
+    await recordToolCallProvenance(input.db, invocationProvenance, "returned");
+    const { stdout, stderr } = result;
+    if (qaRequest && deployment) {
+      const bytes = "qaResultBytes" in result ? result.qaResultBytes : undefined;
+      if (!bytes?.length) throw new Error("qa_result_transport_missing");
+      await writeArtifactFile(qaRequest.snapshot.root, "qa-result.json", bytes);
+      if (JSON.stringify(deployment) !== JSON.stringify(await toolDeploymentHashes(commandParts, cwd))) throw new Error("qa_tool_deployment_changed");
+      const verified = await verifyQaArtifact(qaRequest, tool, deployment);
+      return { status: 200, toolArtifactReceipt: verified.receipt,
+        body: { content: stdout.trim(), stderr: stderr.trim(), data: verified.qa, tool: input.toolName, source: "core", invocationProvenance } };
+    }
+    if (consumerRoot) {
+      const bytes = "qaResultBytes" in result ? result.qaResultBytes : undefined;
+      if (!publicationScope || !prepared.inputBytes) throw new Error("qa_publish_result_scope_missing");
+      const verified = await verifyPublicationResult({ bytes, root: consumerRoot, scope: publicationScope,
+        inputBytes: prepared.inputBytes, parameters: readObject(prepared.parameters) });
+      return { status: 200, artifactPath: verified.artifactPath,
+        body: { content: stdout.trim(), stderr: stderr.trim(), data: verified, tool: input.toolName, source: "core", invocationProvenance } };
+    }
     const trimmedStdout = stdout.trim();
     const trimmedStderr = stderr.trim();
     let parsed: unknown;
@@ -129,8 +179,9 @@ export async function executeCoreWorkflowTool(input: {
       try { parsed = JSON.parse(trimmedStdout); } catch { parsed = undefined; }
     }
     return { status: 200, body: { content: trimmedStdout, data: parsed ?? { stdout: trimmedStdout },
-      stderr: trimmedStderr, tool: input.toolName, source: "core" } };
+      stderr: trimmedStderr, tool: input.toolName, source: "core", invocationProvenance } };
   } catch (error) {
+    if (invocationProvenance?.phase === "prepared") await recordToolCallProvenance(input.db, invocationProvenance, "threw");
     const typed = error as Error & { code?: string | number; stdout?: unknown; stderr?: unknown };
     const stdout = typeof typed.stdout === "string" ? typed.stdout.trim() : "";
     const stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
@@ -138,6 +189,6 @@ export async function executeCoreWorkflowTool(input: {
     const status = error instanceof ToolProgressError && error.status === 422 ? 422 : 500;
     const message = adapterConfig.progress !== undefined && !(error instanceof ToolProgressError)
       ? "tool_progress_execution_failed" : typed.message;
-    return { status, body: { error: `${message}${code}`, data: { stdout }, stderr, tool: input.toolName, source: "core" } };
+    return { status, body: { error: `${message}${code}`, data: { stdout }, stderr, tool: input.toolName, source: "core", invocationProvenance } };
   }
 }

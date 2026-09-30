@@ -80,7 +80,7 @@ export function ApprovalCard({
             size="sm"
             className="bg-green-700 hover:bg-green-600 text-white"
             onClick={onApprove}
-            disabled={isPending || !reviewPacket}
+            disabled={isPending || !reviewPacket || (approval.type === "workflow_replacement" && approval.status !== "pending")}
             title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
           >
             Approve

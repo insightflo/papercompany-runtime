@@ -7,6 +7,7 @@
 // attempt is created per failed snapshot, even under concurrent sync/reconciler calls.
 
 import { and, eq, isNull, sql } from "drizzle-orm";
+import { HttpError } from "../../errors.js";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import {
@@ -101,6 +102,7 @@ function buildRetryMetadataPatch(
  * sentinel, then returns `already_changed` outside the transaction. Real
  * database errors propagate to the caller.
  */
+import { lockUnreplacedRun } from "./run-replacement-guard.js";
 export async function scheduleWorkflowStepRetry(
   db: Db,
   input: ScheduleWorkflowStepRetryInput,
@@ -112,6 +114,7 @@ export async function scheduleWorkflowStepRetry(
 
   try {
     return await db.transaction(async (tx) => {
+      await lockUnreplacedRun(tx as unknown as Db, input.workflowRunId, input.companyId);
       // Step 1: idempotent event insert.
       const claimed = await tx
         .insert(workflowTransitionEvents)
@@ -267,7 +270,7 @@ export async function scheduleWorkflowStepRetry(
       };
     });
   } catch (err) {
-    if (err instanceof Error && err.message === RETRY_CAS_LOST_SENTINEL) {
+    if ((err instanceof Error && err.message === RETRY_CAS_LOST_SENTINEL) || (err instanceof HttpError && err.status === 409)) {
       return { result: "already_changed" as const, stepRunId: input.stepRunId };
     }
     throw err;

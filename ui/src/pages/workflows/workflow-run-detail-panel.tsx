@@ -13,6 +13,7 @@ import {
   thStyle,
 } from "./workflow-page-styles.js";
 import { applyStepRunsToGraphSteps } from "./workflow-graph.js";
+import { WorkflowReplacementProposal } from "./workflow-replacement-proposal.js";
 
 export function WorkflowRunDetailPanel({
   companyId,
@@ -66,6 +67,7 @@ export function WorkflowRunDetailPanel({
   return (
     <div style={{ display: "grid", gap: "8px" }}>
       {actionError ? <p style={mutedTextStyle}>{actionError}</p> : null}
+      {detail.data.run.status === "failed" && <WorkflowReplacementProposal key={`${companyId}:${runId}`} companyId={companyId} runId={runId} />}
       <WorkflowRunGraphPreview
         steps={runGraphSteps}
         pendingStepRunId={pendingStepId}

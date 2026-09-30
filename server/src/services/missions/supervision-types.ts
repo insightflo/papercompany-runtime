@@ -4,6 +4,7 @@
 //   missions.ts mega-file 회피를 위해 분리. supervision 루프가 반환하는 recommendation/appliedAction/result 형태.
 // [외부 연결] consumer: missions.ts(supervision 함수). deps: MissionExecutionSourceRef, MissionOwnerActionExplanation.
 // [수정시 주의] recommendation type 종류가 바뀌면 MissionOwnerSupervisionRecommendationType union과 supervision 분기 동기화.
+import type { OwnerToolRecoveryOutcome } from "./owner-tool-recovery.js";
 import type { MissionExecutionSourceRef } from "./mission-execution-sources.js";
 import { isRecord } from "./utils.js";
 import type { MissionOwnerActionExplanation } from "./mission-owner-recovery-explanations.js";
@@ -139,6 +140,7 @@ export type MissionOwnerSupervisionResult = {
   findings: string[];
   recommendations: MissionOwnerSupervisionRecommendation[];
   appliedActions: MissionOwnerSupervisionAppliedAction[];
+  recoveryOutcomes?: OwnerToolRecoveryOutcome[];
   ownerActionExplanations: MissionOwnerActionExplanation[];
   commented: boolean;
 };

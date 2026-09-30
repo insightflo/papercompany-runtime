@@ -170,6 +170,7 @@ export const missionOwnerDecisionOptionSchema = z.enum([
   "retry_source_issue",
   "reassign_source_issue",
   "replan_mission",
+  "restart_from_start",
   "escalate",
   "report_impossible",
   "recover_artifact",
@@ -180,6 +181,18 @@ export const missionOwnerDecisionOptionSchema = z.enum([
 //   자연어 comment 는 더 이상 권위가 아니다 — 오직 이 구조 제출만 결정을 영속화한다.
 export const missionOwnerDecisionSubmitSchema = z.object({
   decision: missionOwnerDecisionOptionSchema,
+  // Exact recovery identity; issue references remain artifact/reassignment inputs, not tool selectors.
+  recoveryTarget: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("issue"), issueId: z.string().uuid() }).strict(),
+    z.object({
+      kind: z.literal("tool_step"),
+      workflowRunId: z.string().uuid(),
+      stepRunId: z.string().uuid(),
+      expectedAuthorityVersion: z.number().int().nonnegative(),
+      expectedExecutionGeneration: z.number().int().nonnegative(),
+      failedDispatchRequestId: z.string().min(1).nullable(),
+    }).strict(),
+  ]).optional(),
   sourceIssueRef: z.string().trim().optional().nullable(),
   reworkTargetRef: z.string().trim().optional().nullable(),
   // Typed reassignment target — free-text nextAction/reason/evidence UUID scraping is not authority.

@@ -16,6 +16,7 @@ import {
 import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
+import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
@@ -35,7 +36,7 @@ import {
 } from "./workflow-child-execution.js";
 import { issueService } from "../issues.js";
 import { heartbeatService } from "../heartbeat.js";
-import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
+import { applyWorkflowIssueCreatedSideEffects as applyIssueCreatedSideEffects, wakeReplacementAwareIssueRetry as wakeIssueBackedRetryAndMarkDispatching } from "./replacement-agent-delivery.js";
 import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
 import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
@@ -124,11 +125,10 @@ import {
   markIssueLessRetryDispatchingFromProof,
   shouldPreservePendingRetryFromIssueState,
   stripRetryTrackingOnSuccess,
-  wakeIssueBackedRetryAndMarkDispatching,
 } from "./retry-launch-dispatch.js";
 import { isControlNodeGraceWaitBlockingDispatch } from "./control-flow/gate-work-product-grace.js";
 import { markRetryDispatching } from "./retry-dispatch-state.js";
-import { retryIssueLessToolWorkflowStepInternal } from "./retry-issue-less-manual.js";
+import { retryIssueLessToolWorkflowStepInternal, type ExpectedToolFailure } from "./retry-issue-less-manual.js";
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
 import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
 import {
@@ -139,6 +139,7 @@ import {
   type WorkflowDefinitionExecutionShape,
 } from "./execution-steps.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
+import { verifyQaCompletion } from "./qa-artifact-receipt.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
 import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
 import { assertResumeAccepted } from "./resume/acceptance.js";
@@ -2609,7 +2610,7 @@ async function startIssueLessToolStepRun(input: {
   //   the verdict ledger, requestId binding, and generation tracking. A cached
   //   result has no data.verdict, no official transition-event row, and no
   //   current-generation requestId — semantic QA could run on an unvalidated gate.
-  if (!isStructuralGateStep(step)) {
+  if (!isStructuralGateStep(step) && !(step as PersistedWorkflowStep).toolArtifactContract) {
     const cachedStepRun = await findCachedToolStepRun({
       db,
       run,
@@ -3134,7 +3135,7 @@ export async function completeWorkflowToolStepFromResult(
     toolName?: string;
     stdout?: string;
     data?: unknown;
-    artifactPath?: string;
+    artifactPath?: string; toolArtifactReceipt?: unknown;
     stderr?: string;
     exitCode?: number | null;
     error?: string;
@@ -3206,11 +3207,8 @@ export async function completeWorkflowToolStepFromResult(
     : {};
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
-  // [silent-failure prevention] A non-empty artifact-path candidate that is not absolute is a malformed
-  //   result: the canonical reader below would silently DROP it (toolResult.artifactPath omitted) while
-  //   data.rawPath keeps the relative string, which the issue-less IF fallback later resolves against the
-  //   server cwd (wrong-file risk). Reject the whole completion write loudly instead. Containment stays
-  //   where it already lives (remote-tool-executor stepOutputDir check); this guard only enforces absoluteness.
+  const toolArtifactReceipt = (step as PersistedWorkflowStep | undefined)?.toolArtifactContract && input.success
+    ? await verifyQaCompletion(input.toolArtifactReceipt, row, input.requestId) : null;
   const artifactDataRecord = normalizeRecord(input.data);
   const relativeArtifactCandidate = [
     typeof input.artifactPath === "string" ? input.artifactPath.trim() : "",
@@ -3220,7 +3218,7 @@ export async function completeWorkflowToolStepFromResult(
   if (relativeArtifactCandidate) {
     throw new Error(`workflow_tool_result_rejected: artifact path is not absolute (${relativeArtifactCandidate})`);
   }
-  const artifactPath = readWorkflowToolArtifactPath({
+  const artifactPath = toolArtifactReceipt ? null : readWorkflowToolArtifactPath({
     artifactPath: input.artifactPath,
     data: input.data,
   });
@@ -3231,7 +3229,7 @@ export async function completeWorkflowToolStepFromResult(
     toolName: input.toolName ?? null,
     success: input.success,
     stdout: input.stdout ?? null,
-    ...(input.data === undefined ? {} : { data: input.data }),
+    ...(input.data === undefined ? {} : { data: toolArtifactReceipt ? { ...artifactDataRecord, artifactPath: undefined, rawPath: undefined } : input.data }),
     ...(artifactPath ? { artifactPath } : {}),
     stderr: input.stderr ?? null,
     exitCode: input.exitCode ?? null,
@@ -3246,7 +3244,7 @@ export async function completeWorkflowToolStepFromResult(
       ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
       retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
     }
-    : { ...existingMetadata, toolResult };
+    : { ...existingMetadata, toolResult, ...(toolArtifactReceipt ? { toolArtifactReceipt } : {}) };
   if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
   const completionPlan = planStructuralCompletion({
     step: stepForGuard, success: input.success, data: input.data,
@@ -3302,6 +3300,7 @@ export async function completeWorkflowToolStepFromResult(
   //   stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다.
   const completionCasCondition = and(
     eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
+    ...(toolArtifactReceipt ? [eq(workflowStepRuns.lastDispatchRequestId, toolArtifactReceipt.requestId), eq(workflowStepRuns.status, "running")] : []),
     ...(resumeScopeRequestId !== null
       ? [eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion)]
       : []),
@@ -3346,7 +3345,7 @@ export async function completeWorkflowToolStepFromResult(
 }
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
-  input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null },
+  input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null; expectedFailure?: ExpectedToolFailure; validateIntent?: (tx: Db) => Promise<boolean> },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
   // [descope D2] workflow-type S 는 수동 issue-less retry 를 명시적으로 거부한다 — schedule/
   //   reset/retry-count 증가 같은 어떤 변이도 일어나기 "전"이다(스케줄러 리셋 제외 포함).
@@ -3844,12 +3843,7 @@ export async function syncWorkflowRunState(
   return (await syncWorkflowRunStateWithOutcome(db, runId, source, options)).result;
 }
 
-/** [cycle A §7] sync 본체 — 소유권/경합 결과를 스냅숏과 함께 타입으로 반환한다. */
-/**
- * [B2 좁은 회복 채널] 스텝 런들이 참조하는 실행 이슈 상태 스냅샷. v1 대기 규칙이 failed 선행을
- *   대기로 분류할 때 "연결 비종결 이슈 보유"를 검증하기 위해 revival/skip 전파/launch 가 동일한
- *   스냅샷을 소비한다(사실망 최소 전달 — validationVerdicts 와 같은 per-sync 스냅샷 계약).
- */
+// Shared issue-state snapshot for the v1 failed-predecessor wait policy.
 async function loadIssueStatusesForStepRuns(
   db: Db,
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
@@ -3867,7 +3861,11 @@ async function loadIssueStatusesForStepRuns(
   return new Map(rows.map((row) => [row.id, row.status]));
 }
 
-export async function syncWorkflowRunStateWithOutcome(
+export async function syncWorkflowRunStateWithOutcome(db: Db, runId: string, source: WorkflowSyncSource = "workflow_sync",
+  options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean }): Promise<WorkflowSyncOutcome> {
+  return withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options));
+}
+async function syncWorkflowRunStateCore(
   db: Db,
   runId: string,
   source: WorkflowSyncSource = "workflow_sync",
@@ -4248,23 +4246,20 @@ export async function syncWorkflowRunStateWithOutcome(
 
         if (context.definition.sourceKind === "quality") {
           // [T3 Quality DAG 계약] 생성+step 연결 commit 후 깨우기(native-records 코어).
-          //   일반 경로는 아래 기존 순서(생성 중 깨우기 → 연결)를 그대로 유지한다.
+          //   일반 경로도 아래에서 연결 후 깨우되, quality의 원자 생성 계약은 그대로 유지한다.
           await syncQualityStepIssueCommitBeforeWake(
             db, { run: context.run, definition: context.definition, step, stepRunId: stepRun.id }, createWorkflowStepIssue);
           continue;
         }
+        let applyCreatedSideEffects: (() => Promise<void>) | undefined;
         const issueId = await createWorkflowStepIssue({
-          db,
-          run: context.run,
-          definition: context.definition,
-          step,
-          steps: context.steps,
+          db, run: context.run, definition: context.definition, step, steps: context.steps,
+          captureDeferredSideEffects: (apply) => { applyCreatedSideEffects = apply; },
         });
         if (!issueId) continue;
-        await db
-          .update(workflowStepRuns)
-          .set({ issueId })
-          .where(eq(workflowStepRuns.id, stepRun.id));
+        await db.update(workflowStepRuns).set({ issueId }).where(eq(workflowStepRuns.id, stepRun.id));
+        // The original wake must see the durable step binding; never adopt it after claim.
+        if (applyCreatedSideEffects) await applyCreatedSideEffects();
       }
 
       stepRuns = await db

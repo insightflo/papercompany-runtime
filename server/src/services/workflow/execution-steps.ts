@@ -23,6 +23,8 @@ export type PersistedWorkflowStep = WorkflowStep & {
   tools?: unknown;
   toolName?: unknown;
   toolArgs?: unknown;
+  workProductSelectors?: unknown;
+  toolArtifactContract?: unknown;
   type?: unknown;
   qaType?: unknown;
   targetWorkflowId?: unknown;

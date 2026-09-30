@@ -1,8 +1,12 @@
+import type { MissionOwnerDecisionSubmit } from "@paperclipai/shared";
+export type OwnerRecoveryTarget = NonNullable<MissionOwnerDecisionSubmit["recoveryTarget"]>;
+
 export type MissionOwnerDecisionOption =
   | "request_input"
   | "retry_source_issue"
   | "reassign_source_issue"
   | "replan_mission"
+  | "restart_from_start"
   | "escalate"
   | "report_impossible"
   | "recover_artifact"
@@ -13,6 +17,7 @@ export const MISSION_OWNER_DECISION_OPTIONS: MissionOwnerDecisionOption[] = [
   "retry_source_issue",
   "reassign_source_issue",
   "replan_mission",
+  "restart_from_start",
   "escalate",
   "report_impossible",
   "recover_artifact",
@@ -77,6 +82,7 @@ export function buildMissionOwnerDecisionFormat(): string {
 
 export type ExtractedMissionOwnerDecision = {
   decision: MissionOwnerDecisionOption;
+  recoveryTarget?: OwnerRecoveryTarget;
   sourceIssueRef?: string;
   reworkTargetRef?: string;
   targetAgentId?: string;
@@ -85,6 +91,7 @@ export type ExtractedMissionOwnerDecision = {
   evidence?: string;
 } | {
   decision: null;
+  recoveryTarget?: OwnerRecoveryTarget;
   invalidDecision: string;
   sourceIssueRef?: string;
   reworkTargetRef?: string;

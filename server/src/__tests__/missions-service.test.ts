@@ -4798,7 +4798,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(recoveryIssue.description).toContain("No recovery action has been selected by automation.");
   });
 
-  it("automatically retries completed issue-less tool recovery through the unified workflow engine", async () => {
+  it("does not retry or close duplicate tool cards from completed status and description markers alone", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const missionId = randomUUID();
@@ -4926,85 +4926,19 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     expect(result.missionIds).toContain(missionId);
-    expect(result.missions[0]?.appliedActions).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: "native_tool_step_retry",
-        missionId,
-        ownerActionIssueId: recoveryIssue.id,
-        workflowRunId: runId,
-        stepId: "collect-signals",
-        stepRunId: failedStepRunId,
-        resultStatus: "running",
-      }),
-    ]));
-    expect(result.missions[0]?.findings).toEqual(expect.arrayContaining([
-      expect.stringContaining("tool_step_recovery_duplicate_closed"),
-    ]));
-
+    expect(result.missions[0]?.appliedActions).toEqual([]);
+    expect(result.missions[0]?.recoveryOutcomes).toContainEqual(expect.objectContaining({
+      ownerActionIssueId: recoveryIssue.id, kind: "no_op", reason: "target_missing",
+    }));
     const [runAfter] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    expect(runAfter).toEqual(expect.objectContaining({
-      status: "running",
-      completedAt: null,
-    }));
+    expect(runAfter?.status).toBe("failed");
     const stepRunsAfter = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
-    const retriedStep = stepRunsAfter.find((stepRun) => stepRun.id === failedStepRunId);
-    const downstreamStep = stepRunsAfter.find((stepRun) => stepRun.id === downstreamStepRunId);
-    expect(retriedStep).toEqual(expect.objectContaining({
-      status: "running",
-      issueId: null,
-    }));
-    expect(downstreamStep).toEqual(expect.objectContaining({
-      status: "pending",
-      issueId: null,
-      startedAt: null,
-      completedAt: null,
-    }));
+    expect(stepRunsAfter.find((step) => step.id === failedStepRunId)?.status).toBe("failed");
+    expect(stepRunsAfter.find((step) => step.id === downstreamStepRunId)?.status).toBe("skipped");
+    expect(await processQueuedWorkflowToolStepRuns(db)).toMatchObject({ claimedCount: 0, executedCount: 0 });
     expect(executeToolStep).not.toHaveBeenCalled();
-    const retryDispatch = await processQueuedWorkflowToolStepRuns(db);
-    expect(retryDispatch).toMatchObject({ claimedCount: 1, executedCount: 1, failedCount: 0 });
-    expect(executeToolStep).toHaveBeenCalledTimes(1);
-    expect(executeToolStep).toHaveBeenCalledWith(expect.objectContaining({
-      companyId,
-      workflowRunId: runId,
-      stepRunId: failedStepRunId,
-      stepId: "collect-signals",
-      toolName: "collect-signals-kr",
-    }));
-    const [closedDuplicateRecoveryIssue] = await db
-      .select()
-      .from(issues)
-      .where(eq(issues.id, duplicateRecoveryIssue.id));
-    expect(closedDuplicateRecoveryIssue).toEqual(expect.objectContaining({
-      status: "done",
-    }));
-    const duplicateRecoveryComments = await db.select().from(issueComments).where(eq(issueComments.issueId, duplicateRecoveryIssue.id));
-    expect(duplicateRecoveryComments.map((comment) => comment.body).join("\n")).toContain("### Duplicate native tool step recovery closed");
-
-    await completeWorkflowToolStepFromResult(db, {
-      companyId,
-      stepRunId: failedStepRunId,
-      success: false,
-    });
-
-    const retryFailedResult = await svc.runActiveMissionOwnerSupervision({
-      companyId,
-      staleAfterMinutes: 1,
-      now: new Date("2026-06-10T07:40:00.000Z"),
-      applyOwnerDecisionActions: true,
-    });
-    expect(retryFailedResult.missions[0]?.findings).toEqual(expect.arrayContaining([
-      expect.stringContaining("tool_step_recovery_retry_failed_reopened"),
-    ]));
-    const [reopenedRecoveryIssue] = await db
-      .select()
-      .from(issues)
-      .where(eq(issues.id, recoveryIssue.id));
-    expect(reopenedRecoveryIssue).toEqual(expect.objectContaining({
-      status: "todo",
-      completedAt: null,
-    }));
-    const recoveryComments = await db.select().from(issueComments).where(eq(issueComments.issueId, recoveryIssue.id));
-    expect(recoveryComments.map((comment) => comment.body).join("\n")).toContain("### Native tool step retry failed");
+    const [duplicateAfter] = await db.select().from(issues).where(eq(issues.id, duplicateRecoveryIssue.id));
+    expect(duplicateAfter?.status).toBe("todo");
   });
 
   it("creates the main executor oversight substrate when a workflow mission is created", async () => {

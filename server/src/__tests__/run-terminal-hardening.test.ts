@@ -42,7 +42,7 @@ let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 beforeAll(async () => {
   tempDb = await startEmbeddedPostgresTestDatabase("terminal-hardening-");
   db = createDb(tempDb.connectionString);
-});
+}, 60_000);
 
 afterAll(async () => {
   await db.$client.end({ timeout: 5 });

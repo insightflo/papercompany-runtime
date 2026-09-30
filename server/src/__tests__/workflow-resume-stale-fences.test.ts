@@ -181,7 +181,7 @@ describeEmbeddedPostgres("task6c stale fences — workflow link generation resol
       values: { status: "running", executionGeneration: 2, metadata: { resumeRequestId: randomUUID() } },
     });
     const issueId = await seedFenceIssue(db, { companyId: graph.companyId, missionId: graph.missionId });
-
+    await db.update(workflowStepRuns).set({ issueId }).where(eq(workflowStepRuns.id, stepRun.id));
     const link = await resolveWorkflowExecutionLink(db, {
       enabled: false,
       companyId: graph.companyId,
@@ -195,7 +195,7 @@ describeEmbeddedPostgres("task6c stale fences — workflow link generation resol
       generation: 2,
     });
 
-    // ordinary regression: stamp 없는 run 은 v1 off 에서 generation null (기존 동일).
+    // New ordinary admissions also carry typed identity without enabling finalization.
     const ordinaryGraph = await seedFenceGraph(db, "FENCE-B1-ORD");
     const ordinaryStep = await seedFenceStepRun(db, { runId: ordinaryGraph.runId });
     const ordinaryLink = await resolveWorkflowExecutionLink(db, {
@@ -205,6 +205,6 @@ describeEmbeddedPostgres("task6c stale fences — workflow link generation resol
       workflowRunId: ordinaryGraph.runId,
       workflowStepRunId: ordinaryStep.id,
     });
-    expect(ordinaryLink).toMatchObject({ generation: null });
+    expect(ordinaryLink).toMatchObject({ generation: 0 });
   });
 });

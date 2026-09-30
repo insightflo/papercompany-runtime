@@ -163,7 +163,7 @@ describeEmbeddedPostgres("closeout missing-evidence gate", () => {
     const wfId = randomUUID();
     const wfRunId = randomUUID();
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "WF-CG", stepsJson: [] });
-    await db.insert(workflowRuns).values({ id: wfRunId, companyId, workflowId: wfId, status: "completed", triggeredBy: "test" });
+    await db.insert(workflowRuns).values({ id: wfRunId, companyId, missionId, workflowId: wfId, status: "completed", triggeredBy: "test" });
     await db.insert(workflowStepRuns).values({
       workflowRunId: wfRunId, stepId: "step-1", issueId, status: "completed",
       executionGeneration: 1, metadata: { graphWorkProductRequired: false },

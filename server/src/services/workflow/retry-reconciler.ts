@@ -14,6 +14,8 @@ import {
   sanitizeErrorSummary,
 } from "./retry-policy.js";
 import { syncWorkflowRunState } from "./dag-engine.js";
+import { reconcileReplacementStarts } from "./replacement-start-reconciler.js";
+import { reconcileAcceptedToolRecoveries } from "./tool-recovery-delivery.js";
 import type { ReconciliationResult } from "./reconciler.js";
 
 type DueRetryCandidate = {
@@ -74,6 +76,8 @@ export async function reconcileDueWorkflowStepRetries(
   db: Db,
   now: Date = new Date(),
 ): Promise<ReconciliationResult[]> {
+  await reconcileReplacementStarts(db);
+  await reconcileAcceptedToolRecoveries(db, syncWorkflowRunState);
   const candidates = await db
     .select({
       stepRunId: workflowStepRuns.id,

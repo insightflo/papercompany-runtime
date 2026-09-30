@@ -25,6 +25,7 @@ import {
 } from "../services/heartbeat-finalization/owner-capability.js";
 import { claimQueuedHeartbeatRun } from "../services/heartbeat-finalization/shadow-writes.js";
 import { scheduleWorkflowStepRetry } from "../services/workflow/step-retry-scheduler.js";
+import { insertWorkflowWakeRequest } from "../services/heartbeat-workflow-wake.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -83,8 +84,8 @@ describeEP("heartbeat finalization v1 shadow writers", () => {
   it("binds and acknowledges a typed owner, advances retry generation, transfers both epochs, and preserves the first outcome", async () => {
     const wakeupId = randomUUID();
     const runId = randomUUID();
-    await db.insert(agentWakeupRequests).values({
-      id: wakeupId, companyId, agentId, source: "automation", status: "queued",
+    await insertWorkflowWakeRequest(db, {
+      id: wakeupId, companyId, agentId, source: "automation", status: "queued", runId,
       workflowRunId, workflowStepRunId: stepRunId, workflowExecutionGeneration: 0,
     });
     const [queued] = await db.insert(heartbeatRuns).values({
@@ -112,11 +113,13 @@ describeEP("heartbeat finalization v1 shadow writers", () => {
 
     const childWakeupId = randomUUID();
     const childRunId = randomUUID();
-    await db.insert(agentWakeupRequests).values({
-      id: childWakeupId, companyId, agentId, source: "automation", status: "queued",
-    });
+    await insertWorkflowWakeRequest(db, {
+      id: childWakeupId, companyId, agentId, source: "automation", status: "queued", runId: childRunId,
+      workflowRunId, workflowStepRunId: stepRunId, workflowExecutionGeneration: 0,
+      reason: "adapter_fallback", requestKind: "adapter_fallback", requestedByActorType: "system",
+    }, runId);
     await db.insert(heartbeatRuns).values({
-      id: childRunId, companyId, agentId, status: "queued", invocationSource: "automation", wakeupRequestId: childWakeupId,
+      id: childRunId, companyId, agentId, status: "queued", invocationSource: "automation", wakeupRequestId: childWakeupId, retryOfRunId: runId,
     });
     await db.transaction((tx) => transferHeartbeatAuthorityToChild(tx, {
       parent: acknowledged!, childRunId, childWakeupRequestId: childWakeupId, now: new Date(), reason: "adapter_fallback",

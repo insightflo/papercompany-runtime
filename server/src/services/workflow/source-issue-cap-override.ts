@@ -7,9 +7,10 @@
 //   - authority = exact structured mission-owner decision event ID (validated fail-closed).
 //   - one-shot = decision event id. hash marker(qa-cap-key:<32-hex>) 는 company/run/producer/qa/generation bind.
 //   - current official QA request_changes verdict 만 증거. producer iteration+1, cleaned metadata, run revive,
-//     issue reopen — 단일 forward 트랜잭션(CAS + audit insert onConflictDoNothing). 이후 dispatchCapOverrideWake 가
-//     pending→dispatching(token) claim → wake → accepted-mark 한다.
+//     issue reopen + authority validation + audit + native queue acceptance share one transaction.
+//     No forward-only commit or pre-commit heartbeat launch; refusal rolls back every related write.
 import { createHash } from "node:crypto";
+import { lockCapRecovery } from "./cap-recovery-safety.js";
 import { and, desc, eq, inArray, isNotNull, isNull, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
@@ -18,7 +19,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import type { SourceIssueNativeResumeOutcome } from "./source-issue-native-resume.js";
 import { validateOwnerDecisionComment } from "./source-issue-cap-override-authority.js";
-import { dispatchCapOverrideWake } from "./source-issue-cap-override-dispatch.js";
+import { acceptCapOverrideInTransaction } from "./source-issue-cap-override-dispatch.js";
 import { buildCapOverridePriorSnapshot } from "./source-issue-cap-override-snapshot.js";
 
 type StepRunRow = typeof workflowStepRuns.$inferSelect;
@@ -153,9 +154,9 @@ export async function applyOwnerCapOverrideRetry(db: Db, input: { companyId: str
     forwardedIssueUpdatedAt: forwardAppliedAt.toISOString(),
     priorSnapshot,
   };
-  let auditEventId: string | null = null;
   try {
-    await db.transaction(async (tx) => {
+    return await db.transaction(async (tx) => {
+      await lockCapRecovery(tx as unknown as Db, companyId, run.id);
       const s = workflowStepRuns;
       const prodRes = await tx.update(s).set({ status: "pending", iterationIndex: fromIteration + 1, startedAt: null, completedAt: null, lastDispatchAttemptAt: null, lastDispatchAcceptedAt: null, lastDispatchErrorAt: null, lastDispatchErrorSummary: null, lastDispatchRequestId: null, metadata: cleanedMeta })
         .where(and(eq(s.id, stepRun.id), eq(s.status, "completed"), eq(s.iterationIndex, fromIteration), cas(s.startedAt, stepRun.startedAt), cas(s.completedAt, stepRun.completedAt), cas(s.lastDispatchAttemptAt, stepRun.lastDispatchAttemptAt), cas(s.lastDispatchAcceptedAt, stepRun.lastDispatchAcceptedAt), cas(s.lastDispatchErrorAt, stepRun.lastDispatchErrorAt), cas(s.lastDispatchErrorSummary, stepRun.lastDispatchErrorSummary), cas(s.lastDispatchRequestId, stepRun.lastDispatchRequestId), eq(s.metadata, stepRun.metadata))).returning({ id: s.id });
@@ -167,11 +168,17 @@ export async function applyOwnerCapOverrideRetry(db: Db, input: { companyId: str
       if (issueRes.length === 0) throw new Error("cap-override-cas-lost-issue");
       const inserted = await tx.insert(workflowTransitionEvents).values({ companyId, missionId: run.missionId ?? null, workflowRunId: run.id, workflowStepRunId: stepRun.id, issueId: stepRun.issueId ?? null, heartbeatRunId: evidence.heartbeatRunId, eventType: "owner_cap_override_retry", layer: "workflow_validation", fromStatus: "failed", toStatus: "running", decision: "retry_source_issue", verdict: "request_changes", reason: "workflow_api", reasonCode: "owner_cap_override", correlationId: input.ownerAction.ownerActionIssueId, idempotencyKey: auditKey, payload: { ...basePayload, status: "pending" } }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
       if (inserted.length === 0) throw new Error("cap-override-audit-conflict-duplicate");
-      auditEventId = inserted[0]!.id;
+      const accepted = await acceptCapOverrideInTransaction(tx as unknown as Db, {
+        companyId, auditId: inserted[0]!.id, auditIdempotencyKey: auditKey,
+        payload: { ...basePayload, status: "pending" }, wakeKey, wakeFn: input.wakeFn,
+        allowBlockedIssue: input.allowBlockedIssue ?? true,
+      });
+      if (accepted.kind !== "cap_override_applied" && accepted.kind !== "cap_override_already_applied") {
+        throw new Error("cap-override-queue-refused");
+      }
+      return accepted;
     });
   } catch {
     return report({ kind: "report_only", reason: "cap_override_queue_rolled_back", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: stepRun.stepId }, run.id, stepRun.id, stepRun.stepId);
   }
-  // [A] shared wake phase(recovery): pending→dispatching(token) claim → shape/decision verify → wake → accepted-mark.
-  return dispatchCapOverrideWake(db, { companyId, auditId: auditEventId!, auditIdempotencyKey: auditKey, payload: { ...basePayload, status: "pending" }, wakeKey, wakeFn: input.wakeFn, allowBlockedIssue: input.allowBlockedIssue ?? true, mode: "fresh" });
 }

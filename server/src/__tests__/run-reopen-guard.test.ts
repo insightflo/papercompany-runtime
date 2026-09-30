@@ -193,14 +193,12 @@ describeEP("run-reopen-guard v1", () => {
       expect((await runOf(db, world.runId))?.status).toBe("pending");
     });
 
-    it("flag OFF: cancelled run still resumes (legacy behavior)", async () => {
+    it("flag OFF: cancellation still forbids resume", async () => {
       await setRunReopenGuardFlag(db, false);
       const world = await seedBoundaryIntegrationRun(db, {
-        runStatus: "cancelled",
-        steps: [{ stepId: "a", status: "failed" }],
+        runStatus: "cancelled", steps: [{ stepId: "a", status: "failed" }],
       });
-
-      expect(await resumeWorkflowRun(db, world.runId, world.companyId)).toMatchObject({ status: "running" });
+      await expect(resumeWorkflowRun(db, world.runId, world.companyId)).rejects.toMatchObject({ status: 409 });
     });
   });
 
@@ -265,7 +263,7 @@ describeEP("run-reopen-guard v1", () => {
       expect(run).toMatchObject({ status: "failed", dispatchAuthorityVersion: 0 });
     });
 
-    it("flag OFF: advance proceeds as before (legacy trigger path)", async () => {
+    it("flag OFF: advance cannot mint initial authority for a failed run", async () => {
       await setRunReopenGuardFlag(db, false);
       const world = await seedBoundaryIntegrationRun(db, {
         runStatus: "failed",
@@ -278,8 +276,8 @@ describeEP("run-reopen-guard v1", () => {
       requestInstantWorkflowAdvance(world.runId);
       await new Promise((resolve) => setTimeout(resolve, 25));
 
-      expect(executeWorkflowRunMock).toHaveBeenCalledTimes(1);
-      expect(executeWorkflowRunMock).toHaveBeenCalledWith(db, world.runId);
+      expect(executeWorkflowRunMock).not.toHaveBeenCalled();
+      expect((await runOf(db, world.runId))?.status).toBe("failed");
     });
   });
 });

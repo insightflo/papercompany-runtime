@@ -10,6 +10,8 @@
 //   (reason/reasonCode=owner_recovery_api) 로 식별된다. authorship 은 payload+heartbeat run(companyId+issueId
 //   정합) 로 검증한다.
 import { createHash } from "node:crypto";
+import { missionOwnerDecisionSubmitSchema } from "@paperclipai/shared";
+import type { OwnerRecoveryTarget } from "./mission-owner-recovery-events.js";
 import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import { heartbeatRuns, issues, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
@@ -25,6 +27,7 @@ export const MISSION_OWNER_DECISION_SOURCE = "owner_recovery_api";
 
 export type MissionOwnerDecisionSubmission = {
   readonly decision: MissionOwnerDecisionOption;
+  readonly recoveryTarget?: OwnerRecoveryTarget;
   readonly sourceIssueRef?: string;
   readonly reworkTargetRef?: string;
   readonly targetAgentId?: string;
@@ -57,6 +60,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 function normalizeSubmission(raw: {
   decision: string;
+  recoveryTarget?: unknown;
   sourceIssueRef?: string | null;
   reworkTargetRef?: string | null;
   targetAgentId?: string | null;
@@ -65,6 +69,8 @@ function normalizeSubmission(raw: {
   evidence?: string | null;
 }): MissionOwnerDecisionSubmission | null {
   if (!MISSION_OWNER_DECISION_OPTIONS.includes(raw.decision as MissionOwnerDecisionOption)) return null;
+  const target = missionOwnerDecisionSubmitSchema.safeParse({ decision: "no_action_waiting", recoveryTarget: raw.recoveryTarget });
+  if (!target.success) return null;
   const trimmed = (value: string | null | undefined): string | undefined => {
     const normalized = typeof value === "string" ? value.trim() : "";
     return normalized ? normalized : undefined;
@@ -73,6 +79,7 @@ function normalizeSubmission(raw: {
   if (targetAgentId && !UUID_RE.test(targetAgentId)) return null;
   return {
     decision: raw.decision as MissionOwnerDecisionOption,
+    ...(target.data.recoveryTarget ? { recoveryTarget: target.data.recoveryTarget } : {}),
     ...(trimmed(raw.sourceIssueRef) ? { sourceIssueRef: trimmed(raw.sourceIssueRef) } : {}),
     ...(trimmed(raw.reworkTargetRef) ? { reworkTargetRef: trimmed(raw.reworkTargetRef) } : {}),
     ...(targetAgentId ? { targetAgentId } : {}),
@@ -84,6 +91,7 @@ function normalizeSubmission(raw: {
 
 function submissionToDecision(submission: MissionOwnerDecisionSubmission): ExtractedMissionOwnerDecision {
   const decision: ExtractedMissionOwnerDecision = { decision: submission.decision };
+  if (submission.recoveryTarget) decision.recoveryTarget = submission.recoveryTarget;
   if (submission.sourceIssueRef) decision.sourceIssueRef = submission.sourceIssueRef;
   if (submission.reworkTargetRef) decision.reworkTargetRef = submission.reworkTargetRef;
   if (submission.targetAgentId) decision.targetAgentId = submission.targetAgentId;
@@ -102,6 +110,7 @@ function decisionPayloadFingerprint(submission: MissionOwnerDecisionSubmission):
     submission.reason ?? null,
     submission.nextAction ?? null,
     submission.evidence ?? null,
+    ...(submission.recoveryTarget ? [submission.recoveryTarget] : []),
   ])).digest("hex").slice(0, 24);
 }
 
@@ -140,6 +149,7 @@ export async function recordMissionOwnerDecision(input: {
     sourceIssueId,
     commentId: input.commentId ?? null,
     decision: input.submission.decision,
+    ...(input.submission.recoveryTarget ? { recoveryTarget: input.submission.recoveryTarget } : {}),
     ...(input.submission.sourceIssueRef ? { sourceIssueRef: input.submission.sourceIssueRef } : {}),
     ...(input.submission.reworkTargetRef ? { reworkTargetRef: input.submission.reworkTargetRef } : {}),
     ...(input.submission.targetAgentId ? { targetAgentId: input.submission.targetAgentId } : {}),
@@ -240,33 +250,8 @@ export async function loadLatestMissionOwnerDecision(input: {
     .limit(8);
 
   for (const row of rows) {
-    const payload = (row.payload ?? {}) as Record<string, unknown>;
-    // [payload integrity] payload 의 kind/source/ownerActionIssueId 가 row 와 정확히 일치해야 권위.
-    if (payload.kind !== MISSION_OWNER_DECISION_EVENT_TYPE) continue;
-    if (payload.source !== MISSION_OWNER_DECISION_SOURCE) continue;
-    if (!row.issueId || payload.ownerActionIssueId !== row.issueId) continue;
-    const submission = normalizeSubmission({
-      decision: typeof payload.decision === "string" ? payload.decision : "",
-      sourceIssueRef: typeof payload.sourceIssueRef === "string" ? payload.sourceIssueRef : null,
-      reworkTargetRef: typeof payload.reworkTargetRef === "string" ? payload.reworkTargetRef : null,
-      targetAgentId: typeof payload.targetAgentId === "string" ? payload.targetAgentId : null,
-      reason: typeof payload.reason === "string" ? payload.reason : null,
-      nextAction: typeof payload.nextAction === "string" ? payload.nextAction : null,
-      evidence: typeof payload.evidence === "string" ? payload.evidence : null,
-    });
-    if (!submission) continue;
-    if (!row.agentId) continue;
-    return {
-      eventId: row.id,
-      createdAt: row.createdAt,
-      ownerActionIssueId: row.issueId,
-      missionId: row.missionId,
-      sourceIssueId: typeof payload.sourceIssueId === "string" ? payload.sourceIssueId : null,
-      heartbeatRunId: row.heartbeatRunId,
-      authorAgentId: row.agentId,
-      commentId: typeof payload.commentId === "string" ? payload.commentId : null,
-      decision: submissionToDecision(submission),
-    };
+    const record = rowToDecisionRecord(row);
+    if (record) return record;
   }
   return null;
 }
@@ -281,6 +266,7 @@ function rowToDecisionRecord(row: {
   if (!row.issueId || payload.ownerActionIssueId !== row.issueId) return null;
   const submission = normalizeSubmission({
     decision: typeof payload.decision === "string" ? payload.decision : "",
+    recoveryTarget: payload.recoveryTarget,
     sourceIssueRef: typeof payload.sourceIssueRef === "string" ? payload.sourceIssueRef : null,
     reworkTargetRef: typeof payload.reworkTargetRef === "string" ? payload.reworkTargetRef : null,
     targetAgentId: typeof payload.targetAgentId === "string" ? payload.targetAgentId : null,

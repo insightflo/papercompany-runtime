@@ -68,7 +68,7 @@ export async function callIssueLessRetry(
       const stepRuns = await loadDb.select().from(workflowStepRuns)
         .where(eq(workflowStepRuns.workflowRunId, runId));
       return {
-        run: { id: run!.id, companyId: run!.companyId, startedAt: run!.startedAt },
+        run: { id: run!.id, companyId: run!.companyId, startedAt: run!.startedAt, status: run!.status, dispatchAuthorityVersion: run!.dispatchAuthorityVersion },
         steps: [{ id: "tool-1" }],
         stepRuns,
       };

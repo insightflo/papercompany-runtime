@@ -44,7 +44,7 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
   afterEach(async () => { await cleanQaCapFixture(db); });
   afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
-  it("description carries Rework target and retry dispatches to the producer issue", async () => {
+  it.each(["legacy", "explicit", "conflicting"])("%s target dispatches only the authorized producer", async (variant) => {
     const base = await seedQaCapBase(db);
     const seed = await seedQaCapWorkflow(db, base, {
       iteration: 2, edges: [{ stepId: "qa-sem", maxIterations: 2 }],
@@ -106,7 +106,10 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
       issue: { id: capResult!.issue.id, companyId: base.companyId, missionId: base.missionId },
       submission: {
         decision: "retry_source_issue",
-        reworkTargetRef: seed.producerIssueId,
+        ...(variant === "legacy" ? { reworkTargetRef: seed.producerIssueId } : {
+          recoveryTarget: { kind: "issue" as const, issueId: seed.producerIssueId },
+          ...(variant === "conflicting" ? { reworkTargetRef: oversight.id } : {}),
+        }),
         reason: "owner override beyond cap",
       },
       heartbeatRunId: ownerDecisionRun!.id,
@@ -117,7 +120,7 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
       ownerActionIssueId: capResult!.issue.id,
     });
     expect(decision?.decision.decision).toBe("retry_source_issue");
-    expect(decision?.decision.reworkTargetRef).toBe(seed.producerIssueId);
+    if (variant === "legacy") expect(decision?.decision.reworkTargetRef).toBe(seed.producerIssueId);
     const retryWake = vi.fn().mockResolvedValue({ status: "dispatched" });
     const svc = missionService(db, {
       onOwnerActionCreated: async () => ({ id: "noop" }),
@@ -130,7 +133,10 @@ describeEP("QA cap oversight producer retry target resolution (scope: target onl
     });
 
     // SCOPE: verify exact target resolution only, not actual execution.
-    expect(retryWake).toHaveBeenCalled();
-    expect(retryWake.mock.calls[0]![0].sourceIssue.id).toBe(seed.producerIssueId);
+    if (variant === "conflicting") expect(retryWake).not.toHaveBeenCalled();
+    else {
+      expect(retryWake).toHaveBeenCalled();
+      expect(retryWake.mock.calls[0]![0].sourceIssue.id).toBe(seed.producerIssueId);
+    }
   });
 });

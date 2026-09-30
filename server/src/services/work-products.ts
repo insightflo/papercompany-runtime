@@ -1,4 +1,5 @@
 import { and, desc, eq, notExists } from "drizzle-orm";
+import { registeredProducer, preserveProducerMetadata } from "./work-products/producer-provenance.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,7 +135,7 @@ export function workProductService(db: Db) {
       return row ? toIssueWorkProduct(row) : null;
     },
 
-    createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">) => {
+    createForIssue: async (issueId: string, companyId: string, data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">, delegation?: Parameters<typeof registeredProducer>[4]) => {
       if (!hasValidLocalFilePath(data)) return null;
       // [Task6c-D] resume-linked issue 의 agent artifact 등록은 세대 정체 검증만 수행한다
       //   (새 approval 절차 추가 아님). issue 의 active step run 이 resume run 부모의 현재
@@ -144,11 +145,9 @@ export function workProductService(db: Db) {
         throw conflict("stale_generation", { issueId });
       }
       const row = await db.transaction(async (tx) => {
-        // [생략 등록 보호] isPrimary 미지정 등록은 기존 활성 대표를 강등하지 않는다.
-        //   같은 스코프(company+issue+type — 종전 강등 단위와 동일 분류)에 활성 대표가
-        //   있으면 비대표(false)로 등록하고, 없으면 종전대로 대표(true)로 등록한다
-        //   (첫 산출물 생략 호출자 호환). 명시 true/false는 종전 관찰 계약 그대로며,
-        //   생략 해석은 라우트 검증 계층의 default(true) 대신 이 서비스 계약이 담당한다.
+        const producer = await registeredProducer(tx, companyId, issueId, data.createdByRunId, delegation);
+        data = { ...data, sourceExecutionGeneration: producer?.executionGeneration ?? null,
+          metadata: preserveProducerMetadata(data.metadata, producer) };
         let isPrimary: boolean | undefined = data.isPrimary;
         if (isPrimary === undefined) {
           const [existingPrimary] = await tx
@@ -235,7 +234,8 @@ export function workProductService(db: Db) {
           .where(eq(issueWorkProducts.id, id))
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
-
+        patch = { ...patch, sourceExecutionGeneration: existing.sourceExecutionGeneration, createdByRunId: existing.createdByRunId,
+          ...(patch.metadata !== undefined ? { metadata: preserveProducerMetadata(patch.metadata, existing.metadata?.workflowProducer) } : {}) };
         const pathBefore = resolveWorkProductLocalFilePath(existing) ?? "";
         const merged = { ...existing, ...patch } as typeof existing;
         const pathAfter = resolveWorkProductLocalFilePath(merged) ?? "";

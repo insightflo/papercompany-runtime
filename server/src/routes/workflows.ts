@@ -491,14 +491,12 @@ export function workflowRoutes(db: Db) {
       throw notFound("Workflow definition not found");
     }
     const triggeredBy = req.body.triggeredBy ?? (req.actor.type === "agent" ? "agent" : "board");
-    // [runInputs] 파생·기본값·검증은 엔진 trigger 경계에서 공통 수행한다. 라우트는
-    // 원본 메타데이터를 그대로 전달하고, 엔진이 던지는 타입핑 에러를 400으로 번역만 한다.
     const result = await workflowDomainCall(() => workflowService.trigger(db, {
       ...req.body,
       workflowId,
       companyId: definition.companyId,
       triggeredBy,
-    }));
+    }, { actor: req.actor }));
     const actor = actorForActivity(req);
     await logActivity(db, {
       companyId: definition.companyId,
@@ -908,5 +906,6 @@ export function workflowRoutes(db: Db) {
     res.json(body);
   });
 
-  return router;
+  mountWorkflowReplacementRoutes(router, db); return router;
 }
+import { mountWorkflowReplacementRoutes } from "./workflow-replacement.js";

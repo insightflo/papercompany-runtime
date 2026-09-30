@@ -125,8 +125,9 @@ describe("manual workflow run route run-input error boundary", () => {
     // 도메인 값만 경계 projection으로 단언한다.
     expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(1);
     const triggerCall = mockWorkflowService.trigger.mock.calls[0]!;
-    expect(triggerCall.length).toBe(2);
+    expect(triggerCall.length).toBe(3);
     expect(triggerCall[1].metadata).toEqual({ url: "https://youtu.be/dQw4w9WgXcQ" });
+    expect(triggerCall[2]).toEqual({ actor: { type: "board", source: "local_implicit", isInstanceAdmin: true } });
   });
 });
 
