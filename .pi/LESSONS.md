@@ -109,3 +109,15 @@
 - Prevention rule: After dependency extraction, verify which boundary a mock actually intercepts. Do not require a recording mock to produce real persistence or weaken assertions with row-or-mock alternatives. Check tsconfig coverage before claiming test types passed; passing source typecheck does not validate excluded tests.
 - Reuse trigger: Dependency-cycle removal, mocked async dispatch, extracted service tests, or delegated claims based only on package typecheck.
 - Evidence: /tmp/mission-resume-task5a1-parent-tests-initial.txt; /tmp/mission-resume-task5a1-fix1-brief.md.
+
+### 2026-09-30 — random test identifiers can collide before the product assertion
+- Date: 2026-09-30
+- Task: Oversight v3.1 frozen whole-suite verification, shard 2/8.
+- What failed: `plan-qa-evidence-registry.test.ts` / `rejects tampered registry issuer` failed while creating its company, with PostgreSQL 23505 and `Key (issue_prefix)=(GTf1e4) already exists.`
+- Root cause: The unchanged `seedGateWorld` fixture uses only four UUID characters for a unique company prefix (65,536 possibilities); 25 tests share one database and attempt 32 worlds without per-test company cleanup. The issuer rejection assertion had not started.
+- Category: verification-fixture / random-identifier-collision
+- Fix: Preserve the failed log/blob and unchanged source manifest. Collect the ongoing full suite, then perform one same-source/environment/shard/concurrency rerun before accepting the failed segment. Do not silently patch unrelated fixtures or infer pass from an earlier unrelated run.
+- Prevention rule: Inspect the actual database error detail and failing SQL before assigning product blame. Test identifiers constrained unique must not depend on tiny random suffixes. A proposed fixture correction is separate scope unless authorized.
+- Reuse trigger: Unexpected unique-key failure during a large isolated DB test batch.
+- Evidence: `/tmp/oversight-final4-verification/shard-2.log`, `blobs/shard-2.json`, `/tmp/oversight-final4-planqa-failure-diagnosis.md`. Rerun was pending when this entry was written.
+
