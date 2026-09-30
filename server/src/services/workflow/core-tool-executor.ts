@@ -2,6 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { captureToolCallProvenance, recordToolCallProvenance, type ToolCallProvenance } from "./tool-call-provenance.js";
 import { prepareQaConsumer } from "./qa-artifact-consumer.js";
 import { verifyPublicationResult } from "./publication-result.js";
+import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { executeQaByteTool } from "./qa-byte-transport.js";
 import { writeArtifactFile } from "./artifact-writer.js";
 import { captureQaDispatch } from "./qa-dispatch-guard.js";
@@ -167,8 +168,11 @@ export async function executeCoreWorkflowTool(input: {
     if (consumerRoot) {
       const bytes = "qaResultBytes" in result ? result.qaResultBytes : undefined;
       if (!publicationScope || !prepared.inputBytes) throw new Error("qa_publish_result_scope_missing");
+      // idSourcePath is only honored inside this run's company-scoped work-product directory.
+      const runPaths = await resolveMissionWorkProductPaths(input.db, { companyId: publicationScope.companyId,
+        missionId: publicationScope.missionId, workflowRunId: publicationScope.workflowRunId });
       const verified = await verifyPublicationResult({ bytes, root: consumerRoot, scope: publicationScope,
-        inputBytes: prepared.inputBytes, parameters: readObject(prepared.parameters) });
+        inputBytes: prepared.inputBytes, parameters: readObject(prepared.parameters), runOutputDir: runPaths?.runOutputDir });
       return { status: 200, artifactPath: verified.artifactPath,
         body: { content: stdout.trim(), stderr: stderr.trim(), data: verified, tool: input.toolName, source: "core", invocationProvenance } };
     }
