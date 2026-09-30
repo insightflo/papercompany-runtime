@@ -2,7 +2,8 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { assetDigestSchema } from "@paperclipai/shared/validators/workflow-artifact";
-import { digest, readArtifactBytes, type ArtifactRoot } from "./artifact-files.js";
+import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } from "./artifact-files.js";
+import { isPathInsideOrEqual } from "../work-products/output-paths.js";
 import { writeArtifactFile } from "./artifact-writer.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -24,9 +25,39 @@ const resultSchema = z.object({ schemaVersion: z.literal("manual-onboarding.publ
     commandKey: z.string().min(1), contentHash: hash, contentBytes: z.number().int().positive() }).strict(),
 }).strict();
 
+/**
+ * Expected publication id, derived by the runtime itself (never from the producer result).
+ * Mirrors ops manual-onboarding detail-id-source.mjs deriveDetailId: explicit `id` wins; otherwise read the
+ * JSON at `idSourcePath`, take dot-path `idSourceField`, require a lowercase kebab slug, keep an existing
+ * YYYYMMDD- prefix or add it from `date`. The source must be a file inside this run's work-product directory
+ * and is opened without following symlinks. Every failure is fail-closed.
+ */
+export async function expectedPublicationId(parameters: Record<string, unknown>, runOutputDir: string | null | undefined) {
+  if (typeof parameters.id === "string" && parameters.id.trim()) return parameters.id.trim();
+  const sourcePath = parameters.idSourcePath, field = parameters.idSourceField;
+  if (typeof sourcePath !== "string" || !sourcePath.trim()) return undefined;
+  const invalid = () => new Error("qa_publish_result_id_source_invalid");
+  if (!runOutputDir || typeof field !== "string" || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(field)) throw invalid();
+  const resolved = path.resolve(sourcePath.trim()), runDir = path.resolve(runOutputDir);
+  if (resolved === runDir || !isPathInsideOrEqual(resolved, runDir)) throw invalid();
+  let doc: unknown;
+  try {
+    const root = await captureArtifactRoot(runDir);
+    doc = JSON.parse((await readArtifactBytes(root, path.relative(runDir, resolved).split(path.sep).join("/"), 1024 * 1024)).toString("utf8"));
+  } catch { throw invalid(); }
+  let value: unknown = doc;
+  for (const key of field.split(".")) value = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>)[key] : undefined;
+  const slug = typeof value === "string" ? value.trim() : "";
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) throw invalid();
+  if (/^\d{8}-/.test(slug)) return slug;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof parameters.date === "string" ? parameters.date : "");
+  if (!match) throw invalid();
+  return `${match[1]}${match[2]}${match[3]}-${slug}`;
+}
+
 /** Publication data comes exclusively from the scoped machine channel, never diagnostics. */
 export async function verifyPublicationResult(input: { bytes?: Buffer; root: ArtifactRoot;
-  scope: PublicationScope; inputBytes: Buffer; parameters: Record<string, unknown> }) {
+  scope: PublicationScope; inputBytes: Buffer; parameters: Record<string, unknown>; runOutputDir?: string | null }) {
   if (!input.bytes?.length) throw new Error("qa_publish_result_transport_missing");
   let raw: unknown;
   try { raw = JSON.parse(input.bytes.toString("utf8")); } catch { throw new Error("qa_publish_result_invalid_json"); }
@@ -42,7 +73,8 @@ export async function verifyPublicationResult(input: { bytes?: Buffer; root: Art
   if (("htmlSha256" in result.input ? result.input.htmlSha256 : result.input.contentSha256) !== transport.content.sha256 || result.input.qaSha256 !== transport.qa.sha256
     || !isDeepStrictEqual(assets(result.input.assetManifest), assets(transport.assets))) throw new Error("qa_publish_result_input_mismatch");
   const commandSequence = result.cms.commandKey.slice(result.id.length + 1);
-  if (result.id !== input.parameters.id || result.section !== input.parameters.section
+  const expectedId = await expectedPublicationId(input.parameters, input.runOutputDir);
+  if (expectedId === undefined || result.id !== expectedId || result.section !== input.parameters.section
     || (input.parameters.date !== undefined && result.date !== input.parameters.date)
     || result.publicUrl !== result.cms.publicUrl || result.publishedAtKst !== `${result.date}T00:00:00+09:00`
     || result.cms.contentId !== result.id || result.cms.audience !== (input.parameters.visibility === "private" ? "private" : "public")
