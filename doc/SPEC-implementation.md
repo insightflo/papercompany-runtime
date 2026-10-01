@@ -307,6 +307,12 @@ and remaps explicit unit/source identities. Second-revision configuration compar
 use immediate source-run coordinates, mapping only the target. Native target attempt
 advancement retires initial seed authority without deleting provenance; selection then
 requires current-attempt same-run official output and never falls back to an old seed.
+For seeded runs, native bounded producer rework records an exact attempt transition.
+A native structural/paired-semantic consumer reset may retire only that producer's
+seed or earlier-attempt input bindings, atomically with reset and an audit copy.
+The same consumer row then pins a newly verified official product; manual status or
+counter edits alone cannot authorize replacement. Reset and pin writers share scoped
+row locks. Ordinary no-seed pin behavior and manual-resume behavior are unchanged.
 
 ## 6.5 Cross-Company Mission Delegation
 

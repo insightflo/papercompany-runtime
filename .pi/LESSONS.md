@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-01 — reused consumer rows need native input invalidation proof
+- Date: 2026-10-01
+- Task: Final seeded revision rework binding blocker.
+- What failed: New-consumer tests hid permanent old pins on reused QA rows; the first complete-path fixture also replaced native producer-generation metadata and accidentally gave a structural tool an agent ID while correcting types.
+- Root cause: Bindings key consumer row, not attempt; native rework reuses rows. Fixture dispatch must preserve native reset metadata, and structural gates require empty agentId.
+- Category: lifecycle / test fidelity / concurrency.
+- Fix: Retire seed/earlier-attempt pins atomically only with native producer-transition and consumer-reset proof; retain audit. Seed pin writers lock/revalidate. Use same IDs, exact producer completion time, preserved metadata, empty agentId, actual runner/receipt, and test-inclusive tsc.
+- Prevention rule: Same-row rework, not a newly inserted consumer, is the acceptance path. Test manual mutation, stale reset snapshot, concurrent pin writer, finalization OFF/ON, old audit and new pin together.
+- Reuse trigger: Immutable input pins combined with reset/retry/rework of persistent step rows.
+- Evidence: `/tmp/seed-binding-red2.log`, `/tmp/seed-binding-safety-red.log`, `/tmp/seed-binding-stale-red.log`; `/tmp/seed-binding-focused-final2.log` 9 files/51 tests, zero skips; source/test-inclusive typechecks passed.
+
 ### 2026-10-01 — revision failure identity and approval serialization
 - Date: 2026-10-01
 - Task: Independent review findings 2/6/7 and excessive revision mapping restrictions.

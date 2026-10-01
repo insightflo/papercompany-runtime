@@ -81,6 +81,14 @@ retires initial seed authority when the target attempt advances. Consumers then 
 an officially admitted, current-attempt same-run product through an explicit selector;
 missing new evidence never falls back to the original seed. The seed row remains audit
 history, and active initial seeds still revalidate immutable source evidence.
+When native bounded rework invalidates a structural consumer (or its paired semantic
+QA) back to pending, the same consumer row may retire its previous seed/earlier-attempt
+input pin. This requires a server-written exact producer-rework transition; manual
+counter/status edits do not qualify. Retirement, consumer reset and an audit copy of
+the old binding commit together. The next selection must still prove a new current
+same-run official product. Concurrent pin writers serialize with reset and revalidate
+that product. No generic stale-pin fallback, ordinary-run pin reset, historical
+backfill, or manual-resume pin replacement is added.
 For a second revision, configuration comparisons use the immediate source run's step
 IDs, not that source run's older `sourceStepId` links. PAQO materialization validates
 and preserves selectors/artifact contracts and remaps unit or source IDs together
