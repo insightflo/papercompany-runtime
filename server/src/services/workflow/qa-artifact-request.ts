@@ -13,6 +13,7 @@ import { selectOfficialWorkProduct } from "./workproduct-selector.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } from "./artifact-files.js";
 import { readObject } from "./core-tool-context.js";
+import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 
 export type QaRequest = Awaited<ReturnType<typeof prepareQaArtifactRequest>>;
 export async function prepareQaArtifactRequest(input: { db: Db; companyId: string; workflowRunId?: string | null;
@@ -77,6 +78,8 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     stepRunId: row.step.id, stepId: row.step.stepId, executionGeneration: row.step.executionGeneration,
     retryCount: row.step.retryCount, iterationIndex: row.step.iterationIndex, requestId: input.requestId,
     outputRoot: root.path, outputRootHash: digest(JSON.stringify(root)), root,
+    internalPathRoots: await resolveQaInternalPathRoots([paths.workProductRoot, paths.missionOutputDir,
+      paths.runOutputDir, paths.stepOutputDir, root.path, inputRoot.path]),
     input: { workProductId: selected.product.id, producer: selected.producer, path: selected.file, sha256: digest(bytes),
       byteSize: bytes.length, assetsRoot, assetManifest: assets.map(({ bytes: _, ...a }) => a),
       ...(html ? { mode: "html" as const, htmlManifest: html.manifest, ancillaryManifest: ancillary.map(({ bytes: _, ...a }) => a) } : {}) } };

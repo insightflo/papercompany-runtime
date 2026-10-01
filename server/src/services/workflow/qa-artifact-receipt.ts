@@ -8,8 +8,11 @@ import { captureArtifactRoot, digest, readArtifactBytes } from "./artifact-files
 import { readFrozenArtifactAttempt, type FrozenArtifactAttempt } from "./artifact-contract-runtime.js";
 import { evaluateQaRules } from "./qa-rules.js";
 import type { QaRequest } from "./qa-artifact-request.js";
+import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 
-type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution"> & { artifactExecution?: FrozenArtifactAttempt };
+type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution" | "internalPathRoots"> & {
+  artifactExecution?: FrozenArtifactAttempt; internalPathRoots?: string[];
+};
 
 /** Declared files only, relative to the configured deployment root. */
 export async function toolDeploymentHashes(files: string[], cwd: string) {
@@ -51,11 +54,12 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
     }
     const evaluated = await evaluateQaRules({ config: frozen.qaConfig, provenanceValid: true, resultValid: true,
       ...(s.input.mode === "html" ? { html: source.toString("utf8") } : { json: JSON.parse(source.toString("utf8")) }),
-      assetManifest: s.input.assetManifest });
+      assetManifest: s.input.assetManifest,
+      internalPathRoots: await resolveQaInternalPathRoots([s.outputRoot, s.root.path, ...(s.internalPathRoots ?? [])]) });
     if (!evaluated.ok) throw new Error(`qa_artifact_runtime_checks_failed:${evaluated.checks.filter(c => !c.ok).map(c => c.id).join(',')}`);
     runtimeChecks = evaluated.checks;
   }
-  const { root: _, artifactExecution: __, ...scope } = s;
+  const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
   const receipt = toolArtifactReceiptSchema.parse({ ...scope,
     schemaVersion: frozen ? "workflow.tool-artifact.v2" : "workflow.tool-artifact.v1", role: "qa",
     relativePath: contract.resultFileName, resultSchema: contract.resultSchemaVersion, sha256: digest(bytes), byteSize: bytes.length,

@@ -53,6 +53,11 @@ The mandatory catalog is `provenance`, `result-format`, `no-sensitive-data`,
 For conservative script safety, executable inline scripts and event attributes
 are rejected too; inert JSON data scripts remain allowed. All iframes are rejected.
 Path/secret detection is syntactic, not a guarantee against every possible encoding.
+The path rule checks runtime-owned attempt, step, mission and output roots, runtime
+home/instance/data/storage roots, and the temporary directory (including real paths).
+Tutorial paths outside those roots are allowed. `file://`, Windows drive and UNC
+paths remain rejected even when configuration roots are unavailable; secret-key,
+private-key, Bearer-token and key/value secret checks are unchanged.
 `links-reachable` performs HTTPS GET checks after local rules pass: 2xx response
 headers, at most 20 distinct absolute links, four concurrent requests, and a ten-second
 batch limit. Relative links are not network-checked. Enabled reachability runs again

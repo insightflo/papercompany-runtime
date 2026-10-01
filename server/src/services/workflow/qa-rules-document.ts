@@ -1,7 +1,8 @@
 import { JSDOM } from "jsdom";
+import { containsInternalPath } from "./qa-internal-paths.js";
 
 /** Inspect supplied bytes only. jsdom's default disables script execution and resource fetching. */
-export function inspectQaDocument(json: unknown, html?: string) {
+export function inspectQaDocument(json: unknown, html?: string, internalPathRoots: readonly string[] = []) {
   const strings: string[] = [], keys: string[] = [];
   let nodes = 0;
   const collect = (value: unknown, depth = 0) => {
@@ -47,8 +48,7 @@ export function inspectQaDocument(json: unknown, html?: string) {
   const inspectedText = [text, ...decoded].join("\n");
   const sensitive = keys.some(key => sensitiveKey.test(key))
     || /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9._~-]{12,}|\b(?:api[_-]?key|password|secret|access[_-]?token)["']?\s*[:=]\s*["']?[^\s<"']+/i.test(inspectedText)
-    || /(?:^|[\s>"'(=])(?:\/(?:srv|Users|home|root|etc|var|tmp|opt|private|mnt|Volumes|proc|sys)\/|[a-z]:\\|file:\/\/|~\/|\\\\)/im
-      .test(inspectedText.replace(/https?:\/\/[^\s<>"']+/gi, ""));
+    || containsInternalPath(inspectedText, internalPathRoots);
   const isHttps = (link: string) => {
     try { const url = new URL(link); return url.protocol === "https:" && !url.username && !url.password; }
     catch { return false; }

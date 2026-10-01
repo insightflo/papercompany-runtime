@@ -14,6 +14,8 @@ export interface QaRulesInput {
   config?: QaConfig;
   json?: unknown;
   html?: string;
+  /** Runtime-owned absolute roots, including canonical real paths. Not document input. */
+  internalPathRoots?: readonly string[];
   /** Set by runtime byte/provenance and machine-result validators, never by the plugin itself. */
   provenanceValid: boolean;
   resultValid: boolean;
@@ -27,7 +29,7 @@ export async function evaluateQaRules(input: QaRulesInput): Promise<QaRulesResul
   const config = resolveEffectiveQaConfig(undefined, input.config);
   const checks: QaCheck[] = [];
   let document: ReturnType<typeof inspectQaDocument> | undefined;
-  try { document = inspectQaDocument(input.json, input.html); } catch { /* limits fail closed below */ }
+  try { document = inspectQaDocument(input.json, input.html, input.internalPathRoots); } catch { /* limits fail closed below */ }
   const add = (id: string, ok: boolean, detail?: string) => checks.push({ id, ok, severity: "error", ...(detail ? { detail } : {}) });
   const assets = input.assetManifest ?? [];
   for (const [id, rule] of Object.entries(config.rules)) {

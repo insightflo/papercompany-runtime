@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { evaluateQaRules } from "../services/workflow/qa-rules.js";
 
-const base = { provenanceValid: true, resultValid: true };
+const base = { provenanceValid: true, resultValid: true,
+  internalPathRoots: ["/srv/company", "/Users/operator", "/home/operator"] };
 describe("mandatory QA document safety", () => {
   it.each([
     ["no-sensitive-data", "<p>/srv/company/private/report.json</p>"],
