@@ -4,11 +4,13 @@ import {
   text,
   timestamp,
   index,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { goals } from "./goals.js";
 import { projects } from "./projects.js";
+import { workflowRuns } from "./workflow_runs.js";
 
 export const missions = pgTable(
   "missions",
@@ -25,6 +27,8 @@ export const missions = pgTable(
     // [외부 연결] create UI project 선택, missions 리스트/상세 project 표시가 이 컬럼을 读는다.
     // [수정시 영향] project 미연결 mission/agent 런의 workspace 주입(Phase2)이 이 값 유무로 분기한다.
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    sourceMissionId: uuid("source_mission_id").references((): AnyPgColumn => missions.id, { onDelete: "set null" }),
+    sourceWorkflowRunId: uuid("source_workflow_run_id").references((): AnyPgColumn => workflowRuns.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

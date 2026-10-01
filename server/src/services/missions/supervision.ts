@@ -26,7 +26,7 @@ import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContex
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
-import { buildMissionPlanningDescription } from "./mission-planning-description.js";
+import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -2667,7 +2667,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         ? await missionPlanTemplateService(db).list(mission.companyId, { includeDisabled: false })
         : [];
       const refreshedDescription = planSubmissionMissingCandidate.kind === "rejected"
-        ? buildMissionPlanningDescription({
+        ? await buildRevisionMissionPlanningDescription(db, {
             companyId: mission.companyId,
             missionId: mission.id,
             title: mission.title,

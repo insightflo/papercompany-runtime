@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-01 — optional planner context must preserve ordinary manifest shape
+- Date: 2026-10-01
+- Task: Task1 revision source/planner linkage.
+- What failed: Focused regression expected the ordinary step manifest unchanged; unconditional `revisionContext: {}` added a field.
+- Root cause: Normalizing absent optional context into an empty object changed the no-revision contract.
+- Category: compatibility / test
+- Fix: Emit revisionContext only when a revision dossier exists; retain the existing exact manifest assertion.
+- Prevention rule: Optional planning features must preserve the ordinary manifest shape; test both present and absent paths.
+- Reuse trigger: Adding optional context to a runtime manifest.
+- Evidence: `/tmp/task1-focused.log` (80 pass/1 exact-shape failure); correction verified in Task1 focused rerun.
+
 ### 2026-09-22 — conditional QA closeout: sandbox failures are not bug RED and identical-conditions rerun decides blame
 - Date: 2026-09-22
 - Task: PR #260 two-finding correction (durable skip cancellation + JSONB predecessor comparison) closeout and A1 deploy.

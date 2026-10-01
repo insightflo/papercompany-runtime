@@ -1,0 +1,4 @@
+ALTER TABLE "missions" ADD COLUMN "source_mission_id" uuid;--> statement-breakpoint
+ALTER TABLE "missions" ADD COLUMN "source_workflow_run_id" uuid;--> statement-breakpoint
+ALTER TABLE "missions" ADD CONSTRAINT "missions_source_mission_id_missions_id_fk" FOREIGN KEY ("source_mission_id") REFERENCES "public"."missions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "missions" ADD CONSTRAINT "missions_source_workflow_run_id_workflow_runs_id_fk" FOREIGN KEY ("source_workflow_run_id") REFERENCES "public"."workflow_runs"("id") ON DELETE set null ON UPDATE no action;

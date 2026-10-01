@@ -226,6 +226,25 @@ only the unavailable QA unit from the current runnable candidate roster. Each
 selected template body is rendered as a stable, itemized checklist; PLAN-QA
 must evaluate every item and return all blocking failures in one verdict.
 
+## 6.4.2 Revision mission source and planning context
+
+Mission creation accepts nullable `sourceMissionId` and `sourceWorkflowRunId`.
+A source run requires a source mission; both must belong to the destination
+company and the run must belong to that mission. Validation precedes creation.
+When a source mission is supplied without a run, creation pins its latest native
+run by `createdAt DESC, id DESC`, or null if none exists. Existing missions are
+not backfilled; deleted source records clear the corresponding nullable link.
+
+Revision planning receives a delimited, read-only DB dossier in the PLAN issue
+and the owner-context → step-manifest → runtime-brief path. It contains scoped
+step/heartbeat status and error codes, structured PLAN-QA/workflow verdicts,
+operator option IDs and resolution state, and completed-step work products with
+registered producer identity and a stored SHA-256 digest. Products without that
+stored digest/provenance are omitted; this reader neither hashes local files nor
+certifies that current bytes still match. Comments, legacy comment-backed verdicts,
+error prose, stdout and stderr are not revision evidence. These references are
+planning information only: they do not authorize seeding, retry or completion.
+
 ## 6.5 Cross-Company Mission Delegation
 
 Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source

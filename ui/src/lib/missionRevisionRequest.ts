@@ -18,7 +18,11 @@ export function buildMissionRevisionPrefill(input: MissionRevisionPrefillInput):
   title: string;
   description: string;
   ownerAgentId: string;
+  sourceMissionId: string;
+  sourceWorkflowRunId: string | null;
 } {
+  const sourceRun = [...input.workflowRuns].sort((a, b) =>
+    (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || b.id.localeCompare(a.id))[0];
   const artifactUrls = input.workflowRuns
     .filter((run) => run.status === "completed")
     .flatMap((run) => run.steps.flatMap((step) => step.workProducts ?? []))
@@ -50,5 +54,7 @@ export function buildMissionRevisionPrefill(input: MissionRevisionPrefillInput):
     title: `수정 요청 — ${input.mission.title}`,
     description: lines.join("\n"),
     ownerAgentId: input.mission.ownerAgentId,
+    sourceMissionId: input.mission.id,
+    sourceWorkflowRunId: sourceRun?.id ?? null,
   };
 }

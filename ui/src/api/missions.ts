@@ -1,5 +1,6 @@
 import { api } from "./client";
 import type { Issue } from "@paperclipai/shared";
+import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
 
 export type MissionStatus = "planning" | "active" | "paused" | "completed" | "cancelled";
 export type MissionAgentRole = "executor" | "reviewer" | "observer" | "specialist" | "owner";
@@ -291,7 +292,7 @@ export interface MissionGovernanceThreadResponse {
   summary: MissionGovernanceThreadSummary;
 }
 
-export interface MissionListItem {
+export interface MissionListItem extends MissionRevisionSourceInput {
   id: string;
   companyId: string;
   ownerAgentId: string;
@@ -444,12 +445,11 @@ export interface CreateMissionDelegationResponse {
   targetMission: MissionDetailItem;
 }
 
-export interface CreateMissionInput {
+export interface CreateMissionInput extends MissionRevisionSourceInput {
   ownerAgentId: string;
   title: string;
   description?: string;
   goalId?: string;
-  // [목적] new mission 생성 시 project 지정. server POST /missions 가 projectId 수신(Phase1).
   projectId?: string;
   status?: MissionStatus;
   agentIds?: Array<{ agentId: string; role: MissionAgentRole }>;

@@ -3,6 +3,8 @@ import { renderAdaptiveQualityProfileLines } from "./mission-quality-contract.js
 import { renderUntrustedMissionRequestLines } from "./mission-request-prompt-boundary.js";
 
 import type { MissionExecutionCandidate } from "./mission-execution-candidates.js";
+import type { MissionRevisionContext } from "./mission-revision-context.js";
+import { renderMissionRevisionContext } from "@paperclipai/adapter-utils/mission-revision-brief";
 
 export type MissionPlanningRevisionContext = {
   readonly previousDecision: Record<string, unknown>;
@@ -18,6 +20,7 @@ export type MissionPlanningDescriptionInput = {
   readonly runnableRosterLines: readonly string[];
   readonly planTemplateCatalog?: readonly MissionPlanningTemplateCatalogItem[];
   readonly revisionContext?: MissionPlanningRevisionContext;
+  readonly sourceRevisionContext?: MissionRevisionContext;
 };
 function isPlainObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -106,6 +109,7 @@ export function buildMissionPlanningDescription(input: MissionPlanningDescriptio
     "Plan the mission before execution begins, then close this issue when the mission-level work structure is materialized.",
     "",
     ...renderUntrustedMissionRequestLines({ title: input.title, description: input.description }),
+    ...renderMissionRevisionContext(input.sourceRevisionContext),
     "## Planning method",
     "- Treat the original request as the source of truth. Infer the mission's work type, target user, use case, constraints, risk, and intended final use before selecting steps.",
     "- Define an outcome contract: the usable final result, mission-level success criteria, unacceptable outcomes, and the proof surface that can demonstrate completion.",

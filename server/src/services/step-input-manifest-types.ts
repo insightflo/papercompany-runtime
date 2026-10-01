@@ -113,6 +113,7 @@ export interface StepInputManifest {
       activePlanAvailable: boolean;
       selectedExecutionUnitCount: number;
       executionSourceUnitCount: number;
+      revisionContext?: Record<string, unknown>;
       planningDossierAvailable: boolean;
       planningDossierAssetCounts: {
         workflowCandidates: number;

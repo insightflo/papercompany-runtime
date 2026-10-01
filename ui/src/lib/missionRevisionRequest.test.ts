@@ -29,6 +29,8 @@ describe("buildMissionRevisionPrefill", () => {
       issuePrefix: "RES",
     });
 
+    expect(prefill.sourceMissionId).toBe(mission.id);
+    expect(prefill.sourceWorkflowRunId).toBe("run-2");
     expect(prefill.title).toBe("수정 요청 — 2026-08-30 evo harness rl");
     expect(prefill.ownerAgentId).toBe("owner-1");
     expect(prefill.description).toContain("원본 미션 링크: https://papercompany.showk.ing/RES/missions/0b57da0a-c6dc-45f1-a728-dd28ebae72a5");
@@ -42,5 +44,7 @@ describe("buildMissionRevisionPrefill", () => {
     const prefill = buildMissionRevisionPrefill({ mission, workflowRuns: [], origin: "https://x", issuePrefix: null });
     expect(prefill.description).toContain(`원본 미션 링크: ${mission.id}`);
     expect(prefill.description).not.toContain("원본 최종 산출물:");
+    expect(prefill.sourceMissionId).toBe(mission.id);
+    expect(prefill.sourceWorkflowRunId).toBeNull();
   });
 });
