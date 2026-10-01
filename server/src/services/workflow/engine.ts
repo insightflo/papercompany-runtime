@@ -12,6 +12,7 @@ import { issueService } from "../issues.js";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
 import { createAdmittedWorkflowRun } from "./agent-run-create.js";
+import { assertRevisionBoardStart } from "./revision-run-admission.js";
 import { assertSeedActor } from "./workflow-seed-admission.js";
 import { lockUnreplacedRun } from "./run-replacement-guard.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
@@ -398,6 +399,7 @@ export const workflowService = {
     if (workflow.companyId !== input.companyId) {
       throw new Error(`Workflow does not belong to company: ${input.workflowId}`);
     }
+    await assertRevisionBoardStart(db, input, policy.actor);
     await assertAgentReplacementRequired(db, input, policy.actor);
     if (input.replacementIntent) {
       const admitted = await admitReplacement(db, input, policy.actor);
@@ -420,11 +422,7 @@ export const workflowService = {
     await ensureCreatedRunOversight(db, run);
     return executeWorkflowRun(db, run.id);
   },
-
-  /**
-   * Internal scheduler-only entrypoint. Claims a scheduled slot before creating
-   * the run so concurrent scheduler ticks cannot create duplicate scheduled runs.
-   */
+  /** Scheduler-only: claim a slot before run creation to prevent duplicate scheduled runs. */
   async claimScheduledRun(
     db: Db,
     input: ClaimScheduledWorkflowRunInput,

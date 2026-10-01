@@ -43,7 +43,7 @@ export async function checkMissionRevisionSteps(db: Db, input: { companyId: stri
     if (!heartbeat.errorCode) throw error("failure_evidence_missing", { sourceStepId: step.stepId });
     const original = historical.steps.find(s => s.id === step.stepId);
     if (!original) throw error("failure_evidence_missing", { sourceStepId: step.stepId });
-    const hash = revisionStepHash(original, historical.steps, "failure");
+    const hash = revisionStepHash(original, historical.steps, "failure", "current");
     for (const target of input.steps) {
       // Compare all configs, not just the declared mapping: mapping to a successful source or a new ID is no bypass.
       if (revisionStepHash(target, input.steps, "failure") === hash) throw error("repeat_failure", {

@@ -2,9 +2,10 @@ import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import type { WorkflowStep } from "./dag-engine.js";
 
 export type RevisionStep = WorkflowStep & { sourceStepId?: string };
-/** v2: presentation/run identity excluded; explicit dependency identities normalized. */
-export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [], purpose: "seed" | "failure" = "seed") {
-  const ids = new Map(steps.map(s => [s.id, s.sourceStepId ?? s.id]));
+/** Compare in the immediate source run's coordinates: only the target maps its references. */
+export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [], purpose: "seed" | "failure" = "seed",
+  coordinates: "source" | "current" = "source") {
+  const ids = new Map(steps.map(s => [s.id, coordinates === "source" ? s.sourceStepId ?? s.id : s.id]));
   const { id: _id, sourceStepId: _source, name: _name, title: _title, description: _description,
     agentName: _agentName, ...config } = step;
   const remap = (id: string) => ids.get(id) ?? id;

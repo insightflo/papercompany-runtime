@@ -1,7 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { workProductSelectorsSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
-import { readSeededStepProducts, seedError } from "./workflow-seed-evidence.js";
+import { findWorkflowSeed, readSeededStepProducts, seedError } from "./workflow-seed-evidence.js";
 
 export async function selectOfficialWorkProduct(db: Db, scope: { companyId: string; workflowRunId: string;
   stepId: string; selector: WorkProductSelectors[string]; pinnedId?: string }) {
@@ -25,7 +25,7 @@ export async function resolveSelectedPaths(db: Db, input: { companyId: string; w
   // A seed is never consumed through the legacy latest-product/metadata fallback.
   for (const stepId of input.references) {
     if (selectors[stepId]) continue;
-    if (await readSeededStepProducts(db, { ...input, stepId })) throw seedError("explicit_selector_required", { stepId });
+    if (await findWorkflowSeed(db, { ...input, stepId })) throw seedError("explicit_selector_required", { stepId });
   }
   return result;
 }

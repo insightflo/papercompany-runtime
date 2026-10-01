@@ -9,6 +9,7 @@ import { assertRevisionBoardStart } from "./revision-run-admission.js";
 
 export async function createAdmittedWorkflowRun(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   assertSeedActor(input, actor);
+  await assertRevisionBoardStart(db, input, actor);
   if (input.metadata && ("replacementAuthorityId" in input.metadata || "executionDefinitionVersion" in input.metadata)) throw conflict("workflow_reserved_metadata");
   if (input.missionId) return db.transaction(async tx => {
     const t = tx as unknown as Db;

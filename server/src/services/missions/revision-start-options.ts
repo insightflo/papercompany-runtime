@@ -20,7 +20,7 @@ export async function revisionStartOptions(db: Db, companyId: string, missionId:
     const sourceId = (step as RevisionStep).sourceStepId ?? step.id;
     const original = source.steps.find(s => s.id === sourceId);
     if (!original || !completed.some(s => s.stepId === sourceId) || (step.type && step.type !== "agent") || step.qaType
-      || revisionStepHash(step, steps) !== revisionStepHash(original, source.steps)) return [];
+      || revisionStepHash(step, steps) !== revisionStepHash(original, source.steps, "seed", "current")) return [];
     return [{ stepId: step.id, sourceStepId: sourceId, name: step.name, dependencies: step.dependencies }];
   });
   return { ...wait, candidates };

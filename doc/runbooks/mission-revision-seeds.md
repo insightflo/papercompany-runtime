@@ -30,7 +30,9 @@ Content-Type: application/json
 }
 ```
 
-Omit `seedFromRun` to deliberately run fresh. Do not send it inside `metadata`.
+Omit `seedFromRun` to deliberately run fresh. Do not omit or substitute `missionId`:
+revision PAQO definitions belong to their revision mission; mismatch returns HTTP 409
+before mission/run creation. Do not send seed options inside `metadata`.
 `triggeredBy: "board"` does not grant authority to an agent. The plugin native
 `start-workflow` bridge forwards the same seed option and actual request actor.
 
@@ -70,8 +72,15 @@ unit to map to one existing source step: adding/removing failed units is not sup
 
 No automatic reuse, no tool/QA/control-node seeds, no legacy snapshot fallback,
 and no cross-company reuse. Successful PAQO producer back-edges do not prevent
-initial seeding; forward dependencies must still be selected. Later QA rework is
-not authorized by seed approval and cannot silently replace the original attempt.
+initial seeding; forward dependencies must still be selected. Native QA rework/retry
+retires initial seed authority when the target attempt advances. Consumers then require
+an officially admitted, current-attempt same-run product through an explicit selector;
+missing new evidence never falls back to the original seed. The seed row remains audit
+history, and active initial seeds still revalidate immutable source evidence.
+For a second revision, configuration comparisons use the immediate source run's step
+IDs, not that source run's older `sourceStepId` links. PAQO materialization validates
+and preserves selectors/artifact contracts and remaps unit or source IDs together
+with tool arguments.
 
 Board waiting is derived from the scoped immutable definition, current structured
 PLAN-QA approval and absence of a run, not `awaitingBoardStart` prose/metadata.

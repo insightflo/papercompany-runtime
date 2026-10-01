@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-01 — revision fixes require generated-plan and attempt lifecycle proof
+- Date: 2026-10-01
+- Task: Independent mission revision findings 1/3/4/5.
+- What failed: HTTP omitted mission IDs bypassed board wait; generated PAQO dropped artifact contracts; seed selection rejected legitimate rework forever; second-revision hashes compared different coordinate systems.
+- Root cause: Request identity was trusted over definition ownership; manual test definitions bypassed the real builder; initial seed provenance was treated as lifetime execution authority; both sides followed historical source links.
+- Category: execution authority / integration coverage.
+- Fix: Definition-owned early admission; preserve/validate/remap PAQO contracts; retire seed authority on native target attempt advancement and require same-run official output; normalize target references only.
+- Prevention rule: Test actual HTTP omission/substitution with no-mutation checks, generated PAQO through the real tool runner, original plus new-attempt provenance, and revision-of-revision dependent steps. Run rework via sync (execute is initial-start/idempotent), record official QA verdicts, and capture structural producer tokens. QA receipt verification already rejects `ok:false`; do not invent successful rejection receipts.
+- Reuse trigger: Durable evidence reuse, generated workflow contracts, cross-run mapping, retries/rework.
+- Evidence: `/tmp/review-1-red.log`, `/tmp/review-3-red.log`, `/tmp/review-4-red2.log`, `/tmp/review-5-red-1-green.log`; final focused/typecheck logs referenced in plan.
+
 ### 2026-10-01 — inspect an existing contract before extending it
 - Task: Task3 revision unit contract.
 - What failed: Shared build reported missing `missionRevisionSourceSchema` after a new unit schema overwrote its file.

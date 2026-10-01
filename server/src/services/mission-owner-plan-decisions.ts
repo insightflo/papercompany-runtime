@@ -35,8 +35,8 @@ import {
   validateStructuralUnit,
   validateStructuralTopology,
   validateDeclaredStructuralPlan,
-  rewriteStepToolArgs,
 } from "./missions/structural-materialization.js";
+import { applyPaqoArtifactContracts } from "./missions/paqo-artifact-contracts.js";
 import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
@@ -2286,7 +2286,7 @@ export function buildPaqoWorkflowSteps(
   //   - toolArgs reference rewriting
   //   - scoped prompt injection for all QA downstream of structural gates
   const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
-  rewriteStepToolArgs(gatedSteps, unitIdToStepId);
+  applyPaqoArtifactContracts(executableUnits, selectedSteps, gatedSteps, unitIdToStepId);
   // [실행 가능성 보증] 인자 없는 structural tool 스텝은 실행 시 반드시 실패한다(2026-08-27 gazua-evening 2).
   // 표준 검증 인자 자동 채움 → 불가능하면 fail-closed 거부.
   fillStructuralValidatorToolArgs(gatedSteps);

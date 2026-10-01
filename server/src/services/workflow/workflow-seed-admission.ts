@@ -46,7 +46,7 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
     for (const id of ids) {
       const step = targetDef.steps.find(s => s.id === id) as RevisionStep | undefined;
       const original = sourceDef.steps.find(s => s.id === (step?.sourceStepId ?? id));
-      if (!step || !original || seedStepHash(step, targetDef.steps) !== seedStepHash(original, sourceDef.steps)) throw seedError("incompatible_definition", { stepId: id });
+      if (!step || !original || seedStepHash(step, targetDef.steps) !== seedStepHash(original, sourceDef.steps, "seed", "current")) throw seedError("incompatible_definition", { stepId: id });
       assertSupported(step);
       if (resolveEdges(step).some(edge => !edge.isBackEdge && !ids.has(edge.stepId))) throw seedError("dag_gap", { stepId: id });
     }

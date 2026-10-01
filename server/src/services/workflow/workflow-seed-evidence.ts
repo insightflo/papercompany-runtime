@@ -54,7 +54,7 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   const targetDef = await loadExecutionDefinition(db, seed.targetRunId, { requireHistorical: true });
   const sourceStep = sourceDef.steps.find(s => s.id === seed.sourceStepId), targetStep = targetDef.steps.find(s => s.id === seed.targetStepId);
   if (!sourceStep || !targetStep || sourceDef.definitionHash !== evidence.data.sourceDefinitionHash
-    || targetDef.definitionHash !== evidence.data.targetDefinitionHash || seedStepHash(sourceStep, sourceDef.steps) !== evidence.data.stepConfigHash
+    || targetDef.definitionHash !== evidence.data.targetDefinitionHash || seedStepHash(sourceStep, sourceDef.steps, "seed", "current") !== evidence.data.stepConfigHash
     || seedStepHash(targetStep, targetDef.steps) !== evidence.data.stepConfigHash) throw seedError("definition_changed");
   const products = [];
   for (const saved of evidence.data.products) {
@@ -72,12 +72,20 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   return products;
 }
 
-export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }) {
+export async function findWorkflowSeed(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }) {
   const [seed] = await db.select().from(workflowRunSeeds).where(and(eq(workflowRunSeeds.companyId, scope.companyId),
     eq(workflowRunSeeds.targetRunId, scope.workflowRunId), eq(workflowRunSeeds.targetStepId, scope.stepId)));
+  return seed ?? null;
+}
+
+export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }) {
+  const seed = await findWorkflowSeed(db, scope);
   if (!seed) return null;
   const [target] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.targetStepRunId),
     eq(workflowStepRuns.workflowRunId, seed.targetRunId), eq(workflowStepRuns.stepId, seed.targetStepId)));
+  // Native retry/rework/resume counters retire initial seed authority. The ordinary selector
+  // must prove a newly admitted same-run producer; never fall back to the old seed on failure.
+  if (target && (target.executionGeneration > 0 || target.retryCount > 0 || target.iterationIndex > 0)) return null;
   if (!target || target.status !== "completed" || target.issueId !== null || target.executionGeneration !== 0
     || target.retryCount !== 0 || target.iterationIndex !== 0) throw seedError("target_attempt_changed");
   return verifySeedEvidence(db, seed);

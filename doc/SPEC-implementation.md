@@ -294,7 +294,13 @@ Supervision derives board waiting from the scoped immutable PAQO definition, cur
 structured PLAN-QA approval and absence of its mission run. It does not redispatch
 missing materialization merely because `workflowRunId` is null. Board admission
 checks the same current approval under a mission lock; agents cannot self-seed or
-start a revision PAQO workflow, and duplicate board starts are rejected.
+start a revision PAQO workflow, and duplicate board starts are rejected. The definition's
+owning mission determines revision admission: omitted or different mission IDs fail
+before any mission/run mutation. PAQO preserves validated artifact selectors/contracts
+and remaps explicit unit/source identities. Second-revision configuration comparisons
+use immediate source-run coordinates, mapping only the target. Native target attempt
+advancement retires initial seed authority without deleting provenance; selection then
+requires current-attempt same-run official output and never falls back to an old seed.
 
 ## 6.5 Cross-Company Mission Delegation
 
