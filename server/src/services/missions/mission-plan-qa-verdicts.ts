@@ -22,6 +22,7 @@ import { lockPlanQaAttempt } from "./plan-qa-current-attempt.js";
 import { planQaSubmissionDocumentSchema, readVerifiedPlanQaGate } from "./plan-qa-verified-gate.js";
 import { issueService } from "../issues.js";
 import type { ValidationVerdict } from "../validation-verdict.js";
+import { lockMissionPlanQaAuthority } from "./plan-qa-admission-lock.js";
 
 export type PlanQaVerdictActor =
   | { actorType: "agent"; actorId: string }
@@ -33,6 +34,22 @@ export async function recordMissionPlanQaVerdict(input: {
   verdict: ValidationVerdict; diagnostics?: Array<Record<string, unknown>>; reviewedBy: PlanQaVerdictActor;
   sourceRunId?: string | null; sourceCommentId?: string | null;
 }): Promise<{ status: "recorded"; planQaIssueId: string; verdict: ValidationVerdict }> {
+  await input.db.transaction(async tx => {
+    const db = tx as unknown as Db;
+    await lockMissionPlanQaAuthority(db, input.companyId, input.missionId);
+    await writeBaseVerdict({ ...input, db });
+  });
+  const body = input.verdict === "pass" ? "Plan is sound.\nPASS"
+    : `Plan has gaps.\nREQUEST_CHANGES: ${input.diagnostics?.map((d) => d.message ?? d.code ?? "").filter(Boolean).join("; ") || "needs work"}`;
+  try {
+    await issueService(input.db).addComment(input.planQaIssueId, body, {
+      ...(input.reviewedBy.actorType === "agent" ? { agentId: input.reviewedBy.actorId } : {}),
+    });
+  } catch { /* Display failure does not change structured authority. */ }
+  return { status: "recorded", planQaIssueId: input.planQaIssueId, verdict: input.verdict };
+}
+
+async function writeBaseVerdict(input: Parameters<typeof recordMissionPlanQaVerdict>[0]) {
   const pinned = await recordPinnedPlanQaBase(input);
   if (!pinned) {
     // 직접 삽입(v1/사용자 판정) 행에서도 이슈 마커가 가리키는 계획 아티팩트를 함께 기록한다.
@@ -57,14 +74,6 @@ export async function recordMissionPlanQaVerdict(input: {
       set: { ...fields, missionPlanArtifactId: sql`coalesce(${missionPlanQaVerdicts.missionPlanArtifactId}, excluded."mission_plan_artifact_id")` },
     });
   }
-  const body = input.verdict === "pass" ? "Plan is sound.\nPASS"
-    : `Plan has gaps.\nREQUEST_CHANGES: ${input.diagnostics?.map((d) => d.message ?? d.code ?? "").filter(Boolean).join("; ") || "needs work"}`;
-  try {
-    await issueService(input.db).addComment(input.planQaIssueId, body, {
-      ...(input.reviewedBy.actorType === "agent" ? { agentId: input.reviewedBy.actorId } : {}),
-    });
-  } catch { /* Display failure does not change structured authority. */ }
-  return { status: "recorded", planQaIssueId: input.planQaIssueId, verdict: input.verdict };
 }
 
 function defectDiagnostics(defects: Array<{ checkId: string; requirementRefs: unknown[]; templateId: string }>): Array<Record<string, unknown>> {

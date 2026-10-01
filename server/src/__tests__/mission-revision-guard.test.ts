@@ -35,7 +35,7 @@ it.each(["same", "renamed", "mapped-new-id", "unmapped-new-id", "prose-contract"
   await expect(createAdmittedWorkflowRun(db, f.input, board)).rejects.toThrow("mission_revision_");
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toEqual([]);
 });
-it("allows changed execution config but not missing or duplicate explicit mapping", async () => {
+it("allows changed execution config but rejects duplicate explicit mapping", async () => {
   const f = await failedWorld();
   const changed = { ...f.steps[0], id: "new", sourceStepId: "write", toolArgs: { timeout: 120 } };
   await db.update(workflowDefinitions).set({ stepsJson: [changed] }).where(eq(workflowDefinitions.id, f.definition.id));
@@ -64,7 +64,7 @@ it("records a structured plan rejection before PLAN-QA or workflow materializati
     decision, decisionHash: hashOwnerPlanDecision(decision), authorAgentId: f.agentId, status: "submitted" });
   const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId: f.companyId, missionId: f.revision.id });
   expect(result).toMatchObject({ status: "invalid", reason: "mission_revision_invalid",
-    diagnostics: [{ code: "mission_revision_source_mapping_required" }] });
+    diagnostics: [{ code: "mission_revision_repeat_failure" }] });
   const submissions = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, f.revision.id));
   expect(submissions.some(s => s.status === "rejected" && s.rejectionReason === "mission_revision_invalid")).toBe(true);
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toEqual([]);

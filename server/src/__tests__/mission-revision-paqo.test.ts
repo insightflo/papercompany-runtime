@@ -37,7 +37,7 @@ it("actual generated PAQO identities seed explicitly; immutable definition yield
   expect(steps[0]).toHaveProperty("sourceStepId", sourceId);
   expect(await revisionPlanDiagnostics(db, f.companyId, f.revision.id, units, () => steps)).toEqual([]);
   expect(await revisionPlanDiagnostics(db, f.companyId, f.revision.id, draft.refs.selectedExecutionUnits, () => steps))
-    .toMatchObject([{ code: "mission_revision_source_mapping_required" }]);
+    .toEqual([]);
   const [definition] = await db.insert(workflowDefinitions).values({ companyId: f.companyId, missionId: f.revision.id,
     name: "PAQO revision", sourceKind: "paqo", definitionHash: "a".repeat(64), stepsJson: steps }).returning();
   const hash = "b".repeat(64);

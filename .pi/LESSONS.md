@@ -1,5 +1,17 @@
 # Runtime verification lessons
 
+### 2026-10-01 — revision failure identity and approval serialization
+- Date: 2026-10-01
+- Task: Independent review findings 2/6/7 and excessive revision mapping restrictions.
+- What failed: QA rejection/tool failure was treated as missing adapter evidence; generation-only queries mixed retry/iteration attempts; board admission could commit while a verdict revocation was uncommitted. Mandatory mapping/removal prohibition exceeded the request.
+- Root cause: Display failure status substituted for failure authority, and mission-only admission locking did not coordinate PLAN-QA writers. Generated IDs were used as comparison identity.
+- Category: execution authority / concurrency / product scope.
+- Fix: Original wake admission proves current heartbeat attempt; official QA/tool result failures are distinct from heartbeat error codes; typed forward-graph hashes compare unlinked equivalent steps without granting reuse; shared mission→plan→issue→heartbeat→verdict ordering retains approval locks through run commit. New/removal plan units allowed.
+- Prevention rule: Test succeeded-heartbeat request_changes, issue-less tool verdicts, multiple retries in one generation, actual generated QA/machine gates, and both two-transaction orderings. Do not add stricter product restrictions to simplify identity matching.
+- Reuse trigger: Revision comparisons, retry dossiers, approval-to-run admission, generated workflow identities.
+- Evidence: `/tmp/review-267-red.log`, `/tmp/review-267-red7.log`, `/tmp/review-267-focused-final.log` (20 files/96 tests), `/tmp/review-267-regressions.log` (6 files/124 tests). Zero skips. Generated QA→changed PLAN→board verdict→fresh run exercised through real services.
+- Fixture corrections: Use actual storage in a scoped temp root, not a partial storage double with missing objectKey; use original admission helper rather than direct heartbeat insertion. A /tmp test tsconfig needs explicit repo typeRoots/types (otherwise Node EventEmitter members disappear); corrected test-inclusive check passes.
+
 ### 2026-10-01 — revision fixes require generated-plan and attempt lifecycle proof
 - Date: 2026-10-01
 - Task: Independent mission revision findings 1/3/4/5.

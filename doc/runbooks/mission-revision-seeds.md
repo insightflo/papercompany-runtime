@@ -38,7 +38,7 @@ before mission/run creation. Do not send seed options inside `metadata`.
 
 ## Supported seeds and refusal
 
-- Same-company pinned source mission/run. Structured plan units must name their
+- Same-company pinned source mission/run. Units requesting output reuse must name their
   exact `sourceStepId`; generated target IDs are mapped explicitly, never by title.
   Existing IDs remain valid for static definitions. Source mappings must be unique
   and exist in the historical snapshot.
@@ -61,14 +61,18 @@ remove dependent target runs first if administratively deleting history.
 
 ## Repeat-failure policy and limits
 
-A failed source step must remain explicitly mapped. Unchanged executable settings
-are rejected before PLAN-QA/materialization and again atomically at run creation,
-even with no seeds, a different target ID, a renamed title or changed prose.
-Diagnostics contain the scoped heartbeat `errorCode`, source step/run and versioned
-configuration hash. Missing historical snapshots or failed-step heartbeat evidence
-fail closed. Change executable settings (agent/tools/arguments/dependencies/etc.),
-not just promises in descriptions. Current revision planning requires every selected
-unit to map to one existing source step: adding/removing failed units is not supported.
+For a current-attempt execution error with a structured heartbeat `errorCode`, unchanged
+executable settings are rejected before PLAN-QA/materialization and atomically at run
+creation, even with no seeds, changed/generated IDs, renamed titles or changed prose.
+Explicit mappings and typed forward-graph fingerprints compare executable settings;
+no title or prose matching is used. New corrective units and removing a failed approach
+are allowed. Output reuse still requires an explicit source identity.
+
+The original wake admission proves generation, retry and iteration; stale/unproven
+heartbeats are excluded from both the guard and planning dossier. Official current-attempt
+QA `request_changes` and current-request tool failure/verdict records are result failures,
+not invented adapter error codes. Missing historical snapshots or unexplained failed
+steps still fail closed. Diagnostics identify the source step/run and configuration hash.
 
 No automatic reuse, no tool/QA/control-node seeds, no legacy snapshot fallback,
 and no cross-company reuse. Successful PAQO producer back-edges do not prevent
@@ -85,7 +89,9 @@ with tool arguments.
 Board waiting is derived from the scoped immutable definition, current structured
 PLAN-QA approval and absence of a run, not `awaitingBoardStart` prose/metadata.
 Supervision suppresses missing-materialization redispatch while this holds. Native
-board admission rechecks readiness under the mission lock and rejects duplicate
-starts. After start, the native run is authoritative; plan display refs may lag.
+board admission locks mission, active plan, QA issue/heartbeat and verdict authority
+through run commit. PLAN-QA submissions and binding changes use the same lock order;
+concurrent revocation is observed before admission or commits after it. Duplicate starts
+are rejected. After start, the native run is authoritative; plan display refs may lag.
 Task2 pre-release seed records without `stepConfigHashVersion: 2` fail closed; no
 historical seed backfill is performed.

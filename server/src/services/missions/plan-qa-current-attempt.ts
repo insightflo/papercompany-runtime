@@ -6,6 +6,7 @@ import { hashContract, type QualityDb } from "../quality/contract.js";
 import { verifyEvidenceScope } from "../quality/evidence-verifier.js";
 import { planQaInputHashForPlan } from "./plan-qa-addendum-manifest.js";
 import { planQaReviewBindingMarkerSchema } from "./plan-qa-review-binding.js";
+import { lockPlanQaMission } from "./plan-qa-admission-lock.js";
 
 function mismatch(): never { throw conflict("quality_plan_qa_attempt_mismatch", { code: "quality_plan_qa_attempt_mismatch" }); }
 
@@ -45,6 +46,7 @@ export async function assertCurrentPlanQaScope(db: QualityDb, scope: PlanQaScope
 
 /** A common issue-row lock serializes first insert, reads, and submissions for one review. */
 export async function lockPlanQaAttempt(db: QualityDb, scope: PlanQaScope, actor: QualityAgentActor) {
+  await lockPlanQaMission(db, scope.companyId, scope.missionId);
   await db.select({ id: missionPlanArtifacts.id }).from(missionPlanArtifacts).where(and(
     eq(missionPlanArtifacts.companyId, scope.companyId), eq(missionPlanArtifacts.id, scope.planArtifactId),
   )).for("update").limit(1);

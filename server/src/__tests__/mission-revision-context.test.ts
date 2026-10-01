@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { admittedProducer } from "./helpers/admitted-producer.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issueComments, issues, issueWorkProducts,
   missionPlanQaVerdicts, missions, operatorDecisions, workflowDefinitions, workflowRuns, workflowStepRuns,
@@ -25,9 +27,13 @@ describe("DB-only revision planning context", () => {
     const [issue] = await db.insert(issues).values({ companyId, missionId: sourceId, title: "Action", issueNumber: 1, identifier: randomUUID() }).returning();
     const [step] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: "produce", issueId: issue.id,
       status: "completed", executionGeneration: 2, retryCount: 1, iterationIndex: 3 }).returning();
-    const [heartbeat] = await db.insert(heartbeatRuns).values({ companyId, agentId: ownerAgentId, issueId: issue.id,
-      workflowStepRunId: step.id, workflowExecutionGeneration: 2, status: "failed", errorCode: "timeout",
-      error: "FORBIDDEN_ERROR_PROSE", stdoutExcerpt: "FORBIDDEN_STDOUT", stderrExcerpt: "FORBIDDEN_STDERR" }).returning();
+    await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, run.id));
+    await db.update(workflowStepRuns).set({ status: "running" }).where(eq(workflowStepRuns.id, step.id));
+    const heartbeatId = randomUUID();
+    await admittedProducer(db, { companyId, agentId: ownerAgentId, issueId: issue.id, stepRunId: step.id, heartbeatId, status: "failed" });
+    const [heartbeat] = await db.update(heartbeatRuns).set({ errorCode: "timeout", error: "FORBIDDEN_ERROR_PROSE",
+      stdoutExcerpt: "FORBIDDEN_STDOUT", stderrExcerpt: "FORBIDDEN_STDERR" }).where(eq(heartbeatRuns.id, heartbeatId)).returning();
+    await db.update(workflowStepRuns).set({ status: "completed" }).where(eq(workflowStepRuns.id, step.id));
     await db.insert(heartbeatRuns).values({ companyId, agentId: ownerAgentId, issueId: issue.id,
       workflowStepRunId: step.id, workflowExecutionGeneration: 1, status: "failed", errorCode: "STALE_GENERATION" });
     const foreignCompanyId = randomUUID(), foreignAgentId = randomUUID();

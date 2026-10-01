@@ -462,7 +462,7 @@ export function missionPlanArtifactService(db: Db) {
         .select()
         .from(missions)
         .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)))
-        .limit(1);
+        .for("update").limit(1);
       if (!mission) throw notFound(`Mission not found: ${input.missionId}`);
 
       const [latest] = await tx

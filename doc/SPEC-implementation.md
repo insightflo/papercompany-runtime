@@ -274,26 +274,32 @@ explicit seed set or no seed (fresh execution). Agent triggers cannot bypass thi
 PAQO wait by omitting the seed. Ordinary missions retain automatic starts. See
 `doc/runbooks/mission-revision-seeds.md` for the operator UI/API path and restrictions.
 
-Structured revision plan units declare `sourceStepId`; the server validates unique,
-existing source identities before PLAN-QA. Generated PAQO target IDs retain this
+Structured revision plan units may declare `sourceStepId`; the server validates unique,
+existing explicit source identities before PLAN-QA. New corrective units and removal
+of failed approaches are allowed; output reuse still requires source identity. Generated PAQO target IDs retain this
 mapping. Version 2 seed configuration hashes exclude presentation fields and map
 native dependency references while retaining output contract equality. QA consumers
 resolve the target's pinned input binding while preserving the original producer.
 The mission Workflow tab offers completed candidates and an explicit fresh-start
 option; admission verifies the candidates again.
 
-Failed source steps require scoped failed/timed-out heartbeat `errorCode` records
-and a historical execution snapshot. A versioned executable-settings hash rejects
-unchanged failed execution before plan review and atomically at run creation,
-including fresh starts. Names, descriptions, arbitrary metadata and prose contracts
-cannot bypass it. Missing source mapping or failure evidence fails closed. Every
-revision plan unit currently maps to an existing source step; failed steps cannot
-be omitted to evade the guard. Ordinary missions without a source run are unchanged.
+Execution-error comparisons require current-attempt failed/timed-out heartbeat
+`errorCode` records and a historical execution snapshot. Original wake admission binds
+generation, retry and iteration; stale/unproven heartbeats are excluded from the guard
+and planning dossier. Official current-attempt QA rejection and current-request tool
+failure/verdict records explain result failures without inventing adapter error codes.
+Unexplained failed steps still fail closed. A versioned executable-settings hash rejects
+unchanged execution errors before plan review and atomically at run creation, including
+fresh starts. Explicit mapping plus typed forward-graph fingerprints catch equivalent
+unlinked/generated steps; names, descriptions, arbitrary metadata and prose contracts
+cannot bypass comparison. Ordinary missions without a source run are unchanged.
 
 Supervision derives board waiting from the scoped immutable PAQO definition, current
 structured PLAN-QA approval and absence of its mission run. It does not redispatch
 missing materialization merely because `workflowRunId` is null. Board admission
-checks the same current approval under a mission lock; agents cannot self-seed or
+checks the same current approval while retaining mission/plan/QA issue/heartbeat/verdict
+locks through run commit. PLAN-QA writers use matching lock order, so revocation cannot
+commit between the authority read and run admission. Agents cannot self-seed or
 start a revision PAQO workflow, and duplicate board starts are rejected. The definition's
 owning mission determines revision admission: omitted or different mission IDs fail
 before any mission/run mutation. PAQO preserves validated artifact selectors/contracts

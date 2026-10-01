@@ -3,6 +3,7 @@ import { heartbeatRuns, issues, issueWorkProducts, missionPlanQaVerdicts, missio
   workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { workProductProducerSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { notFound, badRequest } from "../../errors.js";
+import { revisionCurrentHeartbeats } from "./revision-current-heartbeats.js";
 
 /** Read-only planning reference, never permission to seed, retry, or complete execution. */
 export async function buildMissionRevisionContext(db: Pick<Db, "select">,
@@ -23,13 +24,9 @@ export async function buildMissionRevisionContext(db: Pick<Db, "select">,
   const stepRows = sourceRunId ? await db.select().from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, sourceRunId)).orderBy(asc(workflowStepRuns.stepId)) : [];
   const steps = await Promise.all(stepRows.map(async step => {
-    // Only typed heartbeat links from this company + issue + generation; never error text or stdout.
-    const attempts = step.issueId ? await db.select({ heartbeatRunId: heartbeatRuns.id,
-      status: heartbeatRuns.status, executionGeneration: heartbeatRuns.workflowExecutionGeneration,
-      errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.issueId, step.issueId),
-      eq(heartbeatRuns.workflowStepRunId, step.id), eq(heartbeatRuns.workflowExecutionGeneration, step.executionGeneration),
-    )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)) : [];
+    const attempts = (await revisionCurrentHeartbeats(db, input.companyId, step)).map(h => ({
+      heartbeatRunId: h.id, status: h.status, executionGeneration: h.workflowExecutionGeneration, errorCode: h.errorCode,
+    }));
     return { stepRunId: step.id, stepId: step.stepId, status: step.status,
       executionGeneration: step.executionGeneration, retryCount: step.retryCount, attempt: step.retryCount + 1,
       iterationIndex: step.iterationIndex, errorCode: attempts[0]?.errorCode ?? null, attempts };

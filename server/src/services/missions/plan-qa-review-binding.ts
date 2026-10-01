@@ -15,6 +15,7 @@ import { artifactRefSchema, uuidSchema, type ArtifactRef } from "@paperclipai/sh
 import { unprocessable } from "../../errors.js";
 import { issueService } from "../issues.js";
 import type { QualityTx } from "../quality/contract.js";
+import { lockPlanQaArtifact } from "./plan-qa-admission-lock.js";
 import { buildPlanQaReviewDescription } from "./mission-plan-review-description.js";
 import {
   attachPlanQaManifest, blockedPlanQaTemplates, planQaInputHashForPlan, planQaOriginId,
@@ -187,6 +188,7 @@ async function createBoundReview(input: PlanQaBindingContext, generation: number
   const prepared = await preparePlanQaManifest(input.db, bindingInput(input, generation));
   const blocked = blockedPlanQaTemplates(prepared.manifest);
   return input.db.transaction(async (tx) => {
+    await lockPlanQaArtifact(tx, input.companyId, input.planArtifactId);
     const created = await issueService(input.db).createFromSrb(tx, input.companyId, {
       missionId: input.missionId,
       originKind: "mission_plan_qa",
@@ -221,6 +223,7 @@ async function bindExistingReview(input: PlanQaBindingContext, issueId: string):
   const prepared = await preparePlanQaManifest(input.db, bindingInput(input, generation));
   const blocked = blockedPlanQaTemplates(prepared.manifest);
   return input.db.transaction(async (tx) => {
+    await lockPlanQaArtifact(tx, input.companyId, input.planArtifactId);
     const ref = await attachPlanQaManifest(tx, { companyId: input.companyId, issueId, uploaded: prepared.uploaded });
     const marker: PlanQaReviewBindingMarker = {
       schemaVersion: 1, kind: "plan_qa_review_binding",
@@ -246,6 +249,7 @@ async function supersedeReview(input: PlanQaBindingContext, previousIssueId: str
   const prepared = await preparePlanQaManifest(input.db, bindingInput(input, generation));
   const blocked = blockedPlanQaTemplates(prepared.manifest);
   return input.db.transaction(async (tx) => {
+    await lockPlanQaArtifact(tx, input.companyId, input.planArtifactId);
     const supersededAt = new Date().toISOString();
     await tx.update(issues).set({
       status: "cancelled", hiddenAt: new Date(), updatedAt: new Date(),
