@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { secretService } from "../services/secrets.js";
-import { sanitizeRecord } from "../redaction.js";
+import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
+import { isSensitiveToolEnvKey } from "../services/tool-env-sensitivity.js";
 import { toolProgressRoutes } from "./tool-progress.js";
 import type { Db } from "@paperclipai/db";
 import {
@@ -53,8 +54,25 @@ function throwToolNameConflict(error: unknown, name: string): never {
 export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOptions = {}) {
   const { toolDispatcher, executeTest = executeToolTest, strictSecretsMode = false } = options;
   const secrets = secretService(db);
-  const maskTool = (tool: { adapterConfig: Record<string, unknown> }) =>
-    ({ ...tool, adapterConfig: sanitizeRecord(tool.adapterConfig) });
+  const maskTool = (tool: { adapterConfig: Record<string, unknown> }) => {
+    const adapterConfig = sanitizeRecord(tool.adapterConfig);
+    if (adapterConfig.env && typeof adapterConfig.env === "object" && !Array.isArray(adapterConfig.env)) {
+      const env = { ...adapterConfig.env as Record<string, unknown> };
+      for (const [key, binding] of Object.entries(env)) {
+        if (!isSensitiveToolEnvKey(key)) continue;
+        if (typeof binding === "string") {
+          env[key] = REDACTED_EVENT_VALUE;
+        } else if (binding && typeof binding === "object" && !Array.isArray(binding)) {
+          const plain = binding as Record<string, unknown>;
+          if (plain.type === "plain" && typeof plain.value === "string") {
+            env[key] = { ...plain, value: REDACTED_EVENT_VALUE };
+          }
+        }
+      }
+      adapterConfig.env = env;
+    }
+    return { ...tool, adapterConfig };
+  };
   const router = Router();
   router.use(toolProgressRoutes(db));
 

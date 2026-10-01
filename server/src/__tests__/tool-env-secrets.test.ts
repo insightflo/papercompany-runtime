@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -138,8 +138,9 @@ describe("tool env secrets (real DB and child process)", () => {
   }
   const toolsPath = () => `/api/companies/${companyId}/tools`;
   it("masks POST/GET/PATCH only, preserving refs and stored plain values", async () => {
-    const env = { CLOUDFLARE_API_KEY: "synthetic-tool-token",
-      AUTH_TOKEN: { type: "secret_ref", secretId, version: "latest" }, NORMAL: "ordinary" };
+    const env = { CLOUDFLARE_API_TOKEN: "synthetic-tool-token",
+      GITHUB_TOKEN: { type: "plain", value: "synthetic-tool-token" },
+      SLACK_BOT_TOKEN: { type: "secret_ref", secretId, version: "latest" }, CLOUDFLARE_ACCOUNT_ID: "account" };
     const server = app();
     const created = await request(server).post(toolsPath()).send({ name: "http-probe",
       adapterType: "builtin", adapterConfig: config(env) });
@@ -148,14 +149,35 @@ describe("tool env secrets (real DB and child process)", () => {
     const patched = await request(server).patch(`${toolsPath()}/${created.body.id}`).send({ adapterConfig: config(env) });
     expect(patched.status).toBe(200);
     for (const tool of [created.body, list.body[0], patched.body]) {
-      expect(JSON.stringify(tool.adapterConfig.env.CLOUDFLARE_API_KEY) === JSON.stringify({ type: "plain", value: "***REDACTED***" })).toBe(true);
-      expect(tool.adapterConfig.env.AUTH_TOKEN).toEqual(env.AUTH_TOKEN);
+      expect(JSON.stringify(tool.adapterConfig.env.CLOUDFLARE_API_TOKEN) === JSON.stringify({ type: "plain", value: "***REDACTED***" })).toBe(true);
+      expect(JSON.stringify(tool.adapterConfig.env.GITHUB_TOKEN) === JSON.stringify({ type: "plain", value: "***REDACTED***" })).toBe(true);
+      expect(tool.adapterConfig.env.SLACK_BOT_TOKEN).toEqual(env.SLACK_BOT_TOKEN);
+      expect(tool.adapterConfig.env.CLOUDFLARE_ACCOUNT_ID).toEqual({ type: "plain", value: "account" });
     }
     const [stored] = await db.select().from(toolDefinitions).where(eq(toolDefinitions.id, created.body.id));
     const storedEnv = stored.adapterConfig.env as Record<string, { value: string }>;
-    expect(storedEnv.CLOUDFLARE_API_KEY.value === "synthetic-tool-token").toBe(true);
-    const roundtrip = await request(server).patch(`${toolsPath()}/${created.body.id}`).send({ adapterConfig: created.body.adapterConfig });
-    expect(roundtrip.status).toBe(422);
+    expect(storedEnv.CLOUDFLARE_API_TOKEN.value === "synthetic-tool-token").toBe(true);
+    for (const adapterConfig of [created.body.adapterConfig, config({ CLOUDFLARE_API_TOKEN: "***REDACTED***" })]) {
+      const roundtrip = await request(server).patch(`${toolsPath()}/${created.body.id}`).send({ adapterConfig });
+      expect(roundtrip.status).toBe(422);
+      const [unchanged] = await db.select().from(toolDefinitions).where(eq(toolDefinitions.id, created.body.id));
+      expect(isDeepStrictEqual(unchanged, stored)).toBe(true);
+    }
+  });
+  it("masks legacy string token bindings on GET without changing the DB", async () => {
+    const adapterConfig = config({ CLOUDFLARE_API_TOKEN: "synthetic-tool-token",
+      GITHUB_TOKEN: { type: "plain", value: "synthetic-tool-token" },
+      SLACK_BOT_TOKEN: { type: "secret_ref", secretId, version: "latest" }, CLOUDFLARE_ACCOUNT_ID: "account" });
+    await db.insert(toolDefinitions).values({ id: toolId, companyId, name: "legacy-probe",
+      adapterType: "builtin", adapterConfig });
+    const list = await request(app()).get(toolsPath());
+    expect(list.status).toBe(200);
+    expect(list.body[0].adapterConfig.env.CLOUDFLARE_API_TOKEN === "***REDACTED***").toBe(true);
+    expect(list.body[0].adapterConfig.env.GITHUB_TOKEN.value === "***REDACTED***").toBe(true);
+    expect(list.body[0].adapterConfig.env.SLACK_BOT_TOKEN).toEqual((adapterConfig.env as Record<string, unknown>).SLACK_BOT_TOKEN);
+    expect(list.body[0].adapterConfig.env.CLOUDFLARE_ACCOUNT_ID).toBe("account");
+    const [stored] = await db.select().from(toolDefinitions).where(eq(toolDefinitions.id, toolId));
+    expect(isDeepStrictEqual(stored.adapterConfig, adapterConfig)).toBe(true);
   });
   it.each([false, true])("rejects placeholders and strict inline values for POST/PATCH (strict=%s)", async (strict) => {
     await db.insert(toolDefinitions).values({ id: toolId, companyId, name: "existing",

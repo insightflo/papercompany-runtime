@@ -6,6 +6,17 @@ const tool = { id: "12345678-rest", adapterConfig: { command: "node", env: {
   NORMAL: "ordinary", AUTH_EMPTY: "  ", API_KEY_REF: { type: "secret_ref", secretId: "existing" },
 } } };
 describe("tool env migration core", () => {
+  it.each(["synthetic", { type: "plain", value: "synthetic" }])("selects token segments without selecting tokenizer or ordinary env names (%j)", (binding) => {
+    const plan = planToolEnvSecrets({ id: tool.id, adapterConfig: { env: {
+      CLOUDFLARE_API_TOKEN: binding, GITHUB_TOKEN: "synthetic", TOKEN: "synthetic",
+      BOT_TOKEN_V2: "synthetic", SLACK_BOT_TOKEN: "synthetic", INPUT_TOKENS_LIMIT: "10",
+      CLOUDFLARE_ACCOUNT_ID: "account", MANUAL_ONBOARDING_SITE_ROOT: "/site",
+      TOKENIZER_PATH: "/tokenizer", MAX_TOKENIZER: "10",
+    } } });
+    expect(plan.map(({ key }) => key)).toEqual([
+      "CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN", "TOKEN", "BOT_TOKEN_V2", "SLACK_BOT_TOKEN", "INPUT_TOKENS_LIMIT",
+    ]);
+  });
   it("selects only nonempty sensitive plain bindings with deterministic names", () => {
     const plan = planToolEnvSecrets(tool);
     expect(plan.map(({ key, name }) => ({ key, name }))).toEqual([

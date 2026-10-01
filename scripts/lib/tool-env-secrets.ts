@@ -1,5 +1,4 @@
-const SENSITIVE_ENV_KEY_RE =
-  /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
+import { isSensitiveToolEnvKey } from "../../server/src/services/tool-env-sensitivity.js";
 
 type ToolEnvRow = { id: string; adapterConfig: unknown };
 function record(value: unknown): Record<string, unknown> | null {
@@ -10,7 +9,7 @@ function record(value: unknown): Record<string, unknown> | null {
 export function planToolEnvSecrets(tool: ToolEnvRow) {
   const env = record(record(tool.adapterConfig)?.env);
   return Object.entries(env ?? {}).flatMap(([key, binding]) => {
-    if (!SENSITIVE_ENV_KEY_RE.test(key)) return [];
+    if (!isSensitiveToolEnvKey(key)) return [];
     const object = record(binding);
     const value = typeof binding === "string" ? binding
       : object?.type === "plain" && typeof object.value === "string" ? object.value : null;
