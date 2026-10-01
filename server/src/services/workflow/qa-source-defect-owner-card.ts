@@ -198,7 +198,7 @@ function buildCardCreateInput(input: {
     }),
     priority: "high" as const,
     interactionType: "single_select" as const,
-    title: `QA 반려 원천 데이터 결함 — 오너 결정 필요 (${input.producerStepId} iter ${input.iteration})`.slice(0, 200),
+    title: `QA 반려 ${sourceOnly ? "원천 데이터" : findingsSorted.some((finding) => finding.layer === "source_data") ? "원천+산출물" : "산출물"} 결함 — 오너 결정 필요 (${input.producerStepId} iter ${input.iteration})`.slice(0, 200),
     description: [
       "## QA 반려 계층 라우팅 — 오너 결정 필요",
       "",
