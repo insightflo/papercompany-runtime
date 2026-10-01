@@ -447,7 +447,10 @@ export async function createApp(
     lifecycleManager: lifecycle,
     db,
   });
-  api.use(toolDefinitionRoutes(db, { toolDispatcher }));
+  api.use(toolDefinitionRoutes(db, {
+    toolDispatcher,
+    strictSecretsMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
+  }));
 
   setWorkflowToolStepReadinessChecker(async ({ companyId, toolNames }) => {
     const nonPluginToolNames = toolNames.filter((toolName) => !toolDispatcher.getTool(toolName));

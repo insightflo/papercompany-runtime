@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { secretService } from "../services/secrets.js";
+import { sanitizeRecord } from "../redaction.js";
 import { toolProgressRoutes } from "./tool-progress.js";
 import type { Db } from "@paperclipai/db";
 import {
@@ -15,6 +17,7 @@ import { executeToolTest, type ToolTestDispatcher, type ToolTestExecutor } from 
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 type ToolDefinitionRoutesOptions = {
+  strictSecretsMode?: boolean;
   toolDispatcher?: ToolTestDispatcher;
   executeTest?: ToolTestExecutor;
 };
@@ -48,7 +51,10 @@ function throwToolNameConflict(error: unknown, name: string): never {
 }
 
 export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOptions = {}) {
-  const { toolDispatcher, executeTest = executeToolTest } = options;
+  const { toolDispatcher, executeTest = executeToolTest, strictSecretsMode = false } = options;
+  const secrets = secretService(db);
+  const maskTool = (tool: { adapterConfig: Record<string, unknown> }) =>
+    ({ ...tool, adapterConfig: sanitizeRecord(tool.adapterConfig) });
   const router = Router();
   router.use(toolProgressRoutes(db));
 
@@ -56,7 +62,7 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    res.json(await toolService.listDefinitions(db, { companyId }));
+    res.json((await toolService.listDefinitions(db, { companyId })).map(maskTool));
   });
 
   router.post("/companies/:companyId/tools", validate(createToolDefinitionSchema), async (req, res) => {
@@ -64,6 +70,11 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
     assertCompanyAccess(req, companyId);
     assertBoard(req);
     assertHttpArtifactAssertionFloor(req.body);
+    if (req.body.adapterConfig !== undefined) {
+      req.body.adapterConfig = await secrets.normalizeAdapterConfigForPersistence(
+        companyId, req.body.adapterConfig, { strictMode: strictSecretsMode },
+      );
+    }
     let tool;
     try {
       tool = await toolService.createDefinition(db, { ...req.body, companyId });
@@ -86,7 +97,7 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
         enabled: tool.enabled,
       },
     });
-    res.status(201).json(tool);
+    res.status(201).json(maskTool(tool));
   });
 
   router.patch("/companies/:companyId/tools/:toolId", validate(updateToolDefinitionSchema), async (req, res) => {
@@ -108,6 +119,9 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
         adapterType: req.body.adapterType ?? existing.adapterType,
         adapterConfig: req.body.adapterConfig,
       });
+      req.body.adapterConfig = await secrets.normalizeAdapterConfigForPersistence(
+        companyId, req.body.adapterConfig, { strictMode: strictSecretsMode },
+      );
     }
     let tool;
     try {
@@ -135,7 +149,7 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
         changedKeys: Object.keys(req.body),
       },
     });
-    res.json(tool);
+    res.json(maskTool(tool));
   });
 
   router.delete("/companies/:companyId/tools/:toolId", async (req, res) => {

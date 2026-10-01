@@ -20,6 +20,7 @@ import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-pol
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
 import { executeAgentJudgmentTool } from "../judgment/agent-judgment-tool-executor.js";
 import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
+import { secretService } from "../secrets.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
@@ -116,6 +117,20 @@ export async function executeCoreWorkflowTool(input: {
   const cwd = typeof adapterConfig.workingDirectory === "string" && adapterConfig.workingDirectory.trim()
     ? adapterConfig.workingDirectory.trim() : process.cwd();
   const envConfig = readObject(adapterConfig.env);
+  const resolvedEnv: Record<string, string> = {};
+  const secrets = secretService(input.db);
+  for (const [key, binding] of Object.entries(envConfig)) {
+    try {
+      const resolved = await secrets.resolveEnvBindings(input.companyId, { [key]: binding });
+      Object.assign(resolvedEnv, resolved.env);
+    } catch {
+      return { status: 422, body: { error: `Unable to resolve environment binding for key: ${key}`,
+        tool: input.toolName, source: "core" } };
+    }
+  }
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.PAPERCLIP_SECRETS_MASTER_KEY;
+  delete inheritedEnv.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
   const timeoutMs = typeof adapterConfig.timeoutMs === "number" && Number.isFinite(adapterConfig.timeoutMs)
     ? Math.max(1, Math.trunc(adapterConfig.timeoutMs)) : 120_000;
   let executable = commandParts[0]!;
@@ -131,8 +146,7 @@ export async function executeCoreWorkflowTool(input: {
     const consumerRoot = "resultRoot" in prepared ? prepared.resultRoot : undefined;
     const publicationScope = "publicationScope" in prepared ? prepared.publicationScope : undefined;
     const policy = readToolProgressPolicy(adapterConfig);
-    const env = { ...process.env,
-      ...Object.fromEntries(Object.entries(envConfig).map(([key, value]) => [key, String(value)])),
+    const env = { ...inheritedEnv, ...resolvedEnv,
       PAPERCLIP_COMPANY_ID: input.companyId,
       ...(agentId ? { PAPERCLIP_AGENT_ID: agentId } : {}),
       ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}), ...(input.stepEnv ?? {}),
