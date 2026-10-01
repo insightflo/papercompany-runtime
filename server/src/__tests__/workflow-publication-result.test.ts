@@ -6,6 +6,8 @@ import { expect, it } from "vitest";
 import { companies, toolDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { database, fixture } from "./helpers/qa-receipt-fixture.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
+import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
+import { legacyHtmlManualPublicationContract } from "./helpers/legacy-html-manual.js";
 
 // Real executor + isolated DB, with a deliberately hostile machine producer.
 type IdSource = { body: string | null; params: (sourcePath: string, runDir: string) => Record<string, unknown> };
@@ -25,7 +27,10 @@ async function publisher(mutation: string, progress = false, idSource?: IdSource
     targetParams = idSource.params(sourcePath, runDir);
   }
   const id = randomUUID(), script = path.join(path.dirname(f.content), `publisher-${id}.mjs`);
-  await db.insert(workflowStepRuns).values({ id, workflowRunId: f.runId, stepId: "publish", status: "running", lastDispatchRequestId: "publish-1" });
+  const artifactContract = { ...legacyHtmlManualPublicationContract(path.basename(script)), resultFileName: "manual-onboarding-publish-result.json" };
+  const adapterConfig = { workingDirectory: path.dirname(script), artifactContract };
+  await db.insert(workflowStepRuns).values({ id, workflowRunId: f.runId, stepId: "publish", status: "running", lastDispatchRequestId: "publish-1",
+    metadata: { artifactExecution: freezeArtifactAttempt({ adapterConfig, step: { id: "publish", type: "tool" }, executionGeneration: 0, requestId: "publish-1" }) } });
   await writeFile(script, `import fs from 'node:fs';
 const v=JSON.parse(fs.readFileSync(0,'utf8'));
 const r={schemaVersion:'manual-onboarding.publication.v1',ok:true,command:'publish',mode:'content-draft',
@@ -35,7 +40,7 @@ cms:{ok:true,audience:'public',contentId:'test',slug:'test',publicUrl:'http://12
 ${mutation}
 console.log(JSON.stringify({ok:true,artifactPath:'/outside/unverified.json',id:'stdout-lie'}));`);
   await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "publish", description: "test", adapterType: "builtin", adapterConfig: {
-    command: `${process.execPath} ${script}`, ...(progress ? { progress: { version: 1, idleTimeoutMs: 5000, maxDurationMs: 15000, stages: [{ key: "publish", unit: "items" }] } } : {}),
+    ...adapterConfig, command: `${process.execPath} ${script}`, ...(progress ? { progress: { version: 1, idleTimeoutMs: 5000, maxDurationMs: 15000, stages: [{ key: "publish", unit: "items" }] } } : {}),
   } });
   const result = await executeCoreWorkflowTool({ db, companyId: f.companyId, workflowRunId: f.runId, stepRunId: id,
     stepId: "publish", requestId: "publish-1", toolName: "publish", parameters: { sourceContentPath: f.content,
@@ -57,6 +62,11 @@ it.each([
   ["wrong target", "r.id='other';fs.writeFileSync(4,JSON.stringify(r));"],
   ["wrong CMS result", "r.cms.contentId='other';fs.writeFileSync(4,JSON.stringify(r));"],
   ["claimed path", "r.artifactPath='/outside/unverified.json';fs.writeFileSync(4,JSON.stringify(r));"],
+  ["wrong timestamp", "r.publishedAtKst='2026-09-29T00:00:00Z';fs.writeFileSync(4,JSON.stringify(r));"],
+  ["wrong audience", "r.cms.audience='private';fs.writeFileSync(4,JSON.stringify(r));"],
+  ["wrong date", "r.date='2026-09-30';fs.writeFileSync(4,JSON.stringify(r));"],
+  ["wrong command sequence", "r.cms.commandKey='test:0';fs.writeFileSync(4,JSON.stringify(r));"],
+  ["wrong CMS URL", "r.cms.publicUrl='https://example.org/other';fs.writeFileSync(4,JSON.stringify(r));"],
 ])("rejects %s FD4 despite successful stdout", async (_name, mutation) => {
   const { result, root } = await publisher(mutation);
   expect(result.status, JSON.stringify(result.body)).toBe(500);
@@ -91,8 +101,8 @@ const decision = (slug: unknown) => JSON.stringify({ status: "selected", selecti
 const viaSource = (body: string | null, extra: Record<string, unknown> = {}): IdSource => ({ body,
   params: (sourcePath) => ({ idSourcePath: sourcePath, idSourceField: "selection.topicSlug", date: "2026-09-29", ...extra }) });
 
-it("accepts an explicit id arg", async () => {
-  const { result } = await publisher(emitId("test"));
+it("accepts an explicit id arg before attempting an invalid source", async () => {
+  const { result } = await publisher(emitId("test"), false, viaSource(null, { id: ' test ', idSourceField: 'invalid..field' }));
   expect(result.status, JSON.stringify(result.body)).toBe(200);
 });
 

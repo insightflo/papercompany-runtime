@@ -65,6 +65,38 @@
 - Prevention rule: Optional planning features must preserve the ordinary manifest shape; test both present and absent paths.
 - Reuse trigger: Adding optional context to a runtime manifest.
 - Evidence: `/tmp/task1-focused.log` (80 pass/1 exact-shape failure); correction verified in Task1 focused rerun.
+### 2026-10-01 — isolate full-suite resources and fixture clocks
+- Date: 2026-10-01
+- Task: Runtime QA Phase A full gates.
+- What failed: Default full suite terminated; serial run later failed PG setup, continuation claiming and a CU request, although failed files passed isolated.
+- Root cause: Continuation fixtures mixed DB microsecond time and JavaScript millisecond time; competing test runners and PG resource pressure were observed, but original PG timeout/CU 401 causes remain unproven.
+- Category: test determinism / resource contention
+- Fix: Fixed fixture clock, restored CU environment with failure diagnostics, closed DB client before cleanup; waited for other Vitest processes, used fresh temp directories and one worker. Fresh full suite passed 991 files / 7,468 tests, with two expected skips.
+- Prevention rule: Do not count isolated reruns as full-suite success. Avoid competing full suites, explicitly set due times, restore fixture environment and inspect unexpected DB skips. Never kill another worktree's processes.
+- Reuse trigger: Embedded Postgres full gates fail only under sustained suite execution.
+- Evidence: `/tmp/qag/full-test-serial-summary.md`, `/tmp/qag/test-determinism-focused.log`, `/tmp/qag/final-gates-summary.md`.
+
+### 2026-10-01 — authorize policy replacement against the locked current row
+- Date: 2026-10-01
+- Task: Phase A board-only QA configuration and frozen attempt start.
+- What failed: A controlled local-DB HTTP regression let an agent overwrite a board policy added after the route's initial read (200 instead of 403). An initial failure cleanup also erased the current attempt's frozen policy on dispatch rejection.
+- Root cause: Authorization compared a stale route snapshot; cleanup did not distinguish a prior attempt from the current request.
+- Category: authorization / concurrent writes / durable evidence
+- Fix: Compare agent step replacements under a workflow-definition row lock and write in the same transaction; clear artifact snapshots only when dispatch request identity changes.
+- Prevention rule: Read-compare-write authorization needs a lock or fenced write. Attempt cleanup must preserve current-request evidence while removing prior-request evidence.
+- Reuse trigger: Board-owned policy within agent-editable documents, or attempt-metadata cleanup shared by start and dispatch failure.
+- Evidence: `/tmp/qag-auth-race-red.log` (200 versus 403), `/tmp/qag-auth-race-green.log` (35 tests), `/tmp/qag-auth-freeze-edge-red.log` (2 failures), `/tmp/qag-auth-freeze-final.log` (101 tests before final race addition).
+
+### 2026-10-01 — capture artifact dispatch before deployment byte reads
+- Date: 2026-10-01
+- Task: Phase A generic artifact pipeline plumbing.
+- What failed: Existing DB regression tests detected generation/retry/iteration changes during deployment hash reads, yet publication still launched.
+- Root cause: The consumer captured its dispatch fence only after deployment hashing, adopting the newer attempt rather than the original request snapshot.
+- Category: execution-control / awaited-read ordering
+- Fix: Capture the original dispatch fence before any awaited deployment or input byte read; pass that same guard into consumer validation and launch. All 13 p2 regression tests passed afterward.
+- Prevention rule: Any new awaited preparation before a launch must occur after the original attempt guard is captured. Never rebase the guard after awaited I/O.
+- Reuse trigger: Adding deployment/provenance/config reads around guarded tool execution.
+- Evidence: `/tmp/qag-pipeline-regression.log` (three fencing failures), `/tmp/qag-pipeline-cas.log` (16 passing byte/DB regression tests).
 
 ### 2026-09-22 — conditional QA closeout: sandbox failures are not bug RED and identical-conditions rerun decides blame
 - Date: 2026-09-22

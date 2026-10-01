@@ -20,6 +20,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql }
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import {
@@ -141,7 +142,7 @@ import {
   type WorkflowDefinitionExecutionShape,
 } from "./execution-steps.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
-import { verifyQaCompletion } from "./qa-artifact-receipt.js";
+import { verifyArtifactStepCompletion } from "./artifact-step-result.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
 import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
 import { assertResumeAccepted } from "./resume/acceptance.js";
@@ -2483,6 +2484,7 @@ async function failToolStepRunWithDispatchError(input: {
     },
   };
   delete metadata.concurrencyBlocked;
+  if (input.stepRun.lastDispatchRequestId !== input.requestId) delete metadata.artifactExecution;
 
   // [step-status fencing v1] 스냅샷 status CAS — 폐기 시 전이 기록(provenance)도 함께 생략되어
   //   낡은 fromStatus 가 ledger 에 남지 않는다.
@@ -2533,6 +2535,7 @@ async function startIssueLessToolStepRun(input: {
   const requestId = `${run.id}:${step.id}:${Date.now()}`;
   const workflowSteps = input.steps;
   let args: unknown;
+  let artifactExecution: Awaited<ReturnType<typeof freezeCompanyArtifactAttempt>>;
   try {
     args = await resolveWorkflowToolStepArgs({
       db,
@@ -2541,6 +2544,8 @@ async function startIssueLessToolStepRun(input: {
       workflowSteps,
       consumerStepRunId: stepRun.id,
     });
+    artifactExecution = await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
+      executionGeneration: stepRun.executionGeneration, requestId });
   } catch (error) {
     await failToolStepRunWithDispatchError({
       db,
@@ -2576,11 +2581,8 @@ async function startIssueLessToolStepRun(input: {
       return true;
     }
   }
-  // [Hybrid QA] Structural gates must NOT use generic tool cache. Cache bypasses
-  //   the verdict ledger, requestId binding, and generation tracking. A cached
-  //   result has no data.verdict, no official transition-event row, and no
-  //   current-generation requestId — semantic QA could run on an unvalidated gate.
-  if (!isStructuralGateStep(step) && !(step as PersistedWorkflowStep).toolArtifactContract) {
+  // QA/artifact attempts need current request-bound evidence, never generic cached results.
+  if (!isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
     const cachedStepRun = await findCachedToolStepRun({
       db,
       run,
@@ -2636,7 +2638,7 @@ async function startIssueLessToolStepRun(input: {
   }
 
   const metadata: Record<string, unknown> = {
-    ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
+    ...artifactAttemptMetadata(buildWorkflowStepRunMetadata(step, stepRun.metadata), artifactExecution),
     toolInvocation: {
       requestId,
       toolName,
@@ -2672,13 +2674,8 @@ async function startIssueLessToolStepRun(input: {
   return true;
 }
 
-// [orphan-claim reaper] claim 은 프로세스 내 실행기가 소유한다. 런타임 재시작/크래시로 실행기가
-//   증발하면 claim 은 완료도 실패도 못 받는다(타임아웃 타이머도 프로세스 내부에서 사라짐).
-//   판정: issue-less 툴 스텝 running + lastDispatchAcceptedAt NOT NULL + error 없음 +
-//   claim 나이 > 도구 timeoutMs + grace (최소 MIN_AGE). 실패 처리는 큐 프로세서의 기존
-//   failToolStepRunWithDispatchError + syncWorkflowRunState 경로를 그대로 재사용한다.
-//   2026-08-30 사고(미션 17f36958): 배포 검증 재시작 6초 전에 claim 된 stage-youtube-video 가
-//   3시간+ running 방치 — 감지(사다리 7회)는 됐지만 회복 통로가 없었다. 이 회수기가 그 끝을 맡는다.
+// Reap orphaned running claims after timeout + grace through the existing failure/sync path.
+// Process-local executors/timers disappear on restart; queued, unclaimed rows are not orphans.
 const DEFAULT_ORPHANED_TOOL_CLAIM_TIMEOUT_MS = 10 * 60_000;
 const ORPHANED_TOOL_CLAIM_GRACE_MS = 5 * 60_000;
 const ORPHANED_TOOL_CLAIM_MIN_AGE_MS = 15 * 60_000;
@@ -3177,8 +3174,8 @@ export async function completeWorkflowToolStepFromResult(
     : {};
   const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
   const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
-  const toolArtifactReceipt = (step as PersistedWorkflowStep | undefined)?.toolArtifactContract && input.success
-    ? await verifyQaCompletion(input.toolArtifactReceipt, row, input.requestId) : null;
+  const artifactCompletion = await verifyArtifactStepCompletion(row, (step as PersistedWorkflowStep | undefined)?.toolArtifactContract, input);
+  const toolArtifactReceipt = artifactCompletion?.receipt ?? null;
   const artifactDataRecord = normalizeRecord(input.data);
   const relativeArtifactCandidate = [
     typeof input.artifactPath === "string" ? input.artifactPath.trim() : "",
@@ -3270,7 +3267,7 @@ export async function completeWorkflowToolStepFromResult(
   //   stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다.
   const completionCasCondition = and(
     eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
-    ...(toolArtifactReceipt ? [eq(workflowStepRuns.lastDispatchRequestId, toolArtifactReceipt.requestId), eq(workflowStepRuns.status, "running")] : []),
+    ...(artifactCompletion ? [eq(workflowStepRuns.lastDispatchRequestId, artifactCompletion.requestId), eq(workflowStepRuns.status, "running")] : []),
     ...(resumeScopeRequestId !== null
       ? [eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion)]
       : []),

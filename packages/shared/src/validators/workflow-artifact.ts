@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { issueWorkProductTypeSchema } from "./work-product.js";
+import { artifactFileNameSchema, artifactRoleSchema, artifactSchemaVersionSchema, type ArtifactContract } from "./artifact-contract.js";
 
 export const workProductSelectorsSchema = z.record(z.string().regex(/^[A-Za-z0-9_-]+$/), z.object({
   type: issueWorkProductTypeSchema, title: z.string().min(1).max(255),
@@ -8,8 +9,8 @@ export type WorkProductSelectors = z.infer<typeof workProductSelectorsSchema>;
 
 /** Explicit frozen definition contract, never inferred from a tool name or stdout. */
 export const toolArtifactContractSchema = z.object({
-  schemaVersion: z.literal("manual-onboarding.qa.v1"),
-  role: z.literal("qa"),
+  schemaVersion: artifactSchemaVersionSchema,
+  role: artifactRoleSchema,
   inputStepId: z.string().regex(/^[A-Za-z0-9_-]+$/),
 }).strict();
 export type ToolArtifactContract = z.infer<typeof toolArtifactContractSchema>;
@@ -24,7 +25,7 @@ export const workProductProducerSchema = z.object({
 }).strict();
 export const assetDigestSchema = z.object({ fileName: z.string().min(1), sha256: hash, byteSize: count }).strict();
 const check = z.object({ id: z.string().min(1), ok: z.boolean(), detail: z.unknown().optional(), problems: z.array(z.unknown()).optional() }).passthrough();
-const qaBase = { schemaVersion: z.literal("manual-onboarding.qa.v1"), command: z.literal("qa"),
+const qaBase = { schemaVersion: artifactSchemaVersionSchema, command: z.literal("qa"),
   section: z.string().nullable(), ok: z.boolean(), checks: z.array(check).min(1),
   checkedAt: z.string().datetime(), artifactPath: z.string() };
 export const manualQaResultSchema = z.union([
@@ -32,12 +33,37 @@ export const manualQaResultSchema = z.union([
   z.object({ ...qaBase, mode: z.literal("html"), htmlPath: z.string(), htmlSha256: hash,
     assetManifest: z.array(assetDigestSchema), ancillaryManifest: z.array(assetDigestSchema) }).strict(),
 ]);
-export const toolArtifactReceiptSchema = z.object({
-  schemaVersion: z.literal("workflow.tool-artifact.v1"), role: z.literal("qa"),
+export const qaCheckSchema = z.object({ id: z.string().min(1), ok: z.boolean(),
+  severity: z.enum(["error", "warning"]).optional(), detail: z.unknown().optional() }).strict();
+export const workflowQaResultSchema = z.object({
+  schemaVersion: z.literal("workflow.qa-result.v1"), ok: z.boolean(), checks: z.array(qaCheckSchema).min(1),
+  inputDigest: z.object({ sha256: hash, mode: z.enum(["content", "html"]).optional() }).strict(),
+  assetManifest: z.array(assetDigestSchema).optional(), ancillaryManifest: z.array(assetDigestSchema).optional(),
+}).strict();
+export type WorkflowQaResult = z.infer<typeof workflowQaResultSchema>;
+export type QaCheck = z.infer<typeof qaCheckSchema>;
+
+/** Call only on machine-channel JSON; the declared schema must match before adaptation. */
+export function adaptQaResult(raw: unknown, contract: Pick<ArtifactContract, "resultSchemaVersion" | "resultAdapter">): WorkflowQaResult {
+  if (!raw || typeof raw !== "object" || !("schemaVersion" in raw) || raw.schemaVersion !== contract.resultSchemaVersion) {
+    throw new Error("qa_result_schema_mismatch");
+  }
+  if (contract.resultAdapter === "generic") return workflowQaResultSchema.parse(raw);
+  if (contract.resultAdapter !== "legacy-qa") throw new Error("qa_result_adapter_invalid");
+  const legacy = manualQaResultSchema.parse(raw);
+  return workflowQaResultSchema.parse({ schemaVersion: "workflow.qa-result.v1", ok: legacy.ok,
+    checks: legacy.checks.map(({ id, ok, detail }) => ({ id, ok, ...(detail !== undefined ? { detail } : {}) })),
+    inputDigest: { sha256: legacy.mode === "html" ? legacy.htmlSha256 : legacy.contentSha256, mode: legacy.mode },
+    assetManifest: legacy.assetManifest, ...(legacy.mode === "html" ? { ancillaryManifest: legacy.ancillaryManifest } : {}),
+  });
+}
+
+const receiptBase = z.object({
+  role: artifactRoleSchema,
   companyId: z.string().uuid(), missionId: z.string().uuid(), workflowRunId: z.string().uuid(),
   stepRunId: z.string().uuid(), stepId: z.string().min(1), executionGeneration: count, retryCount: count,
   iterationIndex: count, requestId: z.string().min(1), outputRoot: z.string().min(1), outputRootHash: hash,
-  relativePath: z.literal("qa-result.json"), resultSchema: z.literal("manual-onboarding.qa.v1"),
+  relativePath: artifactFileNameSchema, resultSchema: artifactSchemaVersionSchema,
   sha256: hash, byteSize: count, toolId: z.string().uuid(), toolName: z.string().min(1),
   toolDeployment: z.array(assetDigestSchema).min(1),
   input: z.object({ workProductId: z.string().uuid(), producer: workProductProducerSchema,
@@ -47,4 +73,9 @@ export const toolArtifactReceiptSchema = z.object({
   }).strict().refine(v => v.mode === "html" ? v.htmlManifest !== undefined && v.ancillaryManifest !== undefined
     : v.htmlManifest === undefined && v.ancillaryManifest === undefined),
 }).strict();
+export const toolArtifactReceiptSchema = z.discriminatedUnion("schemaVersion", [
+  receiptBase.extend({ schemaVersion: z.literal("workflow.tool-artifact.v1") }),
+  receiptBase.extend({ schemaVersion: z.literal("workflow.tool-artifact.v2"), contractHash: hash, qaConfigHash: hash,
+    runtimeChecks: z.array(qaCheckSchema).optional(), pluginChecks: z.array(qaCheckSchema).optional() }),
+]);
 export type ToolArtifactReceipt = z.infer<typeof toolArtifactReceiptSchema>;

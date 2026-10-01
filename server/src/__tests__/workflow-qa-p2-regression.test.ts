@@ -8,6 +8,8 @@ import { fixture, database } from "./helpers/qa-receipt-fixture.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import { prepareQaConsumer } from "../services/workflow/qa-artifact-consumer.js";
 import { completeWorkflowToolStepFromResult } from "../services/workflow/dag-engine.js";
+import { legacyHtmlManualPublicationContract } from './helpers/legacy-html-manual.js';
+import { freezeArtifactAttempt } from '../services/workflow/artifact-contract-runtime.js';
 
 const hook = vi.hoisted(() => ({ afterRead: null as null | (() => Promise<void>) }));
 const writerHook = vi.hoisted(() => ({ beforeWrite: null as null | (() => Promise<void>) }));
@@ -43,12 +45,16 @@ section:'tech-blog',id:'probe',date:'2026-09-29',title:null,publishedAtKst:'2026
 input:{contentSha256:v.content.sha256,qaSha256:v.qa.sha256,assetManifest:v.assets.map(({fileName,sha256,byteSize})=>({fileName,sha256,byteSize}))},
 cms:{ok:true,audience:'public',contentId:'probe',slug:'probe',publicUrl:'http://127.0.0.1/public/tech-blog/probe',liveStatus:200,
 blocks:1,assets:1,commandKey:'probe:1',contentHash:'a'.repeat(64),contentBytes:123}}));writeFileSync(${JSON.stringify(sentinel)},'ran');`);
+  const adapterConfig = { command: `${process.execPath} ${script}`, workingDirectory: path.dirname(script),
+    artifactContract: legacyHtmlManualPublicationContract(path.basename(script)) };
   await db.insert(toolDefinitions).values({ id: toolId, companyId: f.companyId, name: "publish-probe",
-    description: "Local sentinel, not CMS", adapterType: "builtin", adapterConfig: { command: `${process.execPath} ${script}` } });
+    description: "Local sentinel, not CMS", adapterType: "builtin", adapterConfig });
+  await db.update(workflowStepRuns).set({ metadata: { artifactExecution: freezeArtifactAttempt({
+    adapterConfig, step: {}, executionGeneration: 3, requestId: 'publish-1' }) } }).where(eq(workflowStepRuns.id, stepRunId));
   const input = { db, companyId: f.companyId, workflowRunId: f.runId, stepRunId, stepId: "publish",
     requestId: "publish-1", toolName: "publish-probe", parameters: { sourceContentPath: f.content, section: "tech-blog", id: "probe", date: "2026-09-29",
       qaResultPath: path.join(receipt.outputRoot, "qa-result.json") } };
-  return { ...f, db, receipt, input, sentinel };
+  return { ...f, db, receipt, input, sentinel, publicationAdapterConfig: adapterConfig, publicationToolId: toolId };
 }
 
 it.each(["run", "mission", "step", "request"])("does not execute publication with stale %s", async kind => {
@@ -78,10 +84,10 @@ it.each(["run", "mission", "generation", "retry", "iteration"])("fences %s chang
 it.each([false, true])("executes a current publication request (progress=%s)", async progress => {
   const f = await publication();
   if (progress) await f.db.update(toolDefinitions).set({ adapterConfig: {
-    command: `${process.execPath} ${path.join(path.dirname(f.content), "publish.mjs")}`,
+    ...f.publicationAdapterConfig,
     progress: { version: 1, idleTimeoutMs: 5000, maxDurationMs: 15000,
       stages: [{ key: "copy", unit: "items" }] },
-  } }).where(eq(toolDefinitions.companyId, f.companyId));
+  } }).where(eq(toolDefinitions.id, f.publicationToolId));
   const result = await executeCoreWorkflowTool(f.input);
   expect(result.status, JSON.stringify(result.body)).toBe(200);
   await expect(access(f.sentinel)).resolves.toBeUndefined();

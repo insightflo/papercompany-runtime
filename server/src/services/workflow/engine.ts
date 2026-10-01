@@ -60,6 +60,7 @@ import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 import type { WorkflowSyncSource } from "./workflow-sync-source.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { ensureCreatedRunOversight } from "./workflow-created-run-oversight.js";
+import { validateWorkflowQaConfigs } from './artifact-config-validation.js';
 
 type WorkflowStepLike = WorkflowStep & {
   title?: unknown;
@@ -82,6 +83,7 @@ function normalizeWorkflowSteps(
   steps: unknown[],
   options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown } = {},
 ): WorkflowStep[] {
+  validateWorkflowQaConfigs(steps);
   const normalizedSteps = steps.map((rawStep) => {
     const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
     const { conditionalDependencies: _rawConditionalDependencies, ...stepWithoutRawConditionalDependencies } = step;
@@ -310,9 +312,7 @@ export async function rearmBlockedQaIssuesForResume(
 }
 
 export const workflowService = {
-  /**
-   * Create a new workflow definition.
-   */
+  /** Create a new workflow definition. */
   async createDefinition(
     db: Db,
     input: CreateWorkflowDefinitionInput,

@@ -1,4 +1,6 @@
 import path from "node:path";
+import { preparePublicationVerifyConsumer } from './publication-verify-consumer.js';
+import { loadArtifactAttempt, type FrozenArtifactAttempt } from "./artifact-contract-runtime.js";
 import type { PublicationScope } from "./publication-result.js";
 import { encodeQaInput } from "./qa-byte-transport.js";
 import { randomUUID } from "node:crypto";
@@ -20,17 +22,22 @@ export async function resolveQaReceiptPath(db: Db, scope: { companyId: string; w
 }
 
 /** External CLI consumes the verified byte bundle, never a copied absolute path. */
-export async function prepareQaConsumer(input: QaDispatchScope & { parameters: unknown }) {
+export async function prepareQaConsumer(input: QaDispatchScope & { parameters: unknown; artifactExecution?: FrozenArtifactAttempt | null;
+  dispatch?: Awaited<ReturnType<typeof captureQaDispatch>> }) {
   const args = readObject(input.parameters);
-  if (typeof args.qaResultPath !== "string") return { parameters: input.parameters, inputBytes: undefined, resultRoot: undefined };
+  const frozen = input.artifactExecution === undefined ? await loadArtifactAttempt(input) : input.artifactExecution;
+  if (!frozen || frozen.contract.role === "qa") return { parameters: input.parameters, inputBytes: undefined, resultRoot: undefined };
+  if (frozen.contract.role === 'publication-verify') return preparePublicationVerifyConsumer({ ...input, artifactExecution: frozen });
+  const contract = frozen.contract, names = contract.consumerParams;
+  if (!names || typeof args[names.receipt] !== "string") throw new Error("qa_artifact_consumer_receipt_required");
   if (!input.workflowRunId) throw new Error("qa_artifact_request_stale");
-  const dispatch = await captureQaDispatch(input);
+  const dispatch = input.dispatch ?? await captureQaDispatch(input);
   const rows = await input.db.select({ step: workflowStepRuns, run: workflowRuns }).from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId)).where(and(
       eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.companyId)));
   const matches = rows.filter(({ step }) => {
     const r = toolArtifactReceiptSchema.safeParse(step.metadata.toolArtifactReceipt);
-    return r.success && path.join(r.data.outputRoot, r.data.relativePath) === args.qaResultPath;
+    return r.success && path.join(r.data.outputRoot, r.data.relativePath) === args[names.receipt];
   });
   if (matches.length !== 1) throw new Error("qa_artifact_consumer_receipt_required");
   const { step, run } = matches[0];
@@ -43,9 +50,11 @@ export async function prepareQaConsumer(input: QaDispatchScope & { parameters: u
   const producer = await selectOfficialWorkProduct(input.db, { companyId: input.companyId, workflowRunId: run.id,
     stepId: bindings[0].referencedStepId, selector: { type: "document", title: path.basename(receipt.input.path) }, pinnedId: receipt.input.workProductId });
   if (producer.file !== receipt.input.path) throw new Error("qa_artifact_consumer_producer_changed");
-  const sourceKey = typeof args.sourceContentPath === "string" ? "sourceContentPath" : "sourceHtmlPath";
-  if (args[sourceKey] !== receipt.input.path || (sourceKey === "sourceHtmlPath") !== (receipt.input.mode === "html")
-    || (typeof args.sourceContentPath === "string" && typeof args.sourceHtmlPath === "string")) throw new Error("qa_artifact_consumer_input_mismatch");
+  const sourceKey = receipt.input.mode === "html" ? names.html : names.content;
+  if (!sourceKey || args[sourceKey] !== receipt.input.path
+    || (names.content && names.html && typeof args[names.content] === "string" && typeof args[names.html] === "string")) {
+    throw new Error("qa_artifact_consumer_input_mismatch");
+  }
   const request = step.metadata.toolArtifactRequest as NonNullable<QaRequest>["snapshot"];
   const root = await captureArtifactRoot(request.root.path);
   if (root.dev !== request.root.dev || root.ino !== request.root.ino) throw new Error("qa_artifact_root_replaced");
@@ -71,5 +80,6 @@ export async function prepareQaConsumer(input: QaDispatchScope & { parameters: u
   const publicationScope: PublicationScope = { companyId: input.companyId, missionId: run.missionId,
     workflowRunId: run.id, stepRunId: consumer.id, stepId: input.stepId, requestId: input.requestId,
     executionGeneration: consumer.executionGeneration, retryCount: consumer.retryCount, iterationIndex: consumer.iterationIndex };
-  return { parameters: args, inputBytes: encodeQaInput(source, assets, qaBytes, receipt.input.mode === "html" ? { ancillary } : undefined), resultRoot, publicationScope };
+  return { parameters: args, inputBytes: encodeQaInput(source, assets, qaBytes,
+    receipt.input.mode === "html" ? { ancillary } : undefined, contract.inputEnvelopeVersion), resultRoot, publicationScope, contract, dispatch };
 }

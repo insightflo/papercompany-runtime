@@ -537,7 +537,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     });
 
     expect(product).toMatchObject({
-      provider: "manual_onboarding",
+      provider: "public_url",
       title: "260707-llm-document-search",
       type: "preview_url",
       url: publicUrl,
@@ -733,7 +733,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(response.body).toMatchObject({
       issueId: issue.id,
-      provider: "manual_onboarding",
+      provider: "public_url",
       title: "260707-llm-document-search",
       type: "preview_url",
       url: publicUrl,

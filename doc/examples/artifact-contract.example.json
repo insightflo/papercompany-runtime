@@ -1,0 +1,22 @@
+{
+  "role": "publication",
+  "resultFileName": "publication-result.json",
+  "resultSchemaVersion": "workflow.publication-result.v1",
+  "resultAdapter": "generic",
+  "inputParams": { "content": "document", "html": "page", "assetsDir": "media", "manifest": "bundle", "out": "result" },
+  "consumerParams": { "receipt": "reviewReceipt", "content": "sourceDocument", "html": "sourcePage" },
+  "deploymentFiles": ["publish.mjs", "canonical-json.mjs"],
+  "inputEnvelopeVersion": "workflow.artifact-input.v1",
+  "assetDiscovery": ["/blocks/*/assetFile"],
+  "bundleManifest": { "fileName": "bundle.json", "schemaVersion": "document.bundle.v1", "ancillaryRoles": ["metadata", "screenshot"] },
+  "publication": {
+    "identity": { "param": "entryId", "sourcePathParam": "decisionPath", "sourceFieldParam": "slugField", "format": "date-prefixed-slug", "dateParam": "day" },
+    "bindings": [{ "resultPointer": "/section", "parameter": "collection" }, { "resultPointer": "/date", "parameter": "day" }],
+    "publishedAt": { "resultPointer": "/publishedAt", "dateParam": "day", "suffix": "T00:00:00Z" },
+    "command": "publish",
+    "commandKeySeparator": ":",
+    "audience": { "parameter": "access", "privateValue": "restricted", "privateResult": "private", "defaultResult": "public" }
+  },
+  "readback": { "rejectTitlePatterns": ["Document Catalog"] },
+  "previewProvider": "document_catalog"
+}
