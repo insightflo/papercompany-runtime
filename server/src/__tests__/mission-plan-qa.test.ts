@@ -1,342 +1,106 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { extractMissionIntent, intentSignalsByCategory } from "../services/missions/mission-intent.js";
-import {
-  buildClarificationRequest,
-  extractUnitRoles,
-  getMissionPlanQaCritiqueHook,
-  reviewPlanAgainstIntent,
-  setMissionPlanQaCritiqueHook,
-  type PlanQaDiagnostic,
-} from "../services/missions/mission-plan-qa.js";
+import { buildClarificationRequest, extractUnitRoles, getMissionPlanQaCritiqueHook, reviewPlanAgainstIntent,
+  setMissionPlanQaCritiqueHook, type PlanQaDiagnostic } from "../services/missions/mission-plan-qa.js";
 import { buildCapabilityManifest, resolveSitePublishTarget } from "../services/missions/mission-owner-planning-context.js";
+import { publicationTools, publicationUnits } from "./helpers/mission-publication-fixture.js";
 
-/**
- * [목적] plan-time QA MVP(mission-intent + mission-plan-qa) 의 순수 로직 검증.
- *   핵심 회귀: 실제 사용자 brief("...site에 올리도록") 에서 publish intent 가 잡히고,
- *   publish/readback unit 이 없는 plan 은 missing_publish_unit(invalid) 로 reject 되어야 한다.
- *   DB 없이 deterministic.
- */
+const intent = extractMissionIntent({ selectedExecutionUnits: publicationUnits(), tools: publicationTools });
+const review = (units: Record<string, unknown>[]) => reviewPlanAgainstIntent({ intent, selectedExecutionUnits: units, tools: publicationTools });
+const producer = { id: "a", type: "action", graphWorkProductRequired: true };
+const qa = { id: "q", type: "qa", dependsOn: ["a"] };
+const publisher = { ...publicationUnits()[0], dependsOn: ["q"] };
+const verifier = { ...publicationUnits()[1], toolArgs: { receiptInput: "{$steps.p.workProductPath}" } };
 
-const REAL_BRIEF_TITLE = "디자인 경험 없는 사람이 AI 또는 웹 디자이너에게 UI/UX/배치/색감/수정지시 전달법 리서치";
-const REAL_BRIEF_DESC = "전달하는 법을 리서치하고 site에 올리도록";
-
-function unit(over: Record<string, unknown>): Record<string, unknown> {
-  return { kind: "mission_plan_unit", selectionState: "selected", ...over };
-}
-
-describe("extractMissionIntent — 실제 brief", () => {
-  const intent = extractMissionIntent(REAL_BRIEF_TITLE, REAL_BRIEF_DESC);
-  it("publish intent 감지(site에 올려)", () => {
+describe("structured mission intent", () => {
+  it("records declared publication signals", () => {
     expect(intent.publish).toBe(true);
-    expect(intentSignalsByCategory(intent, "publish")).toContain("site");
+    expect(intentSignalsByCategory(intent, "publish")).toEqual(["publication"]);
   });
-  it("audience split 감지(AI + 웹 디자이너, 복수 대상)", () => {
-    expect(intent.audienceSplit).toBe(true);
-    expect(intent.audiences).toEqual(expect.arrayContaining(["AI", "웹 디자이너"]));
+  it.each(["publish HTML", "AI and developers", "scenario cases", "게시 배포 상황별 초보자"])("does not parse %s", text => {
+    expect(extractMissionIntent(text)).toMatchObject({ publish: false, audienceSplit: false, scenario: false });
   });
-  it("beneficiary(디자인 경험 없는 사람)는 recipient 에서 제외 — audiences 에 안 들음(P1 정밀화)", () => {
-    expect(intent.beneficiary).toContain("비전문가/초보자");
-    expect(intent.audiences).not.toContain("비전문가/초보자");
+  it("accepts explicit audience and scenario arrays", () => {
+    expect(extractMissionIntent({ audiences: ["reader", "operator"], scenarios: ["normal"] })).toMatchObject({ audienceSplit: true, scenario: true });
   });
 });
-
-describe("extractMissionIntent — recipient vs beneficiary 구분", () => {
-  it("beneficiary(초보자/비전문가)만 있고 recipient 가 없으면 split 아님", () => {
-    const intent = extractMissionIntent("초보자 안내서", "비전문가가 이해하기 쉽게 정리");
-    expect(intent.audienceSplit).toBe(false);
-    expect(intent.audiences).toEqual([]);
-    expect(intent.beneficiary.length).toBeGreaterThan(0);
+describe("plan-time publication QA", () => {
+  it("reports absent publication if caller requires it", () => {
+    expect(review([producer, qa]).map(d => d.code)).toContain("missing_publish_unit");
   });
-  it("올림픽 등 오탐 회피 — '올리' 어간이지만 게시 아님", () => {
-    const intent = extractMissionIntent("올림픽 역사 정리", "폐회식까지 요약");
-    expect(intent.publish).toBe(false);
+  it("accepts declared producer → QA → publication → bound verification", () => {
+    expect(review([producer, qa, publisher, verifier])).toEqual([]);
   });
-});
-
-describe("extractMissionIntent — legacy/순수 research", () => {
-  it("게시/대상/시나리오 의도 없으면 모두 false(회귀 없이 pass 조건)", () => {
-    const intent = extractMissionIntent("주간 기술 동향 리서치", "최근 AI 논문을 요약해 정리한다");
-    expect(intent.publish).toBe(false);
-    expect(intent.audienceSplit).toBe(false);
-    expect(intent.scenario).toBe(false);
+  it("rejects missing downstream readback", () => {
+    expect(review([{ ...publisher, dependsOn: [] }]).map(d => d.code)).toContain("missing_publish_readback_qa");
   });
-  it("scenario 의도 감지(상황별/케이스별)", () => {
-    const intent = extractMissionIntent("상황별 대응 가이드", "여러가지 상황에 대한 케이스별 매뉴얼 작성");
-    expect(intent.scenario).toBe(true);
+  it("requires artifact QA before publication for declared producers", () => {
+    const codes = review([producer, { ...publisher, dependsOn: ["a"] }]).map(d => d.code);
+    expect(codes).toContain("missing_artifact_qa_before_delivery");
   });
-});
-
-describe("reviewPlanAgainstIntent — 핵심 회귀(reject 케이스)", () => {
-  const intent = extractMissionIntent(REAL_BRIEF_TITLE, REAL_BRIEF_DESC);
-
-  it("실제 brief: research→synthesis→QA 만 있고 publish/readback unit 이 없으면 missing_publish_unit(invalid) reject", () => {
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "전달법 리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-synth", title: "리서치 종합 보고서 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-        unit({ id: "u-qa", title: "[QA] 보고서 검증", sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
-      ],
-    });
-    const codes = diag.map((d) => d.code);
-    expect(codes).toContain("missing_publish_unit");
-    expect(diag.find((d) => d.code === "missing_publish_unit")?.severity).toBe("invalid");
+  it("rejects reversed artifact QA order", () => {
+    expect(review([producer, { ...publisher, dependsOn: ["a"] }, { ...qa, dependsOn: ["p"] }]).map(d => d.code)).toContain("invalid_artifact_qa_delivery_order");
   });
-
-  it("delivery tool unit + QA/readback unit 이 있으면 invalid 없이 통과(needs_clarification 만 허용)", () => {
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "전달법 리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-synth", title: "산출물 초안 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-        unit({ id: "u-artifact-qa", title: "[QA] 산출물 내용/출처/형식 검증", dependsOn: ["u-synth"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
-        unit({ id: "u-publish", title: "site에 산출물 게시/배포", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        unit({ id: "u-qa", title: "[QA] 게시물 readback 검증", toolNames: ["manual-onboarding-verify"], toolArgs: { publishResultPath: "{$steps.u-publish.workProductPath}" }, dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-qa" } }),
-      ],
-    });
-    const blocking = diag.filter((d) => d.severity === "invalid");
-    expect(blocking).toEqual([]);
+  it("cannot satisfy topology with title or role alone", () => {
+    expect(review([{ ...publisher, dependsOn: [] }, { id: "v", type: "qa", title: "readback verified", dependsOn: ["p"] }]).map(d => d.code)).toContain("missing_publication_verify_tool");
   });
-
-  it("publish unit 은 있으나 QA/readback 검증 unit 이 없으면 missing_publish_readback_qa(invalid)", () => {
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-publish", title: "사이트에 게시", toolNames: ["manual-onboarding-publish"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-      ],
-    });
-    const codes = diag.map((d) => d.code);
-    expect(codes).toContain("missing_publish_readback_qa");
-    expect(diag.find((d) => d.code === "missing_publish_readback_qa")?.severity).toBe("invalid");
-  });
-
-  it("ACTION verify unit without a publish-result dependency is rejected", () => {
-    const actionVerify = unit({
-      id: "u-verify",
-      title: "[ACTION] Verify published manual destination readback",
-      toolNames: ["manual-onboarding-verify"],
-      sourceRef: { type: "mission_plan_unit", id: "u-verify" },
-    });
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-build", title: "[ACTION] Build HTML artifact", sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
-        unit({ id: "u-artifact-qa", title: "[QA] Validate HTML artifact", dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
-        unit({ id: "u-publish", title: "[ACTION] Publish HTML", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-artifact-qa"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        actionVerify,
-      ],
-    });
-
-    expect(extractUnitRoles(actionVerify).readbackQa).toBe(false);
-    expect(diag.map((d) => d.code)).toContain("missing_manual_onboarding_verify_tool");
-  });
-
-  it("산출물 delivery plan 에서 artifact QA 가 없으면 missing_artifact_qa_before_delivery(invalid)", () => {
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "필요 조건 확인 및 템플릿 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-build", title: "템플릿 기반 대시보드 파일 생성", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
-        unit({ id: "u-publish", title: "Cloudflare Pages에 산출물 업로드", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        unit({ id: "u-readback", title: "[QA] 게시물 readback 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-readback" } }),
-      ],
-    });
-    expect(diag.map((d) => d.code)).toContain("missing_artifact_qa_before_delivery");
-    expect(diag.find((d) => d.code === "missing_artifact_qa_before_delivery")?.severity).toBe("invalid");
-  });
-
-  it("artifact QA 가 delivery 뒤에 있으면 invalid_artifact_qa_delivery_order(invalid)", () => {
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "필요 조건 확인 및 자료 조사", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-build", title: "PPTX 덱 파일 제작", dependsOn: ["u-research"], sourceRef: { type: "mission_plan_unit", id: "u-build" } }),
-        unit({ id: "u-publish", title: "site에 PPTX 업로드/게시", toolNames: ["manual-onboarding-publish"], dependsOn: ["u-build"], sourceRef: { type: "mission_plan_unit", id: "u-publish" } }),
-        unit({ id: "u-artifact-qa", title: "[QA] 산출물 파일 품질 검증", dependsOn: ["u-publish"], sourceRef: { type: "mission_plan_unit", id: "u-artifact-qa" } }),
-      ],
-    });
-    expect(diag.map((d) => d.code)).toContain("invalid_artifact_qa_delivery_order");
-    expect(diag.find((d) => d.code === "invalid_artifact_qa_delivery_order")?.severity).toBe("invalid");
+  it("does not treat prose verification as an explicit role", () => {
+    expect(extractUnitRoles({ title: "[QA] verify artifact" }).readbackQa).toBe(false);
+    expect(extractUnitRoles({ type: "qa" }).readbackQa).toBe(true);
   });
 });
-
-describe("reviewPlanAgainstIntent — needs_clarification(audience/scenario)", () => {
-  it("audience split 인데 대상 분기 근거가 없으면 missing_audience_split(needs_clarification, non-blocking)", () => {
-    const intent = extractMissionIntent("AI 와 웹 디자이너를 위한 가이드", "각 대상에게 전달하는 법 정리");
-    expect(intent.audienceSplit).toBe(true);
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-synth", title: "단일 통합 가이드 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-      ],
-    });
-    const found = diag.find((d) => d.code === "missing_audience_split");
-    expect(found).toBeTruthy();
-    expect(found?.severity).toBe("needs_clarification");
+describe("structured clarification", () => {
+  const required = extractMissionIntent({ audiences: ["reader", "operator"], scenarios: ["normal"] });
+  it("reports missing declared coverage", () => {
+    expect(reviewPlanAgainstIntent({ intent: required, selectedExecutionUnits: [] }).map(d => d.code)).toEqual(["missing_audience_split", "missing_scenario_taxonomy"]);
   });
-
-  it("scenario 인데 시나리오/상황별 unit 이나 successCriteria 가 없으면 missing_scenario_taxonomy(needs_clarification)", () => {
-    const intent = extractMissionIntent("상황별 대응 매뉴얼", "여러가지 상황 케이스 정리");
-    expect(intent.scenario).toBe(true);
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-synth", title: "일반 매뉴얼 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-      ],
-    });
-    const found = diag.find((d) => d.code === "missing_scenario_taxonomy");
-    expect(found).toBeTruthy();
-    expect(found?.severity).toBe("needs_clarification");
+  it("prose success criteria cannot satisfy coverage", () => {
+    expect(reviewPlanAgainstIntent({ intent: required, selectedExecutionUnits: [], successCriteria: ["audience cases"] })).toHaveLength(2);
   });
-
-  it("scenario 인데 successCriteria 에 상황별 근거가 있으면 diagnostic 없음", () => {
-    const intent = extractMissionIntent("상황별 대응 매뉴얼", "여러가지 상황 케이스 정리");
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-synth", title: "매뉴얼 작성", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-      ],
-      successCriteria: ["각 상황별 케이스를 다루어야 한다"],
-    });
-    expect(diag.find((d) => d.code === "missing_scenario_taxonomy")).toBeFalsy();
+  it("explicit unit fields satisfy coverage", () => {
+    expect(reviewPlanAgainstIntent({ intent: required, selectedExecutionUnits: [{ id: "unit", audiences: ["reader", "operator"], scenarios: ["normal"] }] })).toEqual([]);
   });
-});
-
-describe("reviewPlanAgainstIntent — legacy 보존", () => {
-  it("intent 없는 research-only mission 은 diagnostic 없음(회귀 없음)", () => {
-    const intent = extractMissionIntent("주간 기술 동향 리서치", "AI 논문 요약 정리");
-    const diag = reviewPlanAgainstIntent({
-      intent,
-      selectedExecutionUnits: [
-        unit({ id: "u-research", title: "논문 리서치", sourceRef: { type: "mission_plan_unit", id: "u-research" } }),
-        unit({ id: "u-synth", title: "요약 정리", sourceRef: { type: "mission_plan_unit", id: "u-synth" } }),
-      ],
-    });
-    expect(diag).toEqual([] as PlanQaDiagnostic[]);
-  });
-});
-
-describe("extractUnitRoles", () => {
-  it("[QA] prefix / readback / delivery tool 을 역할로 잡는다", () => {
-    expect(extractUnitRoles(unit({ title: "[QA] 게시물 검증" })).readbackQa).toBe(true);
-    expect(extractUnitRoles(unit({ title: "게시물 readback 확인" })).readbackQa).toBe(true);
-    expect(extractUnitRoles(unit({ title: "site에 HTML 게시" })).publish).toBe(false);
-    expect(extractUnitRoles(unit({ title: "site에 HTML 게시", toolNames: ["manual-onboarding-publish"] })).publish).toBe(true);
-    expect(extractUnitRoles(unit({ title: "배포 파이프라인 실행", toolNames: ["deploy-a1"] })).publish).toBe(true);
-  });
-});
-
-describe("buildCapabilityManifest (capability discovery)", () => {
-  it("빈 skills → 빈 manifest, sitePublishTarget.available=null(runtime 미구현 표식)", () => {
-    const manifest = buildCapabilityManifest([]);
-    expect(manifest.publishCapabilities).toEqual([]);
-    expect(manifest.notableSkills).toEqual([]);
-    expect(manifest.sitePublishTarget.available).toBe(null);
-  });
-  it("publisher 계열 skill(manual-onboarding-publisher)을 publishCapabilities 로 분리", () => {
-    const manifest = buildCapabilityManifest([
-      { key: "manual-onboarding-publisher", slug: "publisher", name: "Manual Onboarding Publisher", description: "site에 산출물을 게시/배포한다." },
-      { key: "research-helper", slug: "research", name: "Research Helper", description: "리서치 보조." },
-    ]);
-    expect(manifest.publishCapabilities.map((s) => s.key)).toContain("manual-onboarding-publisher");
-    expect(manifest.publishCapabilities.map((s) => s.key)).not.toContain("research-helper");
-    expect(manifest.notableSkills.map((s) => s.key)).toEqual(expect.arrayContaining(["manual-onboarding-publisher", "research-helper"]));
-  });
-  it("description 이 길면 purpose 가 truncation 된다(raw SKILL.md 전문 미포함)", () => {
-    const long = "x".repeat(500);
-    const manifest = buildCapabilityManifest([{ key: "s", slug: "s", name: "S", description: long }]);
-    expect(manifest.notableSkills[0]?.purpose.length).toBeLessThan(long.length);
-    expect(manifest.notableSkills[0]?.purpose.endsWith("…")).toBe(true);
-  });
-});
-
-describe("buildClarificationRequest (Hermes handoff contract)", () => {
-  const intent = extractMissionIntent("AI 와 웹 디자이너를 위한 가이드", "각 대상에게 전달하는 법 정리");
-  it("needs_clarification diagnostic 만 질문으로 변환(invalid 는 제외)", () => {
+  it("only clarification diagnostics create questions", () => {
     const diagnostics: PlanQaDiagnostic[] = [
-      { code: "missing_audience_split", severity: "needs_clarification", message: "audience gap" },
-      { code: "missing_publish_unit", severity: "invalid", message: "publish gap" },
+      { code: "missing_audience_split", severity: "needs_clarification", message: "gap" },
+      { code: "missing_publish_unit", severity: "invalid", message: "gap" },
     ];
-    const questions = buildClarificationRequest({ diagnostics, intent });
-    expect(questions).toHaveLength(1);
-    expect(questions[0]?.code).toBe("missing_audience_split");
-    expect(questions[0]?.intentContext).toEqual(expect.arrayContaining(["AI", "웹 디자이너"]));
-    expect(questions[0]?.question.length).toBeGreaterThan(0);
+    expect(buildClarificationRequest({ diagnostics, intent: required })).toMatchObject([{ code: "missing_audience_split", intentContext: ["reader", "operator"] }]);
   });
-  it("needs_clarification 가 없으면 빈 배열", () => {
-    const questions = buildClarificationRequest({
-      diagnostics: [{ code: "missing_publish_unit", severity: "invalid", message: "x" }],
-      intent,
-    });
-    expect(questions).toEqual([]);
+  it("no clarification produces no question", () => {
+    expect(buildClarificationRequest({ diagnostics: [], intent: required })).toEqual([]);
   });
 });
-
-describe("mission-plan-qa critique hook (injectable)", () => {
+describe("bounded capability discovery", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("returns empty capabilities without declarations", () => {
+    expect(buildCapabilityManifest([]).publishCapabilities).toEqual([]);
+  });
+  it("gets publication capability from tools rather than skill names", () => {
+    expect(buildCapabilityManifest([], { tools: publicationTools }).publishCapabilities.map(s => s.key)).toEqual(["alpha"]);
+  });
+  it("bounds skill purpose text", () => {
+    const entry = buildCapabilityManifest([{ key: "s", slug: "s", name: "S", description: "x".repeat(500) }]).notableSkills[0]!;
+    expect(entry.purpose.length).toBeLessThanOrEqual(160);
+  });
+  it("can scope discovery to explicit intent", () => {
+    expect(buildCapabilityManifest([], { tools: publicationTools, intent: extractMissionIntent({}) }).publishCapabilities).toEqual([]);
+  });
+  it("reads configured staging directory only", async () => {
+    vi.stubEnv("PAPERCOMPANY_PUBLICATION_SITE_ROOT", process.env.TMPDIR ?? "/tmp");
+    expect(await resolveSitePublishTarget()).toMatchObject({ available: true, canStage: true });
+  });
+  it("reports missing configured directory", async () => {
+    vi.stubEnv("PAPERCOMPANY_PUBLICATION_SITE_ROOT", "/definitely/missing/directory");
+    expect(await resolveSitePublishTarget()).toMatchObject({ available: false, canStage: false });
+  });
+});
+describe("critique hook", () => {
   afterEach(() => setMissionPlanQaCritiqueHook(null));
-  it("set/get 으로 hook 등록/해제", () => {
-    const fake = async () => [{ code: "missing_publish_unit", severity: "invalid", message: "critique" }] as PlanQaDiagnostic[];
-    expect(getMissionPlanQaCritiqueHook()).toBe(null);
-    setMissionPlanQaCritiqueHook(fake);
-    expect(getMissionPlanQaCritiqueHook()).toBe(fake);
-    setMissionPlanQaCritiqueHook(null);
-    expect(getMissionPlanQaCritiqueHook()).toBe(null);
-  });
-});
-
-describe("buildCapabilityManifest — intent-scoped (P3)", () => {
-  const skills = [
-    { key: "manual-onboarding-publisher", slug: "publisher", name: "Manual Onboarding Publisher", description: "site 게시" },
-    { key: "research-helper", slug: "research", name: "Research Helper", description: "리서치" },
-  ];
-  it("publish intent → publish capability 가 주입된다", () => {
-    const intent = extractMissionIntent("가이드를 site에 올리도록", "게시/배포");
-    expect(intent.publish).toBe(true);
-    const manifest = buildCapabilityManifest(skills, { intent });
-    expect(manifest.publishCapabilities.map((s) => s.key)).toContain("manual-onboarding-publisher");
-  });
-  it("non-publish intent → publish capability 가 과다 주입되지 않는다(스코핑)", () => {
-    const intent = extractMissionIntent("주간 기술 동향 리서치", "논문 요약");
-    expect(intent.publish).toBe(false);
-    const manifest = buildCapabilityManifest(skills, { intent });
-    expect(manifest.publishCapabilities).toEqual([]);
-    // notableSkills 는 intent 무관 general top-K 유지
-    expect(manifest.notableSkills.length).toBeGreaterThan(0);
-  });
-  it("sitePublishTarget 옵션이 manifest 에 그대로 전달된다", () => {
-    const manifest = buildCapabilityManifest([], {
-      sitePublishTarget: { available: true, note: "resolved", siteRoot: "/tmp/x", canStage: true, cloudflare: { hasApiToken: true, hasAccountId: false } },
-    });
-    expect(manifest.sitePublishTarget.available).toBe(true);
-    expect(manifest.sitePublishTarget.cloudflare?.hasApiToken).toBe(true);
-  });
-});
-
-describe("resolveSitePublishTarget — path/env(presence only, no secret)", () => {
-  const origToken = process.env.CLOUDFLARE_API_TOKEN;
-  const origAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const origRoot = process.env.MANUAL_ONBOARDING_SITE_ROOT;
-  afterEach(() => {
-    delete process.env.CLOUDFLARE_API_TOKEN;
-    delete process.env.CLOUDFLARE_ACCOUNT_ID;
-    delete process.env.MANUAL_ONBOARDING_SITE_ROOT;
-    if (origToken !== undefined) process.env.CLOUDFLARE_API_TOKEN = origToken;
-    if (origAccount !== undefined) process.env.CLOUDFLARE_ACCOUNT_ID = origAccount;
-    if (origRoot !== undefined) process.env.MANUAL_ONBOARDING_SITE_ROOT = origRoot;
-  });
-  it("cloudflare token 이 있으면 available=true, hasApiToken=true(secret 값 미노출)", async () => {
-    process.env.CLOUDFLARE_API_TOKEN = "fake-secret-value";
-    process.env.MANUAL_ONBOARDING_SITE_ROOT = "/definitely/does/not/exist/xyz";
-    const target = await resolveSitePublishTarget();
-    expect(target.available).toBe(true);
-    expect(target.cloudflare?.hasApiToken).toBe(true);
-    expect(JSON.stringify(target)).not.toContain("fake-secret-value"); // secret 값 노출 금지
-  });
-  it("path/env 모두 없으면 available=null", async () => {
-    process.env.MANUAL_ONBOARDING_SITE_ROOT = "/definitely/does/not/exist/xyz";
-    const target = await resolveSitePublishTarget();
-    expect(target.available).toBe(null);
-    expect(target.cloudflare?.hasApiToken).toBe(false);
+  it("registers and clears structured diagnostic hooks", () => {
+    const hook = async (): Promise<PlanQaDiagnostic[]> => [];
+    expect(getMissionPlanQaCritiqueHook()).toBeNull();
+    setMissionPlanQaCritiqueHook(hook);
+    expect(getMissionPlanQaCritiqueHook()).toBe(hook);
   });
 });

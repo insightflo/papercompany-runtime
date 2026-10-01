@@ -26,7 +26,7 @@ it.each([false, true])("seed → QA rejects → admitted rework producer replace
     .onConflictDoUpdate({ target: instanceSettings.singletonKey, set: { experimental: { enableHeartbeatFinalizationV1: enabled } } });
   const f = await seedWorld(db, root);
   const steps = [{ ...f.steps[0], conditionalDependencies: [{ stepId: "use", when: "qa_request_changes" as const, isBackEdge: true, maxIterations: 2 }] },
-    { ...f.steps[1], name: "[QA] Review" }];
+    { ...f.steps[1], type: "qa", name: "[QA] Review" }];
   await db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, f.definition.id));
   const target = await f.admit();
   await executeWorkflowRun(db, target.id);

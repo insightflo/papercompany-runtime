@@ -1,6 +1,5 @@
-// mission goal 에서 품질 수식어(초보자/심층/실행가능/report)를 역추적해 Mission Quality Contract 를 도출.
-// PLAN-QA description + qa-rubric 주입용. 판정은 LLM QA 가 rubric 로(본 helper 는 판정 안 함).
-// goal 모호 → hardStopRules 비움(과차단 방지). reviewPlanAgainstIntent deterministic invalid 추가 금지.
+// Render explicitly supplied quality signals as review guidance. Never parse mission prose
+// into hard stops. Without declarations, retain the general purpose-fitness review axes.
 
 export type MissionQualitySignals = {
   beginnerFacing: boolean;
@@ -23,29 +22,24 @@ export type MissionQualityContract = {
   clarifyNote: string | null;
 };
 
-const BEGINNER_RE = /초보자|비전문가|입문|beginner|for-beginners?|report-for-beginners/iu;
-const ACTIONABLE_RE = /판단 가능|결정|다음 행동|실행|가이드|manual|onboarding/iu;
-const DEEP_RESEARCH_RE = /심층|상세|대충 조사 하지 말|충분히 많은 자료|출처|근거|반론|회의|deep|in-depth/iu;
-const PUBLISH_HTML_RE = /publish|게시|html|온보딩|manual-onboarding/iu;
-
 export const EVIDENCE_CHAIN_FORMAT = "source content -> observation -> interpretation -> conclusion";
 
 export const EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE =
   `For written/report/manual/analysis deliverables, plan and write evidence as ${EVIDENCE_CHAIN_FORMAT}; treat storage paths, evidence repositories, and workProducts as traceability, not the proof itself.`;
 
-// mission goal/title/description → MissionQualityContract. 모호 goal → underspecified, hardStopRules 비움.
+// Mission text is display context only; optional qualitySignals supply explicit review guidance.
 export function extractMissionQualityContract(input: {
   missionGoal: string;
   missionTitle?: string | null;
   missionDescription?: string | null;
+  qualitySignals?: Partial<MissionQualitySignals>;
 }): MissionQualityContract {
   const goal = (input.missionGoal ?? "").trim();
-  const text = `${goal} ${input.missionTitle ?? ""} ${input.missionDescription ?? ""}`.trim();
   const signals: MissionQualitySignals = {
-    beginnerFacing: BEGINNER_RE.test(text),
-    actionableReport: ACTIONABLE_RE.test(text),
-    deepResearch: DEEP_RESEARCH_RE.test(text),
-    publishHtml: PUBLISH_HTML_RE.test(text),
+    beginnerFacing: input.qualitySignals?.beginnerFacing === true,
+    actionableReport: input.qualitySignals?.actionableReport === true,
+    deepResearch: input.qualitySignals?.deepResearch === true,
+    publishHtml: input.qualitySignals?.publishHtml === true,
   };
   const anySignal =
     signals.beginnerFacing || signals.actionableReport || signals.deepResearch || signals.publishHtml;

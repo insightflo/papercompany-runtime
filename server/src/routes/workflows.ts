@@ -46,6 +46,7 @@ import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../servic
 import { badRequest, conflict, notFound, unauthorized, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { workflowResumeRoutes } from "./workflow-resume.js";
+import { assertWorkflowQaConfigWrite, updateAuthorizedWorkflowDefinition } from './workflow-qa-config-auth.js';
 import { QA_REWORK_CAP_BOOST_KEY } from "../services/workflow/control-flow/types.js";
 
 function serializeValue(value: unknown): unknown {
@@ -59,17 +60,9 @@ function serializeValue(value: unknown): unknown {
   return value;
 }
 
-function serializeDefinition(definition: WorkflowDefinition) {
-  return serializeValue(definition) as Record<string, unknown>;
-}
-
-function serializeRun(run: WorkflowRun) {
-  return serializeValue(run) as Record<string, unknown>;
-}
-
-function serializeStepRun(stepRun: WorkflowStepRun) {
-  return serializeValue(stepRun) as Record<string, unknown>;
-}
+const serializeDefinition = (definition: WorkflowDefinition) => serializeValue(definition) as Record<string, unknown>;
+const serializeRun = (run: WorkflowRun) => serializeValue(run) as Record<string, unknown>;
+const serializeStepRun = (stepRun: WorkflowStepRun) => serializeValue(stepRun) as Record<string, unknown>;
 
 type AgentNameById = ReadonlyMap<string, string>;
 
@@ -392,6 +385,7 @@ export function workflowRoutes(db: Db) {
   router.post("/companies/:companyId/workflows", validate(createWorkflowDefinitionSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    assertWorkflowQaConfigWrite(req);
     const definition = await workflowDomainCall(() => workflowService.createDefinition(db, {
       ...req.body,
       companyId,
@@ -426,7 +420,8 @@ export function workflowRoutes(db: Db) {
     if (!existing || !canAccessRecord(req, existing.companyId)) {
       throw notFound("Workflow definition not found");
     }
-    const definition = await workflowDomainCall(() => workflowService.updateDefinition(db, workflowId, req.body));
+    assertWorkflowQaConfigWrite(req, existing.steps);
+    const definition = await workflowDomainCall(() => updateAuthorizedWorkflowDefinition(db, workflowId, req));
     if (!definition) throw notFound("Workflow definition not found");
     const actor = actorForActivity(req);
     await logActivity(db, {

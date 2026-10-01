@@ -10,6 +10,9 @@ import { workProductService } from "../../services/work-products.js";
 import { executeCoreWorkflowTool } from "../../services/workflow/core-tool-executor.js";
 import { resolveWorkflowToolStepArgs } from "../../services/workflow/tool-step-args.js";
 import { admittedProducer } from "./admitted-producer.js";
+import { eq } from 'drizzle-orm';
+import { legacyHtmlManualContract } from './legacy-html-manual.js';
+import { freezeArtifactAttempt } from '../../services/workflow/artifact-contract-runtime.js';
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("qa-receipt-v31-"); db = createDb(temp.connectionString);
   root = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-v31-"))); }, 60000);
@@ -52,12 +55,15 @@ const h=b=>createHash('sha256').update(b).digest('hex'), asset=Buffer.from(v.ass
 const q={schemaVersion:'manual-onboarding.qa.v1',command:'qa',mode:'content',section:'tech-blog',ok:true,checkedAt:new Date().toISOString(),checks:[{id:'fixture',ok:true,detail:null}],artifactPath:a.out,contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[{fileName:'hero.png',sha256:h(asset),byteSize:asset.length}]};
 writeFileSync(4,JSON.stringify(q)); console.log('not JSON; stdout is diagnostic only');`);
   }
-  await db.insert(toolDefinitions).values({ id: toolId, companyId, name: "local-qa", description: "QA", adapterType: "builtin",
-    adapterConfig: { command: `${process.execPath} ${script} qa` } });
+  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: path.dirname(script),
+    artifactContract: legacyHtmlManualContract(path.basename(script)) };
+  await db.insert(toolDefinitions).values({ id: toolId, companyId, name: "local-qa", description: "QA", adapterType: "builtin", adapterConfig });
+  await db.update(workflowStepRuns).set({ metadata: { artifactExecution: freezeArtifactAttempt({ adapterConfig,
+    step: steps[1], executionGeneration: 2, requestId }) } }).where(eq(workflowStepRuns.id, qaId));
   await resolveWorkflowToolStepArgs({ db, run: { id: runId, companyId }, consumerStepRunId: qaId,
     step: { ...steps[1], toolArgs: { content: "{$steps.write.workProductPath}" } }, workflowSteps: steps });
   const invoke = () => executeCoreWorkflowTool({ db, companyId, toolName: "local-qa", workflowRunId: runId, stepRunId: qaId, stepId: "qa",
     requestId, parameters: { content, assetsDir, section: "tech-blog" } });
-  return { companyId, runId, qaId, missionId, content, assetsDir, requestId, invoke };
+  return { companyId, runId, qaId, missionId, content, assetsDir, requestId, invoke, toolId, adapterConfig };
 }
 

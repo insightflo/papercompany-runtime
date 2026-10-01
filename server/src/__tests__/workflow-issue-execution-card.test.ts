@@ -61,8 +61,17 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
   });
 
   afterAll(async () => {
+    await db?.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   });
+
+  async function seedProducer(companyId: string, agentId: string, name: string, issuePrefix: string) {
+    await db.insert(companies).values({ id: companyId, name, issuePrefix, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Producer", role: "operator", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+  }
 
   it("creates a structured execution card and passes its hash to the wakeup context", async () => {
     const companyId = randomUUID();
@@ -72,23 +81,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     const runId = randomUUID();
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Execution Card Co",
-      issuePrefix: "ECC",
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Producer",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await seedProducer(companyId, agentId, "Execution Card Co", "ECC");
     await db.insert(missions).values({
       id: missionId,
       companyId,
@@ -147,23 +140,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     const runId = randomUUID();
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Step Contract Co",
-      issuePrefix: "SCC",
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Producer",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await seedProducer(companyId, agentId, "Step Contract Co", "SCC");
     await db.insert(workflowDefinitions).values({
       id: workflowId,
       companyId,
@@ -214,23 +191,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     const runId = randomUUID();
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Execution Card Resync Co",
-      issuePrefix: "ECR",
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Producer",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await seedProducer(companyId, agentId, "Execution Card Resync Co", "ECR");
     await db.insert(workflowDefinitions).values({
       id: workflowId,
       companyId,
@@ -288,23 +249,7 @@ describeEmbeddedPostgres("workflow issue execution cards", () => {
     const runId = randomUUID();
 
     heartbeatWakeup.mockResolvedValue({ id: "queued-run" });
-    await db.insert(companies).values({
-      id: companyId,
-      name: "No Contract Co",
-      issuePrefix: "NCC",
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Producer",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
+    await seedProducer(companyId, agentId, "No Contract Co", "NCC");
     await db.insert(workflowDefinitions).values({
       id: workflowId,
       companyId,

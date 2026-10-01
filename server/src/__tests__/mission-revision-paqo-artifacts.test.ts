@@ -9,6 +9,8 @@ import { eq } from "drizzle-orm";
 import { createDb, workflowDefinitions, workflowStepRuns, workflowRuns, toolDefinitions } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedWorld } from "./helpers/workflow-seed-world.js";
+import { legacyHtmlManualContract, legacyHtmlManualPublicationContract } from "./helpers/legacy-html-manual.js";
+import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { buildPaqoWorkflowSteps } from "../services/mission-owner-plan-decisions.js";
 import { ensureWorkflowStepRunRecords } from "../services/workflow/workflow-step-materialization.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
@@ -52,11 +54,14 @@ it.each(["unit", "source", "reject"])("actual PAQO %s references survive seed â†
   const check = rows.find(s => s.stepId === steps[1].id)!, consumer = rows.find(s => s.stepId === steps[2].id)!;
   const requestId = randomUUID();
   const producerToken = await captureStructuralGateProducerToken({ db, workflowRunId: target.id, gate: steps[1], steps });
+  const script = path.join(root, `${randomUUID()}.mjs`);
+  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
+    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
   await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: requestId,
-    metadata: { structuralGateProducerToken: producerToken } }).where(eq(workflowStepRuns.id, check.id));
+    metadata: { structuralGateProducerToken: producerToken, artifactExecution: freezeArtifactAttempt({ adapterConfig,
+      step: steps[1], executionGeneration: check.executionGeneration, requestId }) } }).where(eq(workflowStepRuns.id, check.id));
   await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
   const parameters = await resolveWorkflowToolStepArgs({ db, run: target, step: steps[1], workflowSteps: steps, consumerStepRunId: check.id });
-  const script = path.join(root, `${randomUUID()}.mjs`);
   // Local machine-contract producer test double; executes through the real tool runner/fd4 transport.
   await writeFile(script, `import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';
 const a=Object.fromEntries(process.argv.slice(3).reduce((r,v,i,all)=>i%2?r:[...r,[v.slice(2),all[i+1]]],[]));
@@ -65,7 +70,7 @@ writeFileSync(4,JSON.stringify({schemaVersion:'manual-onboarding.qa.v1',command:
 checks:[{id:'fixture',ok:true}],checkedAt:new Date().toISOString(),artifactPath:a.out,
 contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
   await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin",
-    adapterConfig: { command: `${process.execPath} ${script} qa` } });
+    adapterConfig });
   const result = await executeCoreWorkflowTool({ db, companyId: f.companyId, toolName: "local-qa", workflowRunId: target.id,
     stepRunId: check.id, stepId: check.stepId, requestId, parameters });
   if (references === "reject") {
@@ -80,14 +85,16 @@ contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
   expect(result.body.data).toMatchObject({ verdict: "pass" });
   await completeWorkflowToolStepFromResult(db, { companyId: f.companyId, workflowRunId: target.id, stepRunId: check.id,
     stepId: check.stepId, requestId, toolName: "local-qa", success: true, toolArtifactReceipt: result.toolArtifactReceipt, data: result.body.data });
-  await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: "consume" }).where(eq(workflowStepRuns.id, consumer.id));
+  await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: "consume",
+    metadata: { artifactExecution: freezeArtifactAttempt({ adapterConfig: { artifactContract: legacyHtmlManualPublicationContract("publish.mjs") },
+      step: steps[2], executionGeneration: consumer.executionGeneration, requestId: "consume" }) } }).where(eq(workflowStepRuns.id, consumer.id));
   const consumerArgs = await resolveWorkflowToolStepArgs({ db, run: target, step: steps[2], workflowSteps: steps, consumerStepRunId: consumer.id });
   const prepared = await prepareQaConsumer({ db, companyId: f.companyId, workflowRunId: target.id,
     stepRunId: consumer.id, stepId: consumer.stepId, requestId: "consume", parameters: consumerArgs });
   expect(JSON.parse(prepared.inputBytes!.toString()).schemaVersion).toBe("manual-onboarding.input.v1");
 });
 it.each([{ workProductSelectors: { write: { type: "bogus", title: "x" } } },
-  { toolArtifactContract: { schemaVersion: "unknown", role: "qa", inputStepId: "write" } },
+  { toolArtifactContract: { schemaVersion: "", role: "qa", inputStepId: "write" } },
   { workProductSelectors: { missing: selector } }])("PAQO rejects invalid artifact contracts instead of dropping them: %j", async patch => {
   const f = await seedWorld(db, root);
   expect(() => buildPaqoWorkflowSteps(draft([writer, { ...qa, ...patch }]) as never, f.revision)).toThrow();

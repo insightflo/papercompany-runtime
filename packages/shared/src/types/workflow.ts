@@ -47,6 +47,9 @@ export interface WorkflowStepDefinition {
   toolArgs?: unknown;
   workProductSelectors?: import("../validators/workflow-artifact.js").WorkProductSelectors;
   toolArtifactContract?: import("../validators/workflow-artifact.js").ToolArtifactContract;
+  qaConfig?: import("../validators/qa-config.js").QaConfig;
+  deliveryVerification?: 'required';
+  capAcceptance?: 'blocked';
   tools?: string[];
   toolNames?: string[];
   allowedSearchScopes?: string[];

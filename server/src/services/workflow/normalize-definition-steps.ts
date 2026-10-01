@@ -1,0 +1,49 @@
+import type { WorkflowStep } from "./dag-engine.js";
+import { normalizeWorkflowStepsForExecution } from "./execution-steps.js";
+import { validateWorkflowQaConfigs } from "./artifact-config-validation.js";
+import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
+import type { PlanningArtifactTool } from "../missions/mission-plan-publication-contract.js";
+
+type WorkflowStepLike = WorkflowStep & {
+  title?: unknown; dependsOn?: unknown; tools?: unknown; toolName?: unknown; agentName?: unknown;
+};
+
+/** Save-time normalization only: never rebuild an already captured run definition. */
+export function normalizeWorkflowSteps(
+  steps: unknown[],
+  options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown; tools?: readonly PlanningArtifactTool[] } = {},
+): WorkflowStep[] {
+  validateWorkflowQaConfigs(steps);
+  const normalizedSteps = steps.map((rawStep) => {
+    const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
+    const { conditionalDependencies: _rawConditionalDependencies, ...stepWithoutRawConditionalDependencies } = step;
+    const normalized = normalizeWorkflowStepsForExecution([step])[0]!;
+    const toolNames = normalized.toolNames;
+    return {
+      ...stepWithoutRawConditionalDependencies,
+      id: normalized.id,
+      name: normalized.name,
+      agentId: normalized.agentId,
+      dependencies: normalized.dependencies,
+      graphWorkProductRequired: normalized.graphWorkProductRequired,
+      ...(normalized.conditionalDependencies ? { conditionalDependencies: normalized.conditionalDependencies } : {}),
+      ...(toolNames ? { toolNames } : {}),
+    };
+  });
+  const dynamicOwnerPlan = options.executionMode === "dynamic_owner_plan"
+    || options.dynamicPlanBootstrapOnly === true
+    || options.dynamicPlanBootstrapOnly === "true";
+  const stepsWithQaLoops = normalizedSteps
+    .filter((step) => isQaLikeStep(step) && step.dependencies.length > 0)
+    .reduce((nextSteps, qaStep) => synthesizeQaReworkBackEdge(nextSteps, qaStep.id, undefined, { tools: options.tools }), normalizedSteps);
+  if (!dynamicOwnerPlan) return stepsWithQaLoops;
+  return stepsWithQaLoops.map((step) => {
+    if (step.triggerOn === "escalation" || step.dependencies.length > 0) return step;
+    return {
+      ...step,
+      dynamicChildren: step.dynamicChildren ?? true,
+      ownerPlanBootstrapOnly: step.ownerPlanBootstrapOnly ?? true,
+      executionMode: step.executionMode ?? "dynamic_owner_plan",
+    };
+  });
+}

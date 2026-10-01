@@ -1,5 +1,6 @@
 import type { ConditionalEdge } from "../workflow/control-flow/types.js";
 import { isQaLikeStep } from "../workflow-step-role.js";
+import { hasPlanArtifactRole, consumesPublicationResult, type PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 
 export type DagStepLike = {
   readonly id: string;
@@ -12,6 +13,7 @@ export type DagStepLike = {
   readonly qaType?: string;
   readonly toolName?: string;
   readonly toolNames?: readonly string[];
+  readonly toolArgs?: unknown;
 };
 
 export type BackEdgeCapableStep = DagStepLike & {
@@ -22,6 +24,7 @@ export const QA_REWORK_DEFAULT_MAX_ITERATIONS = 2;
 
 export type QaReworkBackEdgeOptions = {
   allowCapAcceptance?: boolean;
+  tools?: readonly PlanningArtifactTool[];
 };
 
 export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: readonly DagStepLike[]): string | null {
@@ -55,7 +58,7 @@ export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: rea
   return resolve(qaStepId, new Set())?.id ?? null;
 }
 
-function resolveManualOnboardingReplayStepIds(qaStepId: string, steps: readonly DagStepLike[]): string[] {
+function resolvePublicationReplayStepIds(qaStepId: string, steps: readonly DagStepLike[], tools: readonly PlanningArtifactTool[]): string[] {
   const byId = new Map(steps.map((step) => [step.id, step]));
   const isAncestorOf = (candidateId: string, stepId: string, visited = new Set<string>()): boolean => {
     if (visited.has(stepId)) return false;
@@ -64,22 +67,16 @@ function resolveManualOnboardingReplayStepIds(qaStepId: string, steps: readonly 
     return dependencies.some((dependencyId) =>
       dependencyId === candidateId || isAncestorOf(candidateId, dependencyId, new Set(visited)));
   };
-  const toolNames = (step: DagStepLike) => [
-    ...(step.toolName ? [step.toolName] : []),
-    ...(step.toolNames ?? []),
-  ];
-  const publishers = steps.filter((step) =>
-    toolNames(step).includes("manual-onboarding-publish") && isAncestorOf(step.id, qaStepId));
-  const verifiers = steps.filter((step) =>
-    toolNames(step).includes("manual-onboarding-verify") && isAncestorOf(step.id, qaStepId));
-  const connectedPublishers = publishers.filter((publisher) =>
-    verifiers.some((verifier) => isAncestorOf(publisher.id, verifier.id)));
-  const connectedVerifiers = verifiers.filter((verifier) =>
-    connectedPublishers.some((publisher) => isAncestorOf(publisher.id, verifier.id)));
+  const publishers = steps.filter(step => hasPlanArtifactRole(step, tools, "publication") && isAncestorOf(step.id, qaStepId));
+  const verifiers = steps.filter(step => hasPlanArtifactRole(step, tools, "publication-verify") && isAncestorOf(step.id, qaStepId));
+  const connectedPublishers = publishers.filter(publisher => verifiers.some(verifier =>
+    isAncestorOf(publisher.id, verifier.id) && consumesPublicationResult(verifier, publisher, tools)));
+  const connectedVerifiers = verifiers.filter(verifier => connectedPublishers.some(publisher =>
+    isAncestorOf(publisher.id, verifier.id) && consumesPublicationResult(verifier, publisher, tools)));
   const replayIds = new Set<string>();
   for (const publisher of connectedPublishers) {
     for (const verifier of connectedVerifiers) {
-      if (!isAncestorOf(publisher.id, verifier.id)) continue;
+      if (!isAncestorOf(publisher.id, verifier.id) || !consumesPublicationResult(verifier, publisher, tools)) continue;
       for (const step of steps) {
         if (step.id === publisher.id || step.id === verifier.id
           || (isAncestorOf(publisher.id, step.id) && isAncestorOf(step.id, verifier.id))) {
@@ -99,7 +96,7 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
 ): T[] {
   if (!qaStepId || steps.length === 0) return steps;
   const effectiveMaxIterations = maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
-  const deliveryReplayIds = resolveManualOnboardingReplayStepIds(qaStepId, steps);
+  const deliveryReplayIds = resolvePublicationReplayStepIds(qaStepId, steps, options.tools ?? []);
   const producerId = resolveProducerStepIdFromDag(qaStepId, steps);
   const targetIds = deliveryReplayIds.length > 0 ? deliveryReplayIds : producerId ? [producerId] : [];
   if (targetIds.length === 0) return steps;

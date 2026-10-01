@@ -13,10 +13,10 @@ import {
 } from "../services/missions/mission-quality-contract.js";
 
 describe("mission-quality-contract", () => {
-  it("extracts beginner / deep-research / actionable signals from a Feynman-style brief", () => {
+  it("uses explicitly selected quality signals rather than brief keywords", () => {
     const contract = extractMissionQualityContract({
-      missionGoal:
-        "storm-research skill 로 심층 상세 분석. 대충 조사 하지 말고 충분히 많은 자료 조사. report-for-beginners skill 로 html 작성. 초보자가 판단 가능 해야 한다.",
+      missionGoal: "Create a useful report",
+      qualitySignals: { beginnerFacing: true, deepResearch: true, actionableReport: true },
     });
     expect(contract.signals.beginnerFacing).toBe(true);
     expect(contract.signals.deepResearch).toBe(true);

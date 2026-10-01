@@ -8,6 +8,7 @@ interface QaCapStep extends EdgeBearingStep {
   readonly description?: string;
   readonly type?: string;
   readonly qaType?: string;
+  readonly capAcceptance?: 'blocked';
   readonly agentId?: string;
   readonly toolNames?: string[];
 }
@@ -51,7 +52,7 @@ export function buildQaCapAcceptanceRuntimeContract(input: {
   readonly steps: readonly QaCapStep[];
   readonly stepRuns: readonly StepRunSnapshot[];
 }): QaCapAcceptanceRuntimeContract | null {
-  if (isStructuralGateStep(input.qaStep) || isDeliveryReadbackStep(input.qaStep)) return null;
+  if (input.qaStep.capAcceptance === 'blocked' || isStructuralGateStep(input.qaStep) || isDeliveryReadbackStep(input.qaStep)) return null;
 
   const runByStepId = new Map(input.stepRuns.map((run) => [run.stepId, run]));
   const candidates = input.steps.flatMap((producer) => {

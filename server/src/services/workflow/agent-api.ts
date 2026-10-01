@@ -14,6 +14,7 @@ import { workflowService } from "./engine.js";
 import { canonicalLocalArtifactTitle, reconcileExistingLocalArtifactTitle } from "./local-artifact-title.js";
 export { submitWorkflowVerdict } from "./agent-verdict-api.js";
 import { assertQualityStepCompletionAllowed } from "../quality/evaluation-candidates.js";
+import { publicationPreviewProvider } from './publication-preview-contract.js';
 
 type IssueRow = typeof issues.$inferSelect;
 
@@ -73,10 +74,6 @@ function parsePreviewUrl(value: string) {
     throw unprocessable("Workflow preview_url must use an HTTP(S) URL");
   }
   return url;
-}
-
-function previewUrlProvider(url: URL) {
-  return url.hostname === "manual-onboarding.pages.dev" ? "manual_onboarding" : "public_url";
 }
 
 function previewUrlTitle(input: WorkflowPreviewUrlRegister, url: URL) {
@@ -180,7 +177,7 @@ export async function registerWorkflowArtifact(input: {
       executionWorkspaceId: null,
       runtimeServiceId: null,
       type: "preview_url",
-      provider: previewUrlProvider(url),
+      provider: await publicationPreviewProvider(input.db, input.issue),
       externalId: input.data.externalId ?? url.toString(),
       title: previewUrlTitle(input.data, url),
       url: url.toString(),

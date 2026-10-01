@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-10-02 — declarative role migration must preserve execution equivalence
+- Date: 2026-10-02
+- Task: QA genericization integration with revision repeat guards and seeded reuse.
+- What failed: Updating a failed-source fixture to `action` hid the legacy `agent` → declared `action` hash mismatch; original failing work was admitted to PLAN-QA instead of rejected.
+- Root cause: Comparison treated the role spelling change as a new execution configuration.
+- Category: integration / regression fixture fidelity.
+- Fix: Canonicalize only untyped/agent/action execution for both comparison purposes; retain legacy-source fixtures and assert real repeat rejection and seeded product identity. QA/control/tool roles remain distinct.
+- Prevention rule: Preserve historical fixture definitions when migrating declarations; add cross-version comparisons instead of modernizing both sides.
+- Reuse trigger: Declarative role/config migrations affecting revision hashes or reuse admission.
+- Evidence: `/tmp/qag/phase-b3-investigation/legacy-red.log`, `delivery-red-integration.log`, `seed-diagnostic.log`.
+
+### 2026-10-02 — exported baselines must resolve their own workspace packages
+- Date: 2026-10-02
+- Task: Compare PAQO integration timing with origin/main without touching other worktrees.
+- What failed: A baseline export with directory-level node_modules symlinks resolved current shared validators, producing a false baseline assertion failure.
+- Root cause: Workspace dependency symlinks resolved through the original dependency directory.
+- Category: verification environment.
+- Fix: Link external dependencies individually and redirect workspace links to the exported commit; exact main then passed 6/6 tests.
+- Prevention rule: Verify workspace-package resolution before treating an exported baseline run as evidence. Setup failures and tool-launch errors are not product RED results.
+- Reuse trigger: git archive baseline comparisons with pnpm workspaces.
+- Evidence: `/tmp/qag/phase-b3-investigation/main.log`, `main-isolated.log`.
+
 ### 2026-10-01 — reused consumer rows need native input invalidation proof
 - Date: 2026-10-01
 - Task: Final seeded revision rework binding blocker.
@@ -65,6 +87,60 @@
 - Prevention rule: Optional planning features must preserve the ordinary manifest shape; test both present and absent paths.
 - Reuse trigger: Adding optional context to a runtime manifest.
 - Evidence: `/tmp/task1-focused.log` (80 pass/1 exact-shape failure); correction verified in Task1 focused rerun.
+### 2026-10-01 — optional frozen markers can narrow mapped array inference
+- Date: 2026-10-01
+- Task: Phase B structural publication-verifier preservation.
+- What failed: Focused tests passed, but server typecheck rejected assigning ordinary workflow steps to a mapped array whose `deliveryRole` property was inferred as required-with-undefined.
+- Root cause: The policy projection widened runtime behavior correctly but narrowed TypeScript's inferred collection shape beyond `WorkflowStep[]`.
+- Category: type contract
+- Fix: Declare the builder accumulator as `WorkflowStep[]`; retain the optional marker in the canonical runtime step type.
+- Prevention rule: When a projection adds optional derived fields and later receives other step sources, type the accumulator to the canonical step interface and run source typecheck.
+- Reuse trigger: Frozen snapshot normalization or synthetic workflow step insertion.
+- Evidence: `/tmp/qag/b-review-workflow/typecheck.log`; corrected verification in `typecheck-final.log`.
+
+### 2026-10-01 — definition integration fixtures need grant authors and executor readiness
+- Date: 2026-10-01
+- Task: Phase B general workflow publication replay integration.
+- What failed: Initial local DB tests stopped at missing `agent_tool_grants.granted_by`, then missing configured workflow tool executor, before reaching replay assertions.
+- Root cause: Fixture omitted a required grant column and definition-save readiness prerequisite.
+- Category: verification-fixture
+- Fix: Supply `grantedBy: "board"` and install a definition-only executor that throws if invoked; clear it at teardown. Actual RED then showed publisher-only replay instead of publisher + verifier.
+- Prevention rule: Definition-save tests using tools need complete persisted grants and an explicit non-dispatching executor; prerequisite errors are not product RED.
+- Reuse trigger: Local DB workflow create/update tests with declared tools.
+- Evidence: `/tmp/qag/b-templates/red.log`, `red2.log`, `red3.log`, `focused.log` (14 files / 275 tests).
+
+### 2026-10-01 — isolate full-suite resources and fixture clocks
+- Date: 2026-10-01
+- Task: Runtime QA Phase A full gates.
+- What failed: Default full suite terminated; serial run later failed PG setup, continuation claiming and a CU request, although failed files passed isolated.
+- Root cause: Continuation fixtures mixed DB microsecond time and JavaScript millisecond time; competing test runners and PG resource pressure were observed, but original PG timeout/CU 401 causes remain unproven.
+- Category: test determinism / resource contention
+- Fix: Fixed fixture clock, restored CU environment with failure diagnostics, closed DB client before cleanup; waited for other Vitest processes, used fresh temp directories and one worker. Fresh full suite passed 991 files / 7,468 tests, with two expected skips.
+- Prevention rule: Do not count isolated reruns as full-suite success. Avoid competing full suites, explicitly set due times, restore fixture environment and inspect unexpected DB skips. Never kill another worktree's processes.
+- Reuse trigger: Embedded Postgres full gates fail only under sustained suite execution.
+- Evidence: `/tmp/qag/full-test-serial-summary.md`, `/tmp/qag/test-determinism-focused.log`, `/tmp/qag/final-gates-summary.md`.
+
+### 2026-10-01 — authorize policy replacement against the locked current row
+- Date: 2026-10-01
+- Task: Phase A board-only QA configuration and frozen attempt start.
+- What failed: A controlled local-DB HTTP regression let an agent overwrite a board policy added after the route's initial read (200 instead of 403). An initial failure cleanup also erased the current attempt's frozen policy on dispatch rejection.
+- Root cause: Authorization compared a stale route snapshot; cleanup did not distinguish a prior attempt from the current request.
+- Category: authorization / concurrent writes / durable evidence
+- Fix: Compare agent step replacements under a workflow-definition row lock and write in the same transaction; clear artifact snapshots only when dispatch request identity changes.
+- Prevention rule: Read-compare-write authorization needs a lock or fenced write. Attempt cleanup must preserve current-request evidence while removing prior-request evidence.
+- Reuse trigger: Board-owned policy within agent-editable documents, or attempt-metadata cleanup shared by start and dispatch failure.
+- Evidence: `/tmp/qag-auth-race-red.log` (200 versus 403), `/tmp/qag-auth-race-green.log` (35 tests), `/tmp/qag-auth-freeze-edge-red.log` (2 failures), `/tmp/qag-auth-freeze-final.log` (101 tests before final race addition).
+
+### 2026-10-01 — capture artifact dispatch before deployment byte reads
+- Date: 2026-10-01
+- Task: Phase A generic artifact pipeline plumbing.
+- What failed: Existing DB regression tests detected generation/retry/iteration changes during deployment hash reads, yet publication still launched.
+- Root cause: The consumer captured its dispatch fence only after deployment hashing, adopting the newer attempt rather than the original request snapshot.
+- Category: execution-control / awaited-read ordering
+- Fix: Capture the original dispatch fence before any awaited deployment or input byte read; pass that same guard into consumer validation and launch. All 13 p2 regression tests passed afterward.
+- Prevention rule: Any new awaited preparation before a launch must occur after the original attempt guard is captured. Never rebase the guard after awaited I/O.
+- Reuse trigger: Adding deployment/provenance/config reads around guarded tool execution.
+- Evidence: `/tmp/qag-pipeline-regression.log` (three fencing failures), `/tmp/qag-pipeline-cas.log` (16 passing byte/DB regression tests).
 
 ### 2026-09-22 — conditional QA closeout: sandbox failures are not bug RED and identical-conditions rerun decides blame
 - Date: 2026-09-22
@@ -186,4 +262,15 @@
 - Prevention rule: Inspect the actual database error detail and failing SQL before assigning product blame. Test identifiers constrained unique must not depend on tiny random suffixes. A proposed fixture correction is separate scope unless authorized.
 - Reuse trigger: Unexpected unique-key failure during a large isolated DB test batch.
 - Evidence: `/tmp/oversight-final4-verification/shard-2.log`, `blobs/shard-2.json`, `/tmp/oversight-final4-planqa-failure-diagnosis.md`. Rerun was pending when this entry was written.
+
+### 2026-10-01 — validation event fixture must satisfy the durable schema before RED counts
+- Date: 2026-10-01
+- Task: Planning review qaType-only validation gate regression.
+- What failed: Four initial tests stopped inserting workflow transition events because required `layer` was omitted.
+- Root cause: The fixture mirrored reader-selected columns rather than the full insert contract.
+- Category: verification-fixture / schema
+- Fix: Read the table schema, add `layer: workflow`, and rerun unchanged production code; 13 meaningful regression failures confirmed before implementation.
+- Prevention rule: Check required database insert fields before treating a test failure as product RED; preserve setup-failure and confirmed-RED logs separately.
+- Reuse trigger: New durable-event reader integration fixtures.
+- Evidence: `/tmp/qag/b-review-planning/red.log`, `/tmp/qag/b-review-planning/red-confirmed.log`, `/tmp/qag/b-review-planning/final.log`.
 

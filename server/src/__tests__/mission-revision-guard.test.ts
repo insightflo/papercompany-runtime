@@ -17,8 +17,9 @@ let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: Ret
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-guard-"); db = createDb(temp.connectionString);
   root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-guard-"))); }, 60000);
 afterAll(async () => { await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
-async function failedWorld() {
-  const f = await seedWorld(db, root);
+async function failedWorld(type = "agent") {
+  const f = await seedWorld(db, root, mission => [{ id: "write", name: "Write", type,
+    agentId: mission.ownerAgentId!, dependencies: [], graphWorkProductRequired: true }]);
   await db.update(workflowStepRuns).set({ status: "failed" }).where(eq(workflowStepRuns.id, f.sourceStep.id));
   await db.update(heartbeatRuns).set({ status: "failed", errorCode: "adapter_timeout" }).where(eq(heartbeatRuns.workflowStepRunId, f.sourceStep.id));
   const { seedFromRun: _, ...input } = f.input;

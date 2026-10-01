@@ -144,7 +144,7 @@ describeEP("hybrid QA — stale structural gate requeue (same-iteration producer
           dependencies: [producerStepId], graphWorkProductRequired: false,
         },
         {
-          id: qaStepId, name: "[QA] Semantic review", agentId,
+          id: qaStepId, type: "qa", name: "[QA] Semantic review", agentId,
           dependencies: [gateStepId], graphWorkProductRequired: false,
         },
       ],

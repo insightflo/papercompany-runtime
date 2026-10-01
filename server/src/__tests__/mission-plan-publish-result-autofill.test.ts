@@ -1,202 +1,57 @@
 import { describe, expect, it } from "vitest";
-import {
-  autofillManualOnboardingPublishResult,
-  type PublishResultAutofillResult,
-} from "../services/missions/mission-plan-publish-result-autofill.js";
-import { reviewManualOnboardingVerificationTopology } from "../services/missions/mission-plan-manual-onboarding-contract.js";
+import { autofillPublicationResult as autofill } from "../services/missions/mission-plan-publish-result-autofill.js";
+import { reviewPublicationVerificationTopology as review } from "../services/missions/mission-plan-publication-contract.js";
+import { publicationTools, publicationUnits, publicationContract } from "./helpers/mission-publication-fixture.js";
 
-function publishUnit(id = "publish"): Record<string, unknown> {
-  return {
-    id,
-    kind: "mission_plan_unit",
-    title: "Publish",
-    assigneeAgentId: "publisher",
-    selectionState: "selected",
-    toolNames: ["manual-onboarding-publish"],
-    toolArgs: {},
-    dependsOn: [],
-    graphWorkProductRequired: true,
-  };
-}
-
-function verifyUnit(id = "verify", dependsOn = ["publish"], toolArgs: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id,
-    kind: "mission_plan_unit",
-    title: "Verify",
-    assigneeAgentId: "publisher",
-    selectionState: "selected",
-    toolNames: ["manual-onboarding-verify"],
-    toolArgs,
-    dependsOn,
-    graphWorkProductRequired: false,
-  };
-}
-
-describe("autofillManualOnboardingPublishResult — canonical autofill", () => {
-  it("adds canonical publishResultPath when a single publisher/verifier pair exists and verifier depends on publisher", () => {
-    const result = autofillManualOnboardingPublishResult([
-      publishUnit(),
-      verifyUnit("verify", ["publish"], { timeoutMs: 5000 }),
-    ]);
-    expect(result.units[1]?.toolArgs).toEqual({
-      timeoutMs: 5000,
-      publishResultPath: "{$steps.publish.workProductPath}",
-    });
-    expect(result.applied).toEqual({
-      publisherUnitId: "publish",
-      verifierUnitId: "verify",
-      field: "publishResultPath",
-    });
+describe("bounded publication autofill", () => {
+  it("adds the declared canonical argument and preserves other arguments", () => {
+    const units = publicationUnits();
+    units[1]!.toolArgs = { timeout: 5 };
+    const result = autofill(units, publicationTools);
+    expect(result.units[1]?.toolArgs).toEqual({ timeout: 5, receiptInput: "{$steps.p.workProductPath}" });
+    expect(result.applied).toEqual({ publisherUnitId: "p", verifierUnitId: "v", field: "receiptInput" });
+    expect(review(result.units, publicationTools)).toEqual([]);
   });
-
-  it("preserves an existing canonical camelCase value and reports no-op", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", ["publish"], { publishResultPath: "{$steps.publish.workProductPath}" }),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.units[1]?.toolArgs).toEqual({ publishResultPath: "{$steps.publish.workProductPath}" });
+  it.each(["{$steps.p.workProductPath}", "conflicting", "", null])("preserves existing declared argument %j", value => {
+    const units = publicationUnits();
+    units[1]!.toolArgs = { receiptInput: value };
+    const result = autofill(units, publicationTools);
     expect(result.applied).toBeNull();
+    expect(result.units[1]?.toolArgs).toEqual({ receiptInput: value });
   });
-
-  it("does not overwrite a conflicting camelCase value and reports no-op", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", ["publish"], { publishResultPath: "https://example.com/other" }),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.units[1]?.toolArgs).toEqual({ publishResultPath: "https://example.com/other" });
-    expect(result.applied).toBeNull();
+  it("uses arbitrary dashed receipt parameter names", () => {
+    const tools = [publicationTools[0]!, { name: "beta", adapterConfig: { artifactContract: publicationContract("publication-verify", "result-receipt") } }];
+    expect(autofill(publicationUnits(), tools).units[1]?.toolArgs).toEqual({ "result-receipt": "{$steps.p.workProductPath}" });
   });
-
-  it("does not autofill when the dashed form is already present", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", ["publish"], { "publish-result-path": "{$steps.publish.workProductPath}" }),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.units[1]?.toolArgs).toEqual({ "publish-result-path": "{$steps.publish.workProductPath}" });
-    expect(result.applied).toBeNull();
+  it("requires exactly one publisher and verifier", () => {
+    const units = publicationUnits();
+    expect(autofill([...units, { ...units[0], id: "p2" }], publicationTools).applied).toBeNull();
+    expect(autofill([...units, { ...units[1], id: "v2" }], publicationTools).applied).toBeNull();
   });
-});
-
-describe("autofillManualOnboardingPublishResult — topology guards", () => {
-  it("does not autofill when multiple publisher units exist", () => {
-    const units = [
-      publishUnit("publish-a"),
-      publishUnit("publish-b"),
-      verifyUnit("verify", ["publish-a"], {}),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toBeNull();
-    expect(result.units[1]?.toolArgs).toEqual({});
+  it("does not autofill unrelated pairs", () => {
+    const units = publicationUnits(); units[1]!.dependsOn = [];
+    expect(autofill(units, publicationTools).applied).toBeNull();
   });
-
-  it("does not autofill when multiple verifier units exist", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify-a", ["publish"], {}),
-      verifyUnit("verify-b", ["publish"], {}),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toBeNull();
+  it.each([undefined, null, "malformed", []])("does not invent an argument object for %j", toolArgs => {
+    const units: Record<string, unknown>[] = publicationUnits(); units[1]!.toolArgs = toolArgs;
+    expect(autofill(units, publicationTools).applied).toBeNull();
   });
-
-  it("does not autofill when the verifier does not depend on the publisher", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", [], {}),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toBeNull();
-    expect(result.units[1]?.toolArgs).toEqual({});
+  it("accepts transitive dependencies", () => {
+    const units = publicationUnits(); units[1]!.dependsOn = ["middle"];
+    expect(autofill([...units, { id: "middle", dependsOn: ["p"] }], publicationTools).applied).not.toBeNull();
   });
-
-  it("does not autofill when toolArgs is malformed", () => {
-    const units = [
-      publishUnit(),
-      { ...verifyUnit("verify", ["publish"], {}), toolArgs: "not-an-object" },
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toBeNull();
+  it("rejects ambiguous selected verifier contracts", () => {
+    const units = publicationUnits(); units[1]!.toolNames = ["beta", "gamma"];
+    expect(autofill(units, [...publicationTools, { ...publicationTools[1]!, name: "gamma" }]).applied).toBeNull();
   });
-
-  it("autofills when dependency is transitive through an intermediate unit", () => {
-    const units = [
-      publishUnit(),
-      { ...verifyUnit("middle", ["publish"], {}), toolNames: ["some-other-tool"] },
-      verifyUnit("verify", ["middle"], {}),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toEqual({
-      publisherUnitId: "publish",
-      verifierUnitId: "verify",
-      field: "publishResultPath",
-    });
-    expect(result.units[2]?.toolArgs).toEqual({
-      publishResultPath: "{$steps.publish.workProductPath}",
-    });
-    // Intermediate unit must not be mutated.
-    expect(result.units[1]?.toolArgs).toEqual({});
+  it("does not mutate inputs and returns copied units", () => {
+    const units = publicationUnits(), snapshot = JSON.stringify(units);
+    const result = autofill(units, publicationTools);
+    expect(JSON.stringify(units)).toBe(snapshot);
+    expect(result.units[0]).not.toBe(units[0]);
+    expect(result.units[1]?.toolArgs).not.toBe(units[1]?.toolArgs);
   });
-
-  it("reports no-op when no publisher or verifier exists", () => {
-    const result = autofillManualOnboardingPublishResult([
-      { id: "unit-1", toolNames: [], toolArgs: {}, dependsOn: [] },
-    ]);
-    expect(result.applied).toBeNull();
-    expect(result.units).toHaveLength(1);
-  });
-});
-
-describe("autofillManualOnboardingPublishResult — immutability and validator interaction", () => {
-  it("never mutates the input unit objects", () => {
-    const publisher = publishUnit();
-    const verifier = verifyUnit("verify", ["publish"], { timeoutMs: 5000 });
-    const originalVerifierArgs = { timeoutMs: 5000 };
-    const original = [publisher, verifier];
-    const snapshot = JSON.stringify(original);
-    autofillManualOnboardingPublishResult(original);
-    expect(JSON.stringify(original)).toBe(snapshot);
-    expect(verifier.toolArgs).toEqual(originalVerifierArgs);
-  });
-
-  it("returns copied unit objects in every path", () => {
-    const original = [publishUnit(), verifyUnit("verify", ["publish"], {})];
-    const result = autofillManualOnboardingPublishResult(original);
-    expect(result.units).not.toBe(original);
-    expect(result.units[0]).not.toBe(original[0]);
-    expect(result.units[1]).not.toBe(original[1]);
-    expect(result.units[1]?.toolArgs).not.toBe(original[1]?.toolArgs);
-  });
-
-  it("no-op result still passes the existing validator topology diagnostic", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", ["publish"], { publishResultPath: "{$steps.publish.workProductPath}" }),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).toBeNull();
-    expect(reviewManualOnboardingVerificationTopology(result.units)).toEqual([]);
-  });
-
-  it("autofilled result passes the existing validator topology diagnostic", () => {
-    const units = [
-      publishUnit(),
-      verifyUnit("verify", ["publish"], {}),
-    ];
-    const result = autofillManualOnboardingPublishResult(units);
-    expect(result.applied).not.toBeNull();
-    expect(reviewManualOnboardingVerificationTopology(result.units)).toEqual([]);
-  });
-
-  it("autofilled result satisfies the PublishResultAutofillResult type contract", () => {
-    const result: PublishResultAutofillResult = autofillManualOnboardingPublishResult([
-      publishUnit(),
-      verifyUnit("verify", ["publish"], {}),
-    ]);
-    expect(Array.isArray(result.units)).toBe(true);
-    expect(result.applied === null || typeof result.applied === "object").toBe(true);
+  it("does not act without scoped contracts", () => {
+    expect(autofill(publicationUnits()).applied).toBeNull();
   });
 });

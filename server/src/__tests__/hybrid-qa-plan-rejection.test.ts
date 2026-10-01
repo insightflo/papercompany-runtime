@@ -123,7 +123,7 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
   }
 
   const producerUnit = (ownerAgentId: string) => ({
-    id: "unit-source-1", kind: "mission_plan_unit", title: "[ACTION] Produce",
+    id: "unit-source-1", kind: "mission_plan_unit", type: "action", title: "[ACTION] Produce",
     assigneeAgentId: ownerAgentId, selectionState: "selected",
     sourceRef: { type: "mission_plan_unit", id: "unit-source-1" }, dependsOn: [],
   });
@@ -154,7 +154,7 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
     const result = await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
       producerUnit(ownerAgentId),
       gateUnit(ownerAgentId, capToolName),
-      { id: "unit-qa-1", kind: "mission_plan_unit", title: "[QA] Semantic review",
+      { id: "unit-qa-1", kind: "mission_plan_unit", type: "qa", title: "[QA] Semantic review",
         assigneeAgentId: ownerAgentId, selectionState: "selected",
         sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" }, dependsOn: ["unit-source-1"] },
     ]);
@@ -169,7 +169,7 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
     const result = await postDecision(companyId, planningIssueId, ownerAgentId, missionId, [
       producerUnit(ownerAgentId),
       gateUnit(ownerAgentId, capToolName),
-      { id: "unit-qa-1", kind: "mission_plan_unit", title: "[QA] Semantic review",
+      { id: "unit-qa-1", kind: "mission_plan_unit", type: "qa", title: "[QA] Semantic review",
         assigneeAgentId: ownerAgentId, selectionState: "selected",
         sourceRef: { type: "mission_plan_unit", id: "unit-qa-1" },
         dependsOn: ["unit-source-1", "unit-gate-1"] },

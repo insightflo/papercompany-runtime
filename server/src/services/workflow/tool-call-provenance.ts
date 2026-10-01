@@ -9,8 +9,6 @@ import type { Db } from '@paperclipai/db';
 import { insertActivityRecord } from '../activity-log-records.js';
 import { logger } from '../../middleware/logger.js';
 
-const FILES = ['manual-onboarding-qa.mjs', 'manual-onboarding-workflow-tool.mjs', 'manual-onboarding-assets.mjs',
-  'publication-date-contract.mjs', 'hub-flow-update.mjs', 'cms-publish.mjs', 'legacy-to-contentv1.mjs', 'canonical-json.mjs'];
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const fileSchema = z.object({ path: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   byteSize: z.number().int().nonnegative().nullable(), error: z.string().nullable() }).strict();
@@ -77,14 +75,11 @@ async function interpreterIdentity(executable: FileIdentity, cwd: string, env: N
 }
 export async function captureToolCallProvenance(input: { companyId: string; toolId: string; toolName: string;
   requestId: string; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null;
-  commandParts: string[]; cwd: string; env: NodeJS.ProcessEnv }) {
-  // No authority based on the registered display name. Cover the actual eight-file native bundle.
-  const script = input.commandParts.slice(1).find(value => FILES.includes(path.basename(value)))
-    ?? (FILES.includes(path.basename(input.commandParts[0]!)) ? input.commandParts[0] : undefined);
-  if (!script) return null;
+  commandParts: string[]; cwd: string; env: NodeJS.ProcessEnv; deploymentFiles?: string[] }) {
+  const files = input.deploymentFiles;
+  if (!files?.length) return null;
   const executablePath = await resolveExecutable(input.commandParts[0]!, input.cwd, input.env);
-  const dir = path.dirname(path.resolve(input.cwd, script));
-  const toolFiles = await Promise.all(FILES.map(file => identity(path.join(dir, file))));
+  const toolFiles = await Promise.all(files.map(file => identity(path.resolve(input.cwd, file))));
   const executable = await identity(executablePath);
   const interpreter = await interpreterIdentity(executable, input.cwd, input.env);
   return toolCallProvenanceSchema.parse({ schemaVersion: 'workflow.tool-call-provenance.v1',
@@ -93,7 +88,7 @@ export async function captureToolCallProvenance(input: { companyId: string; tool
     invocationObservedAt: new Date().toISOString(), phase: 'prepared', finishedAt: null,
     executable, interpreter, toolFiles,
     bundleSha256: toolFiles.every(file => file.sha256 !== null)
-      ? hash(JSON.stringify(toolFiles.map((file, i) => ({fileName: FILES[i], sha256: file.sha256, byteSize: file.byteSize})))) : null,
+      ? hash(JSON.stringify(toolFiles.map((file, i) => ({fileName: files[i], sha256: file.sha256, byteSize: file.byteSize})))) : null,
     core, loadedBytesAttested: false, observation: 'pre-invocation-disk-snapshot-not-loaded-module-attestation',
   });
 }

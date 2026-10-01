@@ -113,6 +113,8 @@ const executionDefinitionStepCoreSchema = z
     dependencies: z.array(z.string()),
     graphWorkProductRequired: z.boolean(),
     autoApproveTools: z.literal(true).optional(),
+    deliveryVerification: z.literal('required').optional(), capAcceptance: z.literal('blocked').optional(),
+    deliveryRole: z.literal('publication-verify').optional(),
     conditionalDependencies: z.array(executionDefinitionConditionalEdgeSchema).optional(),
   })
   .passthrough();

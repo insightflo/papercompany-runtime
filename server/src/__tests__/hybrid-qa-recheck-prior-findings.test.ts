@@ -93,7 +93,7 @@ describeEP("validation recheck — prior findings injection", () => {
 
     const steps = [
       { id: producerStepId, name: "Produce report", agentId, dependencies: [], graphWorkProductRequired: true },
-      { id: qaStepId, name: "[QA] Inspection", agentId, dependencies: [producerStepId], graphWorkProductRequired: false },
+      { id: qaStepId, type: "qa", name: "[QA] Inspection", agentId, dependencies: [producerStepId], graphWorkProductRequired: false },
     ];
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: `wf-${wfId.slice(0, 8)}`, stepsJson: steps });
     await db.insert(workflowRuns).values({ id: runId, companyId, workflowId: wfId, missionId, status: "running", triggeredBy: "test" });

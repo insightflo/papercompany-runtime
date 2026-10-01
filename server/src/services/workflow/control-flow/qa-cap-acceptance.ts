@@ -45,7 +45,7 @@ interface LoopRun {
 }
 
 /** Step shape rich enough for the deterministic gate hard-block checks. */
-type GateCheckStep = StructuralGateStep & { name: string; description?: string };
+type GateCheckStep = StructuralGateStep & { name: string; description?: string; capAcceptance?: 'blocked' };
 
 const TERMINAL = new Set(["completed", "failed", "skipped"]);
 const CAP_CAS_LOST = "qa-cap-acceptance-cas-lost";
@@ -127,7 +127,7 @@ function findQaStepDef(steps: ReadonlyArray<EdgeBearingStep>, stepId: string): G
 /** Deterministic hard-block: structural / delivery-readback gates are never nonblocking-acceptable. */
 function isHardBlockedQaStep(def: GateCheckStep | null): boolean {
   if (!def) return true; // cannot prove plain semantic QA => block (never accept blindly)
-  return isStructuralGateStep(def) || isDeliveryReadbackStep(def);
+  return def.capAcceptance === 'blocked' || isStructuralGateStep(def) || isDeliveryReadbackStep(def);
 }
 
 interface QualifiedQa {

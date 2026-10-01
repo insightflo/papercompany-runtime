@@ -1,8 +1,9 @@
+import { readPlanPolicyDiagnostics } from "./mission-plan-policy-boundary.js";
 type PlanUnit = Record<string, unknown>;
 type DraftStep = string | Record<string, unknown>;
 export type MissionPlanDependencyDiagnostic = {
   code:
-    | "missing_unit_id" | "duplicate_unit_id" | "invalid_dependency_shape"
+    | "board_only_plan_policy" | "missing_unit_id" | "duplicate_unit_id" | "invalid_dependency_shape"
     | "ambiguous_dependency_ref" | "unresolved_dependency_ref"
     | "ambiguous_dependency_target_ref" | "unresolved_dependency_target_ref"
     | "self_dependency" | "dependency_cycle" | "materialized_dependency_on_filtered_unit";
@@ -115,10 +116,9 @@ function isCrossCompany(unit: PlanUnit): boolean {
 
 function isOversight(unit: PlanUnit): boolean {
   if (isStructural(unit)) return false;
-  const title = readString(unit.title) ?? readString(unit.name) ?? readString(unit.id) ?? "";
-  const prefix = /^\s*\[(action|qa|oversight)\]/iu.exec(title);
-  if (prefix) return prefix[1]!.toLowerCase() === "oversight";
-  return /\b(?:oversight|supervision|unblock|escalation)\b/u.test(readString(unit.kind)?.toLowerCase() ?? "");
+  if (readString(unit.type)?.toLowerCase() === "oversight" && unit.triggerOn === "escalation") return true;
+  if (readString(unit.type)) return false;
+  return readString(unit.kind)?.toLowerCase() === "oversight";
 }
 
 /** Cross-company and non-structural oversight units are metadata/delegation units, not local workflow steps. */
@@ -149,7 +149,7 @@ export function normalizeMissionPlanDependencyGraph(
   selectedExecutionUnits: readonly PlanUnit[],
   draftSteps: readonly DraftStep[] = [],
 ): NormalizeMissionPlanDependencyGraphResult {
-  const diagnostics: MissionPlanDependencyDiagnostic[] = [];
+  const diagnostics = readPlanPolicyDiagnostics(selectedExecutionUnits, draftSteps);
   const ids = selectedExecutionUnits.map((unit, index) => {
     const id = readString(unit.id);
     if (!id) diagnostics.push({ code: "missing_unit_id", message: `selectedExecutionUnits[${index}] is missing mandatory unit.id.` });

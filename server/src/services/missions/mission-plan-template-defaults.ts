@@ -24,14 +24,14 @@ export const DEFAULT_MISSION_PLAN_TEMPLATES = [
     ].join("\n"),
   },
   {
-    key: "manual-onboarding-publish-verify",
-    name: "Manual onboarding publish → verify",
-    selectionDescription: "Use when an approved manual must be published with manual-onboarding-publish and read back with manual-onboarding-verify.",
+    key: "publication-verify",
+    name: "Publication → verify",
+    selectionDescription: "Use when granted tools declare publication and publication-verify artifact roles.",
     instructions: [
-      "Assign manual-onboarding-publish to one publisher and manual-onboarding-verify to a downstream QA unit.",
-      "The verifier consumes toolArgs.publishResultPath: {$steps.<publish-unit-id>.workProductPath}.",
-      "Never use a guessed URL or direct curl instead of the registered publish result.",
-      "Treat manual-onboarding-verify as an agent QA tool unless its registered adapterConfig.capabilities explicitly contains structural_validation_v1. A validator-like tool name is not structural capability evidence.",
+      "Assign a tool with artifactContract.role publication to an action unit and a tool with role publication-verify to a downstream qa unit; declare each unit's type explicitly.",
+      "The verifier depends on the publication unit and binds the toolArgs key declared by artifactContract.consumerParams.receipt to {$steps.<publication-unit-id>.workProductPath}.",
+      "Never use a guessed URL or direct curl instead of the registered publication result.",
+      "Use a structural tool gate only when adapterConfig.capabilities explicitly contains structural_validation_v1; tool names do not establish capabilities or artifact roles.",
     ].join("\n"),
   },
   {

@@ -11,7 +11,7 @@
  * [외부 연결] consumer: mission-owner-plan-decisions(recordLatestAuthorizedMissionOwnerPlanDecision).
  *   입력: mission-intent(extractMissionIntent) + draft.refs.selectedExecutionUnits + successCriteria.
  * [수정시 주의]
- *   - delivery 여부는 tool/action 이름으로만 판정한다. 제목/설명 텍스트는 readback/audience/scenario 보조 신호다.
+ *   - Publication roles come only from scoped artifact contracts. Prose never grants roles or coverage.
  *   - 새 checklist 규칙 추가 시 reviewPlanAgainstIntent 에 추가하고 PlanQaDiagnosticCode/테스트 확장.
  *   - critiqueHook 은 async outsider — 순수 함수가 아닌 주입점. 기본 undefined(no-op).
  */
@@ -24,7 +24,7 @@ import {
   reviewArtifactWorkProductMarkers,
 } from "./mission-plan-artifact-contract.js";
 import { buildDependencyIndex, unitDependsOn } from "./mission-plan-unit-dependencies.js";
-import { reviewManualOnboardingVerificationTopology } from "./mission-plan-manual-onboarding-contract.js";
+import { reviewPublicationVerificationTopology, type PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 import { extractUnitRoles, hasPostDeliveryReadbackQa, type PlanQaUnitRole } from "./mission-plan-unit-roles.js";
 
 export { extractUnitRoles } from "./mission-plan-unit-roles.js";
@@ -33,7 +33,7 @@ export type { PlanQaUnitRole } from "./mission-plan-unit-roles.js";
 export type PlanQaDiagnosticCode =
   | "missing_publish_unit"
   | "missing_publish_readback_qa"
-  | "missing_manual_onboarding_verify_tool"
+  | "missing_publication_verify_tool"
   | "missing_artifact_qa_before_delivery"
   | "invalid_artifact_qa_delivery_order"
   | "invalid_artifact_workproduct_marker"
@@ -49,28 +49,22 @@ export interface PlanQaDiagnostic {
   message: string;
 }
 
-function successCriteriaText(successCriteria: unknown[] | undefined): string {
-  if (!Array.isArray(successCriteria)) return "";
-  return successCriteria
-    .map((item) => (typeof item === "string" ? item : item && typeof item === "object" ? JSON.stringify(item) : String(item ?? "")))
-    .join("\n");
-}
-
 function reviewArtifactQaDeliveryOrder(input: {
   intent: MissionIntent;
   selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
+  tools: readonly PlanningArtifactTool[];
 }): PlanQaDiagnostic[] {
   if (!input.intent.publish) return [];
 
   const deliveryIndexes = input.selectedExecutionUnits
     .map((unit, index) => ({ unit, index }))
-    .filter(({ unit }) => hasDeliveryActionRole(unit))
+    .filter(({ unit }) => hasDeliveryActionRole(unit, input.tools))
     .map(({ index }) => index);
   if (deliveryIndexes.length === 0) return [];
 
   const artifactProducerIndexes = input.selectedExecutionUnits
     .map((unit, index) => ({ unit, index }))
-    .filter(({ unit }) => hasArtifactProducerRole(unit))
+    .filter(({ unit }) => hasArtifactProducerRole(unit) && !hasDeliveryActionRole(unit, input.tools))
     .map(({ index }) => index);
   if (artifactProducerIndexes.length === 0) return [];
 
@@ -121,44 +115,43 @@ export function reviewPlanAgainstIntent(input: {
   intent: MissionIntent;
   selectedExecutionUnits: ReadonlyArray<Record<string, unknown>>;
   successCriteria?: unknown[];
+  tools?: readonly PlanningArtifactTool[];
 }): PlanQaDiagnostic[] {
-  const { intent, selectedExecutionUnits, successCriteria } = input;
+  const { intent, selectedExecutionUnits, tools = [] } = input;
   const diagnostics: PlanQaDiagnostic[] = [
-    ...reviewArtifactWorkProductMarkers(selectedExecutionUnits),
+    ...reviewArtifactWorkProductMarkers(selectedExecutionUnits, tools),
     ...reviewDeliveryToolPreflightMarkers(selectedExecutionUnits),
-    ...reviewManualOnboardingVerificationTopology(selectedExecutionUnits),
+    ...reviewPublicationVerificationTopology(selectedExecutionUnits, tools),
   ];
   if (!intent.publish && !intent.audienceSplit && !intent.scenario) {
     return diagnostics;
   }
 
-  const roles = selectedExecutionUnits.map(extractUnitRoles);
+  const roles = selectedExecutionUnits.map(unit => extractUnitRoles(unit, tools));
   const hasRole = (key: keyof PlanQaUnitRole): boolean => roles.some((role) => role[key]);
-  const scText = successCriteriaText(successCriteria);
 
   if (intent.publish) {
     const publishTokens = intentSignalsByCategory(intent, "publish");
-    const why = publishTokens.length > 0 ? `(사용자 표현: ${publishTokens.join(", ")})` : "(사용자 게시 의도 감지)";
+    const why = publishTokens.length > 0 ? `(선언된 역할: ${publishTokens.join(", ")})` : "(게시 계약 필요)";
     if (!hasRole("publish")) {
       diagnostics.push({
         code: "missing_publish_unit",
         severity: "invalid",
-        message: `Mission brief 에 게시/배포 의도가 있지만 ${why} selectedExecutionUnits 에 publish/stage/deploy/readback 성격의 unit 이 없습니다. 최소 하나의 게시/배포 unit 을 추가하세요.`,
+        message: `게시 계약이 필요하지만 ${why} selectedExecutionUnits 에 publication 역할이 선언된 도구가 없습니다. 게시 도구를 명시적으로 선택하세요.`,
       });
-    } else if (!hasPostDeliveryReadbackQa(selectedExecutionUnits)) {
+    } else if (!hasPostDeliveryReadbackQa(selectedExecutionUnits, tools)) {
       diagnostics.push({
         code: "missing_publish_readback_qa",
         severity: "invalid",
         message: `게시/배포 unit 은 있으나 게시물 검증(QA/readback) unit 이 없습니다 ${why}. 게시 후 산출물을 검증하는 [QA] unit 또는 readback 단계를 추가하세요.`,
       });
     }
-    diagnostics.push(...reviewArtifactQaDeliveryOrder({ intent, selectedExecutionUnits }));
+    diagnostics.push(...reviewArtifactQaDeliveryOrder({ intent, selectedExecutionUnits, tools }));
   }
 
   if (intent.audienceSplit) {
     const audiences = intent.audiences.length > 0 ? intent.audiences.join(", ") : "복수 대상";
-    const audienceInSc = /대상별|분기|각각|audience|경우에?\s*따라/iu.test(scText);
-    if (!hasRole("audienceSplit") && !audienceInSc) {
+    if (!hasRole("audienceSplit")) {
       diagnostics.push({
         code: "missing_audience_split",
         severity: "needs_clarification",
@@ -168,8 +161,7 @@ export function reviewPlanAgainstIntent(input: {
   }
 
   if (intent.scenario) {
-    const scenarioInSc = /시나리오|상황별|케이스|경우의?\s*수|scenario|case/iu.test(scText);
-    if (!hasRole("scenario") && !scenarioInSc) {
+    if (!hasRole("scenario")) {
       diagnostics.push({
         code: "missing_scenario_taxonomy",
         severity: "needs_clarification",
@@ -262,7 +254,7 @@ function clarificationQuestionForCode(code: PlanQaDiagnosticCode, intent: Missio
     case "missing_scenario_taxonomy":
       return `상황별/케이스별 처리가 필요한가요? 그렇다면 다뤄야 할 시나리오 목록이나 상황별 success criteria 를 알려 주세요.`;
     case "missing_publish_unit":
-      return `산출물을 사이트에 게시/배포해야 하나요? 그렇다면 게시 대상(site/cloudflare)을 확인해 게시 unit 을 추가해 주세요.`;
+      return `산출물을 사이트에 게시/배포해야 하나요? 그렇다면 게시 대상을 확인해 게시 unit 을 추가해 주세요.`;
     case "missing_publish_readback_qa":
       return `게시 후 산출물 검증(QA/readback)이 필요한가요? 그렇다면 검증 unit 을 추가해 주세요.`;
     default:

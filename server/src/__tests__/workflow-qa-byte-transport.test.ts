@@ -19,10 +19,9 @@ it("progress-enabled QA uses stdin bytes and FD4 while FD3 remains progress-only
 
 it("stdout cannot replace the required machine result channel", async () => {
   const f = await fixture();
-  const script = path.join(path.dirname(f.content), "stdout-only.mjs");
+  const script = path.join(f.adapterConfig.workingDirectory, f.adapterConfig.artifactContract.deploymentFiles[0]);
   await writeFile(script, `import fs from 'node:fs';fs.readFileSync(0);console.log(JSON.stringify({ok:true,schemaVersion:'manual-onboarding.qa.v1'}));`);
-  await database().update(toolDefinitions).set({ adapterConfig: { command: `${process.execPath} ${script} qa` } })
-    .where(eq(toolDefinitions.companyId, f.companyId));
+
   const result = await f.invoke();
   expect(result.status).toBe(500); expect(result.body.error).toContain('qa_result_transport_missing');
   expect(result.toolArtifactReceipt).toBeUndefined();
@@ -30,7 +29,7 @@ it("stdout cannot replace the required machine result channel", async () => {
 
 it("runner receives verified-byte FD result but refuses persistence through a swapped root", async () => {
   const f = await fixture();
-  const script = path.join(path.dirname(f.content), "transport-producer.mjs");
+  const script = path.join(f.adapterConfig.workingDirectory, f.adapterConfig.artifactContract.deploymentFiles[0]);
   await writeFile(script, `import fs from 'node:fs';import path from 'node:path';import{createHash}from'node:crypto';
 const a=Object.fromEntries(process.argv.slice(3).reduce((r,v,i,all)=>i%2?r:[...r,[v.slice(2),all[i+1]]],[]));
 if(process.env.PAPERCOMPANY_QA_INPUT!=='stdin-v1') throw Error('transport_required');
@@ -39,7 +38,7 @@ const source=Buffer.from(v.content.base64,'base64');if(h(source)!==v.content.sha
 const root=path.dirname(a.out), outside=root+'-outside';fs.mkdirSync(outside);fs.renameSync(root,root+'-old');fs.symlinkSync(outside,root);
 const q={schemaVersion:'manual-onboarding.qa.v1',command:'qa',mode:'content',section:'tech-blog',ok:true,checkedAt:new Date().toISOString(),checks:[{id:'fixture',ok:true,detail:null}],artifactPath:a.out,contentSha256:h(source),assetManifest:v.assets.map(({fileName,sha256,byteSize})=>({fileName,sha256,byteSize}))};
 fs.writeFileSync(4,JSON.stringify(q));console.log('diagnostic only');`);
-  await database().update(toolDefinitions).set({adapterConfig:{command:`${process.execPath} ${script} qa`}}).where(eq(toolDefinitions.companyId,f.companyId));
+
   const r=await f.invoke();
   // Root changed after spawn: fail closed, and never write through the replacement.
   expect(r.status).toBe(500);

@@ -42,7 +42,7 @@ export function enableQaCapAcceptanceInSteps(steps: WorkflowStep[]): {
         && Boolean(qaStep)
         && isQaLikeStep(qaStep!)
         && !isStructuralGateStep(qaStep!)
-        && !isDeliveryReadbackStep(qaStep!);
+        && qaStep?.capAcceptance !== 'blocked' && !isDeliveryReadbackStep(qaStep!);
       if (!eligible || edge.allowCapAcceptance === true) return edge;
       producerChanged = true;
       updatedQaEdges += 1;

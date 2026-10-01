@@ -16,7 +16,7 @@ describe("hybrid QA — W002 pre-PLAN effective merged dependency graph", () => 
       { id: "producer", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "producer" } },
       { id: "gate", type: "tool", qaType: "structural", toolNames: ["v"],
         sourceRef: { type: "mission_plan_unit", id: "gate" } },
-      { id: "qa", title: "[QA] Semantic", sourceRef: { type: "mission_plan_unit", id: "qa" } },
+      { id: "qa", type: "qa", title: "[QA] Semantic", sourceRef: { type: "mission_plan_unit", id: "qa" } },
     ];
     const draftSteps = [
       { unitId: "producer", dependencies: [] },
@@ -46,7 +46,7 @@ describe("hybrid QA — W002 pre-PLAN effective merged dependency graph", () => 
       { id: "producer", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "producer" } },
       { id: "gate", type: "tool", qaType: "structural", toolNames: ["v"],
         sourceRef: { type: "mission_plan_unit", id: "gate" } },
-      { id: "qa", title: "[QA] Semantic", sourceRef: { type: "mission_plan_unit", id: "qa" } },
+      { id: "qa", type: "qa", title: "[QA] Semantic", sourceRef: { type: "mission_plan_unit", id: "qa" } },
     ];
     const draftSteps = [
       { unitId: "gate", dependencies: ["producer"] },
@@ -87,7 +87,7 @@ describe("hybrid QA — W002 pre-PLAN effective merged dependency graph", () => 
       { id: "producer", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "producer" } },
       { id: "gate", type: "tool", qaType: "structural", toolNames: ["v"], dependsOn: ["producer"],
         sourceRef: { type: "mission_plan_unit", id: "gate" } },
-      { id: "qa", title: "[QA] Semantic", dependsOn: ["producer"],
+      { id: "qa", type: "qa", title: "[QA] Semantic", dependsOn: ["producer"],
         sourceRef: { type: "mission_plan_unit", id: "qa" } },
     ];
     const draftSteps = [{ unitId: "qa", dependencies: ["gate"] }];

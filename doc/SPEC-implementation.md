@@ -204,16 +204,19 @@ Human Operator reporting.
 
 Every company owns a mission-plan template catalog. Company creation and the
 database migration provide four enabled system defaults: research/report/QA,
-durable-file review, manual-onboarding publish/readback, and structural then
-semantic validation. System defaults may be enabled or disabled; operators may
+durable-file review, contract-declared publication/readback, and structural then
+semantic validation. The forward migration disables only the historical publication
+system seed, preserving its body and references, and adds a generic publication
+verification template without overwriting an existing row. System defaults may be enabled or disabled; operators may
 duplicate them and fully manage custom templates from the Instructions page.
 
 The general ACTION/QA planning shape is always included in a PLAN prompt. The
 prompt also includes only enabled template names, selection guidance, IDs, and
 company-scoped detail endpoints. The mission owner agent fetches applicable full
 templates and returns `selectedPlanTemplateIds`. An explicit array, including an
-empty array, is authoritative. The bounded legacy token selector runs only when
-that field is omitted. Before PLAN-QA or materialization, the server validates
+empty array, is authoritative. When that field is omitted, only the generic
+publication template may be selected automatically, from granted tools with valid
+publication and publication-verify artifact contracts. Prose does not select templates. Before PLAN-QA or materialization, the server validates
 every selected ID against enabled templates in the same company, fails closed on
 invalid selections, and records selection source plus template ID, key, and
 content hash in the mission plan refs. PLAN-QA receives the resolved template

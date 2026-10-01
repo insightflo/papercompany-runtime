@@ -1,9 +1,11 @@
 import type { MissionExecutionCandidate } from "./mission-execution-candidates.js";
+import { hasPlanArtifactRole, type PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 
 export type MissionPlanningTemplateInput = {
   readonly title?: string;
   readonly description?: string | null;
   readonly candidates?: readonly MissionExecutionCandidate[];
+  readonly tools?: readonly PlanningArtifactTool[];
   readonly catalog?: readonly MissionPlanningTemplateCatalogItem[];
 };
 
@@ -13,25 +15,6 @@ export type MissionPlanningTemplateCatalogItem = {
   readonly selectionDescription: string;
   readonly instructions?: string;
 };
-
-const PUBLISH_TOOL = "manual-onboarding-publish";
-const VERIFY_TOOL = "manual-onboarding-verify";
-
-const RESEARCH_TOOL_TOKENS = ["research", "search", "collect", "fetch", "source"];
-const VALIDATOR_TOOL_TOKENS = ["validate", "validator", "verify", "check", "lint", "schema", "contract"];
-const RESEARCH_MISSION_TOKENS = ["research", "analysis", "source gathering", "sources", "report"];
-const DURABLE_MISSION_TOKENS = ["file", "document", "report", "html", "pdf", "presentation", "spreadsheet"];
-const PUBLISH_MISSION_TOKENS = ["publish", "deploy", "upload"];
-const STRUCTURAL_MISSION_TOKENS = ["validate", "validation", "contract", "schema", "machine-checkable"];
-
-function hasToken(text: string, tokens: readonly string[]): boolean {
-  const lower = text.toLowerCase();
-  return tokens.some((token) => lower.includes(token));
-}
-
-function combineText(input: MissionPlanningTemplateInput): string {
-  return `${input.title ?? ""}\n${input.description ?? ""}`;
-}
 
 function grantedTools(input: MissionPlanningTemplateInput): string[] {
   const set = new Set<string>();
@@ -43,13 +26,10 @@ function grantedTools(input: MissionPlanningTemplateInput): string[] {
   return [...set];
 }
 
-function findGrantedByToken(granted: readonly string[], tokens: readonly string[]): string[] {
-  return granted.filter((name) => hasToken(name, tokens));
-}
-
 function generalTemplateLines(): string[] {
   const actionUnit = {
     id: "unit-action-1",
+    type: "action",
     kind: "mission_plan_unit",
     title: "Concrete ACTION title derived from the mission outcome",
     assigneeAgentId: "<roster-agent-id>",
@@ -68,6 +48,8 @@ function generalTemplateLines(): string[] {
   };
   const qaUnit = {
     id: "unit-qa-1",
+    type: "qa",
+    qaType: "semantic",
     kind: "mission_plan_unit",
     title: "[QA] Validate the produced action result against its acceptance criteria",
     assigneeAgentId: "<roster-agent-id>",
@@ -85,10 +67,26 @@ function generalTemplateLines(): string[] {
     graphWorkProductRequired: false,
   };
 
+  const oversightUnit = {
+    ...qaUnit,
+    id: "unit-oversight-1",
+    type: "oversight",
+    qaType: undefined,
+    title: "Review exceptions and coordinate recovery",
+    assigneeAgentId: "<mission-owner-agent-id>",
+    reason: "Handle escalation without replacing the declared QA verdict",
+    expectedOutput: "Recorded recovery or escalation decision",
+    acceptanceCriteria: ["Resolve the reported exception within the mission policy"],
+    evidenceRequired: ["Durable exception and recovery records"],
+    sourceRef: { type: "mission_plan_unit", id: "unit-oversight-1" },
+    dependsOn: ["unit-qa-1"],
+    triggerOn: "escalation",
+  };
+
   return [
     "## General planning template",
     "Use this shape for every mission. Always include at least one ACTION unit producing the deliverable and one QA unit that validates it.",
-    "- Every unit declares `id`, `assigneeAgentId`, `expectedOutput`, `acceptanceCriteria`, `evidenceRequired`, `sourceRef`, `dependsOn`, `toolNames`, `toolArgs`, `knowledgeBaseIds`, `skillRefs`, and `graphWorkProductRequired`.",
+    "- Every unit declares `id`, `type` (action, qa, or oversight), `assigneeAgentId`, `expectedOutput`, `acceptanceCriteria`, `evidenceRequired`, `sourceRef`, `dependsOn`, `toolNames`, `toolArgs`, `knowledgeBaseIds`, `skillRefs`, and `graphWorkProductRequired`.",
     "- ACTION units that produce an official deliverable set `graphWorkProductRequired: true`; pure condition, input-check, and QA units set `graphWorkProductRequired: false`.",
     "- The QA unit must use `dependsOn` to reference the ACTION unit id it validates.",
     "- `toolArgs: {}` is always valid; populate it only when the tool requires runtime arguments.",
@@ -102,6 +100,11 @@ function generalTemplateLines(): string[] {
     "QA unit example:",
     "```json",
     JSON.stringify(qaUnit, null, 2),
+    "```",
+    "",
+    "Optional OVERSIGHT unit example (mission-owner escalation only):",
+    "```json",
+    JSON.stringify(oversightUnit, null, 2),
     "```",
   ];
 }
@@ -119,19 +122,9 @@ export function renderMissionPlanningTemplateLines(input: MissionPlanningTemplat
 }
 
 export function selectFallbackMissionPlanTemplateKeys(input: MissionPlanningTemplateInput): string[] {
-  const text = combineText(input);
-  const granted = grantedTools(input);
-  const selected: string[] = [];
-
-  if (findGrantedByToken(granted, RESEARCH_TOOL_TOKENS).length > 0 && hasToken(text, RESEARCH_MISSION_TOKENS)) {
-    selected.push("research-report-qa");
-  }
-  if (hasToken(text, DURABLE_MISSION_TOKENS)) selected.push("durable-file-review");
-  if (granted.includes(PUBLISH_TOOL) && granted.includes(VERIFY_TOOL) && hasToken(text, PUBLISH_MISSION_TOKENS)) {
-    selected.push("manual-onboarding-publish-verify");
-  }
-  if (findGrantedByToken(granted, VALIDATOR_TOOL_TOKENS).length > 0 && hasToken(text, STRUCTURAL_MISSION_TOKENS)) {
-    selected.push("structural-validation-semantic-review");
-  }
-  return selected;
+  const unit = { toolNames: grantedTools(input) };
+  const tools = input.tools ?? [];
+  return hasPlanArtifactRole(unit, tools, "publication") && hasPlanArtifactRole(unit, tools, "publication-verify")
+    ? ["publication-verify"] : [];
+  // Other cases require explicit selectedPlanTemplateIds; prose is never authority.
 }

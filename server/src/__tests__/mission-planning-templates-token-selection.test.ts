@@ -1,106 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { selectFallbackMissionPlanTemplateKeys } from "../services/missions/mission-planning-templates.js";
-import type { MissionExecutionCandidate } from "../services/missions/mission-execution-candidates.js";
+import { selectFallbackMissionPlanTemplateKeys, renderMissionPlanningTemplateLines } from "../services/missions/mission-planning-templates.js";
+import { classifyWorkflowStepRole } from "../services/workflow-step-role.js";
+import { publicationTools } from "./helpers/mission-publication-fixture.js";
 
-function candidate(overrides: Partial<MissionExecutionCandidate>): MissionExecutionCandidate {
-  return {
-    agentId: "agent-1",
-    name: "Agent One",
-    role: "worker",
-    capabilities: null,
-    desiredSkillKeys: [],
-    toolNames: [],
-    ...overrides,
-  };
-}
+const candidates = [{ agentId: "worker", name: "Worker", role: "worker", capabilities: null,
+  desiredSkillKeys: [], toolNames: ["alpha", "beta", "schema-check", "research-search"] }];
 
-function selectKeys(input: {
-  title: string;
-  description: string | null;
-  candidates: MissionExecutionCandidate[];
-}): string[] {
-  return selectFallbackMissionPlanTemplateKeys(input);
-}
-
-// [ purpose ] The template selector drives case selection off bounded
-//   token sets: research tools (research/search/collect/fetch/source),
-//   research missions (research/analysis/source gathering/report),
-//   durable file missions (file/document/html/pdf/presentation/spreadsheet),
-//   publish missions (publish/deploy/upload), and validator tools
-//   (validate/validator/verify/check/lint/schema/contract). These tests prove
-//   representative tokens from each set are honored. Adding a new token to
-//   a set requires adding a representative case here.
-describe("mission planning template token selection", () => {
-  describe("research tool tokens (research/search/collect/fetch/source)", () => {
-    for (const tool of ["deep-research", "web-search", "data-collect", "api-fetch", "doc-source"]) {
-      it(`renders the research case for granted tool ${tool}`, () => {
-        const out = selectKeys({
-          title: "Source gathering and analysis",
-          description: "Compile a research report.",
-          candidates: [candidate({ toolNames: [tool] })],
-        });
-        expect(out).toContain("research-report-qa");
-      });
-    }
+describe("declarative mission planning template selection", () => {
+  it("does not infer templates from mission prose, agent roles or tool names", () => {
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates,
+      title: "Research report HTML file publish deploy upload validate contract",
+      description: "Collect sources and verify machine-checkable schema.",
+    })).toEqual([]);
   });
 
-  describe("research mission tokens (research/analysis/source gathering/report)", () => {
-    for (const title of ["Market analysis", "Source gathering brief", "Weekly research"]) {
-      it(`renders the research case for mission title "${title}"`, () => {
-        const out = selectKeys({
-          title,
-          description: "Neutral work item.",
-          candidates: [candidate({ toolNames: ["research-search"] })],
-        });
-        expect(out).toContain("research-report-qa");
-      });
-    }
+  it("selects the generic publication template using granted validated artifact roles", () => {
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates, tools: publicationTools })).toEqual(["publication-verify"]);
+    const renamed = publicationTools.map((tool, i) => ({ ...tool, name: `tool-${i}` }));
+    expect(selectFallbackMissionPlanTemplateKeys({
+      candidates: [{ ...candidates[0], toolNames: renamed.map(tool => tool.name) }], tools: renamed,
+    })).toEqual(["publication-verify"]);
   });
 
-  describe("durable file mission tokens (file/document/html/pdf/presentation/spreadsheet)", () => {
-    for (const title of [
-      "Author the output file",
-      "Author the launch document",
-      "Compile the status report",
-      "Build the HTML page",
-      "Generate the PDF",
-      "Produce the quarterly presentation",
-      "Compile the budget spreadsheet",
-    ]) {
-      it(`renders the durable file case for mission title "${title}"`, () => {
-        const out = selectKeys({
-          title,
-          description: "Standalone work item.",
-          candidates: [candidate({})],
-        });
-        expect(out).toContain("durable-file-review");
-      });
-    }
+  it("does not select publication for missing grants, disabled or malformed declarations", () => {
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates: [], tools: publicationTools })).toEqual([]);
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates, tools: [publicationTools[0]] })).toEqual([]);
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates,
+      tools: [publicationTools[0], { ...publicationTools[1], enabled: false }],
+    })).toEqual([]);
+    expect(selectFallbackMissionPlanTemplateKeys({ candidates, tools: publicationTools.map(tool => ({
+      ...tool, adapterConfig: { artifactContract: { role: "publication-verify" } },
+    })) })).toEqual([]);
   });
 
-  describe("publish mission tokens (publish/deploy/upload)", () => {
-    for (const title of ["Publish the release", "Deploy the bundle", "Upload the asset"]) {
-      it(`renders the manual-onboarding case for mission title "${title}" when both tools are granted`, () => {
-        const out = selectKeys({
-          title,
-          description: "Deliver the artifact.",
-          candidates: [candidate({ toolNames: ["manual-onboarding-publish", "manual-onboarding-verify"] })],
-        });
-        expect(out).toContain("manual-onboarding-publish-verify");
-      });
-    }
-  });
-
-  describe("structural tool tokens (validate/validator/verify/check/lint/schema/contract)", () => {
-    for (const tool of ["url-validate", "quality-validator", "result-verify", "status-check", "lint-rules", "schema-guard", "contract-guard"]) {
-      it(`renders the structural case for granted tool ${tool}`, () => {
-        const out = selectKeys({
-          title: "Validate the contract",
-          description: "Verify machine-checkable constraints.",
-          candidates: [candidate({ toolNames: [tool] })],
-        });
-        expect(out).toContain("structural-validation-semantic-review");
-      });
-    }
+  it("emits example execution roles that survive renaming all display and identity fields", () => {
+    const output = renderMissionPlanningTemplateLines({}).join("\n");
+    const examples = [...output.matchAll(/```json\n([\s\S]*?)\n```/g)].map(match => JSON.parse(match[1]));
+    expect(examples.map(example => classifyWorkflowStepRole({ ...example, id: "opaque", title: "Neutral" })))
+      .toEqual(["action", "qa", "oversight"]);
+    expect(examples[1].dependsOn).toEqual([examples[0].id]);
   });
 });
