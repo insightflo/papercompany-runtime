@@ -78,6 +78,25 @@ it("recognizes issue-less current-request tool failure rather than requiring a h
     .rejects.toThrow("mission_revision_failure_evidence_missing");
 });
 
+it("recognizes issue-less current-request tool dispatch failure rather than requiring a heartbeat", async () => {
+  const f = await seedWorld(db, root, () => [{ id: "gate", name: "Gate", type: "tool", qaType: "structural",
+    agentId: "", dependencies: [], toolNames: ["validate"] }]);
+  await db.update(workflowStepRuns).set({ status: "failed", issueId: null, lastDispatchRequestId: "request-1",
+    metadata: { toolInvocation: { requestId: "request-1", dispatchError: "workproduct_selector_stale_producer" } } })
+    .where(eq(workflowStepRuns.id, f.sourceStep.id));
+  await expect(checkMissionRevisionSteps(db, { companyId: f.companyId, missionId: f.revision.id,
+    steps: [{ id: "new-gate", name: "Gate", type: "tool", qaType: "structural", agentId: "", dependencies: [], toolNames: ["validate"], toolArgs: { fixed: true } }] })).resolves.toBeUndefined();
+  for (const toolInvocation of [
+    { requestId: "stale", dispatchError: "workproduct_selector_stale_producer" },
+    { requestId: "request-1" },
+    { requestId: "request-1", dispatchError: "" },
+  ]) {
+    await db.update(workflowStepRuns).set({ metadata: { toolInvocation } }).where(eq(workflowStepRuns.id, f.sourceStep.id));
+    await expect(checkMissionRevisionSteps(db, { companyId: f.companyId, missionId: f.revision.id, steps: [] }))
+      .rejects.toThrow("mission_revision_failure_evidence_missing");
+  }
+});
+
 it("uses atomic structural request_changes ledger without any heartbeat", async () => {
   const f = await seedWorld(db, root, () => [{ id: "gate", name: "Gate", type: "tool", qaType: "structural",
     agentId: "", dependencies: [], toolNames: ["validate"] }]);
