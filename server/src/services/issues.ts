@@ -1942,7 +1942,7 @@ export function issueService(db: Db) {
         .update(issues)
         .set({
           status: "todo",
-          assigneeAgentId: null,
+          assigneeAgentId: existing.originKind === "mission_main_executor_oversight" ? existing.assigneeAgentId : null,
           checkoutRunId: null,
           executionRunId: null,
           executionLockedAt: null,
