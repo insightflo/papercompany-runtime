@@ -5,6 +5,7 @@ import { loadStructuralGateVerdictByRequest } from "../workflow/control-flow/str
 import type { RevisionStep } from "../workflow/revision-step-config.js";
 
 const toolFailure = z.object({ requestId: z.string().min(1), success: z.literal(false) }).passthrough();
+const toolDispatchFailure = z.object({ requestId: z.string().min(1), dispatchError: z.string().min(1) }).passthrough();
 /** A failed result is not necessarily an adapter error. Official QA rejection and native
  * tool completion have their own durable authority, without a failed heartbeat/errorCode. */
 export async function hasRevisionResultFailure(db: Db, companyId: string, step: typeof workflowStepRuns.$inferSelect,
@@ -12,6 +13,8 @@ export async function hasRevisionResultFailure(db: Db, companyId: string, step: 
   if (definition.type === "tool" && step.lastDispatchRequestId) {
     const result = toolFailure.safeParse(step.metadata?.toolResult);
     if (result.success && result.data.requestId === step.lastDispatchRequestId) return true;
+    const invocation = toolDispatchFailure.safeParse(step.metadata?.toolInvocation);
+    if (invocation.success && invocation.data.requestId === step.lastDispatchRequestId) return true;
     if (definition.qaType === "structural") {
       const verdict = await loadStructuralGateVerdictByRequest(db, companyId, step.id, step.lastDispatchRequestId);
       if (verdict?.verdict === "request_changes" && verdict.producerToken) return true;
