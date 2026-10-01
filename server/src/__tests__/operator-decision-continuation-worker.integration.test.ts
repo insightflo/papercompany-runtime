@@ -16,6 +16,8 @@ import { operatorDecisionContinuationWorker } from "../services/operator-decisio
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
+// Match DB due time and JS poll time exactly; DB now() retains sub-millisecond precision.
+const fixtureTime = new Date("2026-07-29T12:00:00Z");
 const definition = {
   options: [{ id: "one", label: "One", description: null, facts: [], evidenceRefs: [] }],
   actions: [{ id: "choose", label: "Choose", outcome: "submit", tone: "primary", requiresSelection: true }],
@@ -57,9 +59,11 @@ describeDb("operator decision continuation worker", () => {
       interactionType: "single_select", title: "Choose", sourceType: "workflow_step", sourceId: "step",
       sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
       issueId, definition, result: { actionId: "choose", outcome: "submit", selectedOptionIds: ["one"], comment: null },
-      resolvedByUserId: "board", resolvedAt: new Date(), continuationMode: "issue_current_assignee",
+      resolvedByUserId: "board", resolvedAt: fixtureTime, continuationMode: "issue_current_assignee",
     });
-    await db.insert(operatorDecisionContinuations).values({ companyId, operatorDecisionId: decisionId, issueId });
+    await db.insert(operatorDecisionContinuations).values({
+      companyId, operatorDecisionId: decisionId, issueId, nextAttemptAt: fixtureTime,
+    });
   });
 
   it("calls heartbeat with the exact envelope and accepts durable proof", async () => {
@@ -74,7 +78,7 @@ describeDb("operator decision continuation worker", () => {
       });
     });
     const worker = operatorDecisionContinuationWorker(db, { wakeup, workerId: "test-worker" });
-    await worker.pollOnce();
+    expect(await worker.pollOnce(fixtureTime)).toBe(1);
     // [delivery bridge] payload/contextSnapshot 매칭에 paperclipOperatorDecisionResolution 키 추가 —
     //   기존 키의 의미는 변경 없음(신규 전달 필드 추가).
     expect(wakeup).toHaveBeenCalledWith(agentId, {
@@ -119,7 +123,7 @@ describeDb("operator decision continuation worker", () => {
     if (issueUpdate === null) await db.delete(issues).where(eq(issues.id, issueId));
     else await db.update(issues).set(issueUpdate).where(eq(issues.id, issueId));
     const wakeup = vi.fn();
-    await operatorDecisionContinuationWorker(db, { wakeup, workerId: "blocker" }).pollOnce();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "blocker" }).pollOnce(fixtureTime)).toBe(1);
     expect(wakeup).not.toHaveBeenCalled();
     expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({ state: "blocked", errorCode });
   });
@@ -133,7 +137,7 @@ describeDb("operator decision continuation worker", () => {
       new Date("2026-07-29T12:00:37Z"),
     ];
     await db.update(operatorDecisionContinuations).set({ nextAttemptAt: times[0] }).where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId));
-    for (const time of times) await worker.pollOnce(time);
+    for (const time of times) expect(await worker.pollOnce(time)).toBe(1);
     expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({ state: "exhausted", attemptCount: 3 });
     expect(wakeup).toHaveBeenCalledTimes(3);
   });
@@ -161,13 +165,13 @@ describeDb("operator decision continuation worker", () => {
     const worker = operatorDecisionContinuationWorker(db, { wakeup, workerId: "coal" });
 
     // a1: 활성 run 합병(coalesced) — 전달 증거 불인정, 5s 뒤 재시도 예약
-    await worker.pollOnce(new Date("2026-07-29T12:00:00Z"));
+    expect(await worker.pollOnce(new Date("2026-07-29T12:00:00Z"))).toBe(1);
     expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
       state: "pending", attemptCount: 1, errorCode: "dispatch_failed",
     });
 
     // a2(+6s): 전용 queued run 이 만들어진 경우 — 전달 증거 인정
-    await worker.pollOnce(new Date("2026-07-29T12:00:06Z"));
+    expect(await worker.pollOnce(new Date("2026-07-29T12:00:06Z"))).toBe(1);
     const [continuation] = await db.select().from(operatorDecisionContinuations);
     expect(continuation).toMatchObject({ state: "accepted", attemptCount: 2 });
     expect(wakeups.map((w) => w.idempotencyKey)).toEqual([
