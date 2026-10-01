@@ -32,16 +32,20 @@ it("seed evidence makes successors ready with finalization enforcement on, witho
 });
 it("QA captures source-mission verified bytes into target request, retaining original producer", async () => {
   const f = await seedWorld(db, root);
-  const qa = { ...f.steps[1], toolArtifactContract: { schemaVersion: "manual-onboarding.qa.v1", role: "qa", inputStepId: "write" },
-    toolArgs: { content: "{$steps.write.workProductPath}", assetsDir: "{$steps.write.siblingAssetsDir}" } };
-  await db.update(workflowDefinitions).set({ stepsJson: [f.steps[0], qa] }).where(eq(workflowDefinitions.id, f.definition.id));
+  const mapped = { ...f.steps[0], id: "revision-write", sourceStepId: "write", name: "Revision writer" };
+  f.input.seedFromRun.stepIds = [mapped.id];
+  const qa = { ...f.steps[1], dependencies: [mapped.id], sourceStepId: "use",
+    workProductSelectors: { [mapped.id]: { type: "document", title: "content.json" } },
+    toolArtifactContract: { schemaVersion: "manual-onboarding.qa.v1", role: "qa", inputStepId: mapped.id },
+    toolArgs: { content: "{$steps.revision-write.workProductPath}", assetsDir: "{$steps.revision-write.siblingAssetsDir}" } };
+  await db.update(workflowDefinitions).set({ stepsJson: [mapped, qa] }).where(eq(workflowDefinitions.id, f.definition.id));
   const target = await f.admit();
   await executeWorkflowRun(db, target.id);
   const [use] = (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, target.id))).filter(s => s.stepId === "use");
   const requestId = randomUUID();
   await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: requestId }).where(eq(workflowStepRuns.id, use.id));
   await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
-  const parameters = await resolveWorkflowToolStepArgs({ db, run: target, step: qa, workflowSteps: [f.steps[0], qa], consumerStepRunId: use.id });
+  const parameters = await resolveWorkflowToolStepArgs({ db, run: target, step: qa, workflowSteps: [mapped, qa], consumerStepRunId: use.id });
   const request = await prepareQaArtifactRequest({ db, companyId: f.companyId, workflowRunId: target.id,
     stepRunId: use.id, stepId: "use", requestId, parameters });
   expect(request?.snapshot.input).toMatchObject({ workProductId: f.product.id, path: f.file,

@@ -13,6 +13,7 @@ import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-def
 import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
+import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -1360,7 +1361,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     companyId,
     units: effectiveDraft.refs.selectedExecutionUnits,
   });
+  const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
+    mission => buildPaqoWorkflowSteps(effectiveDraft, mission));
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
+  if (revisionErrors.length) {
+    await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
+    return { status: "invalid", reason: "mission_revision_invalid", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: revisionErrors };
+  }
   if (allStructuralErrors.length > 0) {
     await upsertMissionPlanDecisionSubmission({
       ...ledgerSubmission,
@@ -2247,6 +2254,7 @@ export function buildPaqoWorkflowSteps(
     const stepAgentId = isStructural ? "" : assigneeAgentId;
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
+      ...(unit.sourceStepId !== undefined ? { sourceStepId: unit.sourceStepId as string } : {}),
       name: `[${groupLabel}] ${title}`,
       agentId: stepAgentId,
       dependencies: [],
@@ -2492,15 +2500,6 @@ function pinnedPlanTemplateSelection(
     .filter((template) => manifest.selectedTemplateIds.includes(template.templateId))
     .map((template) => ({ id: template.templateId, key: template.key, name: template.name, instructions: template.instructions, contentHash: template.bodyHash }));
   return { ok: true, selectionSource, templates };
-}
-
-async function loadMissionRow(db: Db, companyId: string, missionId: string) {
-  const [row] = await db
-    .select({ id: missions.id, title: missions.title, description: missions.description })
-    .from(missions)
-    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
-    .limit(1);
-  return row ?? null;
 }
 
 function toPlanDecisionDiagnostic(diagnostic: Record<string, unknown>, commentId?: string | null): RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic {

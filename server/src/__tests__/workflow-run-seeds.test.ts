@@ -58,7 +58,7 @@ it.each(["sha", "incomplete", "definition", "scope", "foreign", "dag", "unsuppor
   if (reason === "foreign") f.input.seedFromRun.sourceWorkflowRunId = (await seedWorld(db, root)).sourceRun.id;
   if (reason === "dag") f.input.seedFromRun.stepIds = ["use"];
   if (reason === "unsupported") await db.update(workflowDefinitions).set({ stepsJson: [{ ...f.steps[0], type: "workflow" }, f.steps[1]] }).where(eq(workflowDefinitions.id, f.definition.id));
-  await expect(f.admit()).rejects.toThrow(reason === "sha" ? "workflow_seed_sha_mismatch" : "workflow_seed");
+  await expect(f.admit()).rejects.toThrow(reason === "sha" ? "workflow_seed_sha_mismatch" : reason === "incomplete" ? "mission_revision_failure_evidence_missing" : "workflow_seed");
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toEqual([]);
   expect(await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.companyId, f.companyId))).toEqual([]);
 });

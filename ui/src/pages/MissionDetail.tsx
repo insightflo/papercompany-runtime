@@ -8,6 +8,7 @@ import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useDialog } from "../context/DialogContext";
 import { MissionRevisionActions } from "../components/MissionRevisionActions";
+import { MissionRevisionStart } from "../components/MissionRevisionStart";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -21,6 +22,7 @@ import { MissionIssueTree } from "../components/MissionIssueTree";
 import { MissionIssueInspector } from "../components/MissionIssueInspector";
 import { MissionExecutionOverview } from "../components/MissionExecutionOverview";
 import { WorkflowDagPanel } from "../components/WorkflowDagPanel";
+import { formatMissionDate as formatDate } from "../lib/missionDate";
 
 const STATUS_OPTIONS: { value: MissionStatus; label: string }[] = [
   { value: "planning", label: "Planning" },
@@ -30,14 +32,6 @@ const STATUS_OPTIONS: { value: MissionStatus; label: string }[] = [
   { value: "cancelled", label: "Cancelled" },
 ];
 
-function formatDate(date: Date | string | null | undefined): string {
-  if (!date) return "—";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(new Date(date));
-}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -617,6 +611,7 @@ export function MissionDetail() {
         </TabsContent>
 
         <TabsContent value="workflow" className="mt-4">
+          {mission.sourceMissionId && <MissionRevisionStart missionId={mission.id} onStarted={() => { void queryClient.invalidateQueries(); }} />}
           <WorkflowDagPanel missionId={missionId} />
         </TabsContent>
 

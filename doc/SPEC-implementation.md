@@ -258,7 +258,7 @@ verified completion under the existing run lock, with no issue or fake dispatch
 history; verified evidence sets dependency readiness.
 
 V1 reuse is intentionally conservative: static, ordinary agent producer steps,
-identical step IDs and canonical complete step configurations, ancestor-closed
+explicit source-step mapping and canonical compatible step configurations, ancestor-closed
 success dependencies, successful original heartbeat attempts, and local registered
 files inside the source mission root (maximum 32 MiB each). Control nodes, child
 workflows, tool/QA nodes, dynamic planning nodes, missing historical snapshots,
@@ -272,8 +272,29 @@ Revision PLAN materialization publishes its definition and a display
 `POST /api/workflows/:workflowId/runs` with the revision mission ID and either an
 explicit seed set or no seed (fresh execution). Agent triggers cannot bypass this
 PAQO wait by omitting the seed. Ordinary missions retain automatic starts. See
-`doc/runbooks/mission-revision-seeds.md` for the operator API path and current
-mission-generated step-ID limitation.
+`doc/runbooks/mission-revision-seeds.md` for the operator UI/API path and restrictions.
+
+Structured revision plan units declare `sourceStepId`; the server validates unique,
+existing source identities before PLAN-QA. Generated PAQO target IDs retain this
+mapping. Version 2 seed configuration hashes exclude presentation fields and map
+native dependency references while retaining output contract equality. QA consumers
+resolve the target's pinned input binding while preserving the original producer.
+The mission Workflow tab offers completed candidates and an explicit fresh-start
+option; admission verifies the candidates again.
+
+Failed source steps require scoped failed/timed-out heartbeat `errorCode` records
+and a historical execution snapshot. A versioned executable-settings hash rejects
+unchanged failed execution before plan review and atomically at run creation,
+including fresh starts. Names, descriptions, arbitrary metadata and prose contracts
+cannot bypass it. Missing source mapping or failure evidence fails closed. Every
+revision plan unit currently maps to an existing source step; failed steps cannot
+be omitted to evade the guard. Ordinary missions without a source run are unchanged.
+
+Supervision derives board waiting from the scoped immutable PAQO definition, current
+structured PLAN-QA approval and absence of its mission run. It does not redispatch
+missing materialization merely because `workflowRunId` is null. Board admission
+checks the same current approval under a mission lock; agents cannot self-seed or
+start a revision PAQO workflow, and duplicate board starts are rejected.
 
 ## 6.5 Cross-Company Mission Delegation
 

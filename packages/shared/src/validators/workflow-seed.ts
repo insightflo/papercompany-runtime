@@ -14,6 +14,7 @@ export const workflowSeedEvidenceSchema = z.object({
   sourceDefinitionHash: z.string().regex(/^[a-f0-9]{64}$/),
   targetDefinitionHash: z.string().regex(/^[a-f0-9]{64}$/),
   stepConfigHash: z.string().regex(/^[a-f0-9]{64}$/),
+  stepConfigHashVersion: z.literal(2),
   products: z.array(z.object({
     id: z.string().uuid(), type: issueWorkProductTypeSchema, title: z.string().min(1),
     sha256: z.string().regex(/^[a-f0-9]{64}$/), path: z.string().min(1),

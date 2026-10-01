@@ -9,7 +9,8 @@ import { createAdmittedWorkflowRun } from "../../services/workflow/agent-run-cre
 import { workProductService } from "../../services/work-products.js";
 
 export const board = { type: "board" as const, userId: "local-board", source: "local_implicit" as const };
-export async function seedWorld(db: Db, root: string) {
+export async function seedWorld(db: Db, root: string,
+  buildSteps?: (mission: typeof missions.$inferSelect) => import("../../services/workflow/dag-engine.js").WorkflowStep[]) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Seed", issuePrefix: randomUUID(), workProductRoot: root });
   await db.insert(agents).values({ id: agentId, companyId, name: "Writer", role: "operator", adapterType: "process" });
@@ -17,15 +18,17 @@ export async function seedWorld(db: Db, root: string) {
   const steps = [{ id: "write", name: "Write", type: "agent", agentId, dependencies: [], graphWorkProductRequired: true },
     { id: "use", name: "Use", type: "agent", agentId, dependencies: ["write"],
       workProductSelectors: { write: { type: "document", title: "content.json" } }, toolArgs: { content: "{$steps.write.workProductPath}" } }];
-  const [definition] = await db.insert(workflowDefinitions).values({ companyId, name: "Seed", stepsJson: steps }).returning();
+  const executionSteps = buildSteps?.(sourceMission) ?? steps;
+  const producerId = executionSteps[0].id;
+  const [definition] = await db.insert(workflowDefinitions).values({ companyId, name: "Seed", stepsJson: executionSteps }).returning();
   const sourceRun = await createWorkflowRun(db, { companyId, workflowId: definition.id, missionId: sourceMission.id, triggeredBy: "board" });
   await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, sourceRun.id));
   const [issue] = await db.insert(issues).values({ companyId, missionId: sourceMission.id, title: "Write", status: "done" }).returning();
-  const [sourceStep] = await db.insert(workflowStepRuns).values({ workflowRunId: sourceRun.id, stepId: "write", issueId: issue.id,
+  const [sourceStep] = await db.insert(workflowStepRuns).values({ workflowRunId: sourceRun.id, stepId: producerId, issueId: issue.id,
     status: "running", startedAt: new Date() }).returning();
   const heartbeatId = randomUUID();
   await admittedProducer(db, { companyId, agentId, issueId: issue.id, stepRunId: sourceStep.id, heartbeatId });
-  const dir = path.join(root, "missions", sourceMission.id, "runs", sourceRun.id, "steps", "write");
+  const dir = path.join(root, "missions", sourceMission.id, "runs", sourceRun.id, "steps", producerId);
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, "content.json"), bytes = '{"blocks":[]}';
   await writeFile(file, bytes);
@@ -37,7 +40,7 @@ export async function seedWorld(db: Db, root: string) {
   const [revision] = await db.insert(missions).values({ companyId, ownerAgentId: agentId, title: "Revision", status: "active",
     sourceMissionId: sourceMission.id, sourceWorkflowRunId: sourceRun.id }).returning();
   const input = { companyId, workflowId: definition.id, missionId: revision.id, triggeredBy: "board",
-    seedFromRun: { sourceWorkflowRunId: sourceRun.id, stepIds: ["write"] } };
+    seedFromRun: { sourceWorkflowRunId: sourceRun.id, stepIds: [producerId] } };
   const admit = () => createAdmittedWorkflowRun(db, input, board);
   return { companyId, agentId, sourceMission, sourceRun, sourceStep, revision, definition, input, admit, file, product: product!, steps };
 }

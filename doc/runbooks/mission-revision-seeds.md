@@ -1,7 +1,9 @@
 # Board-approved revision output reuse
 
 Audience: board operators. Purpose: reuse registered successful outputs without
-rerunning their producer. This API path is available before a dedicated UI picker.
+rerunning their producer. Use the mission's Workflow tab to select completed source
+results and start, or deliberately choose **재사용 없이 새로 시작**. Candidates are
+advisory; the server verifies scope, configuration, original attempt and bytes again.
 
 ## Start a revision
 
@@ -10,7 +12,8 @@ rerunning their producer. This API path is available before a dedicated UI picke
    definition but leaves execution to the board. The active plan's
    `refs.paqoWorkflow` contains `workflowDefinitionId`, `stepIds`, and
    `awaitingBoardStart: true`; `workflowRunId` is null until explicit start.
-3. Inspect the source run using `GET /api/workflow-runs/:runId/detail` and the
+3. The Workflow tab offers candidates from `GET /api/missions/:id/revision-start`.
+   For API operation, inspect the source run using `GET /api/workflow-runs/:runId/detail` and the
    target definition using `GET /api/workflows/:workflowId`.
 4. Using board authentication, submit the target definition and revision mission:
 
@@ -33,8 +36,12 @@ Omit `seedFromRun` to deliberately run fresh. Do not send it inside `metadata`.
 
 ## Supported seeds and refusal
 
-- Same-company linked source mission/run; identical source/target step IDs and
-  complete canonical execution configurations from historical snapshots.
+- Same-company pinned source mission/run. Structured plan units must name their
+  exact `sourceStepId`; generated target IDs are mapped explicitly, never by title.
+  Existing IDs remain valid for static definitions. Source mappings must be unique
+  and exist in the historical snapshot.
+- Version 2 canonical configuration excludes presentation fields and maps dependency
+  IDs/native machine references. Output contracts still must match for reuse.
 - Ordinary agent producer steps only, with successful original heartbeat evidence.
 - Ancestor-closed success DAG: selecting a child requires every forward ancestor.
 - Registered local work products with stored SHA-256 matching current file bytes,
@@ -43,23 +50,33 @@ Omit `seedFromRun` to deliberately run fresh. Do not send it inside `metadata`.
   execution-card evidence contain verified original product paths. QA stages copy
   source bytes into the new mission's request directory.
 
-Errors return HTTP 422 with a `workflow_seed_*` code, or HTTP 403 for non-board
+Errors return HTTP 422 with a `workflow_seed_*` or `mission_revision_*` code, or HTTP 403 for non-board
 approval. No run/approval survives admission rejection. Later file mutation or
 source retry refuses materialization/selection rather than adopting another file.
 No source issue is attached to a completed target seed. The source is not changed.
 Source run/step deletion is blocked by provenance foreign keys while referenced;
 remove dependent target runs first if administratively deleting history.
 
-## Current limitations / follow-up
+## Repeat-failure policy and limits
 
-Mission-generated PAQO step IDs include the mission ID. Task2 does **not** infer a
-mapping from names/titles, nor weaken configuration equality. Such generated plans
-cannot reuse steps until Task3 supplies explicit source-step identity and a
-compatible canonical mapping. The board can still start them fresh. Static
-revision definitions retaining source IDs can reuse outputs now.
+A failed source step must remain explicitly mapped. Unchanged executable settings
+are rejected before PLAN-QA/materialization and again atomically at run creation,
+even with no seeds, a different target ID, a renamed title or changed prose.
+Diagnostics contain the scoped heartbeat `errorCode`, source step/run and versioned
+configuration hash. Missing historical snapshots or failed-step heartbeat evidence
+fail closed. Change executable settings (agent/tools/arguments/dependencies/etc.),
+not just promises in descriptions. Current revision planning requires every selected
+unit to map to one existing source step: adding/removing failed units is not supported.
 
 No automatic reuse, no tool/QA/control-node seeds, no legacy snapshot fallback,
-and no cross-company reuse. The repeat-failure guard is separate Task3 work.
-After board start, the native workflow run is authoritative; an older plan display
-marker is not execution authority. This change does not guarantee every existing
-supervision display/reconciliation path treats board waiting as an operator wait.
+and no cross-company reuse. Successful PAQO producer back-edges do not prevent
+initial seeding; forward dependencies must still be selected. Later QA rework is
+not authorized by seed approval and cannot silently replace the original attempt.
+
+Board waiting is derived from the scoped immutable definition, current structured
+PLAN-QA approval and absence of a run, not `awaitingBoardStart` prose/metadata.
+Supervision suppresses missing-materialization redispatch while this holds. Native
+board admission rechecks readiness under the mission lock and rejects duplicate
+starts. After start, the native run is authoritative; plan display refs may lag.
+Task2 pre-release seed records without `stepConfigHashVersion: 2` fail closed; no
+historical seed backfill is performed.

@@ -11,6 +11,7 @@ import { requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } fr
 import type { TriggerActor } from "./replacement-admission.js";
 import type { CreateWorkflowRunInput } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
+import type { RevisionStep } from "./revision-step-config.js";
 
 export function assertSeedActor(input: CreateWorkflowRunInput, actor?: TriggerActor) {
   if (!input.seedFromRun) return;
@@ -24,7 +25,7 @@ export function assertSeedActor(input: CreateWorkflowRunInput, actor?: TriggerAc
 function assertSupported(step: WorkflowStep) {
   if ((step.type && step.type !== "agent") || !step.agentId || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
     || step.bootstrapOnly || step.triggerOn === "escalation" || step.executionMode === "dynamic_owner_plan"
-    || resolveEdges(step).some(e => e.isBackEdge || e.when !== "success")) throw seedError("unsupported_step", { stepId: step.id });
+    || resolveEdges(step).some(e => !e.isBackEdge && e.when !== "success")) throw seedError("unsupported_step", { stepId: step.id });
 }
 
 export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
@@ -43,13 +44,16 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
     const ids = new Set(request.stepIds);
     // Check closure before product discovery: never silently fill a missing ancestor.
     for (const id of ids) {
-      const step = targetDef.steps.find(s => s.id === id), original = sourceDef.steps.find(s => s.id === id);
-      if (!step || !original || seedStepHash(step) !== seedStepHash(original)) throw seedError("incompatible_definition", { stepId: id });
+      const step = targetDef.steps.find(s => s.id === id) as RevisionStep | undefined;
+      const original = sourceDef.steps.find(s => s.id === (step?.sourceStepId ?? id));
+      if (!step || !original || seedStepHash(step, targetDef.steps) !== seedStepHash(original, sourceDef.steps)) throw seedError("incompatible_definition", { stepId: id });
       assertSupported(step);
-      if (resolveEdges(step).some(edge => !ids.has(edge.stepId))) throw seedError("dag_gap", { stepId: id });
+      if (resolveEdges(step).some(edge => !edge.isBackEdge && !ids.has(edge.stepId))) throw seedError("dag_gap", { stepId: id });
     }
     for (const id of ids) {
-      const [step] = await tx.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, source.id), eq(workflowStepRuns.stepId, id))).for("share");
+      const targetStep = targetDef.steps.find(s => s.id === id) as RevisionStep;
+      const sourceId = targetStep.sourceStepId ?? id;
+      const [step] = await tx.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, source.id), eq(workflowStepRuns.stepId, sourceId))).for("share");
       if (!step || step.status !== "completed" || !step.issueId) throw seedError("source_incomplete", { stepId: id });
       const rows = await tx.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.companyId, input.companyId),
         eq(issueWorkProducts.issueId, step.issueId), ne(issueWorkProducts.status, "archived"))).for("share");
@@ -58,16 +62,16 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
       for (const product of rows) {
         let selected;
         try {
-          selected = await selectSameRunWorkProduct(t, { companyId: input.companyId, workflowRunId: source.id, stepId: id,
+          selected = await selectSameRunWorkProduct(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId,
             selector: { type: product.type as "document", title: product.title }, pinnedId: product.id });
         } catch { throw seedError("source_provenance_invalid", { stepId: id }); }
         const { sha256 } = await verifySeedProductBytes(t, selected);
         products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
       }
       await tx.insert(workflowRunSeeds).values({ companyId: input.companyId, targetRunId: run.id,
-        targetStepId: id, targetStepRunId: randomUUID(), sourceRunId: source.id, sourceStepRunId: step.id, sourceStepId: id,
+        targetStepId: id, targetStepRunId: randomUUID(), sourceRunId: source.id, sourceStepRunId: step.id, sourceStepId: sourceId,
         approvedByUserId: actor!.userId!, evidence: { schemaVersion: "workflow.seed.v1", sourceDefinitionHash: sourceDef.definitionHash,
-          targetDefinitionHash: targetDef.definitionHash, stepConfigHash: seedStepHash(targetDef.steps.find(s => s.id === id)!), products } });
+          targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2, stepConfigHash: seedStepHash(targetStep, targetDef.steps), products } });
     }
     await tx.insert(activityLog).values({ companyId: input.companyId, actorType: "user", actorId: actor!.userId!,
       action: "workflow_run.seed_approved", entityType: "workflow_run", entityId: run.id,

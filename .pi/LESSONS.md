@@ -1,5 +1,15 @@
 # Runtime verification lessons
 
+### 2026-10-01 — inspect an existing contract before extending it
+- Task: Task3 revision unit contract.
+- What failed: Shared build reported missing `missionRevisionSourceSchema` after a new unit schema overwrote its file.
+- Root cause: Assumed the intended filename was new instead of reading the tracked file first.
+- Category: editing / compatibility.
+- Fix: Restored the original source schema and added the optional unit identity schema alongside it; shared build and source-contract tests pass.
+- Prevention rule: Check tracked-file existence and read before write; extend existing contract files with targeted edits.
+- Reuse trigger: Introducing a schema into an existing feature namespace.
+- Evidence: `/tmp/task3-types.log` failure; `/tmp/task3-types-final.log` successful shared/server/UI checks.
+
 ### 2026-10-01 — seed/QA fixtures must use canonical paths and release read-only fixture directories
 - Date: 2026-10-01
 - Task: Task2 durable revision seed verification.

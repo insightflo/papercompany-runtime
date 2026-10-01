@@ -46,6 +46,7 @@ import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "./qa-rework-cap-oversight-detection.js";
 import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
+import { loadRevisionBoardWait, revisionBoardWaitingMissionIds } from "./revision-board-wait.js";
 import { ensureQaSourceDefectOwnerCard } from "../workflow/qa-source-defect-owner-card.js";
 import {
   TERMINAL_FAILURE_RUN_STATUSES,
@@ -747,7 +748,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       ? latestPlanSubmission.planningIssueId
       : null;
     const hasRecordedPlanDecision = Boolean(trimmedString(activeOwnerPlanDecision.decisionHash));
-    const hasPaqoWorkflowRun = Boolean(trimmedString(activePaqoWorkflow.workflowRunId));
+    const hasPaqoWorkflowRun = Boolean(trimmedString(activePaqoWorkflow.workflowRunId)) || Boolean(await loadRevisionBoardWait(db, mission.companyId, mission.id));
     if (latestPlanDecision.ok && (!hasRecordedPlanDecision || !hasPaqoWorkflowRun)) {
       findings.push(`plan_decision_not_materialized: planning_issue=${latestPlanDecision.planningIssueId} comment=${latestPlanDecision.commentId}`);
       addRecommendation({
@@ -3000,11 +3001,11 @@ export function createSupervision({ db, deps, ownerActions }: {
             .map((row) => `${row.planQaIssueId}:${row.decisionHash}`)
           : [],
       );
+      const boardWaiting = await revisionBoardWaitingMissionIds(db, companyId, rowMissionIds);
       const planMaterializationGapMissionIds = new Set(
-        rows
-          .map((row) => row.id)
+        rows.map((row) => row.id)
           .filter((missionId) => {
-            if (activeHeartbeatMissionIds.has(missionId)) return false;
+            if (activeHeartbeatMissionIds.has(missionId) || boardWaiting.has(missionId)) return false;
             const planRow = activePlanByMissionId.get(missionId);
             if (!planRow) return false;
             const refs = asRecord(planRow.refs);
@@ -3022,8 +3023,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             );
           }),
       );
-      const staleInProgressFailedHeartbeatMissionIds = new Set(
-        rowMissionIds.length > 0
+      const staleInProgressFailedHeartbeatMissionIds = new Set(rowMissionIds.length > 0
           ? (await db
             .select({ missionId: issues.missionId })
             .from(issues)

@@ -8,11 +8,11 @@ import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js
 import { captureArtifactRoot, readArtifactBytes, digest } from "./artifact-files.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
-import type { WorkflowStep } from "./dag-engine.js";
+import { revisionStepHash } from "./revision-step-config.js";
 
 export const seedError = (reason: string, details: Record<string, unknown> = {}) =>
   unprocessable(`workflow_seed_${reason}`, { code: `workflow_seed_${reason}`, ...details });
-export const seedStepHash = (step: WorkflowStep) => hashStructuredValue({ schemaVersion: 1, step });
+export const seedStepHash = revisionStepHash;
 
 export async function requireSeedSource(db: Db, companyId: string, targetMissionId: string | null | undefined, sourceRunId: string) {
   if (!targetMissionId) throw seedError("linked_mission_required");
@@ -54,8 +54,8 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   const targetDef = await loadExecutionDefinition(db, seed.targetRunId, { requireHistorical: true });
   const sourceStep = sourceDef.steps.find(s => s.id === seed.sourceStepId), targetStep = targetDef.steps.find(s => s.id === seed.targetStepId);
   if (!sourceStep || !targetStep || sourceDef.definitionHash !== evidence.data.sourceDefinitionHash
-    || targetDef.definitionHash !== evidence.data.targetDefinitionHash || seedStepHash(sourceStep) !== evidence.data.stepConfigHash
-    || seedStepHash(targetStep) !== evidence.data.stepConfigHash) throw seedError("definition_changed");
+    || targetDef.definitionHash !== evidence.data.targetDefinitionHash || seedStepHash(sourceStep, sourceDef.steps) !== evidence.data.stepConfigHash
+    || seedStepHash(targetStep, targetDef.steps) !== evidence.data.stepConfigHash) throw seedError("definition_changed");
   const products = [];
   for (const saved of evidence.data.products) {
     let selected;

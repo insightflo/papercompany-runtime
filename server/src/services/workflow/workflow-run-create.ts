@@ -4,6 +4,8 @@ import {
   EXECUTION_DEFINITION_CREATION_MARKER_VERSION,
 } from "./execution-definition.js";
 import type { CreateWorkflowRunInput } from "./types.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
+import { checkMissionRevisionSteps } from "../missions/mission-revision-guard.js";
 
 /**
  * [파일 목적] Task5a1 원자적 workflow run 생성. run INSERT 와 실행정의 스냅샷 캡처를
@@ -45,6 +47,10 @@ export async function createWorkflowRunWithDefinition(
     }).returning();
     if (!row) throw new Error("Workflow run insert returned no row");
     await captureExecutionDefinition(tx, row.id);
+    if (input.missionId) {
+      const definition = await loadExecutionDefinition(tx, row.id, { requireHistorical: true });
+      await checkMissionRevisionSteps(tx as unknown as Db, { ...input, steps: definition.steps });
+    }
     return row;
   });
 }
