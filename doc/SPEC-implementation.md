@@ -226,6 +226,94 @@ only the unavailable QA unit from the current runnable candidate roster. Each
 selected template body is rendered as a stable, itemized checklist; PLAN-QA
 must evaluate every item and return all blocking failures in one verdict.
 
+## 6.4.2 Revision mission source and planning context
+
+Mission creation accepts nullable `sourceMissionId` and `sourceWorkflowRunId`.
+A source run requires a source mission; both must belong to the destination
+company and the run must belong to that mission. Validation precedes creation.
+When a source mission is supplied without a run, creation pins its latest native
+run by `createdAt DESC, id DESC`, or null if none exists. Existing missions are
+not backfilled; deleted source records clear the corresponding nullable link.
+
+Revision planning receives a delimited, read-only DB dossier in the PLAN issue
+and the owner-context → step-manifest → runtime-brief path. It contains scoped
+step/heartbeat status and error codes, structured PLAN-QA/workflow verdicts,
+operator option IDs and resolution state, and completed-step work products with
+registered producer identity and a stored SHA-256 digest. Products without that
+stored digest/provenance are omitted; this reader neither hashes local files nor
+certifies that current bytes still match. Comments, legacy comment-backed verdicts,
+error prose, stdout and stderr are not revision evidence. These references are
+planning information only: they do not authorize seeding, retry or completion.
+
+### 6.4.3 Board-approved revision output reuse
+
+The board-only workflow trigger accepts `seedFromRun: { sourceWorkflowRunId,
+stepIds }` together with the revision `missionId`. The authenticated actor, never
+`triggeredBy` or caller metadata, authorizes reuse. Source mission/run links must
+match in the same company. A durable `workflow_run_seeds` record binds each target
+step identity to the original run/step/attempt, registered products, SHA-256 hashes,
+historical definitions, and approving board user. Run creation, snapshot, seed
+approval and activity entry commit atomically. Initial step materialization applies
+verified completion under the existing run lock, with no issue or fake dispatch
+history; verified evidence sets dependency readiness.
+
+V1 reuse is intentionally conservative: static, ordinary agent producer steps,
+explicit source-step mapping and canonical compatible step configurations, ancestor-closed
+success dependencies, successful original heartbeat attempts, and local registered
+files inside the source mission root (maximum 32 MiB each). Control nodes, child
+workflows, tool/QA nodes, dynamic planning nodes, missing historical snapshots,
+changed attempts, missing hashes and changed bytes fail closed. Selection rechecks
+original provenance and bytes; tool consumers require explicit work-product
+selectors rather than legacy metadata fallback. Source producer identity is not
+rewritten. QA copies verified source bytes to its target request directory.
+
+Revision PLAN materialization publishes its definition and a display
+`paqoWorkflow.awaitingBoardStart` marker but does not auto-start it. The board uses
+`POST /api/workflows/:workflowId/runs` with the revision mission ID and either an
+explicit seed set or no seed (fresh execution). Agent triggers cannot bypass this
+PAQO wait by omitting the seed. Ordinary missions retain automatic starts. See
+`doc/runbooks/mission-revision-seeds.md` for the operator UI/API path and restrictions.
+
+Structured revision plan units may declare `sourceStepId`; the server validates unique,
+existing explicit source identities before PLAN-QA. New corrective units and removal
+of failed approaches are allowed; output reuse still requires source identity. Generated PAQO target IDs retain this
+mapping. Version 2 seed configuration hashes exclude presentation fields and map
+native dependency references while retaining output contract equality. QA consumers
+resolve the target's pinned input binding while preserving the original producer.
+The mission Workflow tab offers completed candidates and an explicit fresh-start
+option; admission verifies the candidates again.
+
+Execution-error comparisons require current-attempt failed/timed-out heartbeat
+`errorCode` records and a historical execution snapshot. Original wake admission binds
+generation, retry and iteration; stale/unproven heartbeats are excluded from the guard
+and planning dossier. Official current-attempt QA rejection and current-request tool
+failure/verdict records explain result failures without inventing adapter error codes.
+Unexplained failed steps still fail closed. A versioned executable-settings hash rejects
+unchanged execution errors before plan review and atomically at run creation, including
+fresh starts. Explicit mapping plus typed forward-graph fingerprints catch equivalent
+unlinked/generated steps; names, descriptions, arbitrary metadata and prose contracts
+cannot bypass comparison. Ordinary missions without a source run are unchanged.
+
+Supervision derives board waiting from the scoped immutable PAQO definition, current
+structured PLAN-QA approval and absence of its mission run. It does not redispatch
+missing materialization merely because `workflowRunId` is null. Board admission
+checks the same current approval while retaining mission/plan/QA issue/heartbeat/verdict
+locks through run commit. PLAN-QA writers use matching lock order, so revocation cannot
+commit between the authority read and run admission. Agents cannot self-seed or
+start a revision PAQO workflow, and duplicate board starts are rejected. The definition's
+owning mission determines revision admission: omitted or different mission IDs fail
+before any mission/run mutation. PAQO preserves validated artifact selectors/contracts
+and remaps explicit unit/source identities. Second-revision configuration comparisons
+use immediate source-run coordinates, mapping only the target. Native target attempt
+advancement retires initial seed authority without deleting provenance; selection then
+requires current-attempt same-run official output and never falls back to an old seed.
+For seeded runs, native bounded producer rework records an exact attempt transition.
+A native structural/paired-semantic consumer reset may retire only that producer's
+seed or earlier-attempt input bindings, atomically with reset and an audit copy.
+The same consumer row then pins a newly verified official product; manual status or
+counter edits alone cannot authorize replacement. Reset and pin writers share scoped
+row locks. Ordinary no-seed pin behavior and manual-resume behavior are unchanged.
+
 ## 6.5 Cross-Company Mission Delegation
 
 Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source

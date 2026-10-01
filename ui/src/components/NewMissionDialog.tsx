@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { missionsApi, type MissionStatus } from "../api/missions";
+import { missionsApi, type CreateMissionInput, type MissionStatus } from "../api/missions";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
 import { useDialog } from "../context/DialogContext";
@@ -72,7 +72,7 @@ export function NewMissionDialog() {
   }, [newMissionOpen, newMissionDefaults]);
 
   const createMission = useMutation({
-    mutationFn: (data: { title: string; description?: string; status: MissionStatus; ownerAgentId: string; projectId?: string }) =>
+    mutationFn: (data: CreateMissionInput) =>
       missionsApi.create(selectedCompanyId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.missions.list(selectedCompanyId!) });
@@ -98,6 +98,8 @@ export function NewMissionDialog() {
       status,
       ownerAgentId: ownerAgentId || (agents?.[0]?.id ?? ""),
       projectId: projectId || undefined,
+      sourceMissionId: newMissionDefaults?.sourceMissionId,
+      sourceWorkflowRunId: newMissionDefaults?.sourceWorkflowRunId,
     });
   }
 

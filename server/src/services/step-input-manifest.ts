@@ -239,6 +239,7 @@ export function buildStepInputManifest(input: {
         activePlanAvailable: missionOwnerPlanningActivePlan.available === true,
         selectedExecutionUnitCount: readNumber(missionOwnerPlanningActivePlan.selectedExecutionUnitCount) ?? 0,
         executionSourceUnitCount: missionOwnerPlanningExecutionUnits.length,
+        ...(missionOwnerPlanningContext.revisionContext ? { revisionContext: parseObject(missionOwnerPlanningContext.revisionContext) } : {}),
         planningDossierAvailable: Object.keys(planningDossier).length > 0,
         planningDossierAssetCounts: {
           workflowCandidates: planningDossierWorkflowCandidates.length,

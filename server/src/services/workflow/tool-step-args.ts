@@ -6,7 +6,7 @@ import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workflowStepOutputBindings, workflowStepRuns } from "@paperclipai/db";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
-import type { IssueWorkProduct } from "@paperclipai/shared";
+import { assertPinnedProductConsumable } from "./workproduct-pinned-path.js";
 import {
   pinWorkProductForStep,
 } from "./workflow-output-binding.js";
@@ -50,31 +50,6 @@ export function stringifyWorkflowRunMetadataValue(value: unknown): string | null
   return typeof json === "string" ? json : null;
 }
 
-
-/** [봇 maintainability·medium 교정] 핀 대상 검증의 단일 출처 — 사전 로드 루프와
- *  already_pinned 재조회 루프가 같은 식별 오류 의미론을 공유한다. */
-function assertPinnedProductConsumable(input: {
-  referencedStepId: string;
-  workProductId: string;
-  provider: string | null;
-  metadata: unknown;
-  url: string | null;
-}): string {
-  // [구조 호환] resolveWorkProductLocalFilePath 는 IssueWorkProduct 의 url/metadata 만 읽는다.
-  const fileRef = { url: input.url, metadata: input.metadata } as Pick<IssueWorkProduct, "url" | "metadata">;
-  void fileRef;
-  if (!input.provider) {
-    throw new Error(`workproduct_binding_target_missing: ${input.referencedStepId} → ${input.workProductId}`);
-  }
-  if (input.provider !== "local" && input.provider !== "local_file") {
-    throw new Error(`workproduct_binding_target_invalid: ${input.referencedStepId} → ${input.workProductId} (provider ${input.provider})`);
-  }
-  const pinnedPath = resolveWorkProductLocalFilePath(fileRef);
-  if (!pinnedPath) {
-    throw new Error(`workproduct_binding_target_invalid: ${input.referencedStepId} → ${input.workProductId} (unresolvable path)`);
-  }
-  return path.resolve(pinnedPath);
-}
 
 export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (input: {
   db: Db;
@@ -152,7 +127,8 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
       not(eq(issueWorkProducts.status, "archived")),
     ))
     .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt), desc(issueWorkProducts.id));
-  const products = allProducts.filter(p => !selected.has(p.stepId) || selected.get(p.stepId)!.product.id === p.id);
+  const products = [...allProducts.filter(p => !selected.has(p.stepId)),
+    ...Array.from(selected, ([stepId, value]) => ({ ...value.product, stepId }))];
   const pinCandidates: typeof products = [];
   const candidateStepIds = new Set<string>();
   for (const product of products) {

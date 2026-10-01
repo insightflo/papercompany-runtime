@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
 
 interface NewIssueDefaults {
   status?: string;
@@ -17,7 +18,7 @@ interface NewGoalDefaults {
 }
 
 // [수정 요청 미션] 미션 생성 다이얼로그 사전 채움 값 — MissionDetail의 수정 요청 버튼이 사용.
-interface NewMissionDefaults {
+interface NewMissionDefaults extends MissionRevisionSourceInput {
   title?: string;
   description?: string;
   ownerAgentId?: string;

@@ -114,6 +114,7 @@ export interface WorkflowRun {
  * Input to create a new workflow run.
  */
 export interface CreateWorkflowRunInput {
+  seedFromRun?: import("@paperclipai/shared/validators/workflow-seed").WorkflowSeedRequest;
   replacementIntent?: import("@paperclipai/shared/validators/workflow-replacement").ReplacementIntent;
   workflowId: string;
   companyId: string;

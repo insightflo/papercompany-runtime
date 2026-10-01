@@ -1,4 +1,6 @@
 import { joinPromptSections } from "./prompt-utils.js";
+import { summarizeMarkdownHandoff } from "./runtime-brief-handoff.js";
+import { renderMissionRevisionContext } from "./mission-revision-brief.js";
 import { readRunToolContract } from "./run-tool-contract.js";
 import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
 import { buildWorkflowReworkContractBriefLines, buildWorkflowReworkTaskHeader } from "./runtime-brief-rework-section.js";
@@ -411,18 +413,6 @@ function buildHermesChatBrief(value: unknown) {
   ], "\n");
 }
 
-function summarizeMarkdownHandoff(markdown: string | null) {
-  const trimmed = markdown?.trim();
-  if (!trimmed) return null;
-  const lines = trimmed
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^[-*]\s*/, "").trim())
-    .filter(Boolean);
-  if (lines.length === 0) return null;
-  const summary = lines.join(" ");
-  return summary.length > 220 ? `${summary.slice(0, 217)}...` : summary;
-}
-
 function buildMissionOwnerPlanningToolDetails(missionOwnerPlanningContext: Record<string, unknown>) {
   const planningDossier = asRecord(missionOwnerPlanningContext.planningDossier);
   const assets = asRecord(planningDossier?.assets);
@@ -473,6 +463,7 @@ function buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext: Record<s
     "Use dossier asset counts as pointers only. Missing tool/runtime-service assets do not prove that the Paperclip worker runtime is down.",
     assetCountsLine,
     ...buildMissionOwnerPlanningToolDetails(missionOwnerPlanningContext),
+    ...renderMissionRevisionContext(missionOwnerPlanningContext.revisionContext),
     `- Planning dossier gaps: ${asNumber(missionOwnerPlanningContext.planningDossierGapCount)} total, ${asNumber(missionOwnerPlanningContext.planningDossierSevereGapCount)} severe/blocking-or-research gaps.`,
     "Common operating boundary:",
     "Stay within your assigned role, authority, and issue scope. Do not perform work that belongs to another role just because you can reach a tool.",

@@ -10,8 +10,8 @@
 //     every sync. Fixes no-verdict retry loop and running-producer crash recovery.
 //   - Sibling barrier: coalesce per producer only when all sibling gates terminal.
 //   - Bounded diagnostics: per-item 200 chars, total 2000 chars.
-
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import { withSeedReworkBindings } from "../seed-rework-bindings.js";
 import type { Db } from "@paperclipai/db";
 import { issueComments, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { resolveEdges } from "./edge-condition.js";
@@ -98,9 +98,9 @@ function boundedFeedback(gateId: string, verdictRec: StructuralGateVerdictRecord
   ].join("\n").slice(0, 2000);
 }
 
-export async function applyStructuralGatePass(input: {
+export const applyStructuralGatePass = withSeedReworkBindings(async (input: {
   db: Db; run: LoopRun; steps: readonly ReworkableStep[]; stepRuns: StepRun[];
-}): Promise<{ stepRuns: StepRun[]; reworkedCount: number }> {
+}): Promise<{ stepRuns: StepRun[]; reworkedCount: number }> => {
   const { db, run, steps, stepRuns } = input;
   if (run.status === "cancelled") return { stepRuns, reworkedCount: 0 };
   const srMap = new Map(stepRuns.map((sr) => [sr.stepId, sr]));
@@ -325,7 +325,7 @@ export async function applyStructuralGatePass(input: {
     return { stepRuns: refreshed, reworkedCount };
   }
   return { stepRuns, reworkedCount: 0 };
-}
+});
 
 // [GAZ 저녁3 4f8cfacb 무음 교착] A completed structural gate whose PASS evidence
 //   (dispatch-time producer token / verdict observedAt) predates the producer's

@@ -43,11 +43,15 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
   const sourceArg = typeof parameters.content === "string" ? "content" : "html";
   if (typeof parameters.content === "string" && typeof parameters.html === "string") throw new Error("qa_artifact_input_ambiguous");
   if (parameters[sourceArg] !== selected.file) throw new Error("qa_artifact_input_mismatch");
-  const bytes = await readArtifactBytes(missionRoot, path.relative(missionRoot.path, selected.file), 8 * 1024 * 1024);
+  const inputPaths = await resolveMissionWorkProductPaths(input.db, { companyId: input.companyId, missionId: selected.producer.missionId });
+  const inputRoot = selected.producer.workflowRunId === row.run.id ? missionRoot
+    : await captureArtifactRoot(inputPaths?.missionOutputDir ?? "");
+  const bytes = await readArtifactBytes(inputRoot, path.relative(inputRoot.path, selected.file), 8 * 1024 * 1024);
+  if (selected.producer.workflowRunId !== row.run.id && digest(bytes) !== selected.product.metadata?.sha256) throw new Error("workflow_seed_sha_mismatch");
   const assetsRoot = sourceArg === "content" && typeof parameters.assetsDir === "string" ? parameters.assetsDir : "";
   if (sourceArg === "content" && !assetsRoot) throw new Error("qa_artifact_explicit_assets_required");
-  const html = sourceArg === "html" ? await readHtmlBundle(missionRoot, selected.file, bytes, parameters.htmlManifest) : undefined;
-  const assets = html?.assets ?? await readDraftAssets(missionRoot, bytes, assetsRoot, sourceArg === "content");
+  const html = sourceArg === "html" ? await readHtmlBundle(inputRoot, selected.file, bytes, parameters.htmlManifest) : undefined;
+  const assets = html?.assets ?? await readDraftAssets(inputRoot, bytes, assetsRoot, sourceArg === "content");
   const ancillary = html?.ancillary ?? [];
   // HTML metadata paths are never interpreted by the CLI; only this explicit manifest is authoritative.
   if (html && ["repoMeta", "shotResult", "empiricalResult"].some(k => parameters[k] !== undefined)) throw new Error("qa_artifact_html_use_manifest");

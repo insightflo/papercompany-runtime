@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { createArtifactDirectory } from "./artifact-writer.js";
 import { captureQaDispatch, type QaDispatchScope } from "./qa-dispatch-guard.js";
 import { and, eq } from "drizzle-orm";
-import { workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { workflowRuns, workflowStepRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import { toolArtifactReceiptSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { captureArtifactRoot, digest, readArtifactBytes } from "./artifact-files.js";
 import { readQaReceiptBytes } from "./qa-artifact-receipt.js";
@@ -36,8 +36,12 @@ export async function prepareQaConsumer(input: QaDispatchScope & { parameters: u
   const { step, run } = matches[0];
   const { receipt, bytes: qaBytes } = await readQaReceiptBytes(input.db, { companyId: input.companyId, workflowRunId: run.id, stepId: step.stepId });
   if (receipt.missionId !== run.missionId) throw new Error("qa_artifact_consumer_mission_mismatch");
+  const bindings = await input.db.select().from(workflowStepOutputBindings).where(and(
+    eq(workflowStepOutputBindings.consumerStepRunId, step.id),
+    eq(workflowStepOutputBindings.workProductId, receipt.input.workProductId)));
+  if (bindings.length !== 1) throw new Error("qa_artifact_consumer_binding_required");
   const producer = await selectOfficialWorkProduct(input.db, { companyId: input.companyId, workflowRunId: run.id,
-    stepId: receipt.input.producer.stepId, selector: { type: "document", title: path.basename(receipt.input.path) }, pinnedId: receipt.input.workProductId });
+    stepId: bindings[0].referencedStepId, selector: { type: "document", title: path.basename(receipt.input.path) }, pinnedId: receipt.input.workProductId });
   if (producer.file !== receipt.input.path) throw new Error("qa_artifact_consumer_producer_changed");
   const sourceKey = typeof args.sourceContentPath === "string" ? "sourceContentPath" : "sourceHtmlPath";
   if (args[sourceKey] !== receipt.input.path || (sourceKey === "sourceHtmlPath") !== (receipt.input.mode === "html")

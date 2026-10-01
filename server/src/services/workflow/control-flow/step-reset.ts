@@ -24,6 +24,7 @@ import type { Db } from "@paperclipai/db";
 import { workflowStepRuns } from "@paperclipai/db";
 import { logActivity } from "../../activity-log.js";
 import { appendAttempt } from "./verdict-store.js";
+import { withSeedProducerRework } from "../seed-rework-bindings.js";
 import type { StepIterationAttempt } from "./types.js";
 import { isHeartbeatFinalizationV1Enabled } from "../../heartbeat-finalization/flag.js";
 import {
@@ -62,9 +63,9 @@ export interface ResetStepRunForReworkResult {
  * [입력] ResetStepRunForReworkInput. [출력] { iterationIndex, issueResumeRequired }.
  * [주의] cap 미판정 — 호출자(loop-driver) 가 maxIterations 게이트를 통과한 뒤에만 호출할 것.
  */
-export async function resetStepRunForRework(
+export const resetStepRunForRework = withSeedProducerRework(async (
   input: ResetStepRunForReworkInput,
-): Promise<ResetStepRunForReworkResult> {
+): Promise<ResetStepRunForReworkResult> => {
   const { db, stepRun, companyId, attempt, reason } = input;
   const increment = input.increment ?? 1;
   const now = new Date();
@@ -159,4 +160,4 @@ export async function resetStepRunForRework(
   });
 
   return { stepRunId: stepRun.id, iterationIndex: nextIterationIndex, issueResumeRequired: Boolean(stepRun.issueId) };
-}
+});

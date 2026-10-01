@@ -8,13 +8,15 @@ import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, missionAgents, missions } from "@paperclipai/db";
 import type { WorkflowDefinition } from "../workflow/types.js";
+import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
+import { resolveMissionRevisionSource } from "./mission-revision-source.js";
 
 export type MissionWriteDb = Pick<Db, "insert" | "select">;
 
 /** mission 행 생성. 상태·제목·설명은 호출자가 명시적으로 준다(기본 상태 없음). */
 export async function createMissionRecord(
   dbOrTx: MissionWriteDb,
-  input: {
+  input: MissionRevisionSourceInput & {
     companyId: string;
     ownerAgentId: string;
     title: string;
@@ -24,9 +26,11 @@ export async function createMissionRecord(
     status: string;
   },
 ): Promise<typeof missions.$inferSelect> {
+  const source = await resolveMissionRevisionSource(dbOrTx, input.companyId, input);
   const [mission] = await dbOrTx
     .insert(missions)
     .values({
+      ...source,
       companyId: input.companyId,
       ownerAgentId: input.ownerAgentId,
       title: input.title,

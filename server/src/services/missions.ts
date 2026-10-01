@@ -7,6 +7,7 @@
 
 import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
+import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -246,7 +247,7 @@ async function resolveProjectRefs(db: Db, projectIds: string[]): Promise<Map<str
 /**
  * Input for creating a mission.
  */
-export interface CreateMissionInput {
+export interface CreateMissionInput extends MissionRevisionSourceInput {
   companyId: string;
   ownerAgentId: string;
   title: string;
@@ -472,7 +473,6 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     if (input.status) validateStatus(input.status);
     const missionSource = input.source === "workflow" ? "workflow" : "manual";
 
-    // Verify owner agent exists
     const [ownerRow] = await db
       .select({ id: agents.id })
       .from(agents)
@@ -489,8 +489,8 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     //   the day's still-active mission and interleaving their issues. Every
     //   workflow trigger now gets its own mission.
 
-    // Create mission
     const mission = await createMissionRecord(db, {
+      sourceMissionId: input.sourceMissionId, sourceWorkflowRunId: input.sourceWorkflowRunId,
       companyId: input.companyId,
       ownerAgentId: input.ownerAgentId,
       title: input.title,

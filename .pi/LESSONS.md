@@ -1,5 +1,71 @@
 # Runtime verification lessons
 
+### 2026-10-01 — reused consumer rows need native input invalidation proof
+- Date: 2026-10-01
+- Task: Final seeded revision rework binding blocker.
+- What failed: New-consumer tests hid permanent old pins on reused QA rows; the first complete-path fixture also replaced native producer-generation metadata and accidentally gave a structural tool an agent ID while correcting types.
+- Root cause: Bindings key consumer row, not attempt; native rework reuses rows. Fixture dispatch must preserve native reset metadata, and structural gates require empty agentId.
+- Category: lifecycle / test fidelity / concurrency.
+- Fix: Retire seed/earlier-attempt pins atomically only with native producer-transition and consumer-reset proof; retain audit. Seed pin writers lock/revalidate. Use same IDs, exact producer completion time, preserved metadata, empty agentId, actual runner/receipt, and test-inclusive tsc.
+- Prevention rule: Same-row rework, not a newly inserted consumer, is the acceptance path. Test manual mutation, stale reset snapshot, concurrent pin writer, finalization OFF/ON, old audit and new pin together.
+- Reuse trigger: Immutable input pins combined with reset/retry/rework of persistent step rows.
+- Evidence: `/tmp/seed-binding-red2.log`, `/tmp/seed-binding-safety-red.log`, `/tmp/seed-binding-stale-red.log`; `/tmp/seed-binding-focused-final2.log` 9 files/51 tests, zero skips; source/test-inclusive typechecks passed.
+
+### 2026-10-01 — revision failure identity and approval serialization
+- Date: 2026-10-01
+- Task: Independent review findings 2/6/7 and excessive revision mapping restrictions.
+- What failed: QA rejection/tool failure was treated as missing adapter evidence; generation-only queries mixed retry/iteration attempts; board admission could commit while a verdict revocation was uncommitted. Mandatory mapping/removal prohibition exceeded the request.
+- Root cause: Display failure status substituted for failure authority, and mission-only admission locking did not coordinate PLAN-QA writers. Generated IDs were used as comparison identity.
+- Category: execution authority / concurrency / product scope.
+- Fix: Original wake admission proves current heartbeat attempt; official QA/tool result failures are distinct from heartbeat error codes; typed forward-graph hashes compare unlinked equivalent steps without granting reuse; shared mission→plan→issue→heartbeat→verdict ordering retains approval locks through run commit. New/removal plan units allowed.
+- Prevention rule: Test succeeded-heartbeat request_changes, issue-less tool verdicts, multiple retries in one generation, actual generated QA/machine gates, and both two-transaction orderings. Do not add stricter product restrictions to simplify identity matching.
+- Reuse trigger: Revision comparisons, retry dossiers, approval-to-run admission, generated workflow identities.
+- Evidence: `/tmp/review-267-red.log`, `/tmp/review-267-red7.log`, `/tmp/review-267-focused-final.log` (20 files/96 tests), `/tmp/review-267-regressions.log` (6 files/124 tests). Zero skips. Generated QA→changed PLAN→board verdict→fresh run exercised through real services.
+- Fixture corrections: Use actual storage in a scoped temp root, not a partial storage double with missing objectKey; use original admission helper rather than direct heartbeat insertion. A /tmp test tsconfig needs explicit repo typeRoots/types (otherwise Node EventEmitter members disappear); corrected test-inclusive check passes.
+
+### 2026-10-01 — revision fixes require generated-plan and attempt lifecycle proof
+- Date: 2026-10-01
+- Task: Independent mission revision findings 1/3/4/5.
+- What failed: HTTP omitted mission IDs bypassed board wait; generated PAQO dropped artifact contracts; seed selection rejected legitimate rework forever; second-revision hashes compared different coordinate systems.
+- Root cause: Request identity was trusted over definition ownership; manual test definitions bypassed the real builder; initial seed provenance was treated as lifetime execution authority; both sides followed historical source links.
+- Category: execution authority / integration coverage.
+- Fix: Definition-owned early admission; preserve/validate/remap PAQO contracts; retire seed authority on native target attempt advancement and require same-run official output; normalize target references only.
+- Prevention rule: Test actual HTTP omission/substitution with no-mutation checks, generated PAQO through the real tool runner, original plus new-attempt provenance, and revision-of-revision dependent steps. Run rework via sync (execute is initial-start/idempotent), record official QA verdicts, and capture structural producer tokens. QA receipt verification already rejects `ok:false`; do not invent successful rejection receipts.
+- Reuse trigger: Durable evidence reuse, generated workflow contracts, cross-run mapping, retries/rework.
+- Evidence: `/tmp/review-1-red.log`, `/tmp/review-3-red.log`, `/tmp/review-4-red2.log`, `/tmp/review-5-red-1-green.log`; final focused/typecheck logs referenced in plan.
+
+### 2026-10-01 — inspect an existing contract before extending it
+- Task: Task3 revision unit contract.
+- What failed: Shared build reported missing `missionRevisionSourceSchema` after a new unit schema overwrote its file.
+- Root cause: Assumed the intended filename was new instead of reading the tracked file first.
+- Category: editing / compatibility.
+- Fix: Restored the original source schema and added the optional unit identity schema alongside it; shared build and source-contract tests pass.
+- Prevention rule: Check tracked-file existence and read before write; extend existing contract files with targeted edits.
+- Reuse trigger: Introducing a schema into an existing feature namespace.
+- Evidence: `/tmp/task3-types.log` failure; `/tmp/task3-types-final.log` successful shared/server/UI checks.
+
+### 2026-10-01 — seed/QA fixtures must use canonical paths and release read-only fixture directories
+- Date: 2026-10-01
+- Task: Task2 durable revision seed verification.
+- What failed: Initial happy-path seed fixture used macOS `/var/...` while the safe artifact reader required canonical `/private/var/...`; QA assertions later passed but teardown hit EACCES on intentionally read-only input directories. Parallel legacy DB suites also silently skipped after embedded initialization failure.
+- Root cause: Fixture filesystem contract mismatch; teardown did not restore writable permissions on its own read-only QA directories; excessive parallel embedded startup.
+- Category: test / fixture
+- Fix: `realpath(mkdtemp(...))`; chmod only the exact owned temporary root before cleanup, following the existing QA fixture; rerun focused suites with `--maxWorkers=1` and require zero skips.
+- Prevention rule: Use canonical temporary artifact roots, account for production-created read-only directories in fixture cleanup, and inspect skip counts rather than accepting green suite labels.
+- Reuse trigger: Safe artifact reader/writer DB tests and parallel embedded PostgreSQL fixtures.
+- Evidence: `/tmp/task2-green1.log`, `/tmp/task2-qa.log`, `/tmp/task2-focused2.log`; final `/tmp/task2-focused-final.log` 11 files / 277 tests / zero skips.
+
+### 2026-10-01 — optional planner context must preserve ordinary manifest shape
+- Date: 2026-10-01
+- Task: Task1 revision source/planner linkage.
+- What failed: Focused regression expected the ordinary step manifest unchanged; unconditional `revisionContext: {}` added a field.
+- Root cause: Normalizing absent optional context into an empty object changed the no-revision contract.
+- Category: compatibility / test
+- Fix: Emit revisionContext only when a revision dossier exists; retain the existing exact manifest assertion.
+- Prevention rule: Optional planning features must preserve the ordinary manifest shape; test both present and absent paths.
+- Reuse trigger: Adding optional context to a runtime manifest.
+- Evidence: `/tmp/task1-focused.log` (80 pass/1 exact-shape failure); correction verified in Task1 focused rerun.
+
 ### 2026-09-22 — conditional QA closeout: sandbox failures are not bug RED and identical-conditions rerun decides blame
 - Date: 2026-09-22
 - Task: PR #260 two-finding correction (durable skip cancellation + JSONB predecessor comparison) closeout and A1 deploy.

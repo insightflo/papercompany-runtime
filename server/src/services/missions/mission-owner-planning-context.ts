@@ -7,10 +7,10 @@ import {
   issues,
   knowledgeBases,
   missionAgents,
-  missions,
   pluginEntities,
 } from "@paperclipai/db";
-import { notFound } from "../../errors.js";
+import { loadPlanningMission as loadMission } from "./mission-planning-mission.js";
+import { buildMissionRevisionContext, type MissionRevisionContext } from "./mission-revision-context.js";
 import { missionPlanArtifactService, summarizeMissionPlanForRuntime } from "../mission-plan-artifacts.js";
 import type { MissionPlanRuntimeSummary } from "../mission-plan-artifacts.js";
 import { listWorkflowDefinitions } from "../workflow/workflow-store.js";
@@ -162,6 +162,7 @@ export type MissionOwnerPlanningDossier = {
 export type MissionOwnerPlanningContext = {
   mission: MissionOwnerPlanningMission;
   planningIssueId: string | null;
+  revisionContext: MissionRevisionContext;
   activePlan: MissionOwnerPlanningActivePlan;
   executionSourceSnapshot: MissionExecutionSourceSnapshot;
   ruleRefs: MissionRuleRef[];
@@ -378,30 +379,6 @@ function buildPlanningDossier(input: {
       "Mark each gap as info, needs_research, or blocked and resolve blocked gaps before claiming readiness.",
       "Submit a structured Mission owner plan decision via `POST /api/issues/{planningIssueId}/mission-plan-decision` (`{ \"decision\": { ... } }`) from the checked-out owner run. Markdown comments are display/audit only and are not parsed as control-plane authority.",
     ],
-  };
-}
-
-async function loadMission(db: Db, input: BuildMissionOwnerPlanningContextInput): Promise<MissionOwnerPlanningMission> {
-  const [mission] = await db
-    .select()
-    .from(missions)
-    .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)))
-    .limit(1);
-
-  if (!mission) throw notFound(`Mission not found: ${input.missionId}`);
-
-  return {
-    id: mission.id,
-    companyId: mission.companyId,
-    ownerAgentId: mission.ownerAgentId,
-    title: mission.title,
-    description: mission.description,
-    status: mission.status,
-    goalId: mission.goalId,
-    startedAt: mission.startedAt,
-    completedAt: mission.completedAt,
-    createdAt: mission.createdAt,
-    updatedAt: mission.updatedAt,
   };
 }
 
@@ -691,6 +668,7 @@ export async function buildMissionOwnerPlanningContext(
   return {
     mission,
     planningIssueId: planningIssue?.id ?? null,
+    revisionContext: await buildMissionRevisionContext(db, input),
     activePlan,
     executionSourceSnapshot,
     ruleRefs: ruleContext.ruleRefs,

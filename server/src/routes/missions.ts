@@ -18,6 +18,7 @@
  * - GET    /missions/:id/runtime-snapshot            — Read structured mission runtime snapshot
  */
 import { Router } from "express";
+import { mountMissionRevisionStart } from "./mission-revision-start.js";
 import { type Db } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { missionService } from "../services/missions.js";
@@ -37,8 +38,7 @@ import {
 } from "../services/missions/mission-decision-reports.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
 
-export function missionRoutes(db: Db) {
-  const router = Router();
+export function missionRoutes(db: Db) { const router = Router();
   const heartbeat = heartbeatService(db);
   const enqueuePlanQaWakeup = createPlanQaWakeupHandler(
     heartbeat,
@@ -231,14 +231,12 @@ export function missionRoutes(db: Db) {
 
   /**
    * POST /companies/:companyId/missions
-   *
-   * Create a new mission.
    */
   router.post("/companies/:companyId/missions", async (req, res) => {
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
 
-    const { ownerAgentId, title, description, goalId, projectId, status, agentIds, source } = req.body;
+    const { ownerAgentId, title, description, goalId, projectId, status, agentIds, source, sourceMissionId, sourceWorkflowRunId } = req.body;
 
     if (!ownerAgentId || !title) {
       throw badRequest("ownerAgentId and title are required");
@@ -253,7 +251,7 @@ export function missionRoutes(db: Db) {
       projectId,
       status,
       agentIds,
-      source,
+      source, sourceMissionId, sourceWorkflowRunId,
     });
 
     const actor = getActorInfo(req);
@@ -266,7 +264,8 @@ export function missionRoutes(db: Db) {
       action: "mission.created",
       entityType: "mission",
       entityId: mission.id,
-      details: { title, ownerAgentId, status: mission.status },
+      details: { title, ownerAgentId, status: mission.status,
+        sourceMissionId: mission.sourceMissionId, sourceWorkflowRunId: mission.sourceWorkflowRunId },
     });
 
     res.status(201).json(mission);
@@ -742,5 +741,5 @@ export function missionRoutes(db: Db) {
     res.send(html);
   });
 
-  return router;
+  mountMissionRevisionStart(router, db); return router;
 }

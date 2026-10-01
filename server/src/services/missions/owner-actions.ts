@@ -17,7 +17,7 @@ import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment
 import { runMissionTerminalCleanup } from "./terminal-cleanup-fence.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
-import { buildMissionPlanningDescription } from "./mission-planning-description.js";
+import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines } from "./mission-execution-candidates.js";
 import { buildMissionRuleContext } from "./mission-rule-context.js";
@@ -464,7 +464,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     const runnableRosterLines = formatCandidateRosterLines(candidates, mission.ownerAgentId);
     const planTemplateCatalog = await missionPlanTemplateService(db).list(mission.companyId, { includeDisabled: false });
 
-    const description = buildMissionPlanningDescription({
+    const description = await buildRevisionMissionPlanningDescription(db, {
       companyId: mission.companyId,
       missionId: mission.id,
       title: mission.title,

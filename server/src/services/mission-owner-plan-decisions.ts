@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
@@ -10,9 +10,10 @@ import { readPlanQaRef, updatePlanQaRef, closePlanQaIssue, requireOwnerPlanQaPas
 import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
 import { missionDelegationService } from "./mission-delegations.js";
 import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-definition-identity.js";
-import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
+import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
-import { createWorkflowRun } from "./workflow/workflow-store.js";
+import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
+import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -34,8 +35,8 @@ import {
   validateStructuralUnit,
   validateStructuralTopology,
   validateDeclaredStructuralPlan,
-  rewriteStepToolArgs,
 } from "./missions/structural-materialization.js";
+import { applyPaqoArtifactContracts } from "./missions/paqo-artifact-contracts.js";
 import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
@@ -1360,7 +1361,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     companyId,
     units: effectiveDraft.refs.selectedExecutionUnits,
   });
+  const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
+    mission => buildPaqoWorkflowSteps(effectiveDraft, mission));
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
+  if (revisionErrors.length) {
+    await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
+    return { status: "invalid", reason: "mission_revision_invalid", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: revisionErrors };
+  }
   if (allStructuralErrors.length > 0) {
     await upsertMissionPlanDecisionSubmission({
       ...ledgerSubmission,
@@ -2247,6 +2254,7 @@ export function buildPaqoWorkflowSteps(
     const stepAgentId = isStructural ? "" : assigneeAgentId;
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
+      ...(unit.sourceStepId !== undefined ? { sourceStepId: unit.sourceStepId as string } : {}),
       name: `[${groupLabel}] ${title}`,
       agentId: stepAgentId,
       dependencies: [],
@@ -2278,7 +2286,7 @@ export function buildPaqoWorkflowSteps(
   //   - toolArgs reference rewriting
   //   - scoped prompt injection for all QA downstream of structural gates
   const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
-  rewriteStepToolArgs(gatedSteps, unitIdToStepId);
+  applyPaqoArtifactContracts(executableUnits, selectedSteps, gatedSteps, unitIdToStepId);
   // [실행 가능성 보증] 인자 없는 structural tool 스텝은 실행 시 반드시 실패한다(2026-08-27 gazua-evening 2).
   // 표준 검증 인자 자동 채움 → 불가능하면 fail-closed 거부.
   fillStructuralValidatorToolArgs(gatedSteps);
@@ -2452,23 +2460,8 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   });
   if (!definition) return;
 
-  const [existingRun] = await input.db
-    .select()
-    .from(workflowRuns)
-    .where(and(eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.workflowId, definition.id), eq(workflowRuns.missionId, input.missionId)))
-    .limit(1);
-  const workflowRunId = existingRun?.id ?? (await (async () => {
-    await requireOwnerPlanQaPass(input);
-    const run = await createWorkflowRun(input.db, {
-      companyId: input.companyId,
-      workflowId: definition.id,
-      missionId: input.missionId,
-      triggeredBy: input.triggeredBy,
-    });
-    await requireOwnerPlanQaPass(input);
-    await executeWorkflowRun(input.db, run.id);
-    return run.id;
-  })());
+  const workflowRunId = await ensureOwnerPlanWorkflowRun({ ...input, workflowId: definition.id,
+    requirePlanQaPass: () => requireOwnerPlanQaPass(input) });
 
   const service = missionPlanArtifactService(input.db);
   const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
@@ -2477,6 +2470,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     paqoWorkflow: {
       workflowDefinitionId: definition.id,
       workflowRunId,
+      ...(workflowRunId === null ? { awaitingBoardStart: true } : {}),
       workflowName,
       stepIds: steps.map((step) => step.id),
       decisionHash: input.decisionHash,
@@ -2506,15 +2500,6 @@ function pinnedPlanTemplateSelection(
     .filter((template) => manifest.selectedTemplateIds.includes(template.templateId))
     .map((template) => ({ id: template.templateId, key: template.key, name: template.name, instructions: template.instructions, contentHash: template.bodyHash }));
   return { ok: true, selectionSource, templates };
-}
-
-async function loadMissionRow(db: Db, companyId: string, missionId: string) {
-  const [row] = await db
-    .select({ id: missions.id, title: missions.title, description: missions.description })
-    .from(missions)
-    .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
-    .limit(1);
-  return row ?? null;
 }
 
 function toPlanDecisionDiagnostic(diagnostic: Record<string, unknown>, commentId?: string | null): RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic {

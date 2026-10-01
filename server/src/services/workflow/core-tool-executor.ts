@@ -163,7 +163,7 @@ export async function executeCoreWorkflowTool(input: {
       if (JSON.stringify(deployment) !== JSON.stringify(await toolDeploymentHashes(commandParts, cwd))) throw new Error("qa_tool_deployment_changed");
       const verified = await verifyQaArtifact(qaRequest, tool, deployment);
       return { status: 200, toolArtifactReceipt: verified.receipt,
-        body: { content: stdout.trim(), stderr: stderr.trim(), data: verified.qa, tool: input.toolName, source: "core", invocationProvenance } };
+        body: { content: stdout.trim(), stderr: stderr.trim(), data: { ...verified.qa, verdict: "pass" }, tool: input.toolName, source: "core", invocationProvenance } };
     }
     if (consumerRoot) {
       const bytes = "qaResultBytes" in result ? result.qaResultBytes : undefined;

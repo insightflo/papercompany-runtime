@@ -6,6 +6,8 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { dependencyToolEvidence } from "./dependency-tool-evidence.js";
+import { readWorkflowToolArtifactPath } from "./tool-artifact-path.js";
 import {
   ensureWorkflowStepRunRecords,
   type MaterializationOutcome,
@@ -1462,32 +1464,9 @@ async function createWorkflowStepIssue(input: {
           : "Registered dependency workProduct",
       }];
     });
-  const dependencyToolArtifactRows = input.step.dependencies.length > 0
-    ? await input.db
-      .select({
-        id: workflowStepRuns.id,
-        stepId: workflowStepRuns.stepId,
-        metadata: workflowStepRuns.metadata,
-      })
-      .from(workflowStepRuns)
-      .where(and(
-        eq(workflowStepRuns.workflowRunId, input.run.id),
-        inArray(workflowStepRuns.stepId, input.step.dependencies),
-        isNull(workflowStepRuns.issueId),
-        eq(workflowStepRuns.status, "completed"),
-      ))
-    : [];
-  const dependencyToolArtifactEvidenceRefs: IssueExecutionCardJson["evidenceRefs"] =
-    dependencyToolArtifactRows.flatMap((row) => {
-      const artifactPath = readWorkflowToolArtifactPath(getMetadataRecord(row.metadata, "toolResult"));
-      if (!artifactPath) return [];
-      return [{
-        type: "dependency_tool_artifact",
-        id: row.id,
-        path: artifactPath,
-        description: `Workflow tool artifact from step ${row.stepId}`,
-      }];
-    });
+  const dependencyToolArtifactEvidenceRefs = await dependencyToolEvidence(input.db, {
+    companyId: input.run.companyId, runId: input.run.id, stepIds: input.step.dependencies,
+  });
   const dependencyToolArtifactLines = dependencyToolArtifactEvidenceRefs.map((artifact) =>
     `- ${artifact.description}: ${artifact.path}`,
   );
@@ -2315,15 +2294,6 @@ function getMetadataRecord(value: unknown, key: string): Record<string, unknown>
 
 function readMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function readWorkflowToolArtifactPath(value: unknown): string | null {
-  const result = normalizeRecord(value);
-  const data = normalizeRecord(result.data);
-  const candidate = readMetadataString(result.artifactPath)
-    ?? readMetadataString(data.rawPath)
-    ?? readMetadataString(data.artifactPath);
-  return candidate && path.isAbsolute(candidate) ? path.resolve(candidate) : null;
 }
 
 function isCacheEnabled(step: WorkflowStep): boolean {
