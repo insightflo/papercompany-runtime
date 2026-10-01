@@ -344,19 +344,7 @@ export const workflowToolGrantSchema = z.object({
 }).strict();
 
 export type WorkflowToolGrantInput = z.infer<typeof workflowToolGrantSchema>;
-import { replacementIntentSchema } from "./workflow-replacement.js";
-export const triggerWorkflowRunSchema = z.object({ replacementIntent: replacementIntentSchema.optional(),
-  missionId: z.string().uuid().optional(),
-  triggeredBy: z.string().min(1).optional(),
-  triggerSource: z.string().nullable().optional(),
-  runDate: z.string().nullable().optional(),
-  runNumber: z.number().int().positive().nullable().optional(),
-  runLabel: z.string().nullable().optional(),
-  parentIssueId: nullableOptionalUuidSchema,
-  metadata: metadataSchema.optional(),
-}).strict();
-
-export type TriggerWorkflowRun = z.infer<typeof triggerWorkflowRunSchema>;
+export { triggerWorkflowRunSchema, type TriggerWorkflowRun } from "./workflow-trigger.js";
 
 export const resumeWorkflowRunSchema = z.object({}).strict();
 export type ResumeWorkflowRun = z.infer<typeof resumeWorkflowRunSchema>;

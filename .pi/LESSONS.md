@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-01 — seed/QA fixtures must use canonical paths and release read-only fixture directories
+- Date: 2026-10-01
+- Task: Task2 durable revision seed verification.
+- What failed: Initial happy-path seed fixture used macOS `/var/...` while the safe artifact reader required canonical `/private/var/...`; QA assertions later passed but teardown hit EACCES on intentionally read-only input directories. Parallel legacy DB suites also silently skipped after embedded initialization failure.
+- Root cause: Fixture filesystem contract mismatch; teardown did not restore writable permissions on its own read-only QA directories; excessive parallel embedded startup.
+- Category: test / fixture
+- Fix: `realpath(mkdtemp(...))`; chmod only the exact owned temporary root before cleanup, following the existing QA fixture; rerun focused suites with `--maxWorkers=1` and require zero skips.
+- Prevention rule: Use canonical temporary artifact roots, account for production-created read-only directories in fixture cleanup, and inspect skip counts rather than accepting green suite labels.
+- Reuse trigger: Safe artifact reader/writer DB tests and parallel embedded PostgreSQL fixtures.
+- Evidence: `/tmp/task2-green1.log`, `/tmp/task2-qa.log`, `/tmp/task2-focused2.log`; final `/tmp/task2-focused-final.log` 11 files / 277 tests / zero skips.
+
 ### 2026-10-01 — optional planner context must preserve ordinary manifest shape
 - Date: 2026-10-01
 - Task: Task1 revision source/planner linkage.

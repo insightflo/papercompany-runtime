@@ -1,54 +1,31 @@
-import { and, eq, ne } from "drizzle-orm";
-import { heartbeatRuns, issueWorkProducts, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
-import { workProductProducerSchema, workProductSelectorsSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
-import { resolveWorkProductLocalFilePath } from "../work-products.js";
-import { producerAttempt } from "../work-products/producer-attempt.js";
+import type { Db } from "@paperclipai/db";
+import { workProductSelectorsSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
+import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
+import { readSeededStepProducts, seedError } from "./workflow-seed-evidence.js";
 
 export async function selectOfficialWorkProduct(db: Db, scope: { companyId: string; workflowRunId: string;
   stepId: string; selector: WorkProductSelectors[string]; pinnedId?: string }) {
-  const [source] = await db.select({ run: workflowRuns, step: workflowStepRuns }).from(workflowRuns)
-    .innerJoin(workflowStepRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .where(and(eq(workflowRuns.id, scope.workflowRunId), eq(workflowRuns.companyId, scope.companyId), eq(workflowStepRuns.stepId, scope.stepId)));
-  if (!source?.step.issueId || source.step.status !== "completed") throw new Error("workproduct_selector_producer_unavailable");
-  const products = await db.select().from(issueWorkProducts).where(and(
-    eq(issueWorkProducts.companyId, scope.companyId), eq(issueWorkProducts.issueId, source.step.issueId),
-    ...(scope.pinnedId ? [eq(issueWorkProducts.id, scope.pinnedId)] : [ne(issueWorkProducts.status, "archived")]),
-    eq(issueWorkProducts.type, scope.selector.type), eq(issueWorkProducts.title, scope.selector.title)));
-  // Do not filter stale rows away and silently adopt a newer candidate.
-  if (products.length !== 1) throw new Error("workproduct_selector_not_exactly_one");
-  const product = products[0];
-  const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
-  if (!parsed.success) throw new Error("workproduct_selector_provenance_missing");
-  const p = parsed.data, s = source.step;
-  if (p.companyId !== scope.companyId || p.missionId !== source.run.missionId || p.workflowRunId !== scope.workflowRunId
-    || p.stepRunId !== s.id || p.stepId !== s.stepId || p.executionGeneration !== s.executionGeneration
-    || p.retryCount !== s.retryCount || p.iterationIndex !== s.iterationIndex
-    || product.sourceExecutionGeneration !== s.executionGeneration || product.createdByRunId !== p.heartbeatRunId) {
-    throw new Error("workproduct_selector_stale_producer");
-  }
-  const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, p.heartbeatRunId));
-  if (!heartbeat || heartbeat.companyId !== p.companyId || heartbeat.issueId !== s.issueId
-    || heartbeat.workflowStepRunId !== s.id || heartbeat.workflowExecutionGeneration !== s.executionGeneration) {
-    throw new Error("workproduct_selector_heartbeat_mismatch");
-  }
-  try {
-    const attempt = await producerAttempt(db, heartbeat, s);
-    if (attempt.retryCount !== p.retryCount || attempt.iterationIndex !== p.iterationIndex) throw new Error("attempt mismatch");
-  } catch { throw new Error("workproduct_selector_stale_producer"); }
-  const file = resolveWorkProductLocalFilePath(product);
-  if (!file || !["local", "local_file"].includes(product.provider)) throw new Error("workproduct_selector_not_local");
-  return { product, producer: p, file };
+  const seeded = await readSeededStepProducts(db, scope);
+  if (!seeded) return selectSameRunWorkProduct(db, scope);
+  const matches = seeded.filter(s => s.product.type === scope.selector.type && s.product.title === scope.selector.title
+    && (!scope.pinnedId || s.product.id === scope.pinnedId));
+  if (matches.length !== 1) throw seedError("selector_not_exactly_one");
+  return matches[0];
 }
 
 export async function resolveSelectedPaths(db: Db, input: { companyId: string; workflowRunId: string;
   selectors: unknown; references: Set<string>; pins: Map<string, string> }) {
   const selectors = workProductSelectorsSchema.parse(input.selectors ?? {});
   const result = new Map<string, Awaited<ReturnType<typeof selectOfficialWorkProduct>>>();
-  // Validate every selector before the caller writes even one pin.
   for (const [stepId, selector] of Object.entries(selectors)) {
     if (!input.references.has(stepId)) throw new Error("workproduct_selector_unused_reference");
     result.set(stepId, await selectOfficialWorkProduct(db, { companyId: input.companyId,
       workflowRunId: input.workflowRunId, stepId, selector, pinnedId: input.pins.get(stepId) }));
+  }
+  // A seed is never consumed through the legacy latest-product/metadata fallback.
+  for (const stepId of input.references) {
+    if (selectors[stepId]) continue;
+    if (await readSeededStepProducts(db, { ...input, stepId })) throw seedError("explicit_selector_required", { stepId });
   }
   return result;
 }

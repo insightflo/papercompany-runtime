@@ -245,6 +245,36 @@ certifies that current bytes still match. Comments, legacy comment-backed verdic
 error prose, stdout and stderr are not revision evidence. These references are
 planning information only: they do not authorize seeding, retry or completion.
 
+### 6.4.3 Board-approved revision output reuse
+
+The board-only workflow trigger accepts `seedFromRun: { sourceWorkflowRunId,
+stepIds }` together with the revision `missionId`. The authenticated actor, never
+`triggeredBy` or caller metadata, authorizes reuse. Source mission/run links must
+match in the same company. A durable `workflow_run_seeds` record binds each target
+step identity to the original run/step/attempt, registered products, SHA-256 hashes,
+historical definitions, and approving board user. Run creation, snapshot, seed
+approval and activity entry commit atomically. Initial step materialization applies
+verified completion under the existing run lock, with no issue or fake dispatch
+history; verified evidence sets dependency readiness.
+
+V1 reuse is intentionally conservative: static, ordinary agent producer steps,
+identical step IDs and canonical complete step configurations, ancestor-closed
+success dependencies, successful original heartbeat attempts, and local registered
+files inside the source mission root (maximum 32 MiB each). Control nodes, child
+workflows, tool/QA nodes, dynamic planning nodes, missing historical snapshots,
+changed attempts, missing hashes and changed bytes fail closed. Selection rechecks
+original provenance and bytes; tool consumers require explicit work-product
+selectors rather than legacy metadata fallback. Source producer identity is not
+rewritten. QA copies verified source bytes to its target request directory.
+
+Revision PLAN materialization publishes its definition and a display
+`paqoWorkflow.awaitingBoardStart` marker but does not auto-start it. The board uses
+`POST /api/workflows/:workflowId/runs` with the revision mission ID and either an
+explicit seed set or no seed (fresh execution). Agent triggers cannot bypass this
+PAQO wait by omitting the seed. Ordinary missions retain automatic starts. See
+`doc/runbooks/mission-revision-seeds.md` for the operator API path and current
+mission-generated step-ID limitation.
+
 ## 6.5 Cross-Company Mission Delegation
 
 Cross-company collaboration is mission-scoped, not issue-mirror scoped. A source

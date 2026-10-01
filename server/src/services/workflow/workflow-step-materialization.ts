@@ -7,6 +7,7 @@
 //   초기행 재삽입/영수증 합성은 삭제됐다(D3) — 유효 materialized 자식은 기존 native sync 만 쓴다.
 // [authority] 내구 레코드(workflow_runs.child_start_* / workflow_step_runs)만이 권위.
 import { randomUUID } from "node:crypto";
+import { seedInitialRows } from "./workflow-seed-materialization.js";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
@@ -184,6 +185,7 @@ async function insertMissingStepRows(
   const stepsById = new Map(input.steps.map((step) => [step.id, step]));
   const missingSteps = Array.from(stepsById.values()).filter((step) => !existingStepIds.has(step.id));
   if (missingSteps.length > 0) {
+    const seeds = await seedInitialRows(db, input.runId, missingSteps.map(s => s.id));
     await db
       .insert(workflowStepRuns)
       .values(
@@ -193,6 +195,7 @@ async function insertMissingStepRows(
           stepId: step.id,
           status: "pending",
           metadata: input.buildMetadata(step),
+          ...seeds.get(step.id),
         })),
       )
       .onConflictDoNothing({

@@ -1,0 +1,65 @@
+import "./helpers/workflow-control-node-boundary.js";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { createDb, workflowStepRuns, workflowDefinitions, instanceSettings } from "@paperclipai/db";
+import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { seedWorld } from "./helpers/workflow-seed-world.js";
+import { executeWorkflowRun } from "../services/workflow/dag-engine.js";
+import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
+import { prepareQaArtifactRequest } from "../services/workflow/qa-artifact-request.js";
+import { verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
+import { prepareQaConsumer } from "../services/workflow/qa-artifact-consumer.js";
+import { writeArtifactFile } from "../services/workflow/artifact-writer.js";
+
+let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
+beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("workflow-seed-qa-"); db = createDb(temp.connectionString);
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "workflow-seed-qa-"))); }, 60000);
+afterAll(async () => { await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
+it("seed evidence makes successors ready with finalization enforcement on, without fabricating heartbeat ownership", async () => {
+  await db.insert(instanceSettings).values({ singletonKey: "default", general: {}, experimental: { enableHeartbeatFinalizationV1: true } });
+  const f = await seedWorld(db, root), target = await f.admit();
+  await executeWorkflowRun(db, target.id);
+  const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, target.id));
+  expect(rows.find(s => s.stepId === "write")).toMatchObject({ status: "completed", dispatchOwnerHeartbeatRunId: null,
+    dispatchOwnerWakeupRequestId: null, startedAt: null });
+  expect(rows.find(s => s.stepId === "write")?.dispatchReadyAt).toBeInstanceOf(Date);
+  expect(rows.find(s => s.stepId === "use")?.issueId).toBeTruthy();
+});
+it("QA captures source-mission verified bytes into target request, retaining original producer", async () => {
+  const f = await seedWorld(db, root);
+  const qa = { ...f.steps[1], toolArtifactContract: { schemaVersion: "manual-onboarding.qa.v1", role: "qa", inputStepId: "write" },
+    toolArgs: { content: "{$steps.write.workProductPath}", assetsDir: "{$steps.write.siblingAssetsDir}" } };
+  await db.update(workflowDefinitions).set({ stepsJson: [f.steps[0], qa] }).where(eq(workflowDefinitions.id, f.definition.id));
+  const target = await f.admit();
+  await executeWorkflowRun(db, target.id);
+  const [use] = (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, target.id))).filter(s => s.stepId === "use");
+  const requestId = randomUUID();
+  await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: requestId }).where(eq(workflowStepRuns.id, use.id));
+  await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
+  const parameters = await resolveWorkflowToolStepArgs({ db, run: target, step: qa, workflowSteps: [f.steps[0], qa], consumerStepRunId: use.id });
+  const request = await prepareQaArtifactRequest({ db, companyId: f.companyId, workflowRunId: target.id,
+    stepRunId: use.id, stepId: "use", requestId, parameters });
+  expect(request?.snapshot.input).toMatchObject({ workProductId: f.product.id, path: f.file,
+    producer: { workflowRunId: f.sourceRun.id, stepRunId: f.sourceStep.id } });
+  expect(request?.snapshot.outputRoot).toContain(f.revision.id);
+  const snapshot = request!.snapshot;
+  await writeArtifactFile(snapshot.root, "qa-result.json", Buffer.from(JSON.stringify({ schemaVersion: "manual-onboarding.qa.v1",
+    command: "qa", mode: "content", section: null, ok: true, checks: [{ id: "fixture", ok: true }],
+    checkedAt: new Date().toISOString(), artifactPath: path.join(snapshot.outputRoot, "qa-result.json"),
+    contentSha256: snapshot.input.sha256, assetManifest: [] })));
+  const { receipt } = await verifyQaArtifact(request!, { id: randomUUID(), name: "test-double" },
+    [{ fileName: "test-double.mjs", sha256: "a".repeat(64), byteSize: 1 }]);
+  await db.update(workflowStepRuns).set({ status: "completed", metadata: { toolArtifactRequest: snapshot, toolArtifactReceipt: receipt } })
+    .where(eq(workflowStepRuns.id, use.id));
+  const [consumer] = await db.insert(workflowStepRuns).values({ workflowRunId: target.id, stepId: "publish", status: "running",
+    lastDispatchRequestId: "publish-request" }).returning();
+  const prepared = await prepareQaConsumer({ db, companyId: f.companyId, workflowRunId: target.id, stepRunId: consumer.id,
+    stepId: "publish", requestId: "publish-request", parameters: { qaResultPath: path.join(snapshot.outputRoot, "qa-result.json"), sourceContentPath: f.file } });
+  expect(prepared.inputBytes).toBeDefined();
+  expect(prepared.resultRoot?.path).toContain(f.revision.id);
+});

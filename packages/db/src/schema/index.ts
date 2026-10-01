@@ -110,6 +110,7 @@ export { workflowRuns } from "./workflow_runs.js";
 export { workflowRunDefinitions } from "./workflow_run_definitions.js";
 export { workflowResumeRequests } from "./workflow_resume_requests.js";
 export { workflowResumeExecutions } from "./workflow_resume_executions.js";
+export { workflowRunSeeds } from "./workflow_run_seeds.js";
 export { workflowLateEvidenceSubmissions } from "./workflow_late_evidence_submissions.js";
 export { workflowCuJobs } from "./workflow_cu_jobs.js";
 export { workflowCuObservations } from "./workflow_cu_observations.js";

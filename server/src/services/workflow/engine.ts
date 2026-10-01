@@ -12,6 +12,7 @@ import { issueService } from "../issues.js";
 import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
 import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
 import { createAdmittedWorkflowRun } from "./agent-run-create.js";
+import { assertSeedActor } from "./workflow-seed-admission.js";
 import { lockUnreplacedRun } from "./run-replacement-guard.js";
 import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
@@ -377,9 +378,7 @@ export const workflowService = {
     return updateWorkflowDefinition(db, id, updates);
   },
 
-  /**
-   * Delete a workflow definition.
-   */
+  /** Delete a workflow definition. */
   async deleteDefinition(db: Db, id: string): Promise<boolean> {
     await assertDefinitionNotQualityOwned(db, id);
     return deleteWorkflowDefinition(db, id);
@@ -391,6 +390,7 @@ export const workflowService = {
     input: CreateWorkflowRunInput,
     policy: WorkflowRunInputPolicy = {},
   ): Promise<WorkflowExecutionResult> {
+    assertSeedActor(input, policy.actor);
     const workflow = await getWorkflowDefinitionById(db, input.workflowId);
     if (!workflow) {
       throw new Error(`Workflow definition not found: ${input.workflowId}`);

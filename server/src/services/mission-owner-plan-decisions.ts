@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
@@ -10,9 +10,9 @@ import { readPlanQaRef, updatePlanQaRef, closePlanQaIssue, requireOwnerPlanQaPas
 import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
 import { missionDelegationService } from "./mission-delegations.js";
 import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-definition-identity.js";
-import { executeWorkflowRun, type WorkflowStep } from "./workflow/dag-engine.js";
+import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
-import { createWorkflowRun } from "./workflow/workflow-store.js";
+import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -2452,23 +2452,8 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   });
   if (!definition) return;
 
-  const [existingRun] = await input.db
-    .select()
-    .from(workflowRuns)
-    .where(and(eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.workflowId, definition.id), eq(workflowRuns.missionId, input.missionId)))
-    .limit(1);
-  const workflowRunId = existingRun?.id ?? (await (async () => {
-    await requireOwnerPlanQaPass(input);
-    const run = await createWorkflowRun(input.db, {
-      companyId: input.companyId,
-      workflowId: definition.id,
-      missionId: input.missionId,
-      triggeredBy: input.triggeredBy,
-    });
-    await requireOwnerPlanQaPass(input);
-    await executeWorkflowRun(input.db, run.id);
-    return run.id;
-  })());
+  const workflowRunId = await ensureOwnerPlanWorkflowRun({ ...input, workflowId: definition.id,
+    requirePlanQaPass: () => requireOwnerPlanQaPass(input) });
 
   const service = missionPlanArtifactService(input.db);
   const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
@@ -2477,6 +2462,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     paqoWorkflow: {
       workflowDefinitionId: definition.id,
       workflowRunId,
+      ...(workflowRunId === null ? { awaitingBoardStart: true } : {}),
       workflowName,
       stepIds: steps.map((step) => step.id),
       decisionHash: input.decisionHash,

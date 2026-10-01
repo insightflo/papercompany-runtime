@@ -688,7 +688,7 @@ export function pluginRoutes(
         ? params.triggerSource.trim()
         : req.actor.type;
       const replacementIntent = params.replacementIntent as import("@paperclipai/shared/validators/workflow-replacement").ReplacementIntent | undefined;
-      const trigger = { companyId, workflowId, missionId, triggeredBy, replacementIntent, metadata: params.metadata as Record<string, unknown> | undefined };
+      const trigger = { companyId, workflowId, missionId, triggeredBy, replacementIntent, seedFromRun: params.seedFromRun as import("@paperclipai/shared/validators/workflow-seed").WorkflowSeedRequest | undefined, metadata: params.metadata as Record<string, unknown> | undefined };
       await assertAgentReplacementRequired(db, trigger, req.actor);
       if (!replacementIntent) await refreshNativeWorkflowDefinitionFromPluginEntity({ companyId, pluginId: input.pluginId, workflowId });
       const run = await workflowService.trigger(db, trigger, { actor: req.actor });
