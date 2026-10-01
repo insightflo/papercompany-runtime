@@ -38,6 +38,6 @@ export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [],
     ...(purpose === "seed" && step.dependsOn ? { dependsOn: step.dependsOn.map(remap).sort() } : {}),
     // Rework routing is not the producer's execution configuration. Seed admission separately checks topology.
     conditionalDependencies: (step.conditionalDependencies ?? [])
-      .filter(e => !e.isBackEdge).map(e => ({ ...e, stepId: remap(e.stepId) })), 
+      .filter(e => !e.isBackEdge).map(e => ({ ...e, stepId: remap(e.stepId) })),
   });
 }
