@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-10-02 — declarative role migration must preserve execution equivalence
+- Date: 2026-10-02
+- Task: QA genericization integration with revision repeat guards and seeded reuse.
+- What failed: Updating a failed-source fixture to `action` hid the legacy `agent` → declared `action` hash mismatch; original failing work was admitted to PLAN-QA instead of rejected.
+- Root cause: Comparison treated the role spelling change as a new execution configuration.
+- Category: integration / regression fixture fidelity.
+- Fix: Canonicalize only untyped/agent/action execution for both comparison purposes; retain legacy-source fixtures and assert real repeat rejection and seeded product identity. QA/control/tool roles remain distinct.
+- Prevention rule: Preserve historical fixture definitions when migrating declarations; add cross-version comparisons instead of modernizing both sides.
+- Reuse trigger: Declarative role/config migrations affecting revision hashes or reuse admission.
+- Evidence: `/tmp/qag/phase-b3-investigation/legacy-red.log`, `delivery-red-integration.log`, `seed-diagnostic.log`.
+
+### 2026-10-02 — exported baselines must resolve their own workspace packages
+- Date: 2026-10-02
+- Task: Compare PAQO integration timing with origin/main without touching other worktrees.
+- What failed: A baseline export with directory-level node_modules symlinks resolved current shared validators, producing a false baseline assertion failure.
+- Root cause: Workspace dependency symlinks resolved through the original dependency directory.
+- Category: verification environment.
+- Fix: Link external dependencies individually and redirect workspace links to the exported commit; exact main then passed 6/6 tests.
+- Prevention rule: Verify workspace-package resolution before treating an exported baseline run as evidence. Setup failures and tool-launch errors are not product RED results.
+- Reuse trigger: git archive baseline comparisons with pnpm workspaces.
+- Evidence: `/tmp/qag/phase-b3-investigation/main.log`, `main-isolated.log`.
+
 ### 2026-10-01 — reused consumer rows need native input invalidation proof
 - Date: 2026-10-01
 - Task: Final seeded revision rework binding blocker.

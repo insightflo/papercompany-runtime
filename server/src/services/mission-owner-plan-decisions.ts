@@ -1362,7 +1362,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     units: effectiveDraft.refs.selectedExecutionUnits,
   });
   const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
-    mission => buildPaqoWorkflowSteps(effectiveDraft, mission));
+    mission => buildPaqoWorkflowSteps(effectiveDraft, mission, { tools: planningTools }));
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
   if (revisionErrors.length) {
     await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
