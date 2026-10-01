@@ -33,7 +33,8 @@ describeEP("strategy playbook routes (embedded DB)", () => {
   function createApp(actor: Record<string, unknown>) {
     const app = express();
     app.use(express.json());
-    app.use((req, _res, next) => {
+    app.use((req, res, next) => {
+      res.setHeader("x-test-fixture", "strategy-playbook");
       (req as any).actor = actor;
       next();
     });
@@ -250,7 +251,9 @@ describeEP("strategy playbook routes (embedded DB)", () => {
     const seeded = await request(createApp(boardActor([companyId])))
       .post(`/api/companies/${companyId}/strategy-playbook`)
       .send(validProposal);
-    expect(seeded.status).toBe(201);
+    expect(seeded.status, JSON.stringify({
+      body: seeded.body, text: seeded.text, fixture: seeded.headers["x-test-fixture"],
+    })).toBe(201);
 
     const res = await request(createApp(boardActor([companyId])))
       .patch(`/api/strategy-playbook/${seeded.body.id}`)

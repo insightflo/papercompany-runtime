@@ -82,7 +82,7 @@ describeEP("workflow frozen dispatch (captured graph executes despite live edits
   it("materializes step runs only for captured ids: synthesized id stable, live additions and duplicate delivery gates ignored", async () => {
     setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
     const { workflowId, runId } = await seedFrozenWorkflow([
-      { id: "publish-onboarding-hub", name: "Publish onboarding hub", agentId: "", dependencies: [], tools: ["captured-sync"], toolArgs: { target: "hub" } },
+      { id: "publish-onboarding-hub", deliveryVerification: "required", name: "Publish onboarding hub", agentId: "", dependencies: [], tools: ["captured-sync"], toolArgs: { target: "hub" } },
       { id: "downstream", name: "Downstream", agentId: "", dependencies: ["publish-onboarding-hub"], tools: ["captured-sync"], toolArgs: {} },
       { name: "Ghost step", agentId: "", dependencies: [], tools: ["captured-sync"] },
     ]);

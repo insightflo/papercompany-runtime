@@ -52,7 +52,7 @@ describe("heartbeat-stability knobs", () => {
   });
 
   it("derives step timeout signals from normalized workflow steps", () => {
-    expect(stepTimeoutSignalsFromStep({ id: "validate-report", name: "Validate report", timeoutSeconds: 1900 })).toEqual({
+    expect(stepTimeoutSignalsFromStep({ id: "validate-report", name: "Validate report", type: "qa", timeoutSeconds: 1900 })).toEqual({
       stepTimeoutSeconds: 1900,
       isQaStep: true,
     });

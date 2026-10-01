@@ -9,7 +9,6 @@ import {
 import { conflict, notFound, unprocessable } from "../../errors.js";
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import {
-  buildWorkflowExecutionSteps,
   isDynamicOwnerPlanWorkflowDefinition,
 } from "./execution-steps.js";
 import {
@@ -19,6 +18,7 @@ import {
 } from "./execution-definition-codec.js";
 import type { ExecutionDefinitionPayload, ExecutionDefinitionProvenance } from "./execution-definition-codec.js";
 import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
+import { buildCompanyWorkflowExecutionSteps } from './company-execution-steps.js';
 
 /**
  * [파일 목적] Task5a1 실행정의 스냅샷의 캡처(생성 시 1회)와 읽기(SELECT-only)를 담당한다.
@@ -126,12 +126,7 @@ export async function captureExecutionDefinition(tx: TransactionDb, runId: strin
     }
   }
 
-  const steps = buildWorkflowExecutionSteps({
-    name: definition.name,
-    stepsJson: definition.stepsJson,
-    executionMode: definition.executionMode,
-    dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
-  });
+  const steps = await buildCompanyWorkflowExecutionSteps(tx, definition);
   const executionMode = inferExecutionMode(definition, steps);
   const provenance: ExecutionDefinitionProvenance = {
     schemaVersion: 1,
@@ -266,12 +261,7 @@ export async function loadExecutionDefinition(
     throw historicalUnproven("marked_run_without_snapshot", { workflowRunId: run.id });
   }
 
-  const steps = buildWorkflowExecutionSteps({
-    name: definition.name,
-    stepsJson: definition.stepsJson,
-    executionMode: definition.executionMode,
-    dynamicPlanBootstrapOnly: definition.dynamicPlanBootstrapOnly,
-  });
+  const steps = await buildCompanyWorkflowExecutionSteps(dbOrTx, definition);
   const executionMode = inferExecutionMode(definition, steps);
   // [계약] legacy fallback 의 transient hash — historical 증거로는 절대 수리되지 않는다.
   const transientHash = hashStructuredValue({

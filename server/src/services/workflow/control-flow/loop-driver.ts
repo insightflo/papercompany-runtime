@@ -47,7 +47,7 @@ import {
 } from "./edge-condition.js";
 import { resetStepRunForRework } from "./step-reset.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
-import { isDeliveryRelevantStep } from "../delivery-verification-gate.js";
+import { isDeliveryReadbackStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderSourceScopeTag, renderWorkflowReworkComment, applyRecurrencePromotion } from "./rework-contract.js";
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
@@ -457,11 +457,7 @@ export async function applyBackEdgeReworkPass(
       const qaStepDef = steps.find((s) => s.id === q.edge.stepId);
       if (
         qaStepDef &&
-        isDeliveryRelevantStep({
-          id: qaStepDef.id,
-          name: (qaStepDef as { name?: string }).name ?? qaStepDef.id,
-          description: (qaStepDef as { description?: string }).description,
-        })
+        isDeliveryReadbackStep(qaStepDef)
       ) {
         try {
           const qaIssueId = q.qaRun?.issueId ?? null;

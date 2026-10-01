@@ -169,12 +169,12 @@ describe("isDynamicOwnerPlanWorkflowDefinition", () => {
     })).toBe(true);
   });
 
-  it("legacy tech-scout family names need a root planning step for dynamic inference", () => {
+  it("workflow names and planning labels do not select dynamic execution", () => {
     const rootPlan = { id: "plan", name: "Daily plan", dependencies: [] };
     const dependentStep = { id: "scout", name: "Scout", dependencies: ["plan"] };
 
-    expect(isDynamicOwnerPlanWorkflowDefinition({ name: "tech-scout", steps: [rootPlan] })).toBe(true);
-    expect(isDynamicOwnerPlanWorkflowDefinition({ name: "Daily-Tech-AI-News ", steps: [rootPlan] })).toBe(true);
+    expect(isDynamicOwnerPlanWorkflowDefinition({ name: "tech-scout", steps: [rootPlan] })).toBe(false);
+    expect(isDynamicOwnerPlanWorkflowDefinition({ name: "Daily-Tech-AI-News ", steps: [rootPlan] })).toBe(false);
     expect(isDynamicOwnerPlanWorkflowDefinition({ name: "tech-scout", steps: [dependentStep] })).toBe(false);
     expect(isDynamicOwnerPlanWorkflowDefinition({ name: "other-workflow", steps: [rootPlan] })).toBe(false);
   });
@@ -198,7 +198,7 @@ describe("buildWorkflowExecutionSteps — delivery gate synthesis", () => {
   it("appends exactly one delivery-verification-gate for a static manual-onboarding-publish step", () => {
     const steps = buildWorkflowExecutionSteps({
       name: "company-site",
-      stepsJson: [{ id: "manual-onboarding-publish", name: "Publish onboarding hub", agentId: "agent-1" }],
+      stepsJson: [{ id: "manual-onboarding-publish", deliveryVerification: 'required', name: "Publish onboarding hub", agentId: "agent-1" }],
     });
     const gates = steps.filter((step) => step.id === "delivery-verification-gate");
 
@@ -214,7 +214,7 @@ describe("buildWorkflowExecutionSteps — delivery gate synthesis", () => {
     const steps = buildWorkflowExecutionSteps({
       name: "company-site",
       stepsJson: [
-        { id: "manual-onboarding-publish", name: "Publish onboarding hub", agentId: "agent-1" },
+        { id: "manual-onboarding-publish", deliveryVerification: 'required', name: "Publish onboarding hub", agentId: "agent-1" },
         { id: "verify-publish", name: "Verify publish", qaType: "delivery", dependencies: ["manual-onboarding-publish"], agentId: "qa-agent" },
       ],
     });
@@ -228,7 +228,7 @@ describe("buildWorkflowExecutionSteps — delivery gate synthesis", () => {
     const steps = buildWorkflowExecutionSteps({
       name: "company-site",
       executionMode: "dynamic_owner_plan",
-      stepsJson: [{ id: "manual-onboarding-publish", name: "Publish onboarding hub", agentId: "agent-1" }],
+      stepsJson: [{ id: "manual-onboarding-publish", deliveryVerification: 'required', name: "Publish onboarding hub", agentId: "agent-1" }],
     });
 
     expect(steps.some((step) => step.id === "delivery-verification-gate")).toBe(false);

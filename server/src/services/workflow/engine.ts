@@ -9,7 +9,7 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, companies, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { issueService } from "../issues.js";
-import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup, normalizeWorkflowStepsForExecution } from "./dag-engine.js";
+import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
 import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
 import { createAdmittedWorkflowRun } from "./agent-run-create.js";
 import { assertRevisionBoardStart } from "./revision-run-admission.js";
@@ -23,7 +23,7 @@ import { resetFailedControlNodesForResume, resetStaleIfControlNodesForResume } f
 import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
 import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
-import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
+import { listCompanyPlanningArtifactTools } from "../missions/mission-plan-publication-contract.js";
 import { resolveWorkflowMissionOwnerAgentId } from "../missions/mission-create-records.js";
 import { assertDefinitionNotQualityOwned } from "../quality/native-definition.js";
 import {
@@ -60,65 +60,7 @@ import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 import type { WorkflowSyncSource } from "./workflow-sync-source.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { ensureCreatedRunOversight } from "./workflow-created-run-oversight.js";
-import { validateWorkflowQaConfigs } from './artifact-config-validation.js';
-
-type WorkflowStepLike = WorkflowStep & {
-  title?: unknown;
-  dependsOn?: unknown;
-  tools?: unknown;
-  toolName?: unknown;
-  agentName?: unknown;
-};
-
-function synthesizeWorkflowQaReworkBackEdges(steps: WorkflowStep[]): WorkflowStep[] {
-  return steps
-    .filter((step) => isQaLikeStep(step) && step.dependencies.length > 0)
-    .reduce(
-      (nextSteps, qaStep) => synthesizeQaReworkBackEdge(nextSteps, qaStep.id),
-      steps,
-    );
-}
-
-function normalizeWorkflowSteps(
-  steps: unknown[],
-  options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown } = {},
-): WorkflowStep[] {
-  validateWorkflowQaConfigs(steps);
-  const normalizedSteps = steps.map((rawStep) => {
-    const step = (rawStep && typeof rawStep === "object" ? rawStep : {}) as WorkflowStepLike;
-    const { conditionalDependencies: _rawConditionalDependencies, ...stepWithoutRawConditionalDependencies } = step;
-    const normalized = normalizeWorkflowStepsForExecution([step])[0]!;
-    const toolNames = normalized.toolNames;
-
-    return {
-      ...stepWithoutRawConditionalDependencies,
-      id: normalized.id,
-      name: normalized.name,
-      agentId: normalized.agentId,
-      dependencies: normalized.dependencies,
-      graphWorkProductRequired: normalized.graphWorkProductRequired,
-      ...(normalized.conditionalDependencies ? { conditionalDependencies: normalized.conditionalDependencies } : {}),
-      ...(toolNames ? { toolNames } : {}),
-    };
-  });
-
-  const dynamicOwnerPlan = options.executionMode === "dynamic_owner_plan"
-    || options.dynamicPlanBootstrapOnly === true
-    || options.dynamicPlanBootstrapOnly === "true";
-  const stepsWithQaLoops = synthesizeWorkflowQaReworkBackEdges(normalizedSteps);
-
-  if (!dynamicOwnerPlan) return stepsWithQaLoops;
-
-  return stepsWithQaLoops.map((step) => {
-    if (step.triggerOn === "escalation" || step.dependencies.length > 0) return step;
-    return {
-      ...step,
-      dynamicChildren: step.dynamicChildren ?? true,
-      ownerPlanBootstrapOnly: step.ownerPlanBootstrapOnly ?? true,
-      executionMode: step.executionMode ?? "dynamic_owner_plan",
-    };
-  });
-}
+import { normalizeWorkflowSteps } from "./normalize-definition-steps.js";
 
 function formatWorkflowMissionTitle(
   workflowName: string,
@@ -319,6 +261,7 @@ export const workflowService = {
   ): Promise<WorkflowDefinition> {
     const steps = normalizeWorkflowSteps(input.steps as unknown[], {
       executionMode: input.executionMode,
+      tools: await listCompanyPlanningArtifactTools(db, input.companyId),
     });
     // Validate DAG structure
     const validation = validateDag(steps);
@@ -357,15 +300,16 @@ export const workflowService = {
   ): Promise<WorkflowDefinition | null> {
     await assertDefinitionNotQualityOwned(db, id);
     if (updates.steps) {
+      const existing = await getWorkflowDefinitionById(db, id);
+      if (!existing) return null;
       const steps = normalizeWorkflowSteps(updates.steps as unknown[], {
         executionMode: updates.executionMode,
+        tools: await listCompanyPlanningArtifactTools(db, existing.companyId),
       });
       const validation = validateDag(steps);
       if (!validation.valid) {
         throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
       }
-      const existing = await getWorkflowDefinitionById(db, id);
-      if (!existing) return null;
       await assertWorkflowToolReadiness(db, existing.companyId, steps);
       // [workflow child step] 정의 수정 시에도 CYCLE DFS(자기참조 거부, diamond 허용).
       await assertWorkflowChildDefinitionCycles(db, existing.companyId, id, steps);

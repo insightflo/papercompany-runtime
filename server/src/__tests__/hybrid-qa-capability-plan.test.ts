@@ -17,7 +17,7 @@ describe("hybrid QA — pre-PLAN structural plan validation (topology)", () => {
       { id: "producer", kind: "mission_plan_unit", title: "[ACTION] Produce", sourceRef: { type: "mission_plan_unit", id: "producer" } },
       { id: "gate", kind: "mission_plan_unit", type: "tool", qaType: "structural", title: "[QA] Gate", toolNames: ["v"],
         dependsOn: ["producer"], sourceRef: { type: "mission_plan_unit", id: "gate-src" } },
-      { id: "qa", kind: "mission_plan_unit", title: "[QA] Semantic", dependsOn: ["producer", "gate"],
+      { id: "qa", type: "qa", kind: "mission_plan_unit", title: "[QA] Semantic", dependsOn: ["producer", "gate"],
         sourceRef: { type: "mission_plan_unit", id: "qa-src" } },
     ];
     expect(validateDeclaredStructuralPlan(units)).toEqual([]);
@@ -58,7 +58,7 @@ describe("hybrid QA — pre-PLAN structural plan validation (topology)", () => {
       { id: "p", kind: "mission_plan_unit", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "p" } },
       { id: "g", type: "tool", qaType: "structural", toolNames: ["v"], dependsOn: ["p"],
         sourceRef: { type: "mission_plan_unit", id: "g" } },
-      { id: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["p"], // missing "g"
+      { id: "qa", type: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["p"], // missing "g"
         sourceRef: { type: "mission_plan_unit", id: "qa" } },
     ];
     const errors = validateDeclaredStructuralPlan(units);
@@ -70,7 +70,7 @@ describe("hybrid QA — pre-PLAN structural plan validation (topology)", () => {
       { id: "p", kind: "mission_plan_unit", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "p" } },
       { id: "g", type: "tool", qaType: "structural", toolNames: ["v"], dependsOn: ["p"],
         sourceRef: { type: "mission_plan_unit", id: "g" } },
-      { id: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["g"], // omits producer "p"
+      { id: "qa", type: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["g"], // omits producer "p"
         sourceRef: { type: "mission_plan_unit", id: "qa" } },
     ];
     const errors = validateDeclaredStructuralPlan(units);
@@ -85,7 +85,7 @@ describe("hybrid QA — pre-PLAN structural plan validation (topology)", () => {
       { id: "p", kind: "mission_plan_unit", title: "Produce", sourceRef: { type: "mission_plan_unit", id: "p-src" } },
       { id: "g", type: "tool", qaType: "structural", toolNames: ["v"], dependsOn: ["p"],
         sourceRef: { type: "mission_plan_unit", id: "g-src" } },
-      { id: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["g", "p-src"],
+      { id: "qa", type: "qa", kind: "mission_plan_unit", title: "[QA] Review", dependsOn: ["g", "p-src"],
         sourceRef: { type: "mission_plan_unit", id: "qa-src" } },
     ];
     const errors = validateDeclaredStructuralPlan(units);

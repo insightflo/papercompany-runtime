@@ -848,6 +848,13 @@
       "when": 1790830663509,
       "tag": "0121_new_the_leader",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1790830663510,
+      "tag": "0122_generic_publication_template",
+      "breakpoints": true
     }
   ]
 }

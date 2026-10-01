@@ -136,6 +136,8 @@ describe("validateExecutionDefinitionPayload", () => {
       validStep({ graphWorkProductRequired: "true" }),
       validStep({ autoApproveTools: "true" }),
       validStep({ autoApproveTools: 1 }),
+      validStep({ deliveryVerification: 'optional' }),
+      validStep({ capAcceptance: 'allowed' }),
       validStep({ conditionalDependencies: "qa-1" }),
     ];
     for (const step of cases) {

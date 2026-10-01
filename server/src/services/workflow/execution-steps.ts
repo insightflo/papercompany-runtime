@@ -11,8 +11,8 @@ import { normalizeConditionalEdges } from "./control-flow/types.js";
 import { normalizeWorkflowQaType } from "./workflow-qa-type.js";
 import { readWorkProductRequirementMarker } from "./workflow-step-workproduct-markers.js";
 import {
-  hasExistingDeliveryReadbackStep,
-  isDeliveryRelevantStep,
+  hasExistingDeliveryReadbackStep, type DeliveryPolicyTool,
+  isDeliveryRelevantStep, hasSelectedArtifactRole,
   strengthenDeliveryReadbackSteps,
   synthesizeDeliveryVerificationGateStep,
 } from "./delivery-verification-gate.js";
@@ -178,26 +178,6 @@ function isDynamicOwnerPlanStep(step: WorkflowStep): boolean {
     || step.workflowMode === "dynamic_owner_plan";
 }
 
-function hasRootPlanningStep(steps: WorkflowStep[]): boolean {
-  return steps.some((step) => {
-    if (step.triggerOn === "escalation" || step.dependencies.length > 0) {
-      return false;
-    }
-    const id = step.id.toLowerCase();
-    const name = step.name.toLowerCase();
-    return id === "plan" || id.endsWith("-plan") || name.includes("plan") || name.includes("계획");
-  });
-}
-
-function isLegacyResearchDailyWorkflowName(name: unknown): boolean {
-  if (typeof name !== "string") return false;
-  const normalized = name.trim().toLowerCase();
-  return normalized === "tech-scout"
-    || normalized === "tech-ai-news"
-    || normalized === "daily-tech-scout"
-    || normalized === "daily-tech-ai-news";
-}
-
 export function isDynamicOwnerPlanWorkflowDefinition(
   definition: WorkflowDefinitionExecutionShape,
 ): boolean {
@@ -218,7 +198,7 @@ export function isDynamicOwnerPlanWorkflowDefinition(
     return true;
   }
 
-  return isLegacyResearchDailyWorkflowName(definition.name) && hasRootPlanningStep(steps);
+  return false;
 }
 
 export function getWorkflowLaunchSteps(
@@ -237,8 +217,17 @@ export interface WorkflowDefinitionExecutionInput {
   readonly workflowMode?: unknown;
 }
 
-export function buildWorkflowExecutionSteps(definition: WorkflowDefinitionExecutionInput): WorkflowStep[] {
-  let steps = normalizeWorkflowStepsForExecution(definition.stepsJson);
+export function buildWorkflowExecutionSteps(definition: WorkflowDefinitionExecutionInput, tools: readonly DeliveryPolicyTool[] = []): WorkflowStep[] {
+  // Materialize role-derived policy once; frozen runs never consult changed live tools.
+  let steps: WorkflowStep[] = normalizeWorkflowStepsForExecution(definition.stepsJson).map(step => {
+    const verifier = hasSelectedArtifactRole(step, tools, 'publication-verify');
+    return { ...step,
+      ...(isDeliveryRelevantStep(step, tools) ? { deliveryVerification: 'required' as const } : {}),
+      // Derived only from scoped validated tools; never trust a saved caller-supplied marker.
+      deliveryRole: verifier ? 'publication-verify' as const : undefined,
+      ...(verifier ? { qaType: step.qaType ?? 'delivery' } : {}),
+    };
+  });
   if (
     !isDynamicOwnerPlanWorkflowDefinition({
       name: definition.name,
@@ -248,7 +237,7 @@ export function buildWorkflowExecutionSteps(definition: WorkflowDefinitionExecut
       steps,
     })
   ) {
-    const deliverySteps = steps.filter(isDeliveryRelevantStep);
+    const deliverySteps = steps.filter(step => isDeliveryRelevantStep(step));
     if (deliverySteps.length > 0 && hasExistingDeliveryReadbackStep(steps)) {
       steps = strengthenDeliveryReadbackSteps(steps);
     } else if (deliverySteps.length > 0) {

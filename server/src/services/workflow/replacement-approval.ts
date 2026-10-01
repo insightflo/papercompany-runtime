@@ -25,7 +25,7 @@ export async function proposeReplacement(db: Db, companyId: string, actor: Expre
       workflowId: scope.run.workflowId, sourceRunId: scope.run.id, sourceAuthorityVersion: scope.run.dispatchAuthorityVersion,
       terminalDecisionId: scope.terminal.id, decisionEventId: scope.owner.eventId, requesterAgentId: scope.mission.ownerAgentId,
       targetRunId, requestGeneration: scope.step.executionGeneration, stepRunId: scope.step.id,
-      definitionHash: replacementDefinitionHash(definition, scope.mission.id, targetRunId), inputHash: hashStructuredValue(metadata),
+      definitionHash: await replacementDefinitionHash(tx, definition, scope.mission.id, targetRunId), inputHash: hashStructuredValue(metadata),
       inputContract: definition.runInputs ?? [],
       metadata, idempotencyKey: input.idempotencyKey, externalEffects: input.externalEffects });
     const [approval] = await tx.insert(approvals).values({ companyId, type: "workflow_replacement", status: "pending",
@@ -46,7 +46,7 @@ export async function approveReplacement(db: Db, companyId: string, approvalId: 
     const [approval] = await tx.select().from(approvals).where(eq(approvals.id, approvalId)).for("update");
     const definition = await lockReplacementDefinition(tx as unknown as Db, companyId, scope.run.workflowId);
     if (approval.status !== "pending" || hashStructuredValue(approval.payload) !== hashStructuredValue(p)
-      || p.definitionHash !== replacementDefinitionHash(definition, scope.mission.id, p.targetRunId)
+      || p.definitionHash !== await replacementDefinitionHash(tx, definition, scope.mission.id, p.targetRunId)
       || p.sourceAuthorityVersion !== scope.run.dispatchAuthorityVersion || p.requestGeneration !== scope.step.executionGeneration) throw conflict("replacement_approval_stale");
     const [updated] = await tx.update(approvals).set({ status: "approved", decidedByUserId: userId, decisionNote: input.decisionNote ?? null, decidedAt: new Date(), updatedAt: new Date() })
       .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending"))).returning();
@@ -91,7 +91,7 @@ export async function resubmitReplacement(db: Db, companyId: string, approvalId:
       sourceAuthorityVersion: scope.run.dispatchAuthorityVersion, terminalDecisionId: scope.terminal.id,
       decisionEventId: scope.owner.eventId, requesterAgentId: scope.mission.ownerAgentId,
       requestGeneration: scope.step.executionGeneration, stepRunId: scope.step.id,
-      definitionHash: replacementDefinitionHash(definition, scope.mission.id, p.targetRunId), inputHash: hashStructuredValue(metadata),
+      definitionHash: await replacementDefinitionHash(tx, definition, scope.mission.id, p.targetRunId), inputHash: hashStructuredValue(metadata),
       inputContract: definition.runInputs ?? [], metadata, idempotencyKey: input.idempotencyKey ?? p.idempotencyKey,
       externalEffects: input.externalEffects ?? p.externalEffects });
     const [updated] = await tx.update(approvals).set({ status: "pending", payload, requestedByUserId: userId,

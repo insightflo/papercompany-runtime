@@ -6,6 +6,7 @@ import {
 } from "../services/missions/supervision-helpers.js";
 import { hasDisallowedCycle } from "../services/workflow/control-flow/cycle-validator.js";
 import { normalizeConditionalEdges } from "../services/workflow/control-flow/types.js";
+import { publicationTools } from "./helpers/mission-publication-fixture.js";
 
 /**
  * [목적] P5 PAQO 미션 QA → producer rework back-edge 자동 합성(synthesizeQaReworkBackEdge) 단위 테스트.
@@ -15,10 +16,10 @@ import { normalizeConditionalEdges } from "../services/workflow/control-flow/typ
 type Step = BackEdgeCapableStep;
 
 function action(id: string, dependencies: string[] = [], conditionalDependencies?: Step["conditionalDependencies"]): Step {
-  return { id, dependencies, ...(conditionalDependencies ? { conditionalDependencies } : {}) };
+  return { id, type: "action", dependencies, ...(conditionalDependencies ? { conditionalDependencies } : {}) };
 }
 function qa(id: string, dependencies: string[]): Step {
-  return { id, dependencies };
+  return { id, type: "qa", dependencies };
 }
 
 function backEdge(producerId: string, qaId: string, maxIterations = QA_REWORK_DEFAULT_MAX_ITERATIONS) {
@@ -66,12 +67,12 @@ describe("synthesizeQaReworkBackEdge — 기본 합성", () => {
   it("delivery final QA replays publication and registered public verification as one bounded chain", () => {
     const steps: Step[] = [
       action("build"),
-      { id: "publish", dependencies: ["build"], toolNames: ["manual-onboarding-publish"] },
-      { id: "verify", dependencies: ["publish"], toolNames: ["manual-onboarding-verify"] },
+      { id: "publish", type: "action", dependencies: ["build"], toolNames: ["alpha"] },
+      { id: "verify", type: "qa", dependencies: ["publish"], toolNames: ["beta"], toolArgs: { receiptInput: "{$steps.publish.workProductPath}" } },
       qa("qa-final", ["verify"]),
     ];
 
-    const after = synthesizeQaReworkBackEdge(steps, "qa-final");
+    const after = synthesizeQaReworkBackEdge(steps, "qa-final", 2, { tools: publicationTools });
     const edge = { stepId: "qa-final", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 };
     expect(after.find((step) => step.id === "publish")?.conditionalDependencies).toEqual([edge]);
     expect(after.find((step) => step.id === "verify")?.conditionalDependencies).toEqual([edge]);
@@ -82,13 +83,13 @@ describe("synthesizeQaReworkBackEdge — 기본 합성", () => {
   it("delivery replay includes every intermediate step so verify cannot outrun republish", () => {
     const steps: Step[] = [
       action("build"),
-      { id: "publish", dependencies: ["build"], toolNames: ["manual-onboarding-publish"] },
+      { id: "publish", type: "action", dependencies: ["build"], toolNames: ["alpha"] },
       action("record-publication", ["publish"]),
-      { id: "verify", dependencies: ["record-publication"], toolNames: ["manual-onboarding-verify"] },
+      { id: "verify", type: "qa", dependencies: ["record-publication"], toolNames: ["beta"], toolArgs: { receiptInput: "{$steps.publish.workProductPath}" } },
       qa("qa-final", ["verify"]),
     ];
 
-    const after = synthesizeQaReworkBackEdge(steps, "qa-final");
+    const after = synthesizeQaReworkBackEdge(steps, "qa-final", 2, { tools: publicationTools });
     for (const stepId of ["publish", "record-publication", "verify"]) {
       expect(after.find((step) => step.id === stepId)?.conditionalDependencies).toEqual([
         { stepId: "qa-final", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },

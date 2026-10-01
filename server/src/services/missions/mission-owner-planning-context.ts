@@ -20,7 +20,8 @@ import type { MissionExecutionSourceSnapshot } from "./mission-execution-sources
 import { buildMissionRuleContext } from "./mission-rule-context.js";
 import type { MissionRuleRef } from "./mission-rule-context.js";
 import { mergeAgentConfig } from "../agents.js";
-import { extractMissionIntent, type MissionIntent } from "./mission-intent.js";
+import type { MissionIntent } from "./mission-intent.js";
+import { listCompanyPlanningArtifactTools, type PlanningArtifactTool, selectedArtifactContracts } from "./mission-plan-publication-contract.js";
 import { EVIDENCE_CHAIN_DELIVERABLE_PLANNING_LINE } from "./mission-quality-contract.js";
 import { stat } from "node:fs/promises";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -98,6 +99,7 @@ export type MissionOwnerPlanningBoundedAssetSummary = {
     description: string;
     inputSchema: Record<string, unknown>;
     planningMetadata?: WorkflowToolPlanningMetadata;
+    artifactContract?: import("@paperclipai/shared").ArtifactContract;
     source: string;
     enabled: boolean;
   }>;
@@ -115,13 +117,12 @@ export type MissionOwnerPlanningCapabilityEntry = {
   purpose: string;
 };
 
-/** site/cloudflare 게시 대상 감지 결과. secret 값은 절대 포함하지 않는다(presence/source 만). */
+/** Optional configured local staging directory; not proof of publication access. */
 export type MissionOwnerPlanningSitePublishTarget = {
   available: boolean | null;
   note: string;
   siteRoot?: string;
   canStage?: boolean;
-  cloudflare?: { hasApiToken: boolean; hasAccountId: boolean };
 };
 
 export type MissionOwnerPlanningCapabilityManifest = {
@@ -263,6 +264,7 @@ function unavailableSummary(note: string): MissionOwnerPlanningBoundedAssetSumma
 
 async function listWorkflowToolSummary(db: Db, companyId: string): Promise<MissionOwnerPlanningBoundedAssetSummary> {
   const catalog = await listWorkflowToolCatalog(db, companyId);
+  const declarations = await listCompanyPlanningArtifactTools(db, companyId);
   const usableTools = catalog.tools.filter((tool) => tool.enabled);
   if (usableTools.length === 0) {
     return {
@@ -284,6 +286,7 @@ async function listWorkflowToolSummary(db: Db, companyId: string): Promise<Missi
       description: tool.description,
       inputSchema: tool.inputSchema,
       ...(tool.planningMetadata ? { planningMetadata: tool.planningMetadata } : {}),
+      artifactContract: selectedArtifactContracts({ toolName: tool.name }, declarations)[0],
       source: tool.source,
       enabled: tool.enabled,
     })),
@@ -437,9 +440,6 @@ async function hasPluginWorkflowDefinitionEntities(db: Db, companyId: string): P
   return rows.length > 0;
 }
 
-/** publish capability 식별 정규식(skill key/slug/name 매칭). mission-intent publish 토큰과 의미 정렬. */
-const PUBLISH_CAPABILITY_RE = /manual[-_\s]?onboarding|publisher|cloudflare|\bpublish\b|\bdeploy\b|\bonboard/iu;
-
 function compressSkillEntry(input: {
   key: string;
   slug: string | null;
@@ -465,6 +465,7 @@ export function buildCapabilityManifest(
   skills: ReadonlyArray<{ key: string; slug: string | null; name: string | null; description: string | null }>,
   options: {
     intent?: MissionIntent;
+    tools?: readonly PlanningArtifactTool[];
     sitePublishTarget?: MissionOwnerPlanningSitePublishTarget;
   } = {},
 ): MissionOwnerPlanningCapabilityManifest {
@@ -474,11 +475,10 @@ export function buildCapabilityManifest(
   for (const skill of skills) {
     const entry = compressSkillEntry(skill);
     if (notableSkills.length < MAX_NOTABLE_SKILLS) notableSkills.push(entry);
-    if (!publishWanted) continue;
-    const haystack = `${skill.key} ${skill.slug ?? ""} ${skill.name ?? ""}`;
-    if (PUBLISH_CAPABILITY_RE.test(haystack) && publishCapabilities.length < MAX_PUBLISH_CAPABILITIES) {
-      publishCapabilities.push(entry);
-    }
+  }
+  for (const tool of options.tools ?? []) {
+    if (publishWanted && selectedArtifactContracts({ toolName: tool.name }, [tool]).some(contract => contract.role === "publication")
+      && publishCapabilities.length < MAX_PUBLISH_CAPABILITIES) publishCapabilities.push({ key: tool.name, name: tool.name, purpose: "Declared publication tool" });
   }
   return {
     publishCapabilities,
@@ -487,30 +487,12 @@ export function buildCapabilityManifest(
   };
 }
 
-/**
- * [목적] site/cloudflare 게시 대상 감지(실데이터). path 존재 + Cloudflare env presence. secret 값은 절대
- *   읽지 않고 boolean/source 만. A1(/srv/...) 과 local dev(env override) 모두 깨지지 않게 fallback.
- *   - siteRoot: env MANUAL_ONBOARDING_SITE_ROOT 우선, 없으면 /srv/manual-onboarding-cloudflare 기본.
- *   - cloudflare env: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 존재 여부(boolean).
- * [주의] fs/env 조회는 전부 가드 — 어떤 환경에서도 throw 하지 않는다.
- */
+/** Optional local staging discovery only; does not imply publication access. */
 export async function resolveSitePublishTarget(): Promise<MissionOwnerPlanningSitePublishTarget> {
-  const siteRoot = process.env.MANUAL_ONBOARDING_SITE_ROOT ?? "/srv/manual-onboarding-cloudflare";
-  let siteExists = false;
-  try {
-    await stat(siteRoot);
-    siteExists = true;
-  } catch {
-    siteExists = false;
-  }
-  const hasApiToken = Boolean(process.env.CLOUDFLARE_API_TOKEN);
-  const hasAccountId = Boolean(process.env.CLOUDFLARE_ACCOUNT_ID);
-  const cloudflare = { hasApiToken, hasAccountId };
-  const available = siteExists || hasApiToken ? true : null;
-  const note = available
-    ? `site root=${siteRoot} exists=${siteExists}; cloudflare token=${hasApiToken} account=${hasAccountId}.`
-    : `site root(${siteRoot}) 미확인 + cloudflare env 미구성. local/A1 어느 쪽도 아니면 게시 불가.`;
-  return { available, note, siteRoot, canStage: siteExists, cloudflare };
+  const siteRoot = process.env.PAPERCOMPANY_PUBLICATION_SITE_ROOT?.trim();
+  if (!siteRoot) return { available: false, canStage: false, note: "Publication site discovery is not configured." };
+  const canStage = await stat(siteRoot).then(value => value.isDirectory()).catch(() => false);
+  return { available: canStage, canStage, siteRoot, note: canStage ? "Configured staging directory exists." : "Configured staging directory is unavailable." };
 }
 
 /**
@@ -522,7 +504,7 @@ async function listCompanySkillSummaries(
   companyId: string,
   intent?: MissionIntent,
 ): Promise<MissionOwnerPlanningCapabilityManifest> {
-  const [rows, sitePublishTarget] = await Promise.all([
+  const [rows, sitePublishTarget, tools] = await Promise.all([
     db
       .select({
         key: companySkills.key,
@@ -534,8 +516,9 @@ async function listCompanySkillSummaries(
       .where(eq(companySkills.companyId, companyId))
       .orderBy(asc(companySkills.key)),
     resolveSitePublishTarget(),
+    listCompanyPlanningArtifactTools(db, companyId),
   ]);
-  return buildCapabilityManifest(rows, { intent, sitePublishTarget });
+  return buildCapabilityManifest(rows, { intent, sitePublishTarget, tools });
 }
 
 async function listAgentRoster(db: Db, missionId: string): Promise<MissionOwnerPlanningAgentRosterEntry[]> {
@@ -632,9 +615,7 @@ export async function buildMissionOwnerPlanningContext(
   const workflowCandidates = await listWorkflowCandidates(db, input.companyId, purposeTokens);
   const agentRoster = await listAgentRoster(db, input.missionId);
   const candidateRoster = await listCompanyExecutionCandidates(db, input.companyId);
-  // [P3] intent 로 capability 를 스코핑 — non-publish 미션에 publish capability 가 과다 주입되지 않게.
-  const missionIntent = extractMissionIntent(mission.title, mission.description);
-  const capabilityManifest = await listCompanySkillSummaries(db, input.companyId, missionIntent);
+  const capabilityManifest = await listCompanySkillSummaries(db, input.companyId);
   const tools = await listWorkflowToolSummary(db, input.companyId);
   const kbRefs = await listKbRefs(db, input.companyId, agentRoster);
   const todoMarkers: MissionOwnerPlanningTodoMarker[] = [];

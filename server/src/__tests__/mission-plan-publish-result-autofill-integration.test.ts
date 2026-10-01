@@ -13,6 +13,9 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { recordLatestAuthorizedMissionOwnerPlanDecision } from "../services/mission-owner-plan-decisions.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
+import { publicationContract } from "./helpers/mission-publication-fixture.js";
+import { listCompanyPlanningArtifactTools } from "../services/missions/mission-plan-publication-contract.js";
+import { autofillPublicationResult } from "../services/missions/mission-plan-publish-result-autofill.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -34,12 +37,12 @@ afterAll(async () => {
 });
 
 // [ purpose ] The authoritative record path applies the bounded
-//   manual-onboarding publish-result autofill exactly once after source-ref
+//   declared publication-result autofill exactly once after source-ref
 //   and execution-placement validation succeed, before PLAN-QA / intent
 //   coverage / structural validation / materialization observe the draft.
-//   A plan that would otherwise fail with `missing_manual_onboarding_verify_tool`
+//   A plan that would otherwise fail with `missing_publication_verify_tool`
 //   (subcode of `plan_intent_coverage_failed`) because the verifier omits
-//   `publishResultPath` now proceeds past the intent gate, the active plan
+//   its declared receipt argument now proceeds past the intent gate, the active plan
 //   carries the canonical reference, and the activity log payload is bounded
 //   to identifiers only (no toolArgs leak).
 describeEP("mission.plan.autofilled — authoritative path integration", () => {
@@ -69,7 +72,7 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     await db.insert(missions).values({
       id: missionId, companyId, ownerAgentId,
       title: "Publish the site update",
-      description: "Deploy via manual onboarding and verify the published destination.",
+      description: "Deliver via declared tools and verify the published destination.",
       status: "active",
     });
     await db.insert(issues).values({
@@ -83,8 +86,8 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     const publishToolId = randomUUID();
     const verifyToolId = randomUUID();
     await db.insert(toolDefinitions).values([
-      { id: publishToolId, companyId, name: "manual-onboarding-publish", description: "", adapterType: "builtin", adapterConfig: {}, enabled: true },
-      { id: verifyToolId, companyId, name: "manual-onboarding-verify", description: "", adapterType: "builtin", adapterConfig: {}, enabled: true },
+      { id: publishToolId, companyId, name: "alpha", description: "", adapterType: "builtin", adapterConfig: { artifactContract: publicationContract("publication") }, enabled: true },
+      { id: verifyToolId, companyId, name: "beta", description: "", adapterType: "builtin", adapterConfig: { artifactContract: publicationContract("publication-verify", "receiptInput") }, enabled: true },
     ]);
     await db.insert(agentToolGrants).values([
       { id: randomUUID(), companyId, agentId: ownerAgentId, toolId: publishToolId, grantedBy: "test" },
@@ -99,33 +102,33 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
       missionGoal: "Publish and verify",
       selectedExecutionUnits: [
         {
-          id: "unit-build", kind: "mission_plan_unit", title: "[ACTION] Build artifact",
+          id: "unit-build", type: "action", kind: "mission_plan_unit", title: "[ACTION] Build artifact",
           assigneeAgentId: ownerAgentId, selectionState: "selected", reason: "produce the deliverable",
           sourceRef: { type: "mission_plan_unit", id: "unit-build" },
           dependsOn: [], toolNames: [], toolArgs: {}, knowledgeBaseIds: [], skillRefs: [],
           graphWorkProductRequired: true,
         },
         {
-          id: "unit-artifact-qa", kind: "mission_plan_unit", title: "[QA] Artifact review",
+          id: "unit-artifact-qa", type: "qa", kind: "mission_plan_unit", title: "[QA] Artifact review",
           assigneeAgentId: ownerAgentId, selectionState: "selected", reason: "review the artifact",
           sourceRef: { type: "mission_plan_unit", id: "unit-artifact-qa" },
           dependsOn: ["unit-build"], toolNames: [], toolArgs: {}, knowledgeBaseIds: [], skillRefs: [],
           graphWorkProductRequired: false,
         },
         {
-          id: "publish", kind: "mission_plan_unit", title: "[ACTION] Publish via manual onboarding",
+          id: "publish", type: "action", kind: "mission_plan_unit", title: "[ACTION] Publish",
           assigneeAgentId: ownerAgentId, selectionState: "selected", reason: "deliver to the destination",
           sourceRef: { type: "mission_plan_unit", id: "publish" },
           dependsOn: ["unit-artifact-qa"],
-          toolNames: ["manual-onboarding-publish"], toolArgs: {}, knowledgeBaseIds: [], skillRefs: [],
+          toolNames: ["alpha"], toolArgs: {}, knowledgeBaseIds: [], skillRefs: [],
           graphWorkProductRequired: true,
         },
         {
-          id: "verify", kind: "mission_plan_unit", title: "[QA] Verify published destination readback",
+          id: "verify", type: "qa", kind: "mission_plan_unit", title: "[QA] Verify published destination readback",
           assigneeAgentId: ownerAgentId, selectionState: "selected", reason: "verify the published result",
           sourceRef: { type: "mission_plan_unit", id: "verify" },
           dependsOn: ["publish"],
-          toolNames: ["manual-onboarding-verify"],
+          toolNames: ["beta"],
           toolArgs: { timeoutMs: 5000 },
           knowledgeBaseIds: [], skillRefs: [],
           graphWorkProductRequired: false,
@@ -147,7 +150,7 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     });
 
     // Without autofill the verifier's missing publishResultPath would surface as
-    // missing_manual_onboarding_verify_tool under plan_intent_coverage_failed.
+    // missing_publication_verify_tool under plan_intent_coverage_failed.
     expect(result.status).not.toBe("invalid");
     if (result.status === "invalid") throw new Error("expected non-invalid status");
 
@@ -158,7 +161,7 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     const verifyUnit = units.find((u) => u.id === "verify");
     expect(verifyUnit?.toolArgs).toMatchObject({
       timeoutMs: 5000,
-      publishResultPath: "{$steps.publish.workProductPath}",
+      receiptInput: "{$steps.publish.workProductPath}",
     });
 
     const autofillActivities = await db
@@ -171,11 +174,32 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
       planningIssueId,
       publisherUnitId: "publish",
       verifierUnitId: "verify",
-      field: "publishResultPath",
+      field: "receiptInput",
     }));
     const detailsJson = JSON.stringify(activity.details);
     expect(detailsJson).not.toContain("toolArgs");
     expect(detailsJson).not.toContain("workProductPath");
+  });
+
+  it("rejects conflicting receipt bindings and records the structured diagnostic", async () => {
+    const { companyId, ownerAgentId, missionId, planningIssueId } = await seed();
+    const decision = decisionWithMissingPublishResultPath(ownerAgentId, missionId);
+    decision.selectedExecutionUnits[3]!.toolArgs = { receiptInput: "{$steps.unit-build.workProductPath}" };
+    const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId,
+      preParsedDecision: { decision, planningIssueId, commentId: "conflicting-binding" } });
+    expect(result).toMatchObject({ status: "invalid", reason: "plan_intent_coverage_failed",
+      diagnostics: expect.arrayContaining([expect.objectContaining({ code: "missing_publication_verify_tool" })]) });
+    const events = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+    expect(events.some(event => event.action === "mission.plan.rejected")).toBe(true);
+    expect(events.some(event => event.action === "mission.plan.autofilled")).toBe(false);
+  });
+
+  it("does not borrow contracts from another company with the same tool names", async () => {
+    const declared = await seed(), undeclared = await seed();
+    await db.update(toolDefinitions).set({ adapterConfig: {} }).where(eq(toolDefinitions.companyId, undeclared.companyId));
+    const units = decisionWithMissingPublishResultPath(undeclared.ownerAgentId, undeclared.missionId).selectedExecutionUnits;
+    expect(autofillPublicationResult(units, await listCompanyPlanningArtifactTools(db, declared.companyId)).applied).not.toBeNull();
+    expect(autofillPublicationResult(units, await listCompanyPlanningArtifactTools(db, undeclared.companyId)).applied).toBeNull();
   });
 
   it("does not log autofill activity when the canonical path is already present", async () => {
@@ -183,7 +207,7 @@ describeEP("mission.plan.autofilled — authoritative path integration", () => {
     const decision = decisionWithMissingPublishResultPath(ownerAgentId, missionId);
     // Pre-populate the canonical reference so autofill is a no-op.
     const verifyUnit = decision.selectedExecutionUnits[3]!;
-    verifyUnit.toolArgs = { timeoutMs: 5000, publishResultPath: "{$steps.publish.workProductPath}" };
+    verifyUnit.toolArgs = { timeoutMs: 5000, receiptInput: "{$steps.publish.workProductPath}" };
 
     const beforeCount = (await db.select().from(activityLog).where(eq(activityLog.action, "mission.plan.autofilled"))).length;
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({

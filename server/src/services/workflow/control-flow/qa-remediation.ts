@@ -85,7 +85,7 @@ export type PreparedFile = { content: string; itemCount: number; beforeHash: str
 
 function isHardBlockedQaStep(def: EdgeBearingStep | undefined): boolean {
   if (!def) return true;
-  return isStructuralGateStep(def as never) || isDeliveryReadbackStep(def as never);
+  return (def as { capAcceptance?: string }).capAcceptance === 'blocked' || isStructuralGateStep(def as never) || isDeliveryReadbackStep(def as never);
 }
 
 /** [current-generation freshness, fail-closed] 판정 observedAt 이 producer 완료 이후여야 한다. */

@@ -7,8 +7,9 @@ import { workflowService } from '../services/workflow/engine.js';
 
 function policy(steps: unknown): string {
   if (!Array.isArray(steps)) return '[]';
-  return canonicalQaJson(steps.filter(step => step?.qaConfig !== undefined)
-    .map(step => ({ id: step.id, qaConfig: step.qaConfig })).sort((a, b) => a.id.localeCompare(b.id)));
+  return canonicalQaJson(steps.filter(step => step?.qaConfig !== undefined || step?.deliveryVerification !== undefined || step?.capAcceptance !== undefined)
+    .map(step => ({ id: step.id, qaConfig: step.qaConfig, deliveryVerification: step.deliveryVerification, capAcceptance: step.capAcceptance }))
+    .sort((a, b) => a.id.localeCompare(b.id)));
 }
 
 /** Whole-step deletion/omission is a policy removal too, not an authorization bypass. */

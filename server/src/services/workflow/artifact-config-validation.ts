@@ -1,13 +1,15 @@
 import { artifactContractSchema, qaConfigSchema } from '@paperclipai/shared';
 import { badRequest } from '../../errors.js';
+import { z } from 'zod';
+const policySchema = z.object({ deliveryVerification: z.literal('required').optional(), capAcceptance: z.literal('blocked').optional(), qaConfig: qaConfigSchema.optional() });
 
 /** Shared write boundary for native, plugin-backed, and direct store saves. */
 export function validateWorkflowQaConfigs(steps: unknown) {
   if (!Array.isArray(steps)) return;
   for (const step of steps) {
-    if (!step || typeof step !== 'object' || step.qaConfig === undefined) continue;
-    const parsed = qaConfigSchema.safeParse(step.qaConfig);
-    if (!parsed.success) throw badRequest('Invalid workflow qaConfig', parsed.error.issues);
+    if (!step || typeof step !== 'object') continue;
+    const parsed = policySchema.safeParse(step);
+    if (!parsed.success) throw badRequest('Invalid workflow policy', parsed.error.issues);
   }
 }
 

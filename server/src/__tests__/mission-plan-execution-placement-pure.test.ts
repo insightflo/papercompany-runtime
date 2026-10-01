@@ -66,77 +66,64 @@ describe("mission plan execution placement pure checks", () => {
     expect(diagnostics).toEqual([]);
   });
 
-  it("rejects a Markdown-only validator assigned to an HTML producer", () => {
-    const toolName = "validate-tech-scout-note-coverage";
+  const proseCases = ["title", "reason", "expectedOutput", "acceptanceCriteria", "evidenceRequired"]
+    .flatMap((field) => [false, true].flatMap((hasDependency) => [
+      "Produce HTML index.html with rendering",
+      "do NOT accept HTML",
+      "Produce Markdown report.md",
+    ].map((text) => ({ field, hasDependency, text }))));
+
+  it.each(proseCases)("does not infer kinds from $field: $text (dependency=$hasDependency)", ({ field, hasDependency, text }) => {
+    const toolName = "validate-record";
+    const context = {
+      workflowToolsByName: new Map([[toolName, {
+        name: toolName,
+        enabled: true,
+        planningMetadata: { acceptedInputKinds: ["json"] },
+      }]]),
+      workflowToolGrantKeys: new Set([`validator-agent:${toolName}`]),
+      agentNamesById: new Map([["validator-agent", "Validator"]]),
+      agentSkillProfilesById: new Map(),
+    };
+    const review = (prose: string) => {
+      const content = { [field]: ["acceptanceCriteria", "evidenceRequired"].includes(field) ? [prose] : prose };
+      return reviewMissionPlanExecutionPlacementWithContext({
+        selectedExecutionUnits: [
+          ...(hasDependency ? [unit({ id: "producer", ...content })] : []),
+          unit({
+            id: "qa",
+            assigneeAgentId: "validator-agent",
+            toolNames: [toolName],
+            ...(hasDependency ? { dependsOn: ["producer"] } : content),
+          }),
+        ],
+        context,
+      });
+    };
+
+    expect(review("Produce the requested record")).toEqual([]);
+    expect(review(text)).toEqual([]);
+  });
+
+  it.each([
+    { enabled: false, knownAgent: true, code: "workflow_tool_disabled" },
+    { enabled: true, knownAgent: false, code: "workflow_tool_assignee_unknown" },
+  ])("preserves $code regardless of prose", ({ enabled, knownAgent, code }) => {
     const diagnostics = reviewMissionPlanExecutionPlacementWithContext({
-      selectedExecutionUnits: [
-        unit({
-          id: "synthesize",
-          title: "[ACTION] Synthesize beginner-friendly HTML page",
-          expectedOutput: "Registered index.html workProduct with rendered images.",
-          graphWorkProductRequired: true,
-        }),
-        unit({
-          id: "qa",
-          title: "[QA] Validate synthesized HTML page",
-          dependsOn: ["synthesize"],
-          assigneeAgentId: "validator-agent",
-          toolNames: [toolName],
-        }),
-      ],
+      selectedExecutionUnits: [unit({
+        id: "qa", title: "do NOT accept HTML", assigneeAgentId: "validator-agent", toolNames: ["validate-record"],
+      })],
       context: {
-        workflowToolsByName: new Map([[toolName, {
-          name: toolName,
-          enabled: true,
-          description: "Validates Tech Scout Markdown reports only.",
-          inputSchema: { type: "object", properties: { noteContent: { type: "string" } } },
-          planningMetadata: { acceptedInputKinds: ["markdown"] },
-        }]]),
-        workflowToolGrantKeys: new Set([`validator-agent:${toolName}`]),
-        agentNamesById: new Map([["validator-agent", "Report Validator"]]),
+        workflowToolsByName: new Map([["validate-record", { name: "validate-record", enabled }]]),
+        workflowToolGrantKeys: new Set(["validator-agent:validate-record"]),
+        agentNamesById: new Map(knownAgent ? [["validator-agent", "Validator"]] : []),
         agentSkillProfilesById: new Map(),
       },
     });
-
-    expect(diagnostics).toEqual([
-      expect.objectContaining({ code: "workflow_tool_input_kind_mismatch" }),
-    ]);
+    expect(diagnostics).toEqual([expect.objectContaining({ code })]);
   });
 
-  it("allows a Markdown-only validator when the producer output is Markdown", () => {
-    const toolName = "validate-tech-scout-note-coverage";
-    const diagnostics = reviewMissionPlanExecutionPlacementWithContext({
-      selectedExecutionUnits: [
-        unit({
-          id: "synthesize",
-          title: "[ACTION] Synthesize Tech Scout Markdown report",
-          expectedOutput: "Registered report.md workProduct with full Markdown content.",
-          graphWorkProductRequired: true,
-        }),
-        unit({
-          id: "qa",
-          title: "[QA] Validate Tech Scout Markdown coverage",
-          dependsOn: ["synthesize"],
-          assigneeAgentId: "validator-agent",
-          toolNames: [toolName],
-        }),
-      ],
-      context: {
-        workflowToolsByName: new Map([[toolName, {
-          name: toolName,
-          enabled: true,
-          planningMetadata: { acceptedInputKinds: ["markdown"] },
-        }]]),
-        workflowToolGrantKeys: new Set([`validator-agent:${toolName}`]),
-        agentNamesById: new Map([["validator-agent", "Report Validator"]]),
-        agentSkillProfilesById: new Map(),
-      },
-    });
-
-    expect(diagnostics).toEqual([]);
-  });
-
-  it("rejects ACTION preflight units that re-check downstream workflow tool access", () => {
+  it("does not derive preflight rejection from ACTION prose", () => {
     const diagnostics = reviewDeliveryToolPreflightMarkers([
       unit({
         id: "preflight",
@@ -147,9 +134,7 @@ describe("mission plan execution placement pure checks", () => {
       unit({ id: "publish", title: "[ACTION] Publish approved page", toolNames: ["manual-onboarding-publish"] }),
     ]);
 
-    expect(diagnostics).toEqual([
-      expect.objectContaining({ code: "invalid_delivery_tool_preflight_unit" }),
-    ]);
+    expect(diagnostics).toEqual([]);
   });
 
   it("allows ordinary delivery wording without workflow tool access preflight", () => {

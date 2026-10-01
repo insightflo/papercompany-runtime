@@ -59,7 +59,7 @@ describeEP("workflow step-status provenance direct writers", () => {
       name: "Recovery workflow",
       stepsJson: [
         { id: "producer", name: "Produce", dependencies: [] },
-        { id: "qa", name: "QA Review", dependencies: ["producer"] },
+        { id: "qa", type: "qa", name: "QA Review", dependencies: ["producer"] },
       ],
     });
     await db.insert(workflowRuns).values({

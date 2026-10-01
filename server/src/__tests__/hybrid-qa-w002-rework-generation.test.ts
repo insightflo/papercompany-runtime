@@ -376,7 +376,7 @@ describeEP("hybrid QA — W002 rework exact producerToken + downstream semantic 
     expect(qa2Meta?.semanticQaVerdict).toBeUndefined(); // old verdict cleared
   });
 
-  it("Task3: a [QA] step with NO qaType (mission-level Verify) depends on BOTH P+G → reset", async () => {
+  it("Task3: a type:qa step with NO qaType (mission-level Verify) depends on BOTH P+G → reset", async () => {
     // Mirrors the real mission-level `[QA] Verify mission result` step, which has
     // no qaType but MUST be invalidated on producer rework via the shared
     // isQaLikeStep classifier (not qaType==="semantic" only).
@@ -389,8 +389,8 @@ describeEP("hybrid QA — W002 rework exact producerToken + downstream semantic 
       { id: prodId, name: "P", agentId: "a1", dependencies: [], graphWorkProductRequired: true },
       { id: gateId, name: "G", agentId: "", type: "tool", qaType: "structural",
         toolNames: ["v"], dependencies: [prodId], graphWorkProductRequired: false },
-      // NOTE: no qaType — classified QA-like by title "[QA] Verify mission result".
-      { id: qaId, name: "[QA] Verify mission result", agentId: "qa",
+      // NOTE: no qaType — the explicit type declares QA independently of its title.
+      { id: qaId, type: "qa", name: "[QA] Verify mission result", agentId: "qa",
         dependencies: [prodId, gateId], graphWorkProductRequired: false },
     ];
     const prodReq = `p-${randomUUID()}`;

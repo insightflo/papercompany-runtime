@@ -34,7 +34,7 @@ describe("QA cap acceptance rollout", () => {
           { stepId: "verify-publish", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 },
         ],
       }),
-      step({ id: "qa", name: "[QA] Review report", dependencies: ["producer"] }),
+      step({ id: "qa", qaType: "semantic", name: "Review report", dependencies: ["producer"] }),
       step({
         id: "structural",
         name: "Structural contract",
@@ -44,7 +44,7 @@ describe("QA cap acceptance rollout", () => {
         toolNames: ["validate-report"],
         dependencies: ["producer"],
       }),
-      step({ id: "verify-publish", name: "Verify publish public readback", dependencies: ["producer"] }),
+      step({ id: "verify-publish", qaType: "delivery", name: "Read result", dependencies: ["producer"] }),
     ]);
 
     expect(result.updatedQaEdges).toBe(1);
@@ -62,7 +62,7 @@ describe("QA cap acceptance rollout", () => {
         name: "Build",
         conditionalDependencies: [{ stepId: "qa", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
       }),
-      step({ id: "qa", name: "[QA] Review", dependencies: ["producer"] }),
+      step({ id: "qa", qaType: "semantic", name: "Review", dependencies: ["producer"] }),
     ];
     mockWorkflowService.listDefinitions.mockResolvedValue([
       { id: "wf-update", status: "active", steps: semanticSteps },

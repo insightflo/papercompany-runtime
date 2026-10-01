@@ -53,18 +53,18 @@ describe('artifact configuration HTTP authority and durable audit', () => {
       ['workflow.created', 'user', 'test-board'], ['workflow.updated', 'user', 'test-board'],
     ]);
   });
-  it('does not authorize a stale read over a concurrent board policy addition', async () => {
+  it.each([step, { ...step, qaConfig: undefined, deliveryVerification: 'required' }, { ...step, qaConfig: undefined, capAcceptance: 'blocked' }])('does not authorize a stale read over a concurrent board policy addition: %j', async configured => {
     const created = await createWorkflowDefinition(fixture.db, { companyId, name: 'racing edit', steps: [] });
     const getDefinition = workflowService.getDefinition.bind(workflowService);
     const spy = vi.spyOn(workflowService, 'getDefinition').mockImplementationOnce(async (db, id) => {
       const stale = await getDefinition(db, id);
-      await updateWorkflowDefinition(fixture.db, id, { steps: [step] });
+      await updateWorkflowDefinition(fixture.db, id, { steps: [configured] as never });
       return stale;
     });
     try {
       const response = await request(app(true)).patch(`/api/workflows/${created.id}`).send({ steps: [] });
       expect(response.status).toBe(403);
-      expect((await getDefinition(fixture.reader, created.id))!.steps[0]).toMatchObject({ qaConfig });
+      expect((await getDefinition(fixture.reader, created.id))!.steps[0]).toMatchObject(JSON.parse(JSON.stringify(configured)));
     } finally { spy.mockRestore(); }
   });
   it('permits agent ordinary metadata changes without replacing QA policy', async () => {
@@ -100,6 +100,30 @@ describe('artifact configuration HTTP authority and durable audit', () => {
       const result = await request(app())[method](url).send({ name: `invalid-${randomUUID()}`, adapterType: 'builtin', adapterConfig: { artifactContract: { ...contract, unknown: true } } });
       expect(result.status).toBe(400);
     }
+  });
+});
+
+describe('declarative workflow policy saves', () => {
+  it.each([{ deliveryVerification: 'required' }, { capAcceptance: 'blocked' }])('requires board writes and audits %j', async policy => {
+    const configured = { id: 'plain', name: 'Plain', agentId, dependencies: [], ...policy };
+    expect((await request(app(true)).post(`/api/companies/${companyId}/workflows`).send({ name: 'denied policy', steps: [configured] })).status).toBe(403);
+    const created = await request(app()).post(`/api/companies/${companyId}/workflows`).send({ name: 'policy', steps: [configured] });
+    expect(created.status).toBe(201);
+    for (const steps of [[], [{ id: 'plain', name: 'Plain', agentId, dependencies: [] }]]) {
+      expect((await request(app(true)).patch(`/api/workflows/${created.body.id}`).send({ steps })).status).toBe(403);
+    }
+    expect((await request(app()).patch(`/api/workflows/${created.body.id}`).send({ steps: [] })).status).toBe(200);
+    const audits = await fixture.reader.select().from(activityLog).where(eq(activityLog.entityId, created.body.id));
+    expect(audits.map(a => [a.action, a.actorType])).toEqual([['workflow.created', 'user'], ['workflow.updated', 'user']]);
+  });
+  it.each([{ deliveryVerification: 'optional' }, { deliveryVerification: null }, { capAcceptance: 'allowed' }, { capAcceptance: { blocked: true } }])('rejects invalid policy at HTTP and direct saves %j', async policy => {
+    const steps = [{ id: 'plain', name: 'Plain', agentId, dependencies: [], ...policy }];
+    const created = await createWorkflowDefinition(fixture.db, { companyId, name: 'invalid policy test', steps: [] });
+    expect((await request(app()).post(`/api/companies/${companyId}/workflows`).send({ name: 'invalid', steps })).status).toBe(400);
+    expect((await request(app()).patch(`/api/workflows/${created.id}`).send({ steps })).status).toBe(400);
+    await expect(createWorkflowDefinition(fixture.db, { companyId, name: 'invalid', steps: steps as never })).rejects.toThrow();
+    await expect(updateWorkflowDefinition(fixture.db, created.id, { steps: steps as never })).rejects.toThrow();
+    expect((await workflowService.getDefinition(fixture.reader, created.id))!.steps).toEqual([]);
   });
 });
 

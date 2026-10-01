@@ -38,7 +38,7 @@ describeEP("hybrid QA — semantic structural evidence", () => {
     const steps = [
       { id: "producer", name: "Build", agentId: "producer", dependencies: [], graphWorkProductRequired: true },
       { id: "gate", name: "Structural", agentId: "", type: "tool", qaType: "structural", toolNames: ["validate"], dependencies: ["producer"] },
-      { id: "qa", name: "[QA] Semantic", agentId: "qa", dependencies: ["producer", "gate"] },
+      { id: "qa", type: "qa", name: "[QA] Semantic", agentId: "qa", dependencies: ["producer", "gate"] },
     ];
     await db.insert(companies).values({ id: companyId, name: `semantic-${companyId}`, status: "active", issuePrefix: `SM${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}` });
     await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "semantic", stepsJson: steps });

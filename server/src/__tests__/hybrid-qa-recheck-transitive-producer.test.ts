@@ -97,14 +97,14 @@ describeEP("validation recheck — transitive producer freshness", () => {
         graphWorkProductRequired: true,
       },
       {
-        id: midQaStepId,
+        id: midQaStepId, type: "qa",
         name: "[QA] Contract review",
         agentId,
         dependencies: [producerStepId],
         graphWorkProductRequired: false,
       },
       {
-        id: semanticQaStepId,
+        id: semanticQaStepId, type: "qa",
         name: "[QA] Final inspection",
         agentId,
         dependencies: [midQaStepId],

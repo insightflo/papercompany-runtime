@@ -147,7 +147,7 @@ export function richDefinitionStepsJson(): Array<Record<string, unknown>> {
       legacyNote: "kept-as-is",
     },
     {
-      id: "manual-onboarding-publish",
+      id: "manual-onboarding-publish", deliveryVerification: 'required',
       name: "Publish onboarding hub",
       agentId: "agent-1",
       dependsOn: "fetch-source",

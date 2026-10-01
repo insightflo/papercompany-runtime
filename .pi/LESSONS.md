@@ -65,6 +65,28 @@
 - Prevention rule: Optional planning features must preserve the ordinary manifest shape; test both present and absent paths.
 - Reuse trigger: Adding optional context to a runtime manifest.
 - Evidence: `/tmp/task1-focused.log` (80 pass/1 exact-shape failure); correction verified in Task1 focused rerun.
+### 2026-10-01 — optional frozen markers can narrow mapped array inference
+- Date: 2026-10-01
+- Task: Phase B structural publication-verifier preservation.
+- What failed: Focused tests passed, but server typecheck rejected assigning ordinary workflow steps to a mapped array whose `deliveryRole` property was inferred as required-with-undefined.
+- Root cause: The policy projection widened runtime behavior correctly but narrowed TypeScript's inferred collection shape beyond `WorkflowStep[]`.
+- Category: type contract
+- Fix: Declare the builder accumulator as `WorkflowStep[]`; retain the optional marker in the canonical runtime step type.
+- Prevention rule: When a projection adds optional derived fields and later receives other step sources, type the accumulator to the canonical step interface and run source typecheck.
+- Reuse trigger: Frozen snapshot normalization or synthetic workflow step insertion.
+- Evidence: `/tmp/qag/b-review-workflow/typecheck.log`; corrected verification in `typecheck-final.log`.
+
+### 2026-10-01 — definition integration fixtures need grant authors and executor readiness
+- Date: 2026-10-01
+- Task: Phase B general workflow publication replay integration.
+- What failed: Initial local DB tests stopped at missing `agent_tool_grants.granted_by`, then missing configured workflow tool executor, before reaching replay assertions.
+- Root cause: Fixture omitted a required grant column and definition-save readiness prerequisite.
+- Category: verification-fixture
+- Fix: Supply `grantedBy: "board"` and install a definition-only executor that throws if invoked; clear it at teardown. Actual RED then showed publisher-only replay instead of publisher + verifier.
+- Prevention rule: Definition-save tests using tools need complete persisted grants and an explicit non-dispatching executor; prerequisite errors are not product RED.
+- Reuse trigger: Local DB workflow create/update tests with declared tools.
+- Evidence: `/tmp/qag/b-templates/red.log`, `red2.log`, `red3.log`, `focused.log` (14 files / 275 tests).
+
 ### 2026-10-01 — isolate full-suite resources and fixture clocks
 - Date: 2026-10-01
 - Task: Runtime QA Phase A full gates.
@@ -218,4 +240,15 @@
 - Prevention rule: Inspect the actual database error detail and failing SQL before assigning product blame. Test identifiers constrained unique must not depend on tiny random suffixes. A proposed fixture correction is separate scope unless authorized.
 - Reuse trigger: Unexpected unique-key failure during a large isolated DB test batch.
 - Evidence: `/tmp/oversight-final4-verification/shard-2.log`, `blobs/shard-2.json`, `/tmp/oversight-final4-planqa-failure-diagnosis.md`. Rerun was pending when this entry was written.
+
+### 2026-10-01 — validation event fixture must satisfy the durable schema before RED counts
+- Date: 2026-10-01
+- Task: Planning review qaType-only validation gate regression.
+- What failed: Four initial tests stopped inserting workflow transition events because required `layer` was omitted.
+- Root cause: The fixture mirrored reader-selected columns rather than the full insert contract.
+- Category: verification-fixture / schema
+- Fix: Read the table schema, add `layer: workflow`, and rerun unchanged production code; 13 meaningful regression failures confirmed before implementation.
+- Prevention rule: Check required database insert fields before treating a test failure as product RED; preserve setup-failure and confirmed-RED logs separately.
+- Reuse trigger: New durable-event reader integration fixtures.
+- Evidence: `/tmp/qag/b-review-planning/red.log`, `/tmp/qag/b-review-planning/red-confirmed.log`, `/tmp/qag/b-review-planning/final.log`.
 

@@ -106,7 +106,7 @@ describeEmbeddedPostgres("workflow verdict precedence", () => {
           conditionalDependencies: [{ stepId: "audit-source-coverage", when: "qa_request_changes", isBackEdge: true, maxIterations: 2 }],
         },
         {
-          id: "audit-source-coverage",
+          id: "audit-source-coverage", type: "qa",
           name: "Audit source coverage",
           agentId: qaAgentId,
           dependencies: ["collect-ai-news-evidence"],

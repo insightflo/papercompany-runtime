@@ -3,39 +3,42 @@
 
 import type { WorkflowStep } from "./dag-engine.js";
 import { buildVerificationBeforeCompletionCriteria } from "../missions/mission-quality-contract.js";
-import { classifyWorkflowStepRole } from "../workflow-step-role.js";
-import { resolveWorkflowQaContract } from "./workflow-qa-type.js";
+import { artifactContractSchema } from '@paperclipai/shared';
 
-// delivery readback 이 필요한 공개 목적지 단서만 매치(generic publish/deploy 는 제외 — regression 방지).
-const DELIVERY_KEYWORDS = /manual-onboarding|onboarding[- ]?hub|onboarding[- ]?publisher|r2|cloudflare|pages\.dev|public[- ]?hub|public[- ]?destination|final[- ]?public|website|site[- ]?html|회사게시|온보딩허브/iu;
-// QA-like marker + public-destination marker 조합으로만 delivery-readback step 인식(둘 다 있어야).
-const QA_LIKE_RE = /qa|verify|검증|확인|smoke|readback/iu;
-const PUBLIC_MARKER_RE = /r2|cloudflare|hub|publish|onboarding|public|회사게시|온보딩|200|http/iu;
-const READBACK_KEYWORDS = /delivery|readback|verify-publish|공개검증|public-destination|delivery-verification/iu;
 const DELIVERY_CRITERIA_MARKER = "Delivery Verification:";
+export interface DeliveryPolicyStep {
+  id: string; name?: string; description?: string; type?: string; qaType?: string;
+  deliveryVerification?: unknown; capAcceptance?: unknown;
+  /** Server-derived role in a frozen execution definition; independent of QA capability. */
+  deliveryRole?: 'publication-verify';
+  toolNames?: string[]; tools?: string[]; toolName?: string; toolArtifactContract?: unknown;
+  dependencies?: string[];
+}
+export interface DeliveryPolicyTool { name: string; adapterConfig: Record<string, unknown> }
 
-// step 이 delivery/publish 성격인지(publish 전 콘텐츠 QA 는 제외).
-export function isDeliveryRelevantStep(step: { id: string; name: string; description?: string }): boolean {
-  if (classifyWorkflowStepRole(step) === "qa") return false;
-  return DELIVERY_KEYWORDS.test(`${step.id} ${step.name} ${step.description ?? ""}`);
+/** Tools must already be resolved inside the owning company; names select, never classify. */
+export function hasSelectedArtifactRole(step: DeliveryPolicyStep, tools: readonly DeliveryPolicyTool[], role: 'publication' | 'publication-verify'): boolean {
+  const names = step.toolNames ?? step.tools ?? (step.toolName ? [step.toolName] : []);
+  return tools.some(tool => {
+    if (!names.includes(tool.name)) return false;
+    const parsed = artifactContractSchema.safeParse(tool.adapterConfig.artifactContract);
+    return parsed.success && parsed.data.role === role;
+  });
+}
+export function isDeliveryRelevantStep(step: DeliveryPolicyStep, tools: readonly DeliveryPolicyTool[] = []): boolean {
+  return step.deliveryVerification === 'required' || hasSelectedArtifactRole(step, tools, 'publication');
+}
+export function isDeliveryReadbackStep(step: DeliveryPolicyStep, tools: readonly DeliveryPolicyTool[] = []): boolean {
+  return step.qaType === 'delivery' || step.deliveryRole === 'publication-verify'
+    || hasSelectedArtifactRole(step, tools, 'publication-verify');
 }
 
-export function isDeliveryReadbackStep(step: { id: string; name: string; description?: string; type?: string; qaType?: string }): boolean {
-  const qaContract = resolveWorkflowQaContract(step.qaType);
-  if (qaContract) return qaContract.inputScope === "delivery_readback";
-  if (classifyWorkflowStepRole(step) === "action") return false;
-  const text = `${step.id} ${step.name} ${step.description ?? ""}`;
-  return READBACK_KEYWORDS.test(text) || (QA_LIKE_RE.test(text) && PUBLIC_MARKER_RE.test(text));
-}
-
-// 이미 delivery/readback 검증 step 있는지(duplicate 판정).
-// QA-like(QA/verify/검증/확인/smoke/readback) + public-destination marker(R2/hub/Cloudflare/publish/onboarding/public)
-// 둘 다 있어야 delivery-readback step 으로 인식. 단독 QA 나 단독 publish 는 제외.
+// A downstream explicit readback prevents duplicate gate injection.
 export function hasExistingDeliveryReadbackStep(
-  steps: Array<{ id: string; name: string; description?: string; dependencies?: string[] }>,
+  steps: DeliveryPolicyStep[], tools: readonly DeliveryPolicyTool[] = [],
 ): boolean {
-  const deliveryStepIds = new Set(steps.filter(isDeliveryRelevantStep).map((step) => step.id));
-  return steps.some((step) => isDeliveryReadbackStep(step) && isDownstreamOfDelivery(step, steps, deliveryStepIds));
+  const deliveryStepIds = new Set(steps.filter(step => isDeliveryRelevantStep(step, tools)).map((step) => step.id));
+  return steps.some((step) => isDeliveryReadbackStep(step, tools) && isDownstreamOfDelivery(step, steps, deliveryStepIds));
 }
 
 function isDownstreamOfDelivery(
@@ -64,10 +67,10 @@ export function appendDeliveryVerificationCriteria(description?: string): string
   return [normalizedDescription, "", criteria].join("\n");
 }
 
-export function strengthenDeliveryReadbackSteps(steps: WorkflowStep[]): WorkflowStep[] {
-  const deliveryStepIds = new Set(steps.filter(isDeliveryRelevantStep).map((step) => step.id));
+export function strengthenDeliveryReadbackSteps(steps: WorkflowStep[], tools: readonly DeliveryPolicyTool[] = []): WorkflowStep[] {
+  const deliveryStepIds = new Set(steps.filter(step => isDeliveryRelevantStep(step, tools)).map((step) => step.id));
   return steps.map((step) => {
-    if (!isDeliveryReadbackStep(step) || !isDownstreamOfDelivery(step, steps, deliveryStepIds)) return step;
+    if (!isDeliveryReadbackStep(step, tools) || !isDownstreamOfDelivery(step, steps, deliveryStepIds)) return step;
     return {
       ...step,
       description: appendDeliveryVerificationCriteria(step.description),

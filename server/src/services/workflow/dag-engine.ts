@@ -134,8 +134,8 @@ import { markRetryDispatching } from "./retry-dispatch-state.js";
 import { retryIssueLessToolWorkflowStepInternal, type ExpectedToolFailure } from "./retry-issue-less-manual.js";
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
 import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
+import { buildCompanyWorkflowExecutionSteps } from './company-execution-steps.js';
 import {
-  buildWorkflowExecutionSteps,
   getWorkflowLaunchSteps,
   isDynamicOwnerPlanWorkflowDefinition,
   type PersistedWorkflowStep,
@@ -193,7 +193,7 @@ export interface WorkflowStep {
   wait?: boolean;
   /** 자식 run 입력(토큰 렌더 대상, 최대 20키). 미해결 토큰은 fail-closed. */
   inputs?: Record<string, string>;
-  qaType?: string;
+  qaType?: string; deliveryVerification?: 'required'; capAcceptance?: 'blocked'; deliveryRole?: 'publication-verify';
   toolName?: string;
   toolArgs?: unknown;
   tools?: string[];
@@ -1370,7 +1370,7 @@ async function createWorkflowStepIssue(input: {
 }): Promise<string | null> {
   const issueSvc = issueService(input.db);
 
-  const executionSteps = input.steps ?? buildWorkflowExecutionSteps(input.definition);
+  const executionSteps = input.steps ?? await buildCompanyWorkflowExecutionSteps(input.db, input.definition);
   const structuralReadiness = await evaluateSemanticStructuralReadiness({
     db: input.db,
     companyId: input.run.companyId,

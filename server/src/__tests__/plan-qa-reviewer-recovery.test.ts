@@ -155,7 +155,7 @@ describeDb("PLAN-QA reviewer recovery", () => {
           graphWorkProductRequired: true,
         },
         {
-          id: "unit-report-qa",
+          id: "unit-report-qa", qaType: "semantic",
           kind: "mission_plan_unit",
           title: "[QA] Review the report",
           assigneeAgentId: input.selectedQaAssignee === "owner"
