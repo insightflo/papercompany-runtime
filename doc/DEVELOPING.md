@@ -375,6 +375,26 @@ pnpm secrets:migrate-inline-env         # dry run
 pnpm secrets:migrate-inline-env --apply # apply migration
 ```
 
+Builtin tool definitions also accept env secret references. Tool GET/POST/PATCH
+responses mask sensitive plain env values; saving a masked placeholder returns 422
+without overwriting the stored config. `PAPERCLIP_SECRETS_STRICT_MODE=true` also
+requires sensitive tool env values to use secret references. Builtin child processes
+do not inherit `PAPERCLIP_SECRETS_MASTER_KEY` or its `_FILE` setting.
+
+Migrate existing tool env values using the same master key as the server and an
+explicit `DATABASE_URL` (the script does not discover an embedded instance):
+
+```sh
+node --import ./cli/node_modules/tsx/dist/loader.mjs scripts/migrate-tool-env-secrets.ts
+node --import ./cli/node_modules/tsx/dist/loader.mjs scripts/migrate-tool-env-secrets.ts --tool-name <name>
+node --import ./cli/node_modules/tsx/dist/loader.mjs scripts/migrate-tool-env-secrets.ts --tool-name <name> --apply
+```
+
+The migration uses `local_encrypted` secrets named `tool_<first 8 tool id characters>_<lowercase env key>`.
+Existing names are rotated. Each tool's secret writes and config replacement are
+transactional; failed rows stay unchanged and produce a nonzero exit status.
+Output contains names, company IDs, env keys and counts, never secret values.
+
 ## Company Deletion Toggle
 
 Company deletion is intended as a dev/debug capability and can be disabled at runtime:
