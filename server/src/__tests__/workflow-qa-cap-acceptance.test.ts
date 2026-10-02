@@ -185,10 +185,19 @@ describeEP("qa-cap acceptance pass", () => {
     const r1 = randomUUID();
     const s1 = await seedScenario(db, { verdict: { origin: "workflow_api", limitations: ["x"], observedAt: QA_FAILED_AT, heartbeatRunId: r1 }, heartbeat: { runId: r1 } });
     expect((await runPass(s1, true, QA_FAILED_AT, structural)).acceptedCount).toBe(0);
-    const delivery = { id: QA, name: "[QA] delivery readback verify publish", type: "qa", dependencies: [PRODUCER] } as Partial<EdgeBearingStep>;
+    const delivery = { id: QA, name: "Read result", qaType: "delivery", type: "qa", dependencies: [PRODUCER] } as Partial<EdgeBearingStep>;
     const r2 = randomUUID();
     const s2 = await seedScenario(db, { verdict: { origin: "workflow_api", limitations: ["x"], observedAt: QA_FAILED_AT, heartbeatRunId: r2 }, heartbeat: { runId: r2 } });
     expect((await runPass(s2, true, QA_FAILED_AT, delivery)).acceptedCount).toBe(0);
+  });
+
+  it('blocks explicit cap policy but not keyword-only names', async () => {
+    for (const [policy, count] of [[{ capAcceptance: 'blocked' }, 0], [{ name: 'delivery public readback' }, 1]] as const) {
+      const runId = randomUUID();
+      const seed = await seedScenario(db, { verdict: { origin: 'workflow_api', limitations: ['cosmetic'], observedAt: QA_FAILED_AT, heartbeatRunId: runId }, heartbeat: { runId } });
+      expect((await runPass(seed, true, QA_FAILED_AT, policy as Partial<EdgeBearingStep>)).acceptedCount).toBe(count);
+      expect((await reload(db, seed.workflowRunId, QA)).status).toBe(count ? 'completed' : 'failed');
+    }
   });
 
   it("downstream loader surfaces accepted limitations (shared by create + resume paths)", async () => {

@@ -32,7 +32,6 @@ export type MissionPlanExecutionPlacementContext = {
 };
 
 type UnitPlacement = {
-  readonly index: number;
   readonly label: string;
   readonly assigneeAgentId: string;
   readonly toolNames: readonly string[];
@@ -85,54 +84,6 @@ function readSkillRefs(unit: Record<string, unknown>): string[] {
   ]));
 }
 
-function readDependencyIds(unit: Record<string, unknown>): string[] {
-  return readStringArray(unit.dependsOn);
-}
-
-function unitArtifactKinds(unit: Record<string, unknown>): string[] {
-  const text = [
-    unit.title,
-    unit.reason,
-    unit.expectedOutput,
-    ...(Array.isArray(unit.acceptanceCriteria) ? unit.acceptanceCriteria : []),
-    ...(Array.isArray(unit.evidenceRequired) ? unit.evidenceRequired : []),
-  ]
-    .filter((value): value is string => typeof value === "string")
-    .join("\n");
-  const kinds = new Set<string>();
-  if (/\bhtml\b|\.html\b|web page|웹 페이지|렌더링|render(?:ing)?/iu.test(text)) kinds.add("html");
-  if (/\bmarkdown\b|\.md\b|markdown report|마크다운/iu.test(text)) kinds.add("markdown");
-  return Array.from(kinds);
-}
-
-function readAcceptedInputKinds(tool: MissionPlanWorkflowToolPlacement): string[] {
-  return (tool.planningMetadata?.acceptedInputKinds ?? [])
-    .map((kind) => kind.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function reviewToolInputKindCompatibility(
-  unit: Record<string, unknown>,
-  tool: MissionPlanWorkflowToolPlacement,
-  selectedUnitsById: ReadonlyMap<string, Record<string, unknown>>,
-): MissionPlanExecutionPlacementDiagnostic | null {
-  const acceptedInputKinds = readAcceptedInputKinds(tool);
-  if (acceptedInputKinds.length === 0) return null;
-
-  const dependencyUnits = readDependencyIds(unit)
-    .map((dependencyId) => selectedUnitsById.get(dependencyId))
-    .filter((dependency): dependency is Record<string, unknown> => Boolean(dependency));
-  const sourceUnits = dependencyUnits.length > 0 ? dependencyUnits : [unit];
-  const producedKinds = Array.from(new Set(sourceUnits.flatMap(unitArtifactKinds)));
-  const incompatibleKinds = producedKinds.filter((kind) => !acceptedInputKinds.includes(kind));
-  if (incompatibleKinds.length === 0) return null;
-
-  return {
-    code: "workflow_tool_input_kind_mismatch",
-    message: `Execution unit "${readUnitLabel(unit, 0)}" assigns workflow tool "${tool.name}" which accepts [${acceptedInputKinds.join(", ")}] input, but its dependency output is classified as [${incompatibleKinds.join(", ")}]. Review the tool description/input schema and assign a compatible tool or change the producer contract.`,
-  };
-}
-
 function normalizeSkillKey(value: string): string {
   const parts = value.trim().toLowerCase().split("/").filter(Boolean);
   const leaf = parts[parts.length - 1] ?? value;
@@ -158,7 +109,6 @@ function collectToolPlacements(
     if (toolNames.length === 0) return;
 
     placements.push({
-      index,
       label: readUnitLabel(unit, index),
       assigneeAgentId: readAssigneeAgentId(unit),
       toolNames,
@@ -221,11 +171,7 @@ export function reviewMissionPlanExecutionPlacementWithContext(input: {
 }): MissionPlanExecutionPlacementDiagnostic[] {
   const diagnostics: MissionPlanExecutionPlacementDiagnostic[] = [];
   const placements = collectToolPlacements(input.selectedExecutionUnits);
-  const selectedUnitsById = new Map(
-    input.selectedExecutionUnits
-      .map((unit) => [readString(unit.id), unit] as const)
-      .filter(([id]) => id.length > 0),
-  );
+  // Units have no validated produced-kind contract; prose cannot reject placement.
 
   for (const placement of placements) {
     if (!placement.assigneeAgentId) {
@@ -265,12 +211,6 @@ export function reviewMissionPlanExecutionPlacementWithContext(input: {
           message: `Execution unit "${placement.label}" assigns workflow tool "${toolName}" to agent ${agentName}, but that agent does not have the tool grant. Grant the tool to that unit's assignee or reassign the unit.`,
         });
       }
-      const compatibilityDiagnostic = reviewToolInputKindCompatibility(
-        input.selectedExecutionUnits[placement.index] ?? {},
-        tool,
-        selectedUnitsById,
-      );
-      if (compatibilityDiagnostic) diagnostics.push(compatibilityDiagnostic);
     }
   }
 

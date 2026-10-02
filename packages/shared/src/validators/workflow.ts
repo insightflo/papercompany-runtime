@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod"; import { qaConfigSchema } from "./qa-config.js";
 import { workProductSelectorsSchema, toolArtifactContractSchema } from "./workflow-artifact.js";
 import { refineWorkflowChildStepContract } from "./workflow-child-contract.js";
 import { workflowConditionGroupSchema } from "./workflow-condition.js";
@@ -131,10 +131,10 @@ export const workflowStepDefinitionSchema = z.object({
   type: z.enum(["agent", "tool", "if", "complete"]).or(z.string()).optional(),
   conditionGroup: workflowConditionGroupSchema.optional(),
   completionReason: z.string().trim().min(1).max(500).optional(),
-  qaType: z.string().trim().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/iu).optional(),
+  qaType: z.string().trim().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/iu).optional(), deliveryVerification: z.literal('required').optional(), capAcceptance: z.literal('blocked').optional(),
   toolName: z.string().optional(),
   toolArgs: z.unknown().optional(),
-  workProductSelectors: workProductSelectorsSchema.optional(), toolArtifactContract: toolArtifactContractSchema.optional(),
+  workProductSelectors: workProductSelectorsSchema.optional(), toolArtifactContract: toolArtifactContractSchema.optional(), qaConfig: qaConfigSchema.optional(),
   tools: z.array(z.string()).optional(),
   toolNames: z.array(z.string()).optional(),
   allowedSearchScopes: z.array(z.string()).optional(),

@@ -52,6 +52,7 @@ function readSteps(value: unknown): DagStepLike[] {
       name: trimmedString(step.name) ?? undefined,
       title: trimmedString(step.title) ?? undefined,
       type: trimmedString(step.type) ?? undefined,
+      qaType: trimmedString(step.qaType) ?? undefined,
     });
   }
   return steps;

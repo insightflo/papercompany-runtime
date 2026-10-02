@@ -6,6 +6,7 @@ import {
   normalizeMissionPlanDependencyGraph,
 } from "./mission-plan-dependency-graph.js";
 import { isDeclaredStructuralUnit } from "./structural-materialization.js";
+import { isQaLikeStep } from "../workflow-step-role.js";
 
 type PlanUnit = Record<string, unknown>;
 
@@ -153,6 +154,5 @@ function readUnitToolNames(unit: PlanUnit): string[] {
 }
 
 function isQaLikeUnit(unit: PlanUnit): boolean {
-  const title = readString(unit.title) ?? readString(unit.name) ?? "";
-  return /\[(qa|QA)\]/.test(title) || readString(unit.qaType) !== null;
+  return isQaLikeStep(unit);
 }

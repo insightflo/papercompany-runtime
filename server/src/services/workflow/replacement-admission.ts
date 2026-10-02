@@ -57,7 +57,7 @@ export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, ac
       || p.requesterAgentId !== actor.agentId || p.requesterAgentId !== scope.mission.ownerAgentId
       || p.stepRunId !== scope.step.id || p.requestGeneration !== scope.step.executionGeneration
       || p.inputHash !== hashStructuredValue(metadata) || p.inputHash !== hashStructuredValue(p.metadata)
-      || p.definitionHash !== replacementDefinitionHash(definition, scope.mission.id, p.targetRunId)) throw conflict("replacement_approval_scope_mismatch");
+      || p.definitionHash !== await replacementDefinitionHash(tx, definition, scope.mission.id, p.targetRunId)) throw conflict("replacement_approval_scope_mismatch");
     const authorityId = crypto.randomUUID();
     const run = await createWorkflowRunWithDefinition(t, { ...input, metadata: { ...p.metadata, replacementAuthorityId: authorityId } }, p.targetRunId);
     const [frozen] = await tx.select().from(workflowRunDefinitions).where(eq(workflowRunDefinitions.workflowRunId, run.id));

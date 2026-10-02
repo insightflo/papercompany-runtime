@@ -25,14 +25,16 @@ export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [],
     "toolName", "toolArgs", "tools", "toolNames", "sessionMode", "onFailure", "escalateTo", "maxRetries", "timeoutSeconds",
     "knowledgeBaseIds", "triggerOn", "dynamicChildren", "ownerPlanBootstrapOnly", "bootstrapOnly", "executionMode", "workflowMode",
     "executionControls", "conditionGroup", "graphWorkProductRequired", "autoApproveTools", "graphRetryDelaySeconds",
-    "graphRetryBackoff", "graphRetryJitter", "workProductSelectors", "toolArtifactContract"]);
+    "graphRetryBackoff", "graphRetryJitter", "workProductSelectors", "toolArtifactContract",
+    "qaConfig", "deliveryVerification", "capAcceptance", "deliveryRole"]);
   const execution = purpose === "failure" ? Object.fromEntries(Object.entries(config).filter(([k]) => failureKeys.has(k))) : config;
   // The native normalizer accepts aliases, but their raw spelling is not a configuration change.
   if (purpose === "failure") {
     delete (execution as Record<string, unknown>).tools;
     delete (execution as Record<string, unknown>).toolName;
-    (execution as Record<string, unknown>).type = step.type ?? "agent";
   }
+  // Legacy agent/untyped and declared action both dispatch the same agent execution.
+  (execution as Record<string, unknown>).type = !step.type || step.type === "agent" ? "action" : step.type;
   return hashStructuredValue({ schemaVersion: "workflow.execution-config.v2", purpose, ...(normalize(execution) as Record<string, unknown>),
     dependencies: step.dependencies.map(remap).sort(),
     ...(purpose === "seed" && step.dependsOn ? { dependsOn: step.dependsOn.map(remap).sort() } : {}),

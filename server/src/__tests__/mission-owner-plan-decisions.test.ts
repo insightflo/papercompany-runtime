@@ -1476,9 +1476,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     }
   });
 
-  it("[P2 critique] deterministic invalid 는 critique 가 needs_clarification 를 반환해도 invalid 로 유지된다(완화 금지)", async () => {
+  it("mission prose does not introduce deterministic publication rejection", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
-    // mission title → publish intent → deterministic missing_publish_unit(invalid).
     await db.update(missions).set({ title: "가이드를 site에 올리도록" }).where(eq(missions.id, missionId));
     const wfId = randomUUID();
     await db.insert(workflowDefinitions).values({ id: wfId, companyId, name: "Det Hold Workflow" });
@@ -1493,15 +1492,13 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     setMissionPlanQaCritiqueHook(async () => [{ code: "missing_audience_split", severity: "needs_clarification", message: "soft" }] as PlanQaDiagnostic[]);
     try {
       const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-      expect(result.status).toBe("invalid"); // deterministic invalid 유지
-      if (result.status !== "invalid") return;
-      expect(result.diagnostics.some((d) => d.code === "missing_publish_unit")).toBe(true);
+      expect(result.status).toBe("plan_qa_pending");
     } finally {
       setMissionPlanQaCritiqueHook(null);
     }
   });
 
-  it("[P4 surface] plan_intent_coverage_failed 시 mission.plan.rejected activity 가 로깅된다(operator 가시)", async () => {
+  it("does not log rejection solely from mission publication wording", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     await db.update(missions).set({ title: "가이드를 site에 올리도록" }).where(eq(missions.id, missionId));
     const wfId = randomUUID();
@@ -1515,10 +1512,9 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     };
     await upsertMissionPlanDecisionSubmission({ db, companyId, missionId, planningIssueId, decision, decisionHash: hashOwnerPlanDecision(decision as Parameters<typeof hashOwnerPlanDecision>[0]), authorAgentId: ownerAgentId, status: "submitted" });
     const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
-    expect(result.status).toBe("invalid");
+    expect(result.status).toBe("plan_qa_pending");
     const rejected = await db.select().from(activityLog).where(eq(activityLog.action, "mission.plan.rejected"));
-    expect(rejected.length).toBeGreaterThan(0);
-    expect(rejected[0]?.details).toMatchObject({ reason: "plan_intent_coverage_failed" });
+    expect(rejected).toEqual([]);
   });
 
   it("materializes selected execution units into a mission-scoped PAQO workflow DAG with ACTION gated before QA", async () => {
@@ -1668,7 +1664,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
     expect(oversightIssues).toHaveLength(0);
   });
 
-  it("adds Research Workbench to search-oriented PLAN units only when the plugin is ready", async () => {
+  it("does not add tools from search-oriented PLAN prose even when a plugin is ready", async () => {
     const { companyId, ownerAgentId, missionId, planningIssueId } = await seedFullMissionFixture();
     await seedReadyResearchWorkbenchPlugin();
     setWorkflowToolStepExecutor(vi.fn().mockResolvedValue({ accepted: true }));
@@ -1713,10 +1709,8 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
       .where(eq(workflowDefinitions.name, "PAQO WBS: Research current market evidence"));
     expect(paqoDefinitions).toHaveLength(1);
     const paqoSteps = paqoDefinitions[0]!.stepsJson as Array<{ name: string; toolNames?: string[] }>;
-    expect(paqoSteps[0]).toMatchObject({
-      name: "[ACTION] Search current external sources",
-      toolNames: ["insightflo.research-workbench:research-search"],
-    });
+    expect(paqoSteps[0]?.name).toBe("[ACTION] Search current external sources");
+    expect(paqoSteps[0]?.toolNames).toBeUndefined();
   });
 
   it("preserves PLAN-selected workflow tools, KBs, and skill rationale on materialized steps", async () => {
@@ -2085,7 +2079,7 @@ describeEmbeddedPostgres("recordLatestAuthorizedMissionOwnerPlanDecision", () =>
         },
         {
           id: "unit-qa-validation",
-          kind: "qa",
+          kind: "qa", type: "qa",
           title: "[QA] Fact-check HTML report",
           assigneeAgentId: otherAgentId,
           sourceRef: { type: "mission_plan_unit", id: "unit-qa-validation" },

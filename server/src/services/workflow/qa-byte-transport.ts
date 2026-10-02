@@ -3,9 +3,9 @@ import type { Readable } from "node:stream";
 import { digest } from "./artifact-files.js";
 
 export function encodeQaInput(content: Buffer, assets: { fileName: string; bytes: Buffer }[], qa: Buffer | null = null,
-  html?: { ancillary: { fileName: string; bytes: Buffer }[] }) {
+  html?: { ancillary: { fileName: string; bytes: Buffer }[] }, schemaVersion = "workflow.artifact-input.v1") {
   const part = (bytes: Buffer) => ({ base64: bytes.toString("base64"), sha256: digest(bytes), byteSize: bytes.length });
-  const data = Buffer.from(JSON.stringify({ schemaVersion: "manual-onboarding.input.v1", content: part(content),
+  const data = Buffer.from(JSON.stringify({ schemaVersion, content: part(content),
     assets: assets.map(a => ({ fileName: a.fileName, ...part(a.bytes) })), qa: qa ? part(qa) : null,
     ...(html ? { mode: "html", ancillary: html.ancillary.map(a => ({ fileName: a.fileName, ...part(a.bytes) })) } : {}) }));
   if (data.length > 64 * 1024 * 1024) throw new Error("qa_input_transport_too_large");

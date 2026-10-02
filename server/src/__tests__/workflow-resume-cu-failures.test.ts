@@ -3,7 +3,7 @@
 // plus explicitly configured Node wrappers. Real producer semantics — a real receiver never
 // inventing success and snapshot-mutation refusal — are proven solely by the opt-in external
 // suite (tests/external/shorts-receivers.external.ts via pnpm test:shorts-external).
-import { afterAll, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { readFile, writeFile } from "node:fs/promises";
@@ -11,12 +11,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bindCuJob } from "../services/workflow-resume-cu-evidence.js";
 import { createCuObjectReader } from "../services/workflow-resume-cu-objects.js";
-import { cuDatabase, cuCase, cuApp, configureCu, boardMembership, encode, digest, type CuCase } from "./workflow-resume-cu-fixture.js";
+import { cuDatabase, cuCase, cuApp, configureCu, snapshotCuEnvironment, boardMembership, encode, digest, type CuCase } from "./workflow-resume-cu-fixture.js";
 
 // Checked-in producer test double; ordinary CI never requires Python, ffmpeg or a sibling checkout.
 const RECEIVER_FIXTURE = fileURLToPath(new URL("./fixtures/shorts-ci/receiver.mjs", import.meta.url));
 
 let fixture: Awaited<ReturnType<typeof cuDatabase>>;
+let restoreEnvironment: ReturnType<typeof snapshotCuEnvironment>;
+beforeEach(() => { restoreEnvironment = snapshotCuEnvironment(); });
+afterEach(() => { restoreEnvironment(); });
 beforeAll(async () => { fixture = await cuDatabase(); }, 120_000);
 afterAll(async () => { await fixture?.cleanup(); });
 async function connected(change: (c: CuCase) => Promise<void>) {
@@ -30,8 +33,9 @@ async function connected(change: (c: CuCase) => Promise<void>) {
 }
 async function admit(c: CuCase) {
   const app = cuApp(fixture, c);
-  for (const observation of c.observations) {
-    expect((await request(app).post(c.observerUrl).set("Authorization", "Bearer observer-secret").send(observation)).status).toBe(201);
+  for (const [index, observation] of c.observations.entries()) {
+    const reply = await request(app).post(c.observerUrl).set("Authorization", "Bearer observer-secret").send(observation);
+    expect(reply.status, `observation[${index}] ${observation.recordId}: ${JSON.stringify(reply.body)}`).toBe(201);
   }
   return request(app).post(c.intakeUrl).set("x-fixture-board", "1").set("Origin", "http://localhost:3100").send(c.intake);
 }
@@ -156,9 +160,12 @@ test.each(["nonzero", "missing", "malformed", "wrong-scope", "mutated-bytes", "w
 test("absent configured executable/root is a fixed 503, not defaults", async () => {
   await connected(async c => {
     for (const key of ["PAPERCLIP_CU_RECEIVER_PYTHON", "PAPERCLIP_CU_RECEIVER_SCRIPT", "PAPERCLIP_CU_EVIDENCE_ROOT"]) {
-      const prior = process.env[key]; delete process.env[key];
-      const reply = await request(cuApp(fixture, c)).post(c.intakeUrl).set("x-fixture-board", "1").set("Origin", "http://localhost:3100").send(c.intake);
-      expect(reply.status).toBe(503); expect(reply.body).toEqual({ error: "cu_evidence_unavailable" }); process.env[key] = prior;
+      const restore = snapshotCuEnvironment();
+      try {
+        delete process.env[key];
+        const reply = await request(cuApp(fixture, c)).post(c.intakeUrl).set("x-fixture-board", "1").set("Origin", "http://localhost:3100").send(c.intake);
+        expect(reply.status).toBe(503); expect(reply.body).toEqual({ error: "cu_evidence_unavailable" });
+      } finally { restore(); }
     }
     expect((await fixture.sql`SELECT count(*)::int AS n FROM workflow_late_evidence_submissions WHERE cu_job_id=${c.job.job_id}`)[0].n).toBe(0);
   });

@@ -3,6 +3,7 @@ import { and, eq, ne } from "drizzle-orm";
 import { activityLog, issueWorkProducts, missions, workflowRuns, workflowRunSeeds, workflowStepRuns, type Db } from "@paperclipai/db";
 import { workflowSeedRequestSchema } from "@paperclipai/shared/validators/workflow-seed";
 import { forbidden } from "../../errors.js";
+import { classifyWorkflowStepRole } from "../workflow-step-role.js";
 import { createWorkflowRun } from "./workflow-store.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
@@ -23,7 +24,8 @@ export function assertSeedActor(input: CreateWorkflowRunInput, actor?: TriggerAc
 }
 
 function assertSupported(step: WorkflowStep) {
-  if ((step.type && step.type !== "agent") || !step.agentId || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
+  const role = classifyWorkflowStepRole(step);
+  if ((role !== "action" && (role !== "unknown" || (step.type && step.type !== "agent"))) || !step.agentId || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
     || step.bootstrapOnly || step.triggerOn === "escalation" || step.executionMode === "dynamic_owner_plan"
     || resolveEdges(step).some(e => !e.isBackEdge && e.when !== "success")) throw seedError("unsupported_step", { stepId: step.id });
 }

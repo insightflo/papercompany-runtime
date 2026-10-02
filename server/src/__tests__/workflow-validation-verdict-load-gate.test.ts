@@ -14,7 +14,7 @@ const plainWorkflowRuns: ValidationVerdictGateStepRun[] = [
 ];
 const qaRetryStep: WorkflowStep = {
   id: "qa",
-  type: "tool",
+  type: "tool", qaType: "semantic",
   title: "[QA] Semantic",
   onFailure: "retry",
   maxRetries: 2,
@@ -47,7 +47,7 @@ describe("shouldLoadValidationVerdictsForRun", () => {
 
   it("returns false for failed QA-like steps when generic retry is disabled or issue-less", () => {
     const disabledSteps: ValidationVerdictGateStep[] = [
-      { id: "qa", title: "[QA] Semantic", onFailure: "retry", maxRetries: 0 },
+      { id: "qa", type: "qa", title: "[QA] Semantic", onFailure: "retry", maxRetries: 0 },
     ];
     expect(shouldLoadValidationVerdictsForRun(disabledSteps, [{ stepId: "qa", status: "failed", issueId: "issue-1" }])).toBe(false);
     expect(shouldLoadValidationVerdictsForRun([gateCompatibleStep], [{ stepId: "qa", status: "failed", issueId: null }])).toBe(false);

@@ -8,6 +8,7 @@ import type { Db } from "@paperclipai/db";
 import { toolDefinitions, toolAuditLog, agents, issues } from "@paperclipai/db";
 import { eq, and, desc } from "drizzle-orm";
 import crypto from "node:crypto";
+import { validateToolArtifactContract } from '../workflow/artifact-config-validation.js';
 import type {
   ToolDefinition,
   CreateToolDefinitionInput,
@@ -35,6 +36,7 @@ export const toolService = {
     db: Db,
     input: CreateToolDefinitionInput,
   ): Promise<ToolDefinition> {
+    validateToolArtifactContract(input.adapterConfig);
     const id = crypto.randomUUID();
     const now = new Date();
 
@@ -119,6 +121,7 @@ export const toolService = {
     id: string,
     updates: Partial<Omit<ToolDefinition, "id" | "createdAt" | "updatedAt">>,
   ): Promise<ToolDefinition | null> {
+    validateToolArtifactContract(updates.adapterConfig);
     await db
       .update(toolDefinitions)
       .set({

@@ -40,8 +40,9 @@ import { applyPaqoArtifactContracts } from "./missions/paqo-artifact-contracts.j
 import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
-import { RESEARCH_WORKBENCH_SEARCH_TOOL_NAME, listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
-import { autofillManualOnboardingPublishResult } from "./missions/mission-plan-publish-result-autofill.js";
+import { classifyWorkflowStepRole } from "./workflow-step-role.js";
+import { listCompanyPlanningArtifactTools, hasPlanArtifactRole, type PlanningArtifactTool } from "./missions/mission-plan-publication-contract.js";
+import { autofillPublicationResult } from "./missions/mission-plan-publish-result-autofill.js";
 import { missionPlanTemplateService } from "./missions/mission-plan-templates.js";
 import { resolveMissionPlanTemplateSelection } from "./missions/mission-plan-template-selection.js";
 import { selectFallbackMissionPlanTemplateKeys } from "./missions/mission-planning-templates.js";
@@ -1077,15 +1078,15 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     })
     : null;
   const planningCandidates = await listCompanyExecutionCandidates(db, companyId);
+  const planningTools = await listCompanyPlanningArtifactTools(db, companyId);
   const templateSelection = pinnedPlanQaBinding?.status === "current" && pinnedPlanQaBinding.manifest
     ? pinnedPlanTemplateSelection(activePlan?.refs, pinnedPlanQaBinding.manifest)
     : resolveMissionPlanTemplateSelection({
       decision: collected.decision,
       enabledTemplates: await missionPlanTemplateService(db).list(companyId, { includeDisabled: false }),
       fallbackKeys: selectFallbackMissionPlanTemplateKeys({
-        title: ownershipRow?.title ?? "",
-        description: ownershipRow?.description ?? null,
         candidates: planningCandidates,
+        tools: planningTools,
       }),
     });
   const persistedPendingUnits = activeOwnerDecision?.decisionHash === decisionHash && activePlanQa?.status === "pending"
@@ -1175,14 +1176,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       diagnostics: executionValidationDiagnostics,
     };
   }
-  // Apply one bounded, immutable manual-onboarding publish-result autofill
+  // Apply one bounded, immutable declared publication-result autofill
   // AFTER source-ref + execution-placement validation succeed, BEFORE PLAN-QA
   // / intent coverage / structural validation / materialization observe the
   // draft. Original collected.decision, decisionHash, and ledgerSubmission
   // are preserved; only the effective draft used downstream is normalized.
-  const autofillResult = autofillManualOnboardingPublishResult(
-    draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
-  );
+  const autofillResult = autofillPublicationResult(draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits, planningTools);
   const draftWithTemplates: PlanRevisionDraft = {
     ...draftAfterQaAssigneeRecovery,
     refs: {
@@ -1269,11 +1268,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // [plan-time QA] intent → required-units checklist (deterministic 1순회) + LLM critique(2순회, injectable).
   //   deterministic invalid 는 critique 가 완화 못 함(additive merge). critique unavailable 은 warn(차단 아님).
   //   needs_clarification 은 Hermes Ops clarification contract 로 surface(사용자 질문 전환).
-  const missionIntent = extractMissionIntent(ownershipRow?.title ?? "", ownershipRow?.description ?? null);
+  const missionIntent = extractMissionIntent({ selectedExecutionUnits: effectiveDraft.refs.selectedExecutionUnits, tools: planningTools });
   const deterministicDiagnostics = reviewPlanAgainstIntent({
     intent: missionIntent,
     selectedExecutionUnits: effectiveDraft.refs.selectedExecutionUnits,
     successCriteria: effectiveDraft.successCriteria,
+    tools: planningTools,
   });
   let critiqueDiagnostics: typeof deterministicDiagnostics = [];
   const critiqueHook = getMissionPlanQaCritiqueHook();
@@ -1362,7 +1362,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     units: effectiveDraft.refs.selectedExecutionUnits,
   });
   const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
-    mission => buildPaqoWorkflowSteps(effectiveDraft, mission));
+    mission => buildPaqoWorkflowSteps(effectiveDraft, mission, { tools: planningTools }));
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
   if (revisionErrors.length) {
     await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
@@ -2015,19 +2015,9 @@ function stripIssueGroupPrefix(title: string): string {
 
 type PaqoIssueGroup = "action" | "qa" | "oversight";
 
-function readIssueGroupPrefix(title: string): PaqoIssueGroup | null {
-  const match = /^\s*\[(action|qa|oversight)\]/iu.exec(title);
-  return match ? match[1]!.toLowerCase() as PaqoIssueGroup : null;
-}
-
-function inferPaqoIssueGroup(unit: Record<string, unknown>, title: string): PaqoIssueGroup {
-  const prefixed = readIssueGroupPrefix(title);
-  if (prefixed) return prefixed;
-
-  const kind = toNonEmptyString(unit.kind)?.toLowerCase() ?? "";
-  if (/\b(?:qa|quality|validation|validator|verify|verification)\b/u.test(kind)) return "qa";
-  if (/\b(?:oversight|supervision|unblock|escalation)\b/u.test(kind)) return "oversight";
-  return "action";
+function inferPaqoIssueGroup(unit: Record<string, unknown>): PaqoIssueGroup {
+  const role = classifyWorkflowStepRole(unit);
+  return role === "unknown" ? "action" : role;
 }
 
 function readPaqoGraphWorkProductRequired(unit: Record<string, unknown>, group: PaqoIssueGroup): boolean {
@@ -2079,42 +2069,6 @@ function readSelectedUnitSkillRefs(unit: Record<string, unknown>): string[] {
     ...readStringArray(unit.skillKeys),
     ...readStringArray(unit.skills),
   ]));
-}
-
-function selectedUnitSearchInstructionText(unit: Record<string, unknown>, title: string): string {
-  return [
-    title,
-    toNonEmptyString(unit.name),
-    toNonEmptyString(unit.kind),
-    toNonEmptyString(unit.reason),
-    toNonEmptyString(unit.description),
-    toNonEmptyString(unit.brief),
-    toNonEmptyString(unit.instructions),
-    toNonEmptyString(unit.query),
-    toNonEmptyString(unit.searchQuery),
-  ].filter((value): value is string => Boolean(value)).join("\n");
-}
-
-function selectedUnitNeedsResearchWorkbench(unit: Record<string, unknown>, title: string): boolean {
-  return /\b(?:research|search|web\s+search|source\s+evidence|source\s+discover(?:y|ies)|current\s+(?:facts|sources|external\s+facts)|lookup|scout|collect\s+sources?|find\s+sources?|citations?|evidence)\b|조사|검색|리서치|자료\s*수집|출처|근거\s*수집|웹\s*검색|최신\s*정보|레퍼런스/iu.test(
-    selectedUnitSearchInstructionText(unit, title),
-  );
-}
-
-function selectedUnitWorkflowToolNames(
-  unit: Record<string, unknown>,
-  title: string,
-  options: { researchWorkbenchAvailable: boolean },
-): string[] {
-  const toolNames = readSelectedUnitWorkflowToolNames(unit);
-  if (
-    options.researchWorkbenchAvailable
-    && selectedUnitNeedsResearchWorkbench(unit, title)
-    && !toolNames.includes(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME)
-  ) {
-    toolNames.push(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME);
-  }
-  return toolNames;
 }
 
 function buildUnitStepIdMap(
@@ -2196,7 +2150,7 @@ function insertStepMachineCheckGates(steps: WorkflowStep[]): WorkflowStep[] {
 export function buildPaqoWorkflowSteps(
   draft: PlanRevisionDraft,
   mission: typeof missions.$inferSelect,
-  options: { researchWorkbenchAvailable?: boolean } = {},
+  options: { researchWorkbenchAvailable?: boolean; tools?: readonly PlanningArtifactTool[] } = {},
 ): WorkflowStep[] {
   const dependencyGraph = normalizeMissionPlanDependencyGraph(
     draft.refs.selectedExecutionUnits,
@@ -2217,7 +2171,7 @@ export function buildPaqoWorkflowSteps(
         ?? toNonEmptyString(unit.name)
         ?? toNonEmptyString(unit.id)
         ?? `Execution unit ${index + 1}`;
-    const group = inferPaqoIssueGroup(unit, rawTitle);
+    const group = inferPaqoIssueGroup(unit);
     const title = stripIssueGroupPrefix(rawTitle);
     const groupLabel = group.toUpperCase();
     // [Hybrid QA] Structural gates never require a graph workProduct — they
@@ -2227,11 +2181,7 @@ export function buildPaqoWorkflowSteps(
       : readPaqoGraphWorkProductRequired(unit, group);
     validateStructuralUnit(unit, title, index);
     const declaredStructural = isDeclaredStructuralUnit(unit);
-    const toolNames = declaredStructural
-      ? readSelectedUnitWorkflowToolNames(unit)
-      : selectedUnitWorkflowToolNames(unit, title, {
-          researchWorkbenchAvailable: options.researchWorkbenchAvailable === true,
-        });
+    const toolNames = readSelectedUnitWorkflowToolNames(unit);
     const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
     const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
     const skillRefs = readSelectedUnitSkillRefs(unit);
@@ -2263,7 +2213,8 @@ export function buildPaqoWorkflowSteps(
       ...(toolArgs !== undefined ? { toolArgs } : {}),
       ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
       ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
-      ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : {}),
+      ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : { type: group }),
+      ...(!isStructural && group === "qa" && typeof unit.qaType === "string" ? { qaType: unit.qaType } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
@@ -2293,9 +2244,7 @@ export function buildPaqoWorkflowSteps(
   validateStructuralTopology(gatedSteps as Parameters<typeof validateStructuralTopology>[0]);
 
   // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
-  const isPublishPlan = /publish|deploy|manual-onboarding|게시|온보딩|release|배포/iu.test(
-    `${draft.missionGoal ?? ""} ${gatedSteps.map((s) => `${s.name} ${s.description ?? ""}`).join(" ")}`,
-  );
+  const isPublishPlan = executableUnits.some(unit => hasPlanArtifactRole(unit, options.tools ?? [], "publication"));
   const unitOutcomeContractLines = renderMissionPlanQaUnitContractLines(
     executableUnits.map((unit, index) => ({
       title: selectedSteps[index]?.name ?? `Execution unit ${index + 1}`,
@@ -2306,6 +2255,7 @@ export function buildPaqoWorkflowSteps(
   const qaStep: WorkflowStep = {
     id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
     name: "[QA] Verify mission result",
+    type: "qa",
     agentId: mission.ownerAgentId,
     dependencies: gatedSteps.map((step) => step.id),
     graphWorkProductRequired: false,
@@ -2332,7 +2282,7 @@ export function buildPaqoWorkflowSteps(
     [...gatedSteps, qaStep],
     qaStep.id,
     undefined,
-    { allowCapAcceptance: true },
+    { allowCapAcceptance: true, tools: options.tools },
   );
 }
 
@@ -2443,10 +2393,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   if (!mission) return;
 
   const workflowName = formatPaqoWorkflowName(input.draft, mission);
-  const defaultPluginToolNames = new Set((await listDefaultWorkflowPluginAgentTools(input.db)).map((tool) => tool.name));
-  const steps = buildPaqoWorkflowSteps(input.draft, mission, {
-    researchWorkbenchAvailable: defaultPluginToolNames.has(RESEARCH_WORKBENCH_SEARCH_TOOL_NAME),
-  });
+  const steps = buildPaqoWorkflowSteps(input.draft, mission, { tools: await listCompanyPlanningArtifactTools(input.db, input.companyId) });
   if (steps.length === 0) return;
   // [Stage 4] Immutable PAQO definition lifecycle: hash-based identity lookup,
   // create-only revisions, race-safe via the partial unique index. Existing

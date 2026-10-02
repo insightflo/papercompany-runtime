@@ -1,7 +1,7 @@
 import path from "node:path";
 import { withSelectedInputTransaction } from "./selected-input-transaction.js";
 import { resolveSelectedPaths } from "./workproduct-selector.js";
-import { resolveQaReceiptPath } from "./qa-artifact-consumer.js";
+import { resolveToolResultPaths } from "./artifact-step-result.js";
 import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workflowStepOutputBindings, workflowStepRuns } from "@paperclipai/db";
@@ -197,34 +197,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
     );
   }
 
-  // QA contracts require a server receipt; legacy non-QA tools keep their existing transport.
-  const unresolvedStepIds = Array.from(references).filter((stepId) => !pathsByStepId.has(stepId));
-  if (unresolvedStepIds.length > 0) {
-    const stepRunRows = await input.db
-      .select({ stepId: workflowStepRuns.stepId, metadata: workflowStepRuns.metadata })
-      .from(workflowStepRuns)
-      .where(and(
-        eq(workflowStepRuns.workflowRunId, input.run.id),
-        inArray(workflowStepRuns.stepId, unresolvedStepIds),
-      ))
-      .orderBy(desc(workflowStepRuns.completedAt), desc(workflowStepRuns.id));
-    for (const row of stepRunRows) {
-      if (pathsByStepId.has(row.stepId)) continue;
-      if (row.metadata?.toolArtifactRequest || row.metadata?.toolArtifactReceipt || input.workflowSteps.find(s => s.id === row.stepId)?.toolArtifactContract) {
-        pathsByStepId.set(row.stepId, await resolveQaReceiptPath(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId: row.stepId }));
-        continue;
-      }
-      const toolResult = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
-        ? (row.metadata as Record<string, unknown>).toolResult
-        : null;
-      const artifactPath = toolResult && typeof toolResult === "object" && !Array.isArray(toolResult)
-        ? (toolResult as Record<string, unknown>).artifactPath
-        : null;
-      if (typeof artifactPath === "string" && artifactPath.trim().length > 0) {
-        pathsByStepId.set(row.stepId, path.resolve(artifactPath.trim()));
-      }
-    }
-  }
+  await resolveToolResultPaths(input, Array.from(references).filter(id => !pathsByStepId.has(id)), pathsByStepId);
   for (const stepId of references) {
     if (!pathsByStepId.has(stepId)) {
       throw new Error(`Workflow tool step "${input.step.id}" could not resolve an active local workProduct for ancestor step "${stepId}".`);

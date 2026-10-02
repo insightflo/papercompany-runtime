@@ -10,6 +10,8 @@ import { createDb, workflowDefinitions, workflowStepRuns, workflowRuns, workflow
   workflowRunSeeds, toolDefinitions, issues, instanceSettings, activityLog } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedWorld } from "./helpers/workflow-seed-world.js";
+import { legacyHtmlManualContract } from "./helpers/legacy-html-manual.js";
+import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
 import { ensureWorkflowStepRunRecords } from "../services/workflow/workflow-step-materialization.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
@@ -48,14 +50,16 @@ const v=JSON.parse(readFileSync(0,'utf8'));const h=b=>createHash('sha256').updat
 writeFileSync(4,JSON.stringify({schemaVersion:'manual-onboarding.qa.v1',command:'qa',mode:'content',section:null,ok:true,
 checks:[{id:'fixture',ok:true}],checkedAt:new Date().toISOString(),artifactPath:a.out,
 contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
-  await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin",
-    adapterConfig: { command: `${process.execPath} ${script} qa` } });
+  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
+    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
+  await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin", adapterConfig });
   const dispatch = async (concurrent = false) => {
     const requestId = randomUUID();
     const token = await captureStructuralGateProducerToken({ db, workflowRunId: target.id, gate: steps[1], steps });
     const current = (await rows()).find(s => s.id === check.id)!;
     await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: requestId,
-      metadata: { ...current.metadata, structuralGateProducerToken: token } }).where(eq(workflowStepRuns.id, check.id));
+      metadata: { ...current.metadata, structuralGateProducerToken: token, artifactExecution: freezeArtifactAttempt({ adapterConfig,
+        step: steps[1], executionGeneration: current.executionGeneration, requestId }) } }).where(eq(workflowStepRuns.id, check.id));
     const resolve = () => resolveWorkflowToolStepArgs({ db, run: target, step: steps[1], workflowSteps: steps, consumerStepRunId: check.id });
     const parameters = concurrent ? await Promise.all([resolve(), resolve()]).then(values => {
       expect(values[0]).toEqual(values[1]); return values[0];

@@ -27,7 +27,8 @@ import { parseEvidence } from "./contract.js";
 import { HttpError, notFound } from "../../errors.js";
 import { insertActivityRecord } from "../activity-log-records.js";
 import { heartbeatService } from "../heartbeat.js";
-import { buildWorkflowExecutionSteps, wakeExistingWorkflowStepIssue } from "../workflow/dag-engine.js";
+import { wakeExistingWorkflowStepIssue } from "../workflow/dag-engine.js";
+import { buildCompanyWorkflowExecutionSteps } from '../workflow/company-execution-steps.js';
 import { ensureCanonicalQualityExecution } from "./native-records.js";
 import { QUALITY_EXECUTE_STEP_ID } from "./native-definition.js";
 import { isAddendumWithdrawnForTarget } from "./rollback.js";
@@ -140,7 +141,7 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
   const wantedStepId = fresh!.kind === "qa_addendum" ? QUALITY_EXECUTE_STEP_ID : stepRun?.stepId ?? null;
   const step = wantedStepId === null
     ? undefined
-    : buildWorkflowExecutionSteps(definition!).find((candidate) => candidate.id === wantedStepId);
+    : (await buildCompanyWorkflowExecutionSteps(db, definition!)).find((candidate) => candidate.id === wantedStepId);
   if (!run || !definition || !step) return { status: "blocked", receiptId: null };
   await wakeExistingWorkflowStepIssue({
     db, run, definition, step, stepRunId: binding.stepRunId, issueId: binding.issueId,

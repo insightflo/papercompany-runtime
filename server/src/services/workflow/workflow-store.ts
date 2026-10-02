@@ -26,6 +26,7 @@ import type { WorkflowExecutionMode, WorkflowStep } from "./dag-engine.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { createWorkflowRunWithDefinition } from "./workflow-run-create.js";
 import { stepTimeoutSignalsFromStep } from "../heartbeat-stability.js";
+import { validateWorkflowQaConfigs } from './artifact-config-validation.js';
 
 function inferWorkflowExecutionMode(name: string, steps: WorkflowStep[]): WorkflowExecutionMode {
   return isDynamicOwnerPlanWorkflowDefinition({ name, steps }) ? "dynamic_owner_plan" : "static_dag";
@@ -144,13 +145,12 @@ function mapWorkflowRunSlot(slot: typeof workflowRunSlots.$inferSelect): Workflo
   };
 }
 
-/**
- * Create a new workflow definition.
- */
+/** Create a new workflow definition; all service variants validate QA policy. */
 export async function createWorkflowDefinition(
   db: Db,
   input: CreateWorkflowDefinitionInput,
 ): Promise<WorkflowDefinition> {
+  validateWorkflowQaConfigs(input.steps);
   const id = crypto.randomUUID();
   const now = new Date();
   const executionMode = input.executionMode ?? inferWorkflowExecutionMode(input.name, input.steps);
@@ -222,14 +222,13 @@ export async function listWorkflowDefinitions(
   return results.map(mapWorkflowDefinition);
 }
 
-/**
- * Update a workflow definition.
- */
+/** Update a workflow definition. */
 export async function updateWorkflowDefinition(
   db: Db,
   id: string,
   updates: Partial<Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt">>,
 ): Promise<WorkflowDefinition | null> {
+  validateWorkflowQaConfigs(updates.steps);
   const { steps, ...rest } = updates;
   const patch: Partial<typeof workflowDefinitions.$inferInsert> = { updatedAt: new Date() };
   for (const [key, value] of Object.entries(rest) as [keyof typeof rest, unknown][]) {

@@ -1283,7 +1283,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       name: "cap-exhausted-loop",
       stepsJson: [
         { id: "produce", name: "Produce artifact", agentId: producerAgentId, dependencies: [], conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: 1 }], description: "Produce the artifact" },
-        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA gate" },
+        { id: "qa-validate", name: "Validate the produced artifact", qaType: "semantic", agentId: qaAgentId, dependencies: ["produce"], description: "QA gate" },
       ],
     });
     await db.insert(workflowRuns).values({ id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running", startedAt: new Date("2026-06-18T07:00:00.000Z") });

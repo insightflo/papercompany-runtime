@@ -97,7 +97,7 @@ export async function seedMirrorWorkflow(decision: MirrorOutcome) {
         },
       },
       {
-        id: "validator",
+        id: "validator", type: "qa",
         name: "Validator",
         agentId,
         dependencies: [],

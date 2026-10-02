@@ -150,9 +150,9 @@ describe("normalizeWorkflowStepsForExecution", () => {
 
   it("forces persisted QA steps to use verdict gates even when legacy data requires a workProduct", () => {
     const normalized = normalizeWorkflowStepsForExecution([
-      { id: "inspection", title: "Final inspection", graphWorkProductRequired: true },
-      { id: "qa-legacy", title: "Legacy QA", graphWorkProductRequired: "true" },
-      { id: "qa-agent", title: "QA agent step", type: "agent", graphWorkProductRequired: true },
+      { id: "inspection", qaType: "semantic", title: "Final inspection", graphWorkProductRequired: true },
+      { id: "qa-legacy", qaType: "semantic", title: "Legacy QA", graphWorkProductRequired: "true" },
+      { id: "qa-agent", qaType: "semantic", title: "QA agent step", type: "agent", graphWorkProductRequired: true },
       { id: "materialize-report", title: "Materialize report", graphWorkProductRequired: true },
     ]);
 
@@ -1076,7 +1076,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       name: "Reusable QA Loop Workflow",
       steps: [
         { id: "produce-report", name: "Produce report", agentId: producerAgentId, dependencies: [] },
-        { id: "validate-report", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
+        { id: "validate-report", qaType: "semantic", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
       ],
     });
 
@@ -1107,10 +1107,10 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       name: "Final Inspection Workflow",
       steps: [
         { id: "materialize-report", name: "Materialize report", agentId: producerAgentId, dependencies: [], graphWorkProductRequired: true },
-        { id: "qa-dashboard-html", name: "Validate report HTML", agentId: qaAgentId, dependencies: ["materialize-report"] },
+        { id: "qa-dashboard-html", qaType: "semantic", name: "Validate report HTML", agentId: qaAgentId, dependencies: ["materialize-report"] },
         { id: "signal-analysis", name: "Signal analysis", agentId: producerAgentId, dependencies: [] },
         { id: "strategy-summary", name: "Strategy summary", agentId: producerAgentId, dependencies: ["signal-analysis"] },
-        { id: "inspection", name: "Final inspection", agentId: qaAgentId, dependencies: ["signal-analysis", "strategy-summary", "qa-dashboard-html"], graphWorkProductRequired: true },
+        { id: "inspection", qaType: "semantic", name: "Final inspection", agentId: qaAgentId, dependencies: ["signal-analysis", "strategy-summary", "qa-dashboard-html"], graphWorkProductRequired: true },
       ],
     });
 
@@ -1149,7 +1149,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
           conditionalDependencies: [{ stepId: "validate-report", when: "qa_request_changes", isBackEdge: true, maxIterations: 5 }],
         },
-        { id: "validate-report", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
+        { id: "validate-report", qaType: "semantic", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
       ],
     });
 
@@ -1184,7 +1184,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     const updated = await workflowService.updateDefinition(db, definition.id, {
       steps: [
         { id: "produce-report", name: "Produce report", agentId: producerAgentId, dependencies: [] },
-        { id: "validate-report", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
+        { id: "validate-report", qaType: "semantic", name: "Validate report", agentId: qaAgentId, dependencies: ["produce-report"] },
       ],
     });
 
@@ -1666,7 +1666,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           graphWorkProductRequired: true,
         },
         {
-          id: "audit-evidence",
+          id: "audit-evidence", qaType: "semantic",
           name: "Audit evidence",
           agentId: qaAgentId,
           dependencies: ["collect-evidence"],
@@ -1860,7 +1860,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           graphWorkProductRequired: false,
         },
         {
-          id: "audit-evidence",
+          id: "audit-evidence", qaType: "semantic",
           name: "Audit evidence",
           agentId: qaAgentId,
           dependencies: ["collect-evidence"],
@@ -2101,7 +2101,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           graphWorkProductRequired: true,
         },
         {
-          id: "publish-manual-onboarding",
+          id: "publish-manual-onboarding", deliveryVerification: "required",
           name: "Publish to manual-onboarding R2",
           agentId: publisherAgentId,
           dependencies: ["build-html"],
@@ -2233,14 +2233,14 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       name: "manual-onboarding publish with smoke QA",
       stepsJson: [
         {
-          id: "publish-manual-onboarding",
+          id: "publish-manual-onboarding", deliveryVerification: "required",
           name: "Publish to manual-onboarding R2",
           agentId: publisherAgentId,
           dependencies: [],
           description: "Upload to the manual-onboarding public hub.",
         },
         {
-          id: "publish-smoke-qa",
+          id: "publish-smoke-qa", qaType: "delivery",
           name: "[QA] 게시 smoke QA: R2 HTTP 200 + hub index 갱신 확인",
           agentId: publisherAgentId,
           dependencies: ["publish-manual-onboarding"],
@@ -2643,7 +2643,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
         },
         {
-          id: "validate-ai-news-artifact",
+          id: "validate-ai-news-artifact", qaType: "semantic",
           name: "Validate TechCrunch AI artifact before delivery",
           agentId: validatorAgentId,
           dependencies: ["collect-ai-news-evidence"],
@@ -2814,7 +2814,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
         },
         {
-          id: "validate-ai-news-note",
+          id: "validate-ai-news-note", qaType: "semantic",
           name: "Validate TechCrunch AI note claims and sources",
           agentId: validatorAgentId,
           dependencies: ["synthesize-ai-news-note"],
@@ -2972,7 +2972,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       name: "tech-ai-news",
       stepsJson: [
         {
-          id: "validate-ai-news-note",
+          id: "validate-ai-news-note", qaType: "semantic",
           name: "Validate TechCrunch AI note claims and sources",
           agentId: validatorAgentId,
           dependencies: [],
@@ -3117,7 +3117,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
       name: "tech-ai-news",
       stepsJson: [
         {
-          id: "validate-ai-news-note",
+          id: "validate-ai-news-note", qaType: "semantic",
           name: "Validate TechCrunch AI note claims and sources",
           agentId: validatorAgentId,
           dependencies: [],
@@ -3286,7 +3286,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
         },
         {
-          id: "validate-ai-news-artifact",
+          id: "validate-ai-news-artifact", qaType: "semantic",
           name: "Validate TechCrunch AI artifact before delivery",
           agentId: validatorAgentId,
           dependencies: ["collect-ai-news-evidence"],
@@ -3474,7 +3474,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           dependencies: [],
         },
         {
-          id: "validate-ai-news-artifact",
+          id: "validate-ai-news-artifact", qaType: "semantic",
           name: "Validate TechCrunch AI artifact before delivery",
           agentId: validatorAgentId,
           dependencies: ["collect-ai-news-evidence"],
@@ -7708,7 +7708,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           }],
           description: "Produce the artifact. Do not validate your own output.",
         },
-        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "qa-validate", qaType: "semantic", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
       ],
     });
     await db.insert(workflowRuns).values({
@@ -7918,8 +7918,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           ],
           description: "Produce the artifact",
         },
-        { id: "qa-claims", name: "Validate claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA claims gate" },
-        { id: "qa-readability", name: "Validate readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA readability gate" },
+        { id: "qa-claims", qaType: "semantic", name: "Validate claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA claims gate" },
+        { id: "qa-readability", qaType: "semantic", name: "Validate readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA readability gate" },
       ],
     });
     await db.insert(workflowRuns).values({
@@ -8207,8 +8207,8 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           ],
           description: "Produce the artifact",
         },
-        { id: "qa-claims", name: "Validate the produced artifact claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
-        { id: "qa-readability", name: "Validate the produced artifact readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "qa-claims", qaType: "semantic", name: "Validate the produced artifact claims", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "qa-readability", qaType: "semantic", name: "Validate the produced artifact readability", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
         { id: "lead-approval", name: "Lead approval", agentId: leadAgentId, dependencies: ["qa-claims", "qa-readability"], description: "Approve validated artifact" },
       ],
     });
@@ -8297,7 +8297,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           description: "Collect source evidence",
         },
         {
-          id: "audit-source-coverage",
+          id: "audit-source-coverage", qaType: "semantic",
           name: "Audit source coverage and confidence",
           agentId: auditAgentId,
           dependencies: ["collect-ai-news-evidence"],
@@ -8377,7 +8377,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
           conditionalDependencies: [{ stepId: "qa-validate", when: "qa_request_changes", isBackEdge: true, maxIterations: 1 }],
           description: "Produce the artifact",
         },
-        { id: "qa-validate", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
+        { id: "qa-validate", qaType: "semantic", name: "Validate the produced artifact", agentId: qaAgentId, dependencies: ["produce"], description: "QA validation gate" },
         { id: "lead-approval", name: "Lead approval", agentId: leadAgentId, dependencies: ["qa-validate"], description: "Approve validated artifact" },
         { id: "build-html", name: "Build HTML", agentId: htmlAgentId, dependencies: ["lead-approval"], description: "Build HTML artifact" },
         { id: "publish-html", name: "Publish HTML", agentId: htmlAgentId, dependencies: ["build-html"], description: "Publish HTML artifact" },

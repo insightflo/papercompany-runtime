@@ -16,8 +16,8 @@ const PAQO_STEPS: DagStepLike[] = [
   { id: "action-2-fed63a3217", name: "Technology Research", dependencies: ["action-1-f39c231860"] },
   { id: "action-3-c01a38e727", name: "Economics Research", dependencies: ["action-1-f39c231860"] },
   { id: "action-4-dcbc31ebc7", name: "Synthesis", dependencies: ["action-2-fed63a3217", "action-3-c01a38e727"] },
-  { id: "qa-5-109cd4a030", name: "Validate", dependencies: ["action-4-dcbc31ebc7"] },
-  { id: "qa-6200a35259", name: "Verify mission result", dependencies: ["action-1-f39c231860", "action-2-fed63a3217", "action-3-c01a38e727", "action-4-dcbc31ebc7", "qa-5-109cd4a030"] },
+  { id: "qa-5-109cd4a030", qaType: "semantic", name: "Validate", dependencies: ["action-4-dcbc31ebc7"] },
+  { id: "qa-6200a35259", qaType: "semantic", name: "Verify mission result", dependencies: ["action-1-f39c231860", "action-2-fed63a3217", "action-3-c01a38e727", "action-4-dcbc31ebc7", "qa-5-109cd4a030"] },
 ];
 
 describe("resolveProducerStepIdFromDag (A: DAG 역참조 → 생산자)", () => {
@@ -39,8 +39,8 @@ describe("resolveProducerStepIdFromDag (A: DAG 역참조 → 생산자)", () => 
     expect(resolveProducerStepIdFromDag("missing-step", PAQO_STEPS)).toBeNull();
     // 모든 dependency가 QA인 step
     const onlyQaDeps: DagStepLike[] = [
-      { id: "qa-a", dependencies: [] },
-      { id: "qa-b", name: "Validate", dependencies: ["qa-a"] },
+      { id: "qa-a", qaType: "semantic", dependencies: [] },
+      { id: "qa-b", qaType: "semantic", name: "Validate", dependencies: ["qa-a"] },
     ];
     expect(resolveProducerStepIdFromDag("qa-b", onlyQaDeps)).toBeNull();
   });
@@ -56,15 +56,10 @@ describe("resolveProducerStepIdFromDag (A: DAG 역참조 → 생산자)", () => 
 });
 
 describe("isQaLikeStep", () => {
-  it("qa-/validate-/verify-/audit- 접두 또는 QA 계열 이름을 QA로 본다", () => {
-    expect(isQaLikeStep({ id: "qa-6200a35259" })).toBe(true);
-    expect(isQaLikeStep({ id: "qa-5-109cd4a030" })).toBe(true);
-    expect(isQaLikeStep({ id: "audit-source-coverage" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-1", name: "Verify report" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-2", title: "QA validation" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-3", title: "Audit source coverage and confidence" })).toBe(true);
-    expect(isQaLikeStep({ id: "qa-step", title: "QA step", type: "agent" })).toBe(true);
-    expect(isQaLikeStep({ id: "validate-report", title: "Validate report", type: "tool" })).toBe(true);
+  it('requires a declared QA role regardless of title or ID', () => {
+    expect(isQaLikeStep({ id: 'qa-check', title: 'QA validation' })).toBe(false);
+    expect(isQaLikeStep({ id: 'ordinary', qaType: 'semantic' })).toBe(true);
+    expect(isQaLikeStep({ id: 'ordinary', type: 'qa' })).toBe(true);
   });
 
   it("ACTION/연구 step은 QA가 아니다", () => {
@@ -80,11 +75,9 @@ describe("isQaLikeStep", () => {
     expect(isQaLikeStep({ id: "final-review", name: "[ACTION] Final review findings and publish corrections" })).toBe(false);
   });
 
-  it("명시적인 한국어 품질 단계는 QA로 본다", () => {
-    expect(isQaLikeStep({ id: "step-4", name: "최종 확인" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-5", name: "산출물 품질 확인" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-6", name: "보고서 검수" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-10", name: "Final review" })).toBe(true);
-    expect(isQaLikeStep({ id: "step-11", name: "Artifact check" })).toBe(true);
+  it('does not infer QA from Korean or English prose', () => {
+    for (const name of ['최종 확인', '산출물 품질 확인', '보고서 검수', 'Final review', 'Artifact check']) {
+      expect(isQaLikeStep({ id: 'ordinary', name })).toBe(false);
+    }
   });
 });

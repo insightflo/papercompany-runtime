@@ -10,7 +10,7 @@ describe("PLAN-QA replacement selection", () => {
     const result = reselectUnavailableQaAssignees({
       selectedExecutionUnits: [{
         id: "qa-unit",
-        title: "[QA] Verify publication",
+        title: "Verify publication", qaType: "semantic",
         assigneeAgentId: "failed-reviewer",
         toolName: "fetch-publication",
         skills: ["publication-review"],
@@ -28,7 +28,7 @@ describe("PLAN-QA replacement selection", () => {
     const result = reselectUnavailableQaAssignees({
       selectedExecutionUnits: [{
         id: "qa-unit",
-        title: "[QA] Verify publication",
+        title: "Verify publication", type: "qa",
         assigneeAgentId: "failed-reviewer",
         skillRefs: ["publication-review"],
       }],
@@ -45,7 +45,7 @@ describe("PLAN-QA replacement selection", () => {
     const result = reselectUnavailableQaAssignees({
       selectedExecutionUnits: [{
         id: "qa-unit",
-        title: "[QA] Verify publication",
+        title: "Verify publication", qaType: "semantic",
         assigneeAgentId: "failed-reviewer",
         skillRefs: ["publication-review"],
       }],
@@ -57,11 +57,36 @@ describe("PLAN-QA replacement selection", () => {
     expect(result.replacements).toEqual([]);
   });
 
+  it("preserves an explicit runnable assignee regardless of capability prose", () => {
+    const input = {
+      selectedExecutionUnits: [{ id: "unit-1", title: "Inspection", qaType: "semantic", assigneeAgentId: "selected" }],
+      runnableCandidates: [
+        { agentId: "other", name: "QA Expert", role: "qa", capabilities: "The best reviewer for every QA task", desiredSkillKeys: [], toolNames: [] },
+        { agentId: "selected", name: "Worker", role: "writer", capabilities: "Writes reports", desiredSkillKeys: [], toolNames: [] },
+      ],
+    };
+    expect(reselectUnavailableQaAssignees(input).replacements).toEqual([]);
+    expect(selectedPlanQaReviewerAgentId(input)).toBe("selected");
+  });
+
+  it("does not select or replace QA from titles or IDs without a role declaration", () => {
+    const input = {
+      selectedExecutionUnits: [{ id: "qa-review", title: "[QA] Verify publication", assigneeAgentId: "unavailable" }],
+      runnableCandidates: [
+        { agentId: "reviewer", name: "Reviewer", role: "qa", capabilities: "QA review", desiredSkillKeys: [], toolNames: [] },
+      ],
+    };
+    const result = reselectUnavailableQaAssignees(input);
+    expect(result.replacements).toEqual([]);
+    expect(result.units[0]?.assigneeAgentId).toBe("unavailable");
+    expect(selectedPlanQaReviewerAgentId(input)).toBeUndefined();
+  });
+
   it("does not rewrite a cross-company QA owner as a local reviewer", () => {
     const input = {
       selectedExecutionUnits: [{
         id: "remote-qa-unit",
-        title: "[QA] External company review",
+        title: "External company review", qaType: "semantic",
         agentId: "remote-owner",
         sourceRef: { type: "cross_company_mission" },
       }],

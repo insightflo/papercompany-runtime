@@ -98,6 +98,17 @@ it("board HTTP trigger passes seed admission while an agent spoofing triggeredBy
   const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, accepted.body.runId));
   expect(rows.find(s => s.stepId === "write")).toMatchObject({ status: "completed", issueId: null });
 });
+it("reuses legacy agent output when PAQO declares the equivalent action role", async () => {
+  const f = await seedWorld(db, root);
+  await db.update(workflowDefinitions).set({ stepsJson: f.steps.map(s => ({ ...s, type: "action" })) })
+    .where(eq(workflowDefinitions.id, f.definition.id));
+  const target = await f.admit();
+  await executeWorkflowRun(db, target.id);
+  const selected = await selectOfficialWorkProduct(db, { companyId: f.companyId, workflowRunId: target.id, stepId: "write",
+    selector: { type: "document", title: "content.json" } });
+  expect(selected.product.id).toBe(f.product.id);
+  expect(selected.producer.workflowRunId).toBe(f.sourceRun.id);
+});
 it("no seed retains ordinary initial materialization", async () => {
   const f = await seedWorld(db, root);
   const { seedFromRun: _, ...input } = f.input;

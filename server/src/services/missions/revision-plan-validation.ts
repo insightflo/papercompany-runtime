@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { missions, type Db } from "@paperclipai/db";
 import { HttpError } from "../../errors.js";
 import { checkMissionRevisionSteps } from "./mission-revision-guard.js";
-import { buildWorkflowExecutionSteps } from "../workflow/execution-steps.js";
+import { buildCompanyWorkflowExecutionSteps } from "../workflow/company-execution-steps.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 
 export async function loadMissionRow(db: Db, companyId: string, missionId: string) {
@@ -15,7 +15,7 @@ export async function revisionPlanDiagnostics(db: Db, companyId: string, mission
   if (!mission?.sourceWorkflowRunId) return [];
   try {
     await checkMissionRevisionSteps(db, { companyId, missionId, units,
-      steps: buildWorkflowExecutionSteps({ name: mission.title, stepsJson: build(mission) }) });
+      steps: await buildCompanyWorkflowExecutionSteps(db, { companyId, name: mission.title, stepsJson: build(mission) }) });
     return [];
   } catch (e) {
     if (!(e instanceof HttpError)) throw e;

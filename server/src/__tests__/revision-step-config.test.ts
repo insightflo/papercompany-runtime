@@ -26,6 +26,19 @@ it("does not treat arbitrary metadata or prose-only contract changes as a change
   const step = { ...source[0], contract: { postconditions: ["new words"] }, irrelevant: "bypass" };
   expect(revisionStepHash(step, [], "failure")).toBe(revisionStepHash(source[0], [], "failure"));
 });
+it.each([
+  { qaConfig: { rules: { "required-fields": { params: { pointers: ["/ok"] } } } } },
+  { deliveryVerification: "required" as const },
+  { capAcceptance: "blocked" as const },
+  { deliveryRole: "publication-verify" as const },
+])("compares executable declaration changes for failed attempts: %j", patch => {
+  expect(revisionStepHash({ ...source[0], ...patch }, [], "failure")).not.toBe(revisionStepHash(source[0], [], "failure"));
+});
+it.each(["seed", "failure"] as const)("normalizes legacy agent/untyped roles without collapsing QA or control roles (%s)", purpose => {
+  const expected = revisionStepHash({ ...source[0], type: "action" }, [], purpose);
+  for (const type of [undefined, "agent", "action"]) expect(revisionStepHash({ ...source[0], type }, [], purpose)).toBe(expected);
+  for (const type of ["qa", "approval", "tool", "if"]) expect(revisionStepHash({ ...source[0], type }, [], purpose)).not.toBe(expected);
+});
 it("normalizes native tool/dependency aliases so spelling alone cannot bypass a failed configuration", () => {
   const [original] = normalizeWorkflowStepsForExecution([{ ...source[0], toolNames: ["run"], dependencies: ["parent"] }]);
   const [alias] = normalizeWorkflowStepsForExecution([{ ...source[0], type: "agent", tools: ["run"], dependsOn: ["parent"], dependencies: ["parent"] }]);

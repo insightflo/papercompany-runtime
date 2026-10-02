@@ -84,7 +84,7 @@ export async function seedQaCapWorkflow(
     const id = edge.stepId ?? `qa-${index}-${randomUUID().slice(0, 8)}`;
     return edge.structural
       ? { id, name: "[QA] Structural gate", type: "tool", qaType: "structural", agentId: "", toolNames: ["validate"], dependencies: [producerStepId] }
-      : { id, name: "[QA] Semantic review", agentId: base.agentId, dependencies: [producerStepId] };
+      : { id, name: "Semantic review", qaType: "semantic", agentId: base.agentId, dependencies: [producerStepId] };
   });
   await db.insert(workflowDefinitions).values({
     id: wfId, companyId: base.companyId, name: "Cap WF",

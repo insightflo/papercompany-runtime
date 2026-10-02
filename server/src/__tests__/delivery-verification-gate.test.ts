@@ -1,172 +1,38 @@
-// @vitest-environment node
-// [Delivery Verification Gate] helper 가 publish/deploy step 감지, duplicate 판정, gate step 생성 검증.
-
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from 'vitest';
 import {
-  appendDeliveryVerificationCriteria,
-  buildDeliveryVerificationCriteria,
-  hasExistingDeliveryReadbackStep,
-  isDeliveryRelevantStep,
-  isDeliveryReadbackStep,
-  strengthenDeliveryReadbackSteps,
-  synthesizeDeliveryVerificationGateStep,
-} from "../services/workflow/delivery-verification-gate.js";
+  appendDeliveryVerificationCriteria, hasExistingDeliveryReadbackStep,
+  strengthenDeliveryReadbackSteps, synthesizeDeliveryVerificationGateStep,
+} from '../services/workflow/delivery-verification-gate.js';
 
-describe("delivery-verification-gate", () => {
-  it("isDeliveryRelevantStep: manual-onboarding/public-destination keywords true, generic publish false", () => {
-    expect(isDeliveryRelevantStep({ id: "s1", name: "manual-onboarding publisher", description: "" })).toBe(true);
-    expect(isDeliveryRelevantStep({ id: "s1", name: "Publish to R2", description: "" })).toBe(true);
-    expect(isDeliveryRelevantStep({ id: "s1", name: "Cloudflare pages deploy", description: "" })).toBe(true);
-    expect(isDeliveryRelevantStep({ id: "s1", name: "회사게시", description: "" })).toBe(true);
-    // generic publish/deploy alone is NOT delivery-relevant (regression prevention)
-    expect(isDeliveryRelevantStep({ id: "publish", name: "Publish report", description: "" })).toBe(false);
-    expect(isDeliveryRelevantStep({ id: "deploy", name: "Deploy", description: "" })).toBe(false);
-    // content QA is NOT delivery-relevant
-    expect(isDeliveryRelevantStep({ id: "validate-content", name: "Validate content quality", description: "" })).toBe(false);
-  });
+const publish = { id: 'publish', name: 'Send result', agentId: 'agent-1', dependencies: [], deliveryVerification: 'required' as const };
+const readback = { id: 'check', name: 'Check result', agentId: 'agent-1', qaType: 'delivery', dependencies: ['publish'] };
 
-  it("hasExistingDeliveryReadbackStep: detects QA+public-marker combo, not generic QA or generic publish", () => {
-    // QA + public marker → delivery readback
-    expect(hasExistingDeliveryReadbackStep([
-      { id: "publish", name: "Publish to R2", description: "" },
-      { id: "s1", name: "Publish smoke QA: R2 HTTP 200 + hub index", description: "", dependencies: ["publish"] },
-    ])).toBe(true);
-    expect(hasExistingDeliveryReadbackStep([
-      { id: "publish", name: "manual-onboarding publisher", description: "" },
-      { id: "s1", name: "verify publish onboarding hub", description: "", dependencies: ["publish"] },
-    ])).toBe(true);
-    // explicit readback keyword
-    expect(hasExistingDeliveryReadbackStep([
-      { id: "publish", name: "Publish to R2", description: "" },
-      { id: "s1", name: "delivery-verification-gate", description: "", dependencies: ["publish"] },
-    ])).toBe(true);
-    // generic QA without public marker → NOT delivery readback
-    expect(hasExistingDeliveryReadbackStep([
-      { id: "s1", name: "Validate content quality", description: "" },
-    ])).toBe(false);
-    // generic publish without QA → NOT delivery readback
-    expect(hasExistingDeliveryReadbackStep([
-      { id: "s1", name: "Publish report", description: "" },
-    ])).toBe(false);
-    // no steps
+describe('delivery verification topology', () => {
+  it('recognizes only a readback downstream of configured delivery', () => {
+    expect(hasExistingDeliveryReadbackStep([publish, readback])).toBe(true);
+    expect(hasExistingDeliveryReadbackStep([publish, { ...readback, dependencies: [] }])).toBe(false);
+    expect(hasExistingDeliveryReadbackStep([publish, { ...readback, qaType: 'semantic' }])).toBe(false);
     expect(hasExistingDeliveryReadbackStep([])).toBe(false);
-    expect(isDeliveryReadbackStep({
-      id: "smoke",
-      name: "[QA] 게시 smoke QA: R2 HTTP 200 + hub index 갱신 확인",
-      description: "",
-    })).toBe(true);
-    expect(isDeliveryReadbackStep({
-      id: "verify",
-      name: "[ACTION] Verify published manual destination readback",
-      description: "Run the registered verify tool.",
-    })).toBe(false);
-    expect(isDeliveryReadbackStep({
-      id: "destination-check",
-      name: "Check published result",
-      type: "agent",
-      description: "Perform final public destination readback.",
-    })).toBe(true);
   });
-
-  it("synthesizeDeliveryVerificationGateStep: creates a gate step with readback hard-stop description", () => {
-    const gate = synthesizeDeliveryVerificationGateStep({
-      dependencyStepIds: ["publish-step-1", "publish-step-2"],
-      agentId: "agent-1",
-      definitionName: "Test Workflow",
-    });
-    expect(gate.id).toBe("delivery-verification-gate");
-    expect(gate.name).toContain("Delivery Verification");
-    expect(gate.dependencies).toEqual(["publish-step-1", "publish-step-2"]);
-    expect(gate.graphWorkProductRequired).toBe(false);
-    expect(gate.agentId).toBe("agent-1");
-    expect(gate.description).toContain("Do NOT pass merely because the publish/deploy step completed");
-    expect(gate.description).toContain("Verification Before Completion");
-    expect(gate.description).toContain("fresh evidence");
-    expect(gate.description).toContain("Do not infer a provider");
-    expect(gate.description).toContain("delivery manifest");
-    expect(gate.description).toContain("HTTP 200");
-    expect(gate.description).toContain("REQUEST_CHANGES");
-    expect(gate.description).toContain("PASS");
+  it('recognizes transitive downstream readback without cycling forever', () => {
+    const bridge = { id: 'bridge', name: 'Bridge', dependencies: ['publish', 'check'] };
+    expect(hasExistingDeliveryReadbackStep([publish, bridge, { ...readback, dependencies: ['bridge'] }])).toBe(true);
+    expect(hasExistingDeliveryReadbackStep([publish, { ...bridge, dependencies: ['check'] }, { ...readback, dependencies: ['bridge'] }])).toBe(false);
   });
-
-  it("buildDeliveryVerificationCriteria: produces readback hard-stop text", () => {
-    const criteria = buildDeliveryVerificationCriteria();
-    expect(criteria).toContain("final destination declared");
-    expect(criteria).toContain("final consumer path");
-    expect(criteria).toContain("Do not PASS merely because the publish/deploy step completed");
-    expect(criteria).toContain("instead of guessing a provider");
-    expect(criteria).toContain("HTTP 200");
-    expect(criteria).toContain("REQUEST_CHANGES");
-  });
-
-  it("strengthens an existing delivery readback step instead of requiring a duplicate gate", () => {
-    const steps = strengthenDeliveryReadbackSteps([
-      {
-        id: "publish",
-        name: "manual-onboarding publisher",
-        agentId: "agent-1",
-        dependencies: [],
-      },
-      {
-        id: "smoke",
-        name: "[QA] 게시 smoke QA: R2 HTTP 200 + hub index 갱신 확인",
-        agentId: "agent-1",
-        dependencies: ["publish"],
-        description: "Check the public hub.",
-      },
+  it('strengthens configured readback only, retaining the existing instructions', () => {
+    const steps = strengthenDeliveryReadbackSteps([publish,
+      { ...readback, id: 'precheck', dependencies: [], description: 'Before send.' },
+      { ...readback, description: 'After send.' },
     ]);
-
-    expect(steps[0]!.description).toBeUndefined();
-    expect(steps[1]!.description).toContain("Check the public hub.");
-    expect(steps[1]!.description).toContain("Delivery Verification:");
-    expect(steps[1]!.description).toContain("REQUEST_CHANGES");
-    expect(appendDeliveryVerificationCriteria(steps[1]!.description)).toBe(steps[1]!.description);
+    expect(steps[0].description).toBeUndefined();
+    expect(steps[1].description).toBe('Before send.');
+    expect(steps[2].description).toContain('After send.');
+    expect(steps[2].description).toContain('Delivery Verification:');
+    expect(appendDeliveryVerificationCriteria(steps[2].description)).toBe(steps[2].description);
   });
-
-  it("does not append QA verdict criteria to an ACTION verify step", () => {
-    const [step] = strengthenDeliveryReadbackSteps([{
-      id: "verify",
-      name: "[ACTION] Verify published manual destination readback",
-      agentId: "agent-1",
-      dependencies: ["publish"],
-      graphWorkProductRequired: true,
-      description: "Run the registered verify tool.",
-    }]);
-
-    expect(step?.description).toBe("Run the registered verify tool.");
-  });
-
-  it("strengthens only readback QA steps that run after the delivery action", () => {
-    const steps = strengthenDeliveryReadbackSteps([
-      {
-        id: "build-html",
-        name: "Build manual HTML",
-        agentId: "agent-1",
-        dependencies: [],
-      },
-      {
-        id: "content-qa",
-        name: "[QA] Validate manual-onboarding claims before publication",
-        agentId: "agent-1",
-        dependencies: ["build-html"],
-        description: "Validate the public manual content before publication.",
-      },
-      {
-        id: "publish-manual-onboarding",
-        name: "Publish to manual-onboarding R2",
-        agentId: "agent-1",
-        dependencies: ["content-qa"],
-      },
-      {
-        id: "public-readback-qa",
-        name: "[QA] Verify public manual URL",
-        agentId: "agent-1",
-        dependencies: ["publish-manual-onboarding"],
-        description: "Read back the public URL after publication.",
-      },
-    ]);
-
-    expect(steps[1]?.description).not.toContain("Delivery Verification:");
-    expect(steps[3]?.description).toContain("Delivery Verification:");
+  it('generates explicit delivery QA with the exact publication dependencies', () => {
+    const gate = synthesizeDeliveryVerificationGateStep({ dependencyStepIds: ['one', 'two'], agentId: 'agent-1' });
+    expect(gate).toMatchObject({ qaType: 'delivery', dependencies: ['one', 'two'], agentId: 'agent-1', graphWorkProductRequired: false });
+    expect(hasExistingDeliveryReadbackStep([{ ...publish, id: 'one' }, gate])).toBe(true);
   });
 });

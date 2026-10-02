@@ -99,7 +99,7 @@ describeEP("workflow frozen wake contract (canonical stored step + stored arrays
         id: "gate", name: "Structural", type: "tool", qaType: "structural",
         toolNames: ["captured-validator"], dependencies: ["producer"], agentId: "",
       },
-      { id: "qa", name: "[QA] Semantic review", agentId: capturedAgentId, dependencies: ["producer", "gate"] },
+      { id: "qa", type: "qa", name: "[QA] Semantic review", agentId: capturedAgentId, dependencies: ["producer", "gate"] },
     ];
     const workflowId = await seedWorkflowDefinition(fixture.sql, {
       companyId: seeded.companyId, name: "frozen-wake-gate", stepsJson: capturedSteps,

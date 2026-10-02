@@ -103,6 +103,17 @@ export async function boardMembership(fixture: ExecutionDefinitionFixtureDb, c: 
   await fixture.sql`INSERT INTO company_memberships (company_id,principal_type,principal_id,status,membership_role)
     VALUES (${c.companyId},'user','cu-board','active','owner')`;
 }
+export function snapshotCuEnvironment() {
+  const keys = ["PAPERCLIP_CU_OBSERVERS_JSON", "PAPERCLIP_CU_LOCAL_OBJECT_ROOT", "PAPERCLIP_CU_EVIDENCE_ROOT",
+    "PAPERCLIP_CU_RECEIVER_PYTHON", "PAPERCLIP_CU_RECEIVER_SCRIPT"];
+  const prior = keys.map(key => [key, process.env[key]] as const);
+  return () => {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
 export function configureCu(c: CuCase, receiver?: { executable: string; script: string }) {
   process.env.PAPERCLIP_CU_OBSERVERS_JSON = JSON.stringify([c.principal]);
   process.env.PAPERCLIP_CU_LOCAL_OBJECT_ROOT = c.objects;

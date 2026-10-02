@@ -11,22 +11,18 @@ function makeStep(overrides: Partial<Step> & { id: string }): Step {
     dependencies: [],
     type: "tool",
     qaType: "structural",
-    toolNames: ["validate-gazua-report-html"],
+    toolNames: ["validate-report"],
     ...overrides,
   } as Step;
 }
 
 describe("fillStructuralValidatorToolArgs", () => {
-  it("fills canonical validator args from the single producer dependency (case A)", () => {
+  it("never invents validator arguments from a tool name (case A)", () => {
     const steps = [
       makeStep({ id: "action-2-abc", name: "[ACTION] produce html", agentId: "agent-1", type: undefined, qaType: undefined, toolNames: undefined }),
       makeStep({ id: "qa-3-def", dependencies: ["action-2-abc"] }),
     ];
-    fillStructuralValidatorToolArgs(steps);
-    expect(steps[1]!.toolArgs).toEqual({
-      dir: "{$steps.action-2-abc.workProductDir}",
-      glob: "*.html",
-    });
+    expect(() => fillStructuralValidatorToolArgs(steps)).toThrow(/toolArgs/);
   });
 
   it("keeps explicitly declared toolArgs untouched (case B)", () => {
@@ -74,17 +70,17 @@ describe("buildPaqoWorkflowSteps structural toolArgs materialization", () => {
     id: "11111111-1111-4111-8111-111111111111",
     companyId: "22222222-2222-4222-8222-222222222222",
     ownerAgentId: "33333333-3333-4333-8333-333333333333",
-    title: "2026-08-27 gazua-evening",
+    title: "Report validation",
   } as never;
 
-  it("fills the validator toolArgs with the materialized producer step id when the plan unit omits toolArgs", () => {
+  it("requires explicit validator arguments in the plan unit", () => {
     const draft = {
       missionGoal: "이브닝 리포트 재생성",
       successCriteria: [],
       refs: {
         selectedExecutionUnits: [
           { id: "unit-produce-html", title: "[ACTION] 이브닝 HTML 생성", assigneeAgentId: "44444444-4444-4444-8444-444444444444", sourceRef: { id: "unit-produce-html", type: "mission_plan_unit" } },
-          { id: "unit-structural-gate", title: "[QA] 기계 검증", type: "tool", qaType: "structural", toolNames: ["validate-gazua-report-html"], sourceRef: { id: "unit-structural-gate", type: "mission_plan_unit" } },
+          { id: "unit-structural-gate", title: "[QA] 기계 검증", type: "tool", qaType: "structural", toolNames: ["validate-report"], sourceRef: { id: "unit-structural-gate", type: "mission_plan_unit" } },
         ],
       },
       steps: [
@@ -93,14 +89,7 @@ describe("buildPaqoWorkflowSteps structural toolArgs materialization", () => {
       ],
     } as never;
 
-    const steps = buildPaqoWorkflowSteps(draft, mission, {});
-
-    const gate = steps.find((step) => step.qaType === "structural");
-    expect(gate).toBeTruthy();
-    expect(gate!.toolArgs).toEqual({
-      dir: `{$steps.${steps.find((s) => s.id.startsWith("action"))!.id}.workProductDir}`,
-      glob: "*.html",
-    });
+    expect(() => buildPaqoWorkflowSteps(draft, mission, {})).toThrow(/toolArgs/);
   });
 
   it("attaches derived contract postconditions for units with plan-field contract data and omits the contract key otherwise", () => {
