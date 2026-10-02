@@ -207,7 +207,20 @@ export async function registerWorkflowArtifact(input: {
   await assertWorkflowArtifactPath({ db: input.db, issue: input.issue, artifactPath, delegation: input.delegation });
 
   const existing = await findExistingWorkflowArtifact({ db: input.db, issue: input.issue, artifactPath });
-  if (existing) return reconcileExistingLocalArtifactTitle(input.db, existing, artifactPath);
+  if (existing) {
+    // [same-path rework restamp] in-place rework re-registers the same path; the heartbeat must prove
+    //   the current attempt and becomes the producer of record (fail closed, same checks as create).
+    const restamped = input.actor.runId
+      ? await workProductService(input.db).restampProducer(existing.id, input.actor.runId, {
+        registeredByRunId: input.actor.runId,
+        // Clear prior delegation markers; the current registration's delegation (if any) replaces them.
+        delegatedWorkflowApi: null, delegatedFromIssueId: null, delegatedFromIssueIdentifier: null,
+        ...delegationMetadata(input.delegation),
+      }, input.delegation)
+      : existing;
+    if (!restamped) throw conflict("workproduct_restamp_target_missing", { workProductId: existing.id });
+    return reconcileExistingLocalArtifactTitle(input.db, restamped, artifactPath);
+  }
 
   const product = await workProductService(input.db).createForIssue(input.issue.id, input.issue.companyId, {
     projectId: input.issue.projectId ?? null,
