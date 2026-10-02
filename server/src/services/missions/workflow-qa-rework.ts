@@ -9,6 +9,7 @@ export type DagStepLike = {
   readonly name?: string;
   readonly title?: string;
   readonly type?: string;
+  readonly agentId?: string;
   readonly description?: string;
   readonly qaType?: string;
   readonly toolName?: string;
@@ -25,11 +26,17 @@ export const QA_REWORK_DEFAULT_MAX_ITERATIONS = 2;
 export type QaReworkBackEdgeOptions = {
   allowCapAcceptance?: boolean;
   tools?: readonly PlanningArtifactTool[];
+  /** PAQO artifact pipelines rework agent producers, not receipt-producing tools. */
+  producerOnly?: boolean;
 };
 
-export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: readonly DagStepLike[]): string | null {
+export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: readonly DagStepLike[],
+  options: Pick<QaReworkBackEdgeOptions, "producerOnly"> = {}): string | null {
   if (!qaStepId) return null;
   const byId = new Map(steps.map((step) => [step.id, step]));
+  const traversable = (step: DagStepLike) => isQaLikeStep(step) || (options.producerOnly === true && step.type === "tool");
+  const producer = (step: DagStepLike) => !traversable(step) && (!options.producerOnly
+    || (Boolean(step.agentId?.trim()) && ["agent", "action", "producer", "research"].includes(step.type ?? "agent")));
 
   const pickDeepest = (candidates: readonly DagStepLike[]): DagStepLike | null => {
     if (candidates.length === 0) return null;
@@ -44,15 +51,15 @@ export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: rea
     if (visited.has(stepId)) return null;
     const nextVisited = new Set(visited).add(stepId);
     const qaStep = byId.get(stepId);
-    if (!qaStep || !isQaLikeStep(qaStep)) return null;
+    if (!qaStep || !traversable(qaStep)) return null;
     const dependencies = (qaStep.dependencies ?? qaStep.dependsOn ?? [])
       .map((dependencyId) => byId.get(dependencyId))
       .filter((step): step is DagStepLike => Boolean(step));
     const nestedProducers = dependencies
-      .filter(isQaLikeStep)
+      .filter(traversable)
       .map((dependency) => resolve(dependency.id, nextVisited))
       .filter((step): step is DagStepLike => Boolean(step));
-    return pickDeepest(nestedProducers) ?? pickDeepest(dependencies.filter((dependency) => !isQaLikeStep(dependency)));
+    return pickDeepest(nestedProducers) ?? pickDeepest(dependencies.filter(producer));
   };
 
   return resolve(qaStepId, new Set())?.id ?? null;
@@ -96,8 +103,8 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
 ): T[] {
   if (!qaStepId || steps.length === 0) return steps;
   const effectiveMaxIterations = maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
-  const deliveryReplayIds = resolvePublicationReplayStepIds(qaStepId, steps, options.tools ?? []);
-  const producerId = resolveProducerStepIdFromDag(qaStepId, steps);
+  const deliveryReplayIds = options.producerOnly ? [] : resolvePublicationReplayStepIds(qaStepId, steps, options.tools ?? []);
+  const producerId = resolveProducerStepIdFromDag(qaStepId, steps, options);
   const targetIds = deliveryReplayIds.length > 0 ? deliveryReplayIds : producerId ? [producerId] : [];
   if (targetIds.length === 0) return steps;
   const targetIdSet = new Set(targetIds);
