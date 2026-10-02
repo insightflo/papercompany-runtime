@@ -4,9 +4,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { agents, companies, createDb, missions, toolDefinitions, workflowDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { artifactTools, paqoDraft } from "./helpers/paqo-artifact-tool-fixture.js";
-import { buildPaqoWorkflowSteps } from "../services/mission-owner-plan-decisions.js";
-import { listCompanyPlanningArtifactTools } from "../services/missions/mission-plan-publication-contract.js";
+import { artifactTools } from "./helpers/paqo-artifact-tool-fixture.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
 import { executeWorkflowRun, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { loadArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
@@ -26,13 +24,13 @@ afterAll(async () => {
   await temp?.cleanup();
 });
 
-it.each(artifactTools)("engine dispatches materialized $name without an issue and binds the artifact attempt", async tool => {
+it.each(artifactTools)("engine dispatches explicitly defined $name without an issue and binds the artifact attempt", async tool => {
   const [company] = await db.insert(companies).values({ name: "Dispatch", issuePrefix: randomUUID() }).returning();
   const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Owner", role: "operator", adapterType: "process" }).returning();
   const [mission] = await db.insert(missions).values({ companyId: company.id, ownerAgentId: agent.id, title: "Dispatch", status: "active" }).returning();
   await db.insert(toolDefinitions).values({ companyId: company.id, ...tool, adapterType: "builtin" });
-  const steps = buildPaqoWorkflowSteps(paqoDraft([{ id: "selected", toolNames: [tool.name], toolArgs: { id: "fixture" } }]),
-    mission, { tools: await listCompanyPlanningArtifactTools(db, company.id) });
+  const steps = [{ id: 'selected', name: 'Explicit engine tool', type: 'tool', agentId: '', dependencies: [],
+    toolNames: [tool.name], toolArgs: { id: 'fixture' }, graphWorkProductRequired: false }];
   const [definition] = await db.insert(workflowDefinitions).values({ companyId: company.id, missionId: mission.id,
     name: "PAQO artifact dispatch", sourceKind: "paqo", stepsJson: steps }).returning();
   const run = await createWorkflowRun(db, { companyId: company.id, workflowId: definition.id, missionId: mission.id, triggeredBy: "board" });

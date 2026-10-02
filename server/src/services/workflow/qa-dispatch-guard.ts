@@ -29,8 +29,10 @@ async function readAttempt(db: Reader, scope: QaDispatchScope, lock: boolean): P
 }
 
 /** DB request identity authorizes execution; status only vetoes it. */
-export async function captureQaDispatch(scope: QaDispatchScope) {
-  const attempt = await readAttempt(scope.db, scope, false);
+export async function captureQaDispatch(scope: QaDispatchScope, reader: Reader = scope.db) {
+  // A dispatch writer can capture its uncommitted attempt with its transaction reader;
+  // subsequent checks still use the durable DB connection, with the same frozen identity.
+  const attempt = await readAttempt(reader, scope, false);
   return {
     async assertCurrent() {
       const now = await readAttempt(scope.db, scope, false);

@@ -37,7 +37,6 @@ import {
   validateDeclaredStructuralPlan,
 } from "./missions/structural-materialization.js";
 import { applyPaqoArtifactContracts } from "./missions/paqo-artifact-contracts.js";
-import { paqoArtifactToolStep } from "./missions/paqo-artifact-tool-step.js";
 import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
 import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
@@ -2161,7 +2160,6 @@ export function buildPaqoWorkflowSteps(
     throw new Error(`Invalid canonical mission-plan dependency graph: ${dependencyGraph.diagnostics.map((entry) => entry.message).join("; ")}`);
   }
   const executableUnits = dependencyGraph.graph.materializedUnits;
-  const artifactToolSteps = executableUnits.map(unit => paqoArtifactToolStep(unit, options.tools));
   const selectedSteps = executableUnits.map((unit, index) => {
     const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
     const assigneeAgentId =
@@ -2173,16 +2171,14 @@ export function buildPaqoWorkflowSteps(
         ?? toNonEmptyString(unit.name)
         ?? toNonEmptyString(unit.id)
         ?? `Execution unit ${index + 1}`;
-    const artifactTool = artifactToolSteps[index];
-    const executionUnit = artifactTool ? { ...unit, ...artifactTool, tools: undefined, toolName: undefined } : unit;
-    const group = inferPaqoIssueGroup(executionUnit);
+    const group = inferPaqoIssueGroup(unit);
     const title = stripIssueGroupPrefix(rawTitle);
     const groupLabel = group.toUpperCase();
-    const graphWorkProductRequired = artifactTool || isDeclaredStructuralUnit(unit)
+    const graphWorkProductRequired = isDeclaredStructuralUnit(unit)
       ? false
       : readPaqoGraphWorkProductRequired(unit, group);
-    validateStructuralUnit(executionUnit, title, index);
-    const toolNames = artifactTool?.toolNames ?? readSelectedUnitWorkflowToolNames(unit);
+    validateStructuralUnit(unit, title, index);
+    const toolNames = readSelectedUnitWorkflowToolNames(unit);
     const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
     const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
     const skillRefs = readSelectedUnitSkillRefs(unit);
@@ -2198,8 +2194,8 @@ export function buildPaqoWorkflowSteps(
       }
       : undefined;
     // Issue-less tools retain the assignee only as plan-time grant metadata.
-    const isStructural = isDeclaredStructuralUnit(executionUnit);
-    const stepAgentId = artifactTool || isStructural ? "" : assigneeAgentId;
+    const isStructural = isDeclaredStructuralUnit(unit);
+    const stepAgentId = isStructural ? "" : assigneeAgentId;
     return {
       id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
       ...(unit.sourceStepId !== undefined ? { sourceStepId: unit.sourceStepId as string } : {}),
@@ -2213,12 +2209,11 @@ export function buildPaqoWorkflowSteps(
       ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
       ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : { type: group }),
       ...(!isStructural && group === "qa" && typeof unit.qaType === "string" ? { qaType: unit.qaType } : {}),
-      ...(artifactTool ? { ...artifactTool, assigneeAgentId } : {}),
       description: [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
         "",
         `Mission: ${mission.title}`,
-        artifactTool ? "Materialized as issue-less artifact-contract tool step (no agent heartbeat)." : isStructural
+        isStructural
           ? `Materialized as issue-less structural tool gate (no agent heartbeat).`
           : `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
         skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
@@ -2281,7 +2276,7 @@ export function buildPaqoWorkflowSteps(
     [...gatedSteps, qaStep],
     qaStep.id,
     undefined,
-    { allowCapAcceptance: true, tools: options.tools, producerOnly: artifactToolSteps.some(Boolean) },
+    { allowCapAcceptance: true, tools: options.tools },
   );
 }
 

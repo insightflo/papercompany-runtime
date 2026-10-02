@@ -34,6 +34,42 @@ Producers receive `PAPERCOMPANY_ARTIFACT_*` environment values and a versioned s
 byte envelope. FD4 (file descriptor 4) is the structured result channel. Stdout and
 stderr remain diagnostics; neither can supply evidence, paths or execution authority.
 
+## Agent calls and attempt binding
+
+An issue-backed agent step can call these tools through
+`POST /api/plugins/tools/execute`; it does not need to become an issue-less `tool`
+step. Normal run-tool authorization and company-scoped grants still apply. PAQO
+planning preserves agent assignments and selected tool lists rather than converting
+artifact-tool users into engine tool steps. Explicit engine tool steps are unchanged.
+
+For artifact-contract calls only, the server resolves the running heartbeat's stored
+step link (or its unambiguous issue link), verifies company/mission/agent assignment,
+and checks the original server wake's generation, retry and iteration proof. Missing,
+stale or mismatched bindings return 422 `artifact_tool_step_binding_required`.
+Caller-supplied workflow IDs, request IDs and prose cannot establish this binding.
+QA still needs a declared `toolArtifactContract.inputStepId` and exact
+`workProductSelectors`; the server pins that input using the engine's selector.
+It never guesses a source file or synthesizes a missing input contract.
+
+Before launch, one transaction freezes the contract, records a new
+`lastDispatchRequestId`, and claims the existing step tool-dispatch metadata.
+The original attempt guard is retained across preparation and execution. At most
+one artifact call runs on a step at a time: an overlapping call returns 409
+`artifact_tool_step_call_in_progress`. After a call settles, a sequential call gets
+a new request ID and replaces that step's prior artifact evidence. A crashed claim
+is not stolen after a timeout; use the existing retry/rework path to create a new
+attempt. Late results and cleanup cannot modify its replacement.
+
+Verified receipts and machine results are saved on the step, and the response's
+`data.artifactPath` exposes the server-owned receipt/result path. A successful tool
+call does **not** complete the agent step, change its issue status or dispatch its
+successor. Normal agent/issue completion still applies. Publication must consume a
+**completed earlier QA step** in the same workflow run and validates that QA step's
+own current attempt and pinned input producer. QA then publication on the *same*
+still-running step is intentionally rejected; use separate QA and publication steps.
+Rework invalidates the previous receipt. Non-contract core and registered plugin
+calls retain their existing execution path.
+
 ## QA layers
 
 `qaConfig` is `{ "rules": { "rule-id": { "enabled": true, "params": {} } } }`.

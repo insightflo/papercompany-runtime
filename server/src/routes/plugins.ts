@@ -69,10 +69,7 @@ import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
-import {
-  executeCoreWorkflowTool,
-  resolveRunStepEnv,
-} from "../services/workflow/core-tool-executor.js";
+import { executeCoreWorkflowTool, resolveRunStepEnv } from "../services/workflow/core-tool-executor.js";
 import { listWorkflowToolCatalog } from "../services/workflow/tool-catalog.js";
 import { authorizeRunToolExecution } from "../services/workflow/plugin-tool-authorization.js";
 
@@ -1169,6 +1166,7 @@ export function pluginRoutes(
         companyId: runContext.companyId,
         agentId: runContext.agentId,
         issueId: workflowRunIssueId,
+        heartbeatRunId: req.actor.type === 'agent' ? String(runContext.runId) : undefined,
         toolName: tool,
         parameters: parameters ?? {},
         requestId: randomUUID(),

@@ -1,3 +1,4 @@
+import { qaConfigSchema } from '@paperclipai/shared';
 import { toolArtifactContractSchema, workProductSelectorsSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import type { PersistedWorkflowStep } from "../workflow/execution-steps.js";
 import type { RevisionStep } from "../workflow/revision-step-config.js";
@@ -22,6 +23,7 @@ export function applyPaqoArtifactContracts(units: Record<string, unknown>[], sel
   };
   for (let i = 0; i < units.length; i++) {
     const unit = units[i], step = steps.find(s => s.id === selectedSteps[i].id)!;
+    if (unit.qaConfig !== undefined) Object.assign(step, { qaConfig: qaConfigSchema.parse(unit.qaConfig) });
     if (unit.workProductSelectors !== undefined) {
       const selectors = workProductSelectorsSchema.parse(unit.workProductSelectors);
       const mapped: Record<string, (typeof selectors)[string]> = {};
