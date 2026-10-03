@@ -85,17 +85,36 @@ while(!fs2.existsSync(${JSON.stringify(release)})) await new Promise(r=>setTimeo
   try {
     await expect.poll(async () => readFile(marker, 'utf8').catch(() => ''), { timeout: 5000 }).toBe('entered');
     before = await f.step('qa');
-    const overlap = await f.call('qa');
+    const overlap = await f.call('qa', undefined, { idempotencyKey: 'overlap-key' });
     expect(overlap.status).toBe(409);
     expect(overlap.body.error).toBe('artifact_tool_step_call_in_progress');
     expect((await f.step('qa')).lastDispatchRequestId).toBe(before.lastDispatchRequestId);
   } finally { await writeFile(release, 'go'); await first; }
   expect((await first).status).toBe(200);
-  const second = await f.call('qa');
+  // The 409 executed nothing, so its idempotency claim was released: the same key now executes.
+  const second = await f.call('qa', undefined, { idempotencyKey: 'overlap-key' });
   expect(second.status, JSON.stringify(second.body)).toBe(200);
+  expect(second.headers['x-idempotent-replay']).toBeUndefined();
   const after = await f.step('qa');
   expect(after.lastDispatchRequestId).not.toBe(before.lastDispatchRequestId);
   expect(after.metadata.toolArtifactReceipt).toMatchObject({ requestId: after.lastDispatchRequestId });
+});
+
+it('recovers a claim left unsettled by a heartbeat that is no longer running, by DB state only', async () => {
+  const f = await agentArtifactFixture();
+  const before = await f.step('qa');
+  const stale = { status: 'claimed', claimedAt: new Date(0).toISOString(), heartbeatRunId: randomUUID(),
+    executionGeneration: before.executionGeneration, retryCount: before.retryCount, iterationIndex: before.iterationIndex };
+  await f.db.update(workflowStepRuns).set({ metadata: { ...before.metadata, toolQueue: stale } }).where(eq(workflowStepRuns.id, f.qaId));
+  const recovered = await f.call('qa');
+  expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
+  // A claim owned by the still-running caller heartbeat is never stolen.
+  const live = { ...stale, heartbeatRunId: f.calls.qa.heartbeatId };
+  const now = await f.step('qa');
+  await f.db.update(workflowStepRuns).set({ metadata: { ...now.metadata, toolQueue: live } }).where(eq(workflowStepRuns.id, f.qaId));
+  const blocked = await f.call('qa');
+  expect(blocked.status).toBe(409);
+  expect((await f.step('qa')).lastDispatchRequestId).toBe(now.lastDispatchRequestId);
 });
 
 it('does not let unbound test execution acquire agent authority', async () => {

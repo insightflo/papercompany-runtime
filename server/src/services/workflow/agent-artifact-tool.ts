@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { heartbeatRuns, issues, workflowStepRuns, type Db } from '@paperclipai/db';
 import { HttpError, unprocessable, conflict } from '../../errors.js';
+import { logger } from '../../middleware/logger.js';
 import { producerAttempt } from '../work-products/producer-attempt.js';
 import { lockProducerSelection } from '../work-products/producer-selection-lock.js';
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
@@ -46,13 +47,20 @@ async function bindAttempt(input: CoreInput) {
     const step = execution.steps.find(s => s.id === stepRun.stepId);
     if (!step || !step.agentId || step.agentId !== input.agentId) throw bindingRequired();
     // One in-flight artifact call per step, across tools and server processes. Never steal a
-    // claimed request on a timer: after a crash the existing retry/rework path must reset it.
+    // claimed request on a timer. A claim is replaceable only by DB state: a different attempt,
+    // or its owning heartbeat is no longer running (crash/finalize left the claim unsettled).
     const claim = readObject(stepRun.metadata.toolQueue);
     const priorAttempt = [claim.executionGeneration, claim.retryCount, claim.iterationIndex];
     const currentAttempt = [stepRun.executionGeneration, stepRun.retryCount, stepRun.iterationIndex];
     const replacedAttempt = priorAttempt.every(n => typeof n === 'number')
       && priorAttempt.some((n, i) => n !== currentAttempt[i]);
-    if (claim.status === 'claimed' && !replacedAttempt) throw conflict('artifact_tool_step_call_in_progress');
+    let ownerEnded = false;
+    if (claim.status === 'claimed' && !replacedAttempt && typeof claim.heartbeatRunId === 'string') {
+      const [owner] = await tx.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, claim.heartbeatRunId));
+      ownerEnded = !owner || owner.status !== 'running';
+    }
+    if (claim.status === 'claimed' && !replacedAttempt && !ownerEnded) throw conflict('artifact_tool_step_call_in_progress');
     const requestId = randomUUID(), now = new Date();
     const frozen = await freezeCompanyArtifactAttempt({ db: tx as unknown as Db, companyId, toolName: input.toolName,
       step, executionGeneration: stepRun.executionGeneration, requestId });
@@ -61,7 +69,7 @@ async function bindAttempt(input: CoreInput) {
     // A later invocation supersedes only this step's evidence, never an earlier QA step's.
     delete metadata.toolArtifactRequest; delete metadata.toolArtifactReceipt; delete metadata.toolResult; delete metadata.cacheHit;
     Object.assign(metadata, { toolInvocation: { requestId, toolName: input.toolName, args: input.parameters,
-      dispatchedAt: now.toISOString() }, toolQueue: { status: 'claimed', claimedAt: now.toISOString(),
+      dispatchedAt: now.toISOString() }, toolQueue: { status: 'claimed', claimedAt: now.toISOString(), heartbeatRunId: heartbeat.id,
         executionGeneration: stepRun.executionGeneration, retryCount: stepRun.retryCount, iterationIndex: stepRun.iterationIndex } });
     await tx.update(workflowStepRuns).set({ lastDispatchRequestId: requestId, lastDispatchAttemptAt: now,
       lastDispatchAcceptedAt: now, lastDispatchErrorAt: null, lastDispatchErrorSummary: null, metadata })
@@ -85,6 +93,7 @@ async function storeResult(db: Db, binding: Binding, result: Awaited<ReturnType<
   const { scope } = binding;
   await binding.dispatch.assertCurrent();
   const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, scope.stepRunId));
+  if (!stepRun) throw new Error('qa_artifact_request_stale');
   // Exactly the engine's receipt/byte verifier, without its step-completion side effect.
   const verified = await verifyArtifactStepCompletion({ run: binding.run, stepRun }, readObject(binding.step).toolArtifactContract,
     { success: result.status === 200, requestId: scope.requestId, toolArtifactReceipt: result.toolArtifactReceipt,
@@ -123,10 +132,17 @@ export async function executeAgentArtifactTool(input: CoreInput, execute: typeof
     const status = error instanceof HttpError && error.status === 409 ? 409 as const : 422 as const;
     return { status, body: { error: error instanceof Error ? error.message : String(error), source: 'core' as const, tool: input.toolName } };
   } finally {
-    if (binding) await input.db.update(workflowStepRuns).set({ metadata:
-      sql`${workflowStepRuns.metadata} || ${JSON.stringify({ toolQueue: { status: 'settled' } })}::jsonb` })
-      .where(and(eq(workflowStepRuns.id, binding.scope.stepRunId), eq(workflowStepRuns.lastDispatchRequestId, binding.scope.requestId),
-        eq(workflowStepRuns.executionGeneration, binding.stepRun.executionGeneration), eq(workflowStepRuns.retryCount, binding.stepRun.retryCount),
-        eq(workflowStepRuns.iterationIndex, binding.stepRun.iterationIndex)));
+    // Settling must not replace the call's real result; an unsettled claim is recovered at the
+    // next bind once its owning heartbeat is no longer running.
+    if (binding) try {
+      await input.db.update(workflowStepRuns).set({ metadata:
+        sql`${workflowStepRuns.metadata} || ${JSON.stringify({ toolQueue: { status: 'settled' } })}::jsonb` })
+        .where(and(eq(workflowStepRuns.id, binding.scope.stepRunId), eq(workflowStepRuns.lastDispatchRequestId, binding.scope.requestId),
+          eq(workflowStepRuns.executionGeneration, binding.stepRun.executionGeneration), eq(workflowStepRuns.retryCount, binding.stepRun.retryCount),
+          eq(workflowStepRuns.iterationIndex, binding.stepRun.iterationIndex)));
+    } catch (error) {
+      logger.warn({ err: error, stepRunId: binding.scope.stepRunId, requestId: binding.scope.requestId },
+        'agent artifact tool claim settle failed');
+    }
   }
 }

@@ -1174,6 +1174,12 @@ export function pluginRoutes(
         stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
         stepEnv,
       });
+      // 409 artifact_tool_step_call_in_progress: nothing executed (another call holds the step).
+      // Release this request's claim so a same-key retry can execute once the step is free.
+      if (coreResult.status === 409 && coreResult.body.error === "artifact_tool_step_call_in_progress" && receiptId !== null) {
+        await releaseToolExecutionReceipt(db, receiptId);
+        receiptId = null;
+      }
       if (coreResult.status !== 404 || coreResult.body.source === "core") {
         await emitExecuted(coreResult.status, coreResult.body as Record<string, unknown>, {
           workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
