@@ -14,7 +14,7 @@ import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
-import { validateRevisionPlanDelta } from "./missions/revision-plan-delta.js";
+import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -1177,33 +1177,13 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       diagnostics: executionValidationDiagnostics,
     };
   }
-  // [슬라이스1] 버전 있는 수정 변경안(revisionDelta) 검증. 실행 배치(도구/권한) 검증이 통과한 뒤,
-  //   PLAN-QA 생성·의도 검사·구조 검증·물화 이전에 계약 위반을 구조화 거절한다(거부는 PLAN-QA 를
-  //   만들지 않는다). 변경안이 없으면 기존 선택적 경로를 그대로 둔다(일반 미션 회귀 없음).
-  const revisionDeltaValidation = await validateRevisionPlanDelta({
-    db,
-    companyId,
+  const revisionDeltaValidation = await validateRevisionPlanDeltaOrRecordRejection({
+    ledgerSubmission, commentId: collected.commentId,
     missionSourceWorkflowRunId: ownershipRow?.sourceWorkflowRunId ?? null,
-    decision: collected.decision,
     selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
     tools: planningTools,
   });
-  if (!revisionDeltaValidation.ok) {
-    await upsertMissionPlanDecisionSubmission({
-      ...ledgerSubmission,
-      status: "rejected",
-      rejectionReason: revisionDeltaValidation.reason,
-      diagnostics: revisionDeltaValidation.diagnostics,
-    });
-    return {
-      status: "invalid",
-      reason: revisionDeltaValidation.reason,
-      planningIssueId: collected.planningIssueId,
-      commentId: collected.commentId,
-      decisionHash,
-      diagnostics: revisionDeltaValidation.diagnostics,
-    };
-  }
+  if (!revisionDeltaValidation.ok) return revisionDeltaValidation.response;
   // Apply one bounded, immutable declared publication-result autofill
   // AFTER source-ref + execution-placement validation succeed, BEFORE PLAN-QA
   // / intent coverage / structural validation / materialization observe the
@@ -1599,24 +1579,10 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // [T7] revision 을 planQa 없이 먼저 확정하고, 이후 binding tx 가 issue 생성·표식·명세 연결·refs.planQa 를
   // 함께 확정한다(도중 실패 시 (c) 경로가 멱등하게 재완수한다). 검토 이슈가 의사결정 이슈인 경우 그 이슈를 재사용한다.
   const decisionIssueReuseId = collected.decisionIssueOriginKind === "mission_plan_qa" ? collected.decisionIssueId : null;
-  const refs = mergeMissionPlanRefs(
-    activePlan?.refs,
-    {
-      ...effectiveDraft.refs,
-      ownerPlanDecision: { ...effectiveDraft.refs.ownerPlanDecision, decisionHash },
-      // [슬라이스1] 검증을 통과한 버전 있는 변경안은 활성 계획 refs 에 그대로 보존된다.
-      ...(revisionDeltaValidation.delta ? { revisionDelta: revisionDeltaValidation.delta } : {}),
-    },
-    { selectedExecutionUnits: "replace" },
-  );
-  // 새 decision 는 이전 decision 의 materialization 결과(paqoWorkflow/crossCompanyDelegations)와 이전 planQa
-  // 게이트 상태를 계승하지 않는다. planQa 는 binding tx 가 현재 decision 기준으로 다시 쓴다.
-  // PASS 시 idempotent branch 에서 새 decision 기준으로 materialize 한다.
-  delete (refs as Record<string, unknown>).paqoWorkflow;
-  delete (refs as Record<string, unknown>).crossCompanyDelegations;
-  delete (refs as Record<string, unknown>).planQa;
-  // 새 decision 이 변경안을 포함하지 않으면 이전 변경안 계약이 활성 계획을 계속 지배하지 않는다.
-  if (!revisionDeltaValidation.delta) delete (refs as Record<string, unknown>).revisionDelta;
+  const refs = buildRevisionDecisionRefs({
+    activePlanRefs: activePlan?.refs, effectiveDraftRefs: effectiveDraft.refs,
+    decisionHash, revisionDelta: revisionDeltaValidation.delta,
+  });
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
     missionId,
