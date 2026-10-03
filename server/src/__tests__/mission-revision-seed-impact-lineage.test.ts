@@ -11,7 +11,7 @@
 //   step.description 을 렌더해 dispatch issue description 으로 주입). 현재 revision-step-config.ts 가
 //   seed hash 계산에서 description 을 제외해 승인이 통과한다. 단순 hash 불일치 비교가 아니라 실제
 //   공개 승인 경로의 거부로 증명한다. prose 는 입력 bytes 로만 취급하고 제어 판정으로 파싱하지
-n//   않는다(규칙 8). 대조: interpretedInputs(구조화 기계 입력) 변경은 이미 거부된다. 지시 bytes 불변
+//   않는다(규칙 8). 대조: interpretedInputs(구조화 기계 입력) 변경은 이미 거부된다. 지시 bytes 불변
 //   renamed(sourceStepId mapping) 재사용은 계속 승인되어 원본 product/lineage 를 실제 소비자가 해석한다.
 //
 // RED-2) 1차 개정 run 이 원본 producer 를 seed 하면 그 write 스텝은 설계상 completed + issueId:null 로
