@@ -20,11 +20,14 @@ import {
   activePlanRefs, diagnosticsOf, documentSelector, grantSlice1Tool, openPlanQaIssueIds, paqoDefinitionSteps,
   registerSlice1Tool, slice1Decision, slice1PublicationContract, slice1Unit, slice1VerifyContract, slice1World,
 } from "./helpers/mission-revision-slice1-world.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-slice1-io-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-slice1-io-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-slice1-io-")));
+  // 외부 도구 실행 경계 스텁: 슬라이스1은 게시 시작 없이 검증/물화까지만 다룬다(실제 호출되면 안 된다).
+  setWorkflowToolStepExecutor(async () => { throw new Error("Unexpected workflow tool step execution in revision slice1"); }); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
 
 it("type2 A+B keeps distinct server targets wired; missing B link and alias merge are structured rejections", async () => {
   const urlA = "https://youtu.test/A", urlB = "https://youtu.test/B";
@@ -86,7 +89,7 @@ it("type2 A+B keeps distinct server targets wired; missing B link and alias merg
   expect(synthStep!.workProductSelectors).toEqual({ [aStep!.id]: reportJson, [bStep!.id]: reportJson }); // 같은 title, 다른 생산자 허용
   expect(synthStep!.toolArgs).toEqual({ sourceA: `{$steps.${aStep!.id}.workProductPath}`, sourceB: `{$steps.${bStep!.id}.workProductPath}` });
   expect(synthStep!.dependencies).toEqual(expect.arrayContaining([aStep!.id, bStep!.id]));
-  expect(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: delta })); // RED
+  expect.soft(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: delta })); // RED(soft: 이 누락 RED 가 이후 음성군 단언 실행을 중단시키지 않음)
   const planQaBefore = await openPlanQaIssueIds(db, w.revision.id);
   // 음성군: B 필수 입력 연결 삭제 — delta 는 B 를 요구하지만 계획이 소비하지 않는다.
   const dropped = synth({ collectA: reportJson }, { sourceA: "{$steps.collectA.workProductPath}" }, ["collectA"]);

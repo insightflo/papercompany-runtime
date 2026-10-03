@@ -23,11 +23,14 @@ import {
   paqoDefinitionSteps, registerSlice1Tool, slice1Decision, slice1PublicationContract, slice1Unit,
   slice1VerifyContract, slice1World,
 } from "./helpers/mission-revision-slice1-world.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-slice1-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-slice1-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-slice1-")));
+  // 외부 도구 실행 경계 스텁: 슬라이스1은 게시 시작 없이 검증/물화까지만 다룬다(실제 호출되면 안 된다).
+  setWorkflowToolStepExecutor(async () => { throw new Error("Unexpected workflow tool step execution in revision slice1"); }); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
 
 it("type1 typed delta keeps impact sets durable, publish-only keeps body reuse, unknown/contradictory deltas are rejected", async () => {
   const sourceUnits = [
@@ -77,7 +80,7 @@ it("type1 typed delta keeps impact sets durable, publish-only keeps body reuse, 
   ]);
   const first = await w.submit(slice1Decision(w.revision.id, units, contentDelta));
   expect(first).toMatchObject({ status: "plan_qa_pending" });
-  expect(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: contentDelta })); // RED
+  expect.soft(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: contentDelta })); // RED(soft: 이 누락 RED 가 이후 물화/음성군 단언 실행을 중단시키지 않음)
   await w.approve(first);
   expect(await w.submit(slice1Decision(w.revision.id, units, contentDelta))).toMatchObject({ status: "recorded" });
   const steps = await paqoDefinitionSteps(db, w.companyId, w.revision.id);
@@ -101,7 +104,7 @@ it("type1 typed delta keeps impact sets durable, publish-only keeps body reuse, 
     { unitId: "verify", operation: "rerun" },
   ]);
   expect(await w.submit(slice1Decision(w.revision.id, units, publishOnlyDelta))).toMatchObject({ status: "plan_qa_pending" });
-  expect(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: publishOnlyDelta })); // RED
+  expect.soft(await activePlanRefs(db, w.companyId, w.revision.id)).toEqual(expect.objectContaining({ revisionDelta: publishOnlyDelta })); // RED(soft)
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, w.revision.id))).toEqual([]);
   const planQaBefore = await openPlanQaIssueIds(db, w.revision.id);
   const unknown = await w.submit(slice1Decision(w.revision.id, units, { ...contentDelta, schemaVersion: "mission-revision-delta.v999" }));
