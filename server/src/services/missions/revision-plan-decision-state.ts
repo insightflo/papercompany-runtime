@@ -19,6 +19,7 @@ import {
   validateRevisionPlanDeltaWiring,
   type RevisionPlanDeltaDiagnostic,
 } from "./revision-plan-delta.js";
+import { applyRevisionDeltaUnitInputs } from "./revision-plan-delta-inputs.js";
 import { inheritCurrentTemplateWiring } from "./revision-plan-template-inheritance.js";
 import type { PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 
@@ -45,7 +46,7 @@ export type RevisionPlanDeltaGate =
 // [슬라이스1] 버전 있는 수정 변경안(revisionDelta) 검증 + 현재 템플릿 상속 적용. 실행 배치(도구/권한)
 //   검증이 통과한 뒤, PLAN-QA 생성·의도 검사·구조 검증·물화 이전에 계약 위반과 상속 불가 대응을
 //   구조화 거절한다(거부는 PLAN-QA 를 만들지 않는다). 통과하면 유일한 templateStepId 대응에 따라
-//   생략된 연결을 기준 템플릿에서 상속한 유효 유닛을 함께 돌려준다(autofill/PLAN-QA/물화/refs 가
+//   생략된 연결을 상속하고 변경안 단위의 지시·해석 입력을 적용한 유효 유닛을 돌려준다(autofill/PLAN-QA/물화/refs 가
 //   같은 초안을 본다). 변경안이 없으면 기존 선택적 경로를 그대로 둔다(일반 미션 회귀 없음).
 export async function validateRevisionPlanDeltaOrRecordRejection(input: {
   /** 제출 원장 필수 필드 묶음(db/companyId/missionId/planningIssueId/decisionHash/decision 등). */
@@ -77,7 +78,11 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
       ? validateRevisionPlanDeltaWiring({ delta: validation.delta, selectedExecutionUnits: inheritance.units })
       : inheritance.diagnostics;
     if (inheritance.ok && wiringDiagnostics.length === 0) {
-      return { ok: true, delta: validation.delta, units: inheritance.units };
+      return {
+        ok: true,
+        delta: validation.delta,
+        units: applyRevisionDeltaUnitInputs(validation.delta, inheritance.units),
+      };
     }
     const reason = inheritance.ok ? wiringDiagnostics[0]!.code : inheritance.reason;
     const diagnostics = inheritance.ok ? wiringDiagnostics : inheritance.diagnostics;
