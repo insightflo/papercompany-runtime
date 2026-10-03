@@ -8,7 +8,7 @@ import { createWorkflowRun } from "./workflow-store.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
-import { requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } from "./workflow-seed-evidence.js";
+import { readSeededStepProducts, requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } from "./workflow-seed-evidence.js";
 import type { TriggerActor } from "./replacement-admission.js";
 import type { CreateWorkflowRunInput } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
@@ -56,19 +56,31 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
       const targetStep = targetDef.steps.find(s => s.id === id) as RevisionStep;
       const sourceId = targetStep.sourceStepId ?? id;
       const [step] = await tx.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, source.id), eq(workflowStepRuns.stepId, sourceId))).for("share");
-      if (!step || step.status !== "completed" || !step.issueId) throw seedError("source_incomplete", { stepId: id });
-      const rows = await tx.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.companyId, input.companyId),
-        eq(issueWorkProducts.issueId, step.issueId), ne(issueWorkProducts.status, "archived"))).for("share");
-      if (!rows.length) throw seedError("products_missing", { stepId: id });
+      if (!step || step.status !== "completed") throw seedError("source_incomplete", { stepId: id });
       const products = [];
-      for (const product of rows) {
-        let selected;
-        try {
-          selected = await selectSameRunWorkProduct(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId,
-            selector: { type: product.type as "document", title: product.title }, pinnedId: product.id });
-        } catch { throw seedError("source_provenance_invalid", { stepId: id }); }
-        const { sha256 } = await verifySeedProductBytes(t, selected);
-        products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
+      if (step.issueId === null) {
+        // A materialized source (completed, issueId:null) can only be re-seeded through its own
+        // validated seed chain: never a fabricated issue or a latest-output fallback.
+        const seeded = await readSeededStepProducts(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId });
+        if (!seeded) throw seedError("source_incomplete", { stepId: id });
+        for (const s of seeded) {
+          const sha256 = s.product.metadata?.sha256;
+          if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) throw seedError("sha_missing", { stepId: id });
+          products.push({ id: s.product.id, type: s.product.type as "document", title: s.product.title, sha256, path: s.file, producer: s.producer });
+        }
+      } else {
+        const rows = await tx.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.companyId, input.companyId),
+          eq(issueWorkProducts.issueId, step.issueId), ne(issueWorkProducts.status, "archived"))).for("share");
+        if (!rows.length) throw seedError("products_missing", { stepId: id });
+        for (const product of rows) {
+          let selected;
+          try {
+            selected = await selectSameRunWorkProduct(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId,
+              selector: { type: product.type as "document", title: product.title }, pinnedId: product.id });
+          } catch { throw seedError("source_provenance_invalid", { stepId: id }); }
+          const { sha256 } = await verifySeedProductBytes(t, selected);
+          products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
+        }
       }
       await tx.insert(workflowRunSeeds).values({ companyId: input.companyId, targetRunId: run.id,
         targetStepId: id, targetStepRunId: randomUUID(), sourceRunId: source.id, sourceStepRunId: step.id, sourceStepId: sourceId,

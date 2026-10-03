@@ -35,6 +35,9 @@ export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [],
   }
   // Legacy agent/untyped and declared action both dispatch the same agent execution.
   (execution as Record<string, unknown>).type = !step.type || step.type === "agent" ? "action" : step.type;
+  // Seed admission hashes the raw instruction bytes (description) verbatim; the failure purpose and
+  // id/name/title normalization stay unchanged, and prose is never parsed for control.
+  if (purpose === "seed" && typeof step.description === "string" && step.description !== "") (execution as Record<string, unknown>).description = step.description;
   return hashStructuredValue({ schemaVersion: "workflow.execution-config.v2", purpose, ...(normalize(execution) as Record<string, unknown>),
     dependencies: step.dependencies.map(remap).sort(),
     ...(purpose === "seed" && step.dependsOn ? { dependsOn: step.dependsOn.map(remap).sort() } : {}),

@@ -45,7 +45,7 @@ export async function verifySeedProductBytes(db: Db, selected: Awaited<ReturnTyp
 }
 
 /** Revalidate the original attempt and bytes, never restamp a producer for the target. */
-export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$inferSelect) {
+export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$inferSelect, visited?: Set<string>) {
   const evidence = workflowSeedEvidenceSchema.safeParse(seed.evidence);
   if (!evidence.success || !seed.approvedByUserId) throw seedError("provenance_invalid");
   const [target] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.targetRunId), eq(workflowRuns.companyId, seed.companyId)));
@@ -56,18 +56,37 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   if (!sourceStep || !targetStep || sourceDef.definitionHash !== evidence.data.sourceDefinitionHash
     || targetDef.definitionHash !== evidence.data.targetDefinitionHash || seedStepHash(sourceStep, sourceDef.steps, "seed", "current") !== evidence.data.stepConfigHash
     || seedStepHash(targetStep, targetDef.steps) !== evidence.data.stepConfigHash) throw seedError("definition_changed");
+  const [sourceStepRun] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.sourceStepRunId),
+    eq(workflowStepRuns.workflowRunId, seed.sourceRunId), eq(workflowStepRuns.stepId, seed.sourceStepId)));
+  if (!sourceStepRun || sourceStepRun.status !== "completed") throw seedError("source_attempt_changed");
+  const seen = visited ?? new Set<string>();
+  if (seen.has(seed.sourceStepRunId)) throw seedError("provenance_invalid");
+  seen.add(seed.sourceStepRunId);
+  // Inherited (seeded) sources resolve their upstream chain once, outside the product loop, so a
+  // multi-product source never false-positives the shared cycle guard on a second traversal.
+  const upstream = sourceStepRun.issueId === null
+    ? await readSeededStepProducts(db, { companyId: seed.companyId, workflowRunId: seed.sourceRunId, stepId: seed.sourceStepId }, seen)
+    : null;
   const products = [];
   for (const saved of evidence.data.products) {
-    let selected;
-    try {
-      selected = await selectSameRunWorkProduct(db, { companyId: seed.companyId, workflowRunId: seed.sourceRunId,
-        stepId: seed.sourceStepId, selector: { type: saved.type, title: saved.title }, pinnedId: saved.id });
-    } catch { throw seedError("source_attempt_changed"); }
-    if (selected.product.status === "archived" || selected.producer.stepRunId !== seed.sourceStepRunId
-      || hashStructuredValue(selected.producer) !== hashStructuredValue(saved.producer) || selected.file !== saved.path) throw seedError("provenance_changed");
-    const verified = await verifySeedProductBytes(db, selected);
-    if (verified.sha256 !== saved.sha256) throw seedError("sha_mismatch");
-    products.push(selected);
+    if (sourceStepRun.issueId !== null) {
+      let selected;
+      try {
+        selected = await selectSameRunWorkProduct(db, { companyId: seed.companyId, workflowRunId: seed.sourceRunId,
+          stepId: seed.sourceStepId, selector: { type: saved.type, title: saved.title }, pinnedId: saved.id });
+      } catch { throw seedError("source_attempt_changed"); }
+      if (selected.product.status === "archived" || selected.producer.stepRunId !== seed.sourceStepRunId
+        || hashStructuredValue(selected.producer) !== hashStructuredValue(saved.producer) || selected.file !== saved.path) throw seedError("provenance_changed");
+      const verified = await verifySeedProductBytes(db, selected);
+      if (verified.sha256 !== saved.sha256) throw seedError("sha_mismatch");
+      products.push(selected);
+    } else {
+      const match = upstream?.find(s => s.product.id === saved.id);
+      if (!match || match.product.type !== saved.type || match.product.title !== saved.title || match.file !== saved.path
+        || hashStructuredValue(match.producer) !== hashStructuredValue(saved.producer)) throw seedError("provenance_changed");
+      if (match.product.metadata?.sha256 !== saved.sha256) throw seedError("sha_mismatch");
+      products.push(match);
+    }
   }
   return products;
 }
@@ -78,7 +97,7 @@ export async function findWorkflowSeed(db: Db, scope: { companyId: string; workf
   return seed ?? null;
 }
 
-export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }) {
+export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }, visited?: Set<string>) {
   const seed = await findWorkflowSeed(db, scope);
   if (!seed) return null;
   const [target] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.targetStepRunId),
@@ -88,5 +107,5 @@ export async function readSeededStepProducts(db: Db, scope: { companyId: string;
   if (target && (target.executionGeneration > 0 || target.retryCount > 0 || target.iterationIndex > 0)) return null;
   if (!target || target.status !== "completed" || target.issueId !== null || target.executionGeneration !== 0
     || target.retryCount !== 0 || target.iterationIndex !== 0) throw seedError("target_attempt_changed");
-  return verifySeedEvidence(db, seed);
+  return verifySeedEvidence(db, seed, visited);
 }
