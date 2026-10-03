@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { createDb, companies, issues, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedToolRecoveryScenario } from "./helpers/tool-recovery-scenario.js";
+import { toolRecoveryUrlDiagnostics } from "./helpers/tool-recovery-url-diagnostics.js";
 import { ensureToolRecoveryCard } from "../services/missions/tool-recovery-card.js";
 import type { WorkflowStep } from "../services/workflow/dag-engine.js";
 
@@ -64,6 +65,7 @@ describe("tool recovery brief creation (real transaction)", () => {
     ["unavailable", "Authorization: Basic BASIC_CREDENTIAL_SENTINEL", "BASIC_CREDENTIAL_SENTINEL"],
     ["missing", "postgres://user:DB_PASSWORD_SENTINEL@db.example/test", "DB_PASSWORD_SENTINEL"],
     ["unavailable", "postgres://user:DB_PASSWORD_SENTINEL@db.example/test", "DB_PASSWORD_SENTINEL"],
+    ["unavailable", "postgres://user:prefix'DSN_QUOTE_SENTINEL@db.example/test", "DSN_QUOTE_SENTINEL"],
   ])("redacts stored diagnostics with %s registry: %s", async (registry, diagnostic, secret) => {
     const input = await seed();
     // Persist native-shaped result; test both raw diagnostics and the structured error projection.
@@ -80,6 +82,22 @@ describe("tool recovery brief creation (real transaction)", () => {
       expect(stored.description).toContain(registry === "unavailable" ? 'registry: "unavailable"' : '"status":"unavailable"');
       if (registry === "unavailable") await tx.execute(sql.raw("alter table tool_definitions_brief_unavailable rename to tool_definitions"));
     });
+  });
+
+  it.each(toolRecoveryUrlDiagnostics)("never stores credential suffixes with %s and missing registry", async (_name, diagnostic) => {
+    const input = await seed();
+    // Isolated registry-free proof: no configured secret list can hide a broken URL boundary.
+    expect(await db.select().from(toolDefinitions).where(eq(toolDefinitions.companyId, input.mission.companyId))).toEqual([]);
+    const [stepRun] = await db.update(workflowStepRuns).set({ metadata: { toolResult: {
+      requestId: "dispatch-exact", toolName: "collect-us-stockflow", success: false,
+      stdout: diagnostic, stderr: diagnostic, error: diagnostic, exitCode: 1,
+      completedAt: "2026-10-03T00:00:00.000Z",
+    } } }).where(eq(workflowStepRuns.id, input.stepRun.id)).returning();
+    const result = await create({ ...input, stepRun });
+    const [stored] = await db.select().from(issues).where(eq(issues.id, result.issue.id));
+    expect(stored.description).toContain('"status":"unavailable"');
+    expect(stored.description).not.toMatch(/DSN_\w+_SENTINEL|user:|prefix/);
+    expect(stored.description).toContain("[REDACTED_URL]");
   });
 
   it("uses company language and never another company's registry entry", async () => {

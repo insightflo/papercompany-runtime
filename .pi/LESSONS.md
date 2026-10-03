@@ -4,12 +4,12 @@
 - Date: 2026-10-03
 - Task: Stage 1 review fixes (display only).
 - What failed: Basic/other authorization schemes retained credential payloads; non-HTTP connection URLs retained passwords. Structured result display omitted native `toolResult.error`.
-- Root cause: Bearer/HTTP-only special cases plus one-token key masking; test fixture invented `errorCode` instead of mirroring the native completion producer.
+- Root cause: Bearer/HTTP-only special cases plus one-token key masking; test fixture invented `errorCode`. Re-review found quote/newline URL token boundaries could publish password suffixes even after URL parsing.
 - Category: security / fixture fidelity.
-- Fix: Suppress the complete authorization line tail; sanitize any scheme:// URL with URL parsing and suppress parse failures. Expose bounded/redacted `error` as diagnostic only, never infer an error code.
-- Prevention rule: Verify persisted final descriptions with independently isolated Basic and DSN sentinels under both missing and SQL-unavailable registry; mirror native producer fields.
+- Fix: Suppress authorization line tails. For scheme:// diagnostics, inspect the entire remaining fragment and suppress it when credential-bearing, ambiguous or unparseable; never preserve a guessed quoted/newline URL boundary. Expose redacted native `error` only.
+- Prevention rule: Verify entire persisted descriptions with Basic/DSN sentinels and missing/SQL-unavailable registry; include apostrophe, double quote, backtick, encoding, newline and malformed credentials. Prefer suppressed diagnostic tails to secret-bearing URL usability; mirror native fields.
 - Reuse trigger: Publishing diagnostic/config text into owner issue descriptions.
-- Evidence: `.recovery-work/stage1-review-fix-red.log` (13 failures, 4 passes), `stage1-review-fix-focused.log` (9 files, 68 passes, zero skips), `stage1-review-fix-synthetic.log` (persisted description inspected).
+- Evidence: `.recovery-work/stage1-review-fix-red.log` (13 failures); `.recovery-work/stage1-url-boundary-red.log` (17 failures/18 passes), `stage1-url-boundary-focused.log` (9 files/88 passes/zero skips), `stage1-url-boundary-types.log` (test-inclusive tsc pass).
 
 ### 2026-10-03 — recovery brief fixtures and diagnostic redaction
 - Task: Stage 1 structured tool recovery brief.

@@ -11,9 +11,16 @@ export function toolRecoverySafeText(value: unknown, secrets: string[] = [], max
   // A header value can contain a scheme, spaces and commas. Suppress the whole
   // diagnostic line tail rather than guessing which token is the credential.
   text = text.replace(/\b(?:proxy-)?authorization["']?\s*[=:]\s*[^\r\n]*/gi, "Authorization: [REDACTED]");
-  text = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi, raw => {
-    try { const url = new URL(raw); url.username = ""; url.password = ""; url.search = ""; url.hash = ""; return url.toString(); }
-    catch { return "[REDACTED_URL]"; }
+  // Diagnostic text has no trustworthy URL boundary: quotes and even newlines
+  // can occur inside userinfo. Consume the entire remaining fragment, not a
+  // token prefix. Sacrifice trailing detail for credential/ambiguous URLs.
+  text = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[\s\S]*/i, raw => {
+    if (/[\s<>"'`]/.test(raw)) return "[REDACTED_URL]";
+    try {
+      const url = new URL(raw);
+      if (url.username || url.password) return "[REDACTED_URL]";
+      url.search = ""; url.hash = ""; return url.toString();
+    } catch { return "[REDACTED_URL]"; }
   });
   text = text.replace(/(["'])([\w-]+)\1\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\s]+)/g,
     (match, quote: string, key: string) => isSensitiveToolEnvKey(key) ? `${quote}${key}${quote}:"[REDACTED]"` : match);
