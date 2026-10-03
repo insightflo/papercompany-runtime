@@ -8,9 +8,10 @@
 //   - 상속은 '생략'에만 적용된다. 사용자가 명시한 값(빈 배열/빈 객체 포함)은 truthiness 없이 그대로 둔다.
 //     정규화(normalizeMissionPlanDependencyGraph) 는 모든 유닛에 canonical dependencies 를 채우므로 생략
 //     여부는 사용자가 제출한 원본 decision 유닛으로만 판정한다.
-//   - 의존성 생략 판정은 decision.steps 의 구조화된 선언까지 반영한다(readDraftTargets 와 같은 대상/
-//     별칭 의미: units/unitId/executionUnitId/selectedExecutionUnitId/id 대상 + dependencies/dependsOn/
-//     after 선언). 대상 유닛이 steps 에서 연결을 명시했다면 이미 canonical 화된 연결을 유지하고 상속으로
+//   - 의존성 생략 판정은 decision.steps 의 구조화된 선언까지 반영한다. 대상 판정 계약은
+//     revision-plan-declaration-targets.ts 로 추출했으며 normalizer(readDraftTargets/resolve) 와 정확히
+//     같다: 비어 있지 않은 units 배열이 대상 전부이고 canonical unit id 가 별칭보다 우선한다(별칭은 유일
+//     소유자만 해석). 대상 유닛이 steps 에서 연결을 명시했다면 이미 canonical 화된 연결을 유지하고 상속으로
 //     덮지 않는다(빈 배열 선언도 명시다). 자연어 steps 문자열은 파싱하지 않는다.
 //   - 기준은 delta.base.workflowDefinitionId 로 읽은 정의뿐이다(승인 후 최신 템플릿으로 조용히 전환하지
 //     않는다). 정의가 없거나 스냅샷 해시가 다르면 구조화 거절한다.
@@ -31,6 +32,11 @@ import { missionRevisionDeltaSchema } from "@paperclipai/shared/validators/missi
 import { computePaqoDefinitionHash } from "../workflow/paqo-definition-identity.js";
 import { STEP_REF_TOKEN, rewriteToolArgsStepReferences } from "./structural-materialization.js";
 import type { RevisionPlanDeltaDiagnostic } from "./revision-plan-delta.js";
+import {
+  hasDependencyDeclaration,
+  readStepDeclaredDependencyUnitIds,
+  readUnitId,
+} from "./revision-plan-declaration-targets.js";
 
 /** [슬라이스1] 현재 템플릿 상속 결과: 통과하면 상속이 적용된 유효 유닛, 실패하면 구조화 거절 진단. */
 export type RevisionTemplateInheritance =
@@ -54,14 +60,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readUnitId(unit: Record<string, unknown>): string | null {
-  return typeof unit.id === "string" && unit.id.trim() !== "" ? unit.id.trim() : null;
-}
-
-function hasDependencyDeclaration(unit: Record<string, unknown>): boolean {
-  return ["dependencies", "dependsOn", "after"].some((key) => Object.prototype.hasOwnProperty.call(unit, key));
-}
-
 function readTemplateSteps(stepsJson: unknown): TemplateStep[] {
   if (!Array.isArray(stepsJson)) return [];
   const steps: TemplateStep[] = [];
@@ -77,65 +75,6 @@ function readTemplateSteps(stepsJson: unknown): TemplateStep[] {
     });
   }
   return steps;
-}
-
-// decision.steps 의 구조화된 선언에서 대상을 읽는다(mission-plan-dependency-graph readDraftTargets 와
-//   같은 대상 키 의미). 문자열 steps 는 구조화 선언이 아니므로 파싱하지 않는다.
-function readStepDeclarationTargets(step: Record<string, unknown>): string[] {
-  const targets: string[] = [];
-  if (Array.isArray(step.units)) {
-    for (const entry of step.units) if (typeof entry === "string" && entry.trim() !== "") targets.push(entry.trim());
-  }
-  for (const key of ["unitId", "executionUnitId", "selectedExecutionUnitId", "id"] as const) {
-    const value = step[key];
-    if (typeof value === "string" && value.trim() !== "") targets.push(value.trim());
-  }
-  return Array.from(new Set(targets));
-}
-
-// 유닛 별칭 표면(normalizer UNIT_ALIAS_KEYS + sourceRef 별칭과 같은 의미)을 정규 유닛 id 로 모은다.
-function readUnitAliases(unit: Record<string, unknown>): string[] {
-  const aliases: string[] = [];
-  for (const key of ["id", "unitId", "stepId", "executionUnitId", "selectedExecutionUnitId"] as const) {
-    const value = unit[key];
-    if (typeof value === "string" && value.trim() !== "") aliases.push(value.trim());
-  }
-  const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
-  if (sourceRef) {
-    for (const key of ["id", "issueId", "stepId", "unitId", "executionUnitId", "selectedExecutionUnitId"] as const) {
-      const value = sourceRef[key];
-      if (typeof value === "string" && value.trim() !== "") aliases.push(value.trim());
-    }
-  }
-  return Array.from(new Set(aliases));
-}
-
-// steps 에서 명시적으로 의존성을 선언받은 유닛 id 집합. 대상은 유닛 별칭으로 정규 유닛에 해석한다
-//   (게이트 시점엔 normalizer 가 모호/미해결 별칭을 이미 거절했으므로 해석은 유일하다).
-function readStepDeclaredDependencyUnitIds(
-  decision: Record<string, unknown>,
-  declaredUnits: readonly Record<string, unknown>[],
-): Set<string> {
-  const unitIdsByAlias = new Map<string, Set<string>>();
-  for (const unit of declaredUnits) {
-    const unitId = readUnitId(unit);
-    if (!unitId) continue;
-    for (const alias of readUnitAliases(unit)) {
-      const owners = unitIdsByAlias.get(alias) ?? new Set<string>();
-      owners.add(unitId);
-      unitIdsByAlias.set(alias, owners);
-    }
-  }
-  const explicit = new Set<string>();
-  const steps = decision.steps;
-  if (!Array.isArray(steps)) return explicit;
-  for (const raw of steps) {
-    if (!isPlainObject(raw) || !hasDependencyDeclaration(raw)) continue;
-    for (const target of readStepDeclarationTargets(raw)) {
-      for (const unitId of unitIdsByAlias.get(target) ?? []) explicit.add(unitId);
-    }
-  }
-  return explicit;
 }
 
 // [Astra 교정] 원본 toolArgs 문자열 값에서 STEP_REF_TOKEN 생산자를 모은다. rewriteToolArgsStepReferences
