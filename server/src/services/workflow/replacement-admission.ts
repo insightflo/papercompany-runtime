@@ -9,6 +9,7 @@ import { lockReplacementScope, lockReplacementDefinition } from "./replacement-s
 import { replacementDefinitionHash } from "./replacement-definition.js";
 import { createWorkflowRunWithDefinition } from "./workflow-run-create.js";
 import type { CreateWorkflowRunInput } from "./types.js";
+import { replacementRequesterEligible } from "./replacement-snapshot-guards.js";
 
 export type TriggerActor = Express.Request["actor"];
 export async function assertAgentReplacementRequired(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
@@ -21,7 +22,8 @@ export async function assertAgentReplacementRequired(db: Db, input: CreateWorkfl
 // Shared REST/plugin boundary. Caller transport/triggeredBy never changes request meaning.
 export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   const intent = replacementIntentSchema.parse(input.replacementIntent);
-  if (actor?.type !== "agent" || !actor.agentId || actor.companyId !== input.companyId) throw forbidden("replacement_requester_required");
+  if (!replacementRequesterEligible(actor, input.companyId)) throw forbidden("replacement_requester_required");
+  const requester = actor!;
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
     const [observed] = await tx.select().from(workflowRuns).where(and(eq(workflowRuns.id, intent.sourceRunId), eq(workflowRuns.companyId, input.companyId)));
@@ -30,7 +32,7 @@ export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, ac
     const [source] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, observed.id)).for("update");
     if (source.status === "cancelled") throw conflict("replacement_source_cancelled");
     const requestHashFor = (metadata: Record<string, unknown>) => hashStructuredValue({ intent, companyId: input.companyId,
-      missionId: input.missionId, workflowId: input.workflowId, metadata, requester: actor.agentId });
+      missionId: input.missionId, workflowId: input.workflowId, metadata, requester: requester.agentId });
     const [used] = await tx.select().from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.workflowRunId, source.id),
       eq(workflowRecoveryAuthorities.targetAuthorityVersion, intent.expectedSourceAuthorityVersion)));
     if (used) {
@@ -54,7 +56,7 @@ export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, ac
     if (p.sourceRunId !== source.id || p.companyId !== input.companyId || p.missionId !== input.missionId || p.workflowId !== input.workflowId
       || p.sourceAuthorityVersion !== source.dispatchAuthorityVersion || p.sourceAuthorityVersion !== intent.expectedSourceAuthorityVersion
       || p.terminalDecisionId !== scope.terminal.id || p.decisionEventId !== intent.decisionEventId || p.idempotencyKey !== intent.idempotencyKey
-      || p.requesterAgentId !== actor.agentId || p.requesterAgentId !== scope.mission.ownerAgentId
+      || p.requesterAgentId !== requester.agentId || p.requesterAgentId !== scope.mission.ownerAgentId
       || p.stepRunId !== scope.step.id || p.requestGeneration !== scope.step.executionGeneration
       || p.inputHash !== hashStructuredValue(metadata) || p.inputHash !== hashStructuredValue(p.metadata)
       || p.definitionHash !== await replacementDefinitionHash(tx, definition, scope.mission.id, p.targetRunId)) throw conflict("replacement_approval_scope_mismatch");
@@ -65,9 +67,9 @@ export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, ac
     await tx.insert(workflowRecoveryAuthorities).values({ id: authorityId, companyId: input.companyId, workflowRunId: source.id,
       targetAuthorityVersion: source.dispatchAuthorityVersion, resultingAuthorityVersion: source.dispatchAuthorityVersion,
       targetDecisionId: scope.terminal.id, recoveryKind: "replacement_from_start_v1", requestReference: intent.idempotencyKey,
-      requestedBy: actor.agentId, ownerDecisionEventId: intent.decisionEventId, operatorApprovalId: approval.id,
+      requestedBy: requester.agentId, ownerDecisionEventId: intent.decisionEventId, operatorApprovalId: approval.id,
       replacementRunId: run.id, requestHash, replacementContract: { ...p, approver: approval.decidedByUserId }, status: "consumed", consumedAt: new Date() });
-    await tx.insert(activityLog).values({ companyId: input.companyId, actorType: "agent", actorId: actor.agentId,
+    await tx.insert(activityLog).values({ companyId: input.companyId, actorType: "agent", actorId: requester.agentId!,
       action: "workflow.replacement_admitted", entityType: "workflow_run", entityId: run.id,
       details: { authorityId, sourceRunId: source.id, approvalId: approval.id, requestHash, definitionHash: p.definitionHash } });
     return { run, replay: false };

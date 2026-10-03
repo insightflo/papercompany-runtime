@@ -20,6 +20,9 @@ type TestDb = ReturnType<typeof createDb>;
 export type ToolRecoveryScenario = {
   readonly artifactPath: string;
   readonly companyId: string;
+  readonly missionId: string;
+  readonly ownerAgentId: string;
+  readonly oversightIssueId: string;
   readonly recoveryIssueId: string;
   readonly stepRunId: string;
   readonly downstreamStepRunId: string;
@@ -167,6 +170,9 @@ export async function seedToolRecoveryScenario(input: {
   return {
     artifactPath,
     companyId,
+    missionId,
+    ownerAgentId,
+    oversightIssueId,
     recoveryIssueId,
     stepRunId,
     downstreamStepRunId,

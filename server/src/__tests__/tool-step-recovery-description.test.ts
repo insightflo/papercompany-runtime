@@ -20,6 +20,9 @@ describe("tool step recovery description", () => {
       },
     });
 
+    expect(description).not.toContain("Local retry hint:");
+    expect(description).not.toContain("manual_owner_decision_required");
+    expect(description).toContain("text-based guess");
     expect(description).toContain("Mission owner decision authority:");
     expect(description).toContain("POST /api/issues/{this owner-action issue id}/owner-recovery/decision");
     expect(description).toContain("Optional display-only comment template");
