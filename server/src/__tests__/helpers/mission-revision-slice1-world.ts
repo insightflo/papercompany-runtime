@@ -10,12 +10,12 @@
 //              sourceStepId?, instructions?, interpretedInputs?, requiredInputs? }],
 //     capabilityRequirements?: [{ unitId, requiredOutcomeId, toolName, capability }] }
 // clone의 templateStepId는 새 유닛을 만드는 재료이며 sourceStepId/재사용 승인이 아니다.
-import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { agentToolGrants, issues, toolDefinitions, workflowDefinitions, type Db } from "@paperclipai/db";
 import { seedWorld } from "./workflow-seed-world.js";
 import { legacyHtmlManualContract, legacyHtmlManualPublicationContract } from "./legacy-html-manual.js";
 import { buildPaqoWorkflowSteps } from "../../services/mission-owner-plan-decisions.js";
+import { computePaqoDefinitionHash } from "../../services/workflow/paqo-definition-identity.js";
 import { missionPlanArtifactService } from "../../services/mission-plan-artifacts.js";
 import { submitMissionOwnerPlanDecision } from "../../services/missions/mission-plan-decision-agent-api.js";
 import { recordMissionPlanQaVerdict } from "../../services/missions/mission-plan-qa-verdicts.js";
@@ -78,7 +78,9 @@ export async function slice1World(db: Db, root: string, sourceUnits: Record<stri
     originKind: "mission_main_executor_plan", status: "todo", assigneeAgentId: f.agentId }).returning();
   await missionPlanArtifactService(db).createInitialMissionPlan({ companyId: f.companyId, missionId: f.revision.id,
     refs: {}, requiredInputs: [], successCriteria: [], steps: [] });
-  const snapshotHash = createHash("sha256").update(JSON.stringify(templateSteps)).digest("hex");
+  // 기준 스냅샷 해시는 서버 정규형(computePaqoDefinitionHash — 키 순서 무관)을 그대로 쓴다.
+  // jsonb 저장은 객체 키 순서를 바꾸므로 삽입 순서 JSON.stringify 바이트는 서버에서 재현할 수 없다.
+  const snapshotHash = computePaqoDefinitionHash(templateSteps as Parameters<typeof computePaqoDefinitionHash>[0]);
   return {
     ...f, source, currentTemplate: currentTemplate!, planning: planning!, snapshotHash,
     delta: (units: Array<Record<string, unknown> & { unitId: string }>, extra: Record<string, unknown> = {}) =>

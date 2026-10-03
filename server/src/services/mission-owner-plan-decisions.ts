@@ -14,6 +14,7 @@ import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
+import { validateRevisionPlanDelta } from "./missions/revision-plan-delta.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -1062,7 +1063,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   };
 
   const [ownershipRow] = await db
-    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
+    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description, sourceWorkflowRunId: missions.sourceWorkflowRunId })
     .from(missions)
     .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
     .limit(1);
@@ -1174,6 +1175,33 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       commentId: collected.commentId,
       decisionHash,
       diagnostics: executionValidationDiagnostics,
+    };
+  }
+  // [슬라이스1] 버전 있는 수정 변경안(revisionDelta) 검증. 실행 배치(도구/권한) 검증이 통과한 뒤,
+  //   PLAN-QA 생성·의도 검사·구조 검증·물화 이전에 계약 위반을 구조화 거절한다(거부는 PLAN-QA 를
+  //   만들지 않는다). 변경안이 없으면 기존 선택적 경로를 그대로 둔다(일반 미션 회귀 없음).
+  const revisionDeltaValidation = await validateRevisionPlanDelta({
+    db,
+    companyId,
+    missionSourceWorkflowRunId: ownershipRow?.sourceWorkflowRunId ?? null,
+    decision: collected.decision,
+    selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+    tools: planningTools,
+  });
+  if (!revisionDeltaValidation.ok) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: revisionDeltaValidation.reason,
+      diagnostics: revisionDeltaValidation.diagnostics,
+    });
+    return {
+      status: "invalid",
+      reason: revisionDeltaValidation.reason,
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: revisionDeltaValidation.diagnostics,
     };
   }
   // Apply one bounded, immutable declared publication-result autofill
@@ -1576,6 +1604,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     {
       ...effectiveDraft.refs,
       ownerPlanDecision: { ...effectiveDraft.refs.ownerPlanDecision, decisionHash },
+      // [슬라이스1] 검증을 통과한 버전 있는 변경안은 활성 계획 refs 에 그대로 보존된다.
+      ...(revisionDeltaValidation.delta ? { revisionDelta: revisionDeltaValidation.delta } : {}),
     },
     { selectedExecutionUnits: "replace" },
   );
@@ -1585,6 +1615,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   delete (refs as Record<string, unknown>).paqoWorkflow;
   delete (refs as Record<string, unknown>).crossCompanyDelegations;
   delete (refs as Record<string, unknown>).planQa;
+  // 새 decision 이 변경안을 포함하지 않으면 이전 변경안 계약이 활성 계획을 계속 지배하지 않는다.
+  if (!revisionDeltaValidation.delta) delete (refs as Record<string, unknown>).revisionDelta;
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
     missionId,
