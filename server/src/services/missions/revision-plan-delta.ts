@@ -8,7 +8,8 @@
 //   - reuse + 변경된 지시/해석 입력 모순
 //   - 계획 단위 ↔ 변경안 단위 불일치, 알 수 없는 참조
 //   - 서로 다른 별칭이 같은 생산 단위로 합쳐지는 모호한 매핑(mission_revision_unit_reference_ambiguous)
-//   - 변경안이 선언한 필수 입력(requiredInputs)을 계획의 결과 선택자가 소비하지 않음
+//   - 변경안이 선언한 필수 입력(requiredInputs)을 계획의 결과 선택자가 소비하지 않음 — 이 입력 연결
+//     검사는 validateRevisionPlanDeltaWiring 으로 분리되어 현재 템플릿 상속 적용 후 실행된다
 //   - 선언된 필수 기능(capabilityRequirements)을 활성 도구가 제공하지 않음(mission_revision_capability_gap)
 // [연결] mission-owner-plan-decisions.ts recordLatestAuthorizedMissionOwnerPlanDecision — 실행 배치(도구/권한)
 //   검증 통과 직후 호출되고, 검증을 통과한 원본 delta 객체를 활성 plan refs 보존에 돌려준다.
@@ -157,8 +158,62 @@ export async function validateRevisionPlanDelta(input: {
     }
   }
 
-  // [입력 연결·별칭 모호성] 선택자 키는 단위 id/원본 단계 별칭으로 해석된다. 서로 다른 키가 같은 생산
-  //   단위로 합쳐지면 모호하고, 변경안이 선언한 필수 입력은 실제 선택자 연결로 소비되어야 한다.
+  // [입력 연결·별칭 모호성] 이 검사는 validateRevisionPlanDeltaWiring 으로 분리되어, 현재 템플릿 상속이
+  //   적용된 effective units 에 대해 게이트에서 실행된다(상속 전 초안에서 requiredInputs 를 거절하면
+  //   생략된 selector 를 상속해 소비하는 정상 계획이 막힌다). 검사 내용·진단 코드는 그대로 유지된다.
+
+  // [필수 기능] 등록·활성 도구가 요청 capability 를 실제로 제공해야 한다(등록만으로 충족되지 않는다).
+  for (const requirement of delta.capabilityRequirements ?? []) {
+    if (!planUnitIds.has(requirement.unitId)) {
+      diagnostics.push(deltaInvalid(`기능 요구가 계획에 없는 단위 ${requirement.unitId} 를 참조합니다.`));
+      continue;
+    }
+    const tool = input.tools.find(candidate => candidate.name === requirement.toolName);
+    if (!toolCapabilities(tool).includes(requirement.capability)) {
+      diagnostics.push({
+        code: "mission_revision_capability_gap",
+        message: `단위 ${requirement.unitId} 의 필수 결과(${requirement.requiredOutcomeId}) 에 필요한 기능 `
+          + `${requirement.capability} 을(를) 활성 도구 ${requirement.toolName} 이(가) 제공하지 않습니다.`,
+        severity: "invalid",
+      });
+    }
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, reason: diagnostics[0]!.code, diagnostics };
+  }
+  // 검증을 통과한 원본 변경안을 그대로 돌려준다(decisionHash·활성 refs·후속 소비가 같은 객체를 본다).
+  return { ok: true, delta: rawDelta as Record<string, unknown> };
+}
+
+// [입력 연결·별칭 모호성 — 상속 후 검사 단계] 선택자 키는 단위 id/원본 단계 별칭으로 해석된다. 서로 다른
+//   키가 같은 생산 단위로 합쳐지면 모호하고, 변경안이 선언한 필수 입력은 실제 선택자 연결로 소비되어야
+//   한다. 이 검사는 현재 템플릿 상속(inheritCurrentTemplateWiring) 이 적용된 effective units 에 대해
+//   실행된다 — 상속 전 초안에서 requiredInputs 를 거절하면 생략된 selector 를 상속해 소비할 수 있는 정상
+//   계획이 막힌다. 명시적 {} 로 필수 입력을 없앤 제출도 여기서 계속 거절된다.
+// [연결] revision-plan-decision-state.ts validateRevisionPlanDeltaOrRecordRejection — 상속 적용 직후.
+export function validateRevisionPlanDeltaWiring(input: {
+  readonly delta: Record<string, unknown>;
+  readonly selectedExecutionUnits: readonly Record<string, unknown>[];
+}): RevisionPlanDeltaDiagnostic[] {
+  const parsed = missionRevisionDeltaSchema.safeParse(input.delta);
+  if (!parsed.success) {
+    // 같은 호출에서 검증을 통과한 객체만 들어온다(방어 오류 — 정상 경로가 아니다).
+    return [deltaInvalid("변경안이 검증 통과 형태와 일치하지 않아 입력 연결 검증을 적용할 수 없습니다.")];
+  }
+  const deltaUnitById = new Map(parsed.data.units.map(unit => [unit.unitId, unit]));
+  const aliasToUnitId = new Map<string, string>();
+  for (const unit of input.selectedExecutionUnits) {
+    const unitId = readUnitId(unit);
+    if (!unitId) continue;
+    aliasToUnitId.set(unitId, unitId);
+    const sourceStepId = readUnitSourceStepId(unit);
+    if (!sourceStepId) continue;
+    const existing = aliasToUnitId.get(sourceStepId);
+    if (existing !== undefined && existing !== unitId) continue; // 모호한 별칭은 상위 검증([단위 색인]) 이 이미 거절했다.
+    aliasToUnitId.set(sourceStepId, unitId);
+  }
+  const diagnostics: RevisionPlanDeltaDiagnostic[] = [];
   for (const unit of input.selectedExecutionUnits) {
     const unitId = readUnitId(unit);
     const deltaUnit = unitId ? deltaUnitById.get(unitId) : undefined;
@@ -193,27 +248,5 @@ export async function validateRevisionPlanDelta(input: {
       }
     }
   }
-
-  // [필수 기능] 등록·활성 도구가 요청 capability 를 실제로 제공해야 한다(등록만으로 충족되지 않는다).
-  for (const requirement of delta.capabilityRequirements ?? []) {
-    if (!planUnitIds.has(requirement.unitId)) {
-      diagnostics.push(deltaInvalid(`기능 요구가 계획에 없는 단위 ${requirement.unitId} 를 참조합니다.`));
-      continue;
-    }
-    const tool = input.tools.find(candidate => candidate.name === requirement.toolName);
-    if (!toolCapabilities(tool).includes(requirement.capability)) {
-      diagnostics.push({
-        code: "mission_revision_capability_gap",
-        message: `단위 ${requirement.unitId} 의 필수 결과(${requirement.requiredOutcomeId}) 에 필요한 기능 `
-          + `${requirement.capability} 을(를) 활성 도구 ${requirement.toolName} 이(가) 제공하지 않습니다.`,
-        severity: "invalid",
-      });
-    }
-  }
-
-  if (diagnostics.length > 0) {
-    return { ok: false, reason: diagnostics[0]!.code, diagnostics };
-  }
-  // 검증을 통과한 원본 변경안을 그대로 돌려준다(decisionHash·활성 refs·후속 소비가 같은 객체를 본다).
-  return { ok: true, delta: rawDelta as Record<string, unknown> };
+  return diagnostics;
 }

@@ -1189,7 +1189,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // / intent coverage / structural validation / materialization observe the
   // draft. Original collected.decision, decisionHash, and ledgerSubmission
   // are preserved; only the effective draft used downstream is normalized.
-  const autofillResult = autofillPublicationResult(draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits, planningTools);
+  const autofillResult = autofillPublicationResult(revisionDeltaValidation.units, planningTools);
   const draftWithTemplates: PlanRevisionDraft = {
     ...draftAfterQaAssigneeRecovery,
     refs: {
