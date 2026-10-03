@@ -14,6 +14,7 @@ import { isWorkflowChildStep } from "../workflow/workflow-child-guards.js";
 import { isWorkflowApiIssue } from "../workflow/issue-api-guards.js";
 import { replacementOperatorEligible, replacementRequesterEligible, replacementDecisionSelected, replacementSourceEligible } from "../workflow/replacement-snapshot-guards.js";
 import { toolRecoveryOwnsStepFailure } from "./tool-step-recovery-authority.js";
+import { declaredToolRecoveryDisplay } from "./tool-recovery-declared-display.js";
 
 export type ToolRecoveryBriefInput = {
   mission: typeof missions.$inferSelect; oversightIssue: typeof issues.$inferSelect;
@@ -94,6 +95,11 @@ export async function loadToolRecoveryBriefFacts(db: Db, input: ToolRecoveryBrie
           paths: [config.instructionsFilePath, config.instructionsPath].filter(v => typeof v === "string").map(safe),
           excerpt: safe(config.instructions) },
         envKeys: Object.keys(displayRecord(config.env)).slice(0, 40).map(safe) };
+    }),
+    // Tool-declared recovery hints: sanitized display projection only; never read back as authority.
+    declaredRecovery: tools === null ? "unavailable" : names.flatMap(name => {
+      const tool = tools.find(t => t.name === name);
+      return tool ? [{ name: safe(tool.name), ...declaredToolRecoveryDisplay(tool.adapterConfig, safe) }] : [];
     }),
     toolResult: Object.fromEntries(["requestId", "toolName", "success", "exitCode", "errorCode", "error", "artifactPath"].map(key => [key, safe(result[key])])),
     invocationPaths: toolRecoveryPathFacts(invocation, secrets),

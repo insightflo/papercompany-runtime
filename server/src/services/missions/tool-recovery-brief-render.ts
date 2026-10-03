@@ -19,6 +19,10 @@ export function renderToolRecoveryBriefFacts(facts: ToolRecoveryBriefFacts): str
       : "Artifact registration is forbidden on this unblock issue. Existing officially registered producer records can still be considered for recovery; this card does not delegate registration onto an arbitrary producer.",
     ko ? "같은 실행에서도 세대·재시도·반복 번호가 다르면 생산자 증거가 오래된 것입니다. prospective 항목은 재시도 승인으로 모든 단계 세대가 증가할 경우의 비교이며, 자동 보정이나 재시작 권한이 아닙니다."
       : "Same-run identity does not prove current producer evidence. prospective compares the generation bump on all steps if strict retry consumes authority; it neither repairs provenance nor authorizes restart.",
+    ko ? "## 도구가 선언한 복구 정보" : "## Declared tool recovery metadata",
+    ko ? "도구 등록 정보에 선언된 참고용 안내입니다(display only). 재시도·완료·정리 여부를 정하는 권한이 아니며, 시스템도 이 값으로 다음 단계를 결정하지 않습니다. reconcile: operator는 운영자만 정리할 수 있다는 뜻입니다."
+      : "Reference hints declared in the tool registry (display only). They are not authority to retry, complete or reconcile, and the system never uses them to choose a next step. reconcile: operator means only an operator may reconcile.",
+    `declaredRecovery: ${JSON.stringify(facts.declaredRecovery)}`,
     ko ? "unavailable/unchecked는 확인되지 않았다는 뜻입니다. 조회 실패나 누락을 허용으로 해석하지 마세요. 지식 카드는 제목/ID 참고용이며 본문은 별도 조회하세요."
       : "unavailable/unchecked means not verified, never allowed. Knowledge titles/IDs are references only; fetch the full card separately.",
   ].join("\n");
