@@ -4577,13 +4577,13 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(ownerActionIssues[0]?.description).toContain(`<!-- tool-step-recovery:${runId}:collect-signals -->`);
     expect(ownerActionIssues[0]?.description).toContain("Tool names: collect-signals-kr");
     expect(ownerActionIssues[0]?.description).toContain("Local signal hint: transient_or_external");
-    expect(ownerActionIssues[0]?.description).toContain("Local retry hint: retry_with_bounded_backoff");
+    expect(ownerActionIssues[0]?.description).not.toContain("Local retry hint:");
     expect(ownerActionIssues[0]?.description).toContain("Main executor brief:");
-    expect(ownerActionIssues[0]?.description).toContain("Mission goal: Tool step recovery mission");
-    expect(ownerActionIssues[0]?.description).toContain("Mission execution loop:");
-    expect(ownerActionIssues[0]?.description).toContain("Oversight signal boundary:");
-    expect(ownerActionIssues[0]?.description).toContain("- Do not depend on normalized decision labels as the primary control path; use labels only as optional hints after judging the mission state yourself.");
-    expect(ownerActionIssues[0]?.description).toContain("- Do not blindly follow local classifications, perform delegated work without deciding why, or invent a recovery recipe without evidence.");
+    expect(ownerActionIssues[0]?.description).toContain("Mission: Tool step recovery mission");
+    expect(ownerActionIssues[0]?.description).toContain("Structured system facts");
+    expect(ownerActionIssues[0]?.description).toContain("registration_not_applicable");
+    expect(ownerActionIssues[0]?.description).toContain("does not automatically retry or complete a tool");
+    expect(ownerActionIssues[0]?.description).toContain("No classification selects the next action");
 
     expect(onOwnerActionCreated).toHaveBeenCalledTimes(1);
     expect(onOwnerActionCreated).toHaveBeenCalledWith(expect.objectContaining({
@@ -4792,7 +4792,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     }));
     expect(recoveryIssue.description).toContain(`<!-- tool-step-recovery:${runId}:scan -->`);
     expect(recoveryIssue.description).toContain("Local signal hint: missing_file");
-    expect(recoveryIssue.description).toContain("Local retry hint: do_not_retry_until_config_fixed");
+    expect(recoveryIssue.description).not.toContain("Local retry hint:");
     expect(recoveryIssue.description).toContain("can't open file");
     expect(recoveryIssue.description).toContain("No such file or directory");
     expect(recoveryIssue.description).toContain("No recovery action has been selected by automation.");

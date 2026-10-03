@@ -3,6 +3,7 @@ import { heartbeatRuns, issueWorkProducts, workflowRuns, workflowStepRuns, type 
 import { workProductProducerSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
+import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
 
 /** Ordinary same-run selector: cross-run approval must never weaken these checks. */
 export async function selectSameRunWorkProduct(db: Db, scope: { companyId: string; workflowRunId: string;
@@ -20,10 +21,7 @@ export async function selectSameRunWorkProduct(db: Db, scope: { companyId: strin
   const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
   if (!parsed.success) throw new Error("workproduct_selector_provenance_missing");
   const p = parsed.data, s = source.step;
-  if (p.companyId !== scope.companyId || p.missionId !== source.run.missionId || p.workflowRunId !== scope.workflowRunId
-    || p.stepRunId !== s.id || p.stepId !== s.stepId || p.executionGeneration !== s.executionGeneration
-    || p.retryCount !== s.retryCount || p.iterationIndex !== s.iterationIndex
-    || product.sourceExecutionGeneration !== s.executionGeneration || product.createdByRunId !== p.heartbeatRunId) {
+  if (workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product }).length > 0) {
     throw new Error("workproduct_selector_stale_producer");
   }
   const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, p.heartbeatRunId));

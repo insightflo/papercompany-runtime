@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-10-03 — recovery diagnostics need whole-header and non-HTTP URI redaction
+- Date: 2026-10-03
+- Task: Stage 1 review fixes (display only).
+- What failed: Basic/other authorization schemes retained credential payloads; non-HTTP connection URLs retained passwords. Structured result display omitted native `toolResult.error`.
+- Root cause: Bearer/HTTP-only special cases plus one-token key masking; test fixture invented `errorCode`. Re-review found quote/newline URL token boundaries could publish password suffixes even after URL parsing.
+- Category: security / fixture fidelity.
+- Fix: Suppress authorization line tails. For scheme:// diagnostics, inspect the entire remaining fragment and suppress it when credential-bearing, ambiguous or unparseable; never preserve a guessed quoted/newline URL boundary. Expose redacted native `error` only.
+- Prevention rule: Verify entire persisted descriptions with Basic/DSN sentinels and missing/SQL-unavailable registry; include apostrophe, double quote, backtick, encoding, newline and malformed credentials. Prefer suppressed diagnostic tails to secret-bearing URL usability; mirror native fields.
+- Reuse trigger: Publishing diagnostic/config text into owner issue descriptions.
+- Evidence: `.recovery-work/stage1-review-fix-red.log` (13 failures); `.recovery-work/stage1-url-boundary-red.log` (17 failures/18 passes), `stage1-url-boundary-focused.log` (9 files/88 passes/zero skips), `stage1-url-boundary-types.log` (test-inclusive tsc pass).
+
+### 2026-10-03 — recovery brief fixtures and diagnostic redaction
+- Task: Stage 1 structured tool recovery brief.
+- What failed: Producer/pattern fixture setup omitted required status/source fields; a producer selector used unsupported type=file. The first redaction pass missed token values after a preceding diagnostic label consumed the regex match. An auxiliary test tsconfig omitted Node/Express types and inherited declaration emission.
+- Root cause: Incomplete fixture schemas, non-overlapping key/value scanning, and test compiler setup rather than product contracts.
+- Category: test fixture / redaction.
+- Fix: Use schema-valid document/active/operator fixtures; redact sensitive key spans independently (including quoted JSON); explicit Node typeRoots, Express declarations and declaration=false in test-only config.
+- Prevention rule: Validate full insert and selector schemas before counting RED; test secrets after diagnostic prefixes and inside quoted JSON; source typecheck is not test typecheck.
+- Reuse trigger: Diagnostic brief redaction, optional DB read tests, auxiliary test-inclusive TypeScript check.
+- Evidence: `.recovery-work/stage1-producer-red-confirmed.log`, `stage1-boundaries-red.log`, `stage1-focused-green.log` (21 files/249 tests), `stage1-test-types-green.log`.
+
+
 ### 2026-10-02 — declarative role migration must preserve execution equivalence
 - Date: 2026-10-02
 - Task: QA genericization integration with revision repeat guards and seeded reuse.

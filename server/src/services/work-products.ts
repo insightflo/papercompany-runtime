@@ -223,6 +223,28 @@ export function workProductService(db: Db) {
       return row ? toIssueWorkProduct(row) : null;
     },
 
+    // [same-path rework restamp] Re-registering an existing artifact path from a heartbeat must prove the
+    //   CURRENT attempt with the same fail-closed checks as createForIssue, then move producer provenance
+    //   to that heartbeat. Other metadata is preserved; only the registration stamp keys are replaced.
+    restampProducer: async (id: string, runId: string, stamp: Record<string, unknown>, delegation?: Parameters<typeof registeredProducer>[4]) => {
+      const [current] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, id));
+      if (!current) return null;
+      if (!(await assertIssueResumeScopeIdentity(db, { companyId: current.companyId, issueId: current.issueId }))) {
+        throw conflict("stale_generation", { issueId: current.issueId });
+      }
+      const row = await db.transaction(async (tx) => {
+        // Same lock order as selection (run/step first via registeredProducer, then the product row) to avoid deadlock.
+        const producer = await registeredProducer(tx, current.companyId, current.issueId, runId, delegation);
+        const [existing] = await tx.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, id)).for("update");
+        if (!existing || existing.issueId !== current.issueId || existing.companyId !== current.companyId) return null;
+        return await tx.update(issueWorkProducts).set({ createdByRunId: runId,
+          sourceExecutionGeneration: producer?.executionGeneration ?? null,
+          metadata: preserveProducerMetadata({ ...(existing.metadata ?? {}), ...stamp }, producer), updatedAt: new Date() })
+          .where(eq(issueWorkProducts.id, id)).returning().then((rows) => rows[0] ?? null);
+      });
+      return row ? toIssueWorkProduct(row) : null;
+    },
+
     update: async (id: string, patch: Partial<typeof issueWorkProducts.$inferInsert>) => {
       // [봇 bug·medium 교정] "경로 결정" 을 필드 명목이 아니라 실제 해석 경로 변화로 판정한다
       //   (storageMirror 의 metadata 병합은 경로 불변 시 통과, provider/url 및 경로 변화는 가드).

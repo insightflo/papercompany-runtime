@@ -307,13 +307,15 @@ export async function syncToolRegistryToolsToCore(
     if (existing) {
       const isRegistryOwned = recordValue(existing.adapterConfig).source === "tool-registry";
       if (isRegistryOwned) {
+        // Display-only recovery declaration: a source declaration wins; otherwise keep the stored one.
+        const recovery = data.recovery ?? recordValue(existing.adapterConfig).recovery;
         await db
           .update(toolDefinitions)
           .set({
             description,
             inputSchema: argsSchema,
             adapterType: "builtin",
-            adapterConfig,
+            adapterConfig: recovery === undefined ? adapterConfig : { ...adapterConfig, recovery },
             enabled: true,
             updatedAt: new Date(),
           })
@@ -333,7 +335,7 @@ export async function syncToolRegistryToolsToCore(
           description,
           inputSchema: argsSchema,
           adapterType: "builtin",
-          adapterConfig,
+          adapterConfig: data.recovery === undefined ? adapterConfig : { ...adapterConfig, recovery: data.recovery },
           enabled: true,
         })
         .returning({ id: toolDefinitions.id });

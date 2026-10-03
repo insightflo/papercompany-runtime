@@ -4,14 +4,14 @@ import { missions, workflowRuns, workflowStepRuns, workflowTerminalDecisions, wo
 import { replacementBudgetBlocked, replacementExecutionInFlight } from "./replacement-execution-safety.js";
 import { conflict } from "../../errors.js";
 import { loadLatestMissionOwnerDecision } from "../missions/mission-owner-recovery-ledger.js";
+import { replacementSourceEligible, replacementDecisionSelected } from "./replacement-snapshot-guards.js";
 
 export async function lockReplacementScope(db: Db, companyId: string, sourceRunId: string, decisionEventId: string) {
   const [observed] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, sourceRunId), eq(workflowRuns.companyId, companyId)));
   if (!observed?.missionId) throw conflict("replacement_source_missing");
   const [mission] = await db.select().from(missions).where(and(eq(missions.id, observed.missionId), eq(missions.companyId, companyId))).for("update");
   const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, sourceRunId)).for("update");
-  if (!mission || mission.status !== "active" || !run || run.missionId !== mission.id || run.status !== "failed"
-    || run.parentRunId || run.parentStepRunId || run.triggeredBy === "workflow-step") throw conflict("replacement_source_ineligible");
+  if (!replacementSourceEligible(mission, run)) throw conflict("replacement_source_ineligible");
   const steps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id)).for("update");
   const [terminal] = await db.select().from(workflowTerminalDecisions).where(and(eq(workflowTerminalDecisions.workflowRunId, run.id),
     eq(workflowTerminalDecisions.companyId, companyId), eq(workflowTerminalDecisions.decidedAuthorityVersion, run.dispatchAuthorityVersion)));
@@ -20,7 +20,7 @@ export async function lockReplacementScope(db: Db, companyId: string, sourceRunI
   const owner = await loadLatestMissionOwnerDecision({ db, companyId, missionId: mission.id });
   const target = owner?.decision.recoveryTarget;
   if (!owner || owner.eventId !== decisionEventId || owner.authorAgentId !== mission.ownerAgentId
-    || owner.decision.decision !== "restart_from_start" || target?.kind !== "tool_step"
+    || !replacementDecisionSelected(owner.decision.decision) || target?.kind !== "tool_step"
     || target.workflowRunId !== run.id || target.expectedAuthorityVersion !== run.dispatchAuthorityVersion) throw conflict("replacement_owner_decision_invalid");
   const step = steps.find((s) => s.id === target.stepRunId);
   if (!step || step.status !== "failed" || step.executionGeneration !== target.expectedExecutionGeneration
