@@ -69,10 +69,7 @@ import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
-import {
-  executeCoreWorkflowTool,
-  resolveRunStepEnv,
-} from "../services/workflow/core-tool-executor.js";
+import { executeCoreWorkflowTool, resolveRunStepEnv } from "../services/workflow/core-tool-executor.js";
 import { listWorkflowToolCatalog } from "../services/workflow/tool-catalog.js";
 import { authorizeRunToolExecution } from "../services/workflow/plugin-tool-authorization.js";
 
@@ -1169,6 +1166,7 @@ export function pluginRoutes(
         companyId: runContext.companyId,
         agentId: runContext.agentId,
         issueId: workflowRunIssueId,
+        heartbeatRunId: req.actor.type === 'agent' ? String(runContext.runId) : undefined,
         toolName: tool,
         parameters: parameters ?? {},
         requestId: randomUUID(),
@@ -1176,6 +1174,12 @@ export function pluginRoutes(
         stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
         stepEnv,
       });
+      // 409 artifact_tool_step_call_in_progress: nothing executed (another call holds the step).
+      // Release this request's claim so a same-key retry can execute once the step is free.
+      if (coreResult.status === 409 && coreResult.body.error === "artifact_tool_step_call_in_progress" && receiptId !== null) {
+        await releaseToolExecutionReceipt(db, receiptId);
+        receiptId = null;
+      }
       if (coreResult.status !== 404 || coreResult.body.source === "core") {
         await emitExecuted(coreResult.status, coreResult.body as Record<string, unknown>, {
           workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,

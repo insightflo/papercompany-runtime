@@ -17,7 +17,8 @@ import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 
 export type QaRequest = Awaited<ReturnType<typeof prepareQaArtifactRequest>>;
 export async function prepareQaArtifactRequest(input: { db: Db; companyId: string; workflowRunId?: string | null;
-  stepRunId?: string | null; stepId?: string | null; requestId: string; parameters: unknown; artifactExecution?: FrozenArtifactAttempt | null }) {
+  stepRunId?: string | null; stepId?: string | null; requestId: string; parameters: unknown; artifactExecution?: FrozenArtifactAttempt | null;
+  dispatch?: Awaited<ReturnType<typeof captureQaDispatch>> }) {
   const frozen = input.artifactExecution === undefined ? await loadArtifactAttempt(input) : input.artifactExecution;
   if (!frozen || frozen.contract.role !== "qa") return null;
   if (!input.workflowRunId || !input.stepRunId) throw new Error("artifact_contract_workflow_required");
@@ -25,7 +26,7 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
   const execution = await loadExecutionDefinition(input.db, input.workflowRunId, { requireHistorical: false });
   const definition = execution.steps.find(s => s.id === input.stepId) as Record<string, unknown> | undefined;
   if (!definition?.toolArtifactContract) throw new Error("qa_artifact_input_contract_required");
-  const dispatch = await captureQaDispatch(input);
+  const dispatch = input.dispatch ?? await captureQaDispatch(input);
   const contract = toolArtifactContractSchema.parse(definition.toolArtifactContract);
   const selectors = workProductSelectorsSchema.parse(definition.workProductSelectors);
   const selector = selectors[contract.inputStepId];

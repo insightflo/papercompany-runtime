@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { executeAgentArtifactTool } from './agent-artifact-tool.js';
 import { captureToolCallProvenance, recordToolCallProvenance, type ToolCallProvenance } from "./tool-call-provenance.js";
 import { prepareQaConsumer } from "./qa-artifact-consumer.js";
 import { verifyPublicationResult } from "./publication-result.js";
@@ -27,7 +28,7 @@ export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } fro
 
 const execFile = promisify(execFileCallback);
 export type CoreWorkflowToolExecutionResult = {
-  status: 200 | 403 | 404 | 422 | 500 | 501 | 503;
+  status: 200 | 403 | 404 | 409 | 422 | 500 | 501 | 503;
   artifactPath?: string;
   toolArtifactReceipt?: ToolArtifactReceipt;
   body: { content?: string; data?: unknown; stderr?: string; tool?: string; source?: "core"; error?: string; invocationProvenance?: ToolCallProvenance | null };
@@ -50,6 +51,9 @@ export async function executeCoreWorkflowTool(input: {
   db: Db; companyId: string; agentId?: string | null; agentName?: string | null; issueId?: string | null;
   toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null;
   stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
+  /** Authenticated server route only; never taken from tool parameters. */
+  heartbeatRunId?: string;
+  artifactDispatch?: Awaited<ReturnType<typeof captureQaDispatch>>;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db.select({ id: toolDefinitions.id, name: toolDefinitions.name,
     enabled: toolDefinitions.enabled, adapterType: toolDefinitions.adapterType, adapterConfig: toolDefinitions.adapterConfig })
@@ -74,6 +78,9 @@ export async function executeCoreWorkflowTool(input: {
       eq(agentToolGrants.companyId, input.companyId), eq(agentToolGrants.agentId, agentId), eq(agentToolGrants.toolId, tool.id),
     )).limit(1);
     if (!grant) return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
+  }
+  if (input.heartbeatRunId && adapterConfig.artifactContract !== undefined) {
+    return executeAgentArtifactTool(input, executeCoreWorkflowTool);
   }
   let artifactExecution: FrozenArtifactAttempt | null;
   try { artifactExecution = await loadArtifactAttempt({ ...input, adapterConfig }); }
@@ -144,8 +151,9 @@ export async function executeCoreWorkflowTool(input: {
   let invocationProvenance: ToolCallProvenance | null = null;
   try {
     // Fence the attempt before any awaited deployment/input byte reads.
-    const initialDispatch = artifactExecution ? await captureQaDispatch(input) : undefined;
-    const qaRequest = await prepareQaArtifactRequest({ ...input, artifactExecution });
+    const initialDispatch = artifactExecution ? input.artifactDispatch ?? await captureQaDispatch(input) : undefined;
+    await initialDispatch?.assertCurrent();
+    const qaRequest = await prepareQaArtifactRequest({ ...input, artifactExecution, dispatch: initialDispatch });
     const deploymentFiles = artifactExecution?.contract.deploymentFiles;
     const deployment = deploymentFiles ? await toolDeploymentHashes(deploymentFiles, cwd) : null;
     const prepared = qaRequest ?? await prepareQaConsumer({ ...input, artifactExecution, dispatch: initialDispatch });
