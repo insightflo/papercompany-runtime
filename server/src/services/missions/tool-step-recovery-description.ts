@@ -29,7 +29,7 @@ export function buildToolStepRecoveryDescription(input: {
     "",
     prose("Raw evidence (bounded/redacted diagnostics, never authority):", "진단 기록(길이 제한·비밀값 숨김 적용, 실행 권한 아님):"),
     ...(input.classification.evidence.length > 0
-      ? input.classification.evidence.filter(line => !line.startsWith("toolInvocationArgs:")).slice(0, 8).map((line) => `- ${safe(line)}`)
+      ? input.classification.evidence.slice(0, 8).map((line) => `- ${safe(line)}`)
       : [prose("- No runtime stderr/stdout/error evidence was captured on the workflow step run.", "- 단계에 저장된 표준 출력·오류 기록이 없습니다.")]),
     input.facts ? renderToolRecoveryBriefFacts(input.facts) : "Structured system facts: unavailable",
     "",

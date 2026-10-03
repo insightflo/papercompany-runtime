@@ -31,4 +31,17 @@ describe("tool step recovery description", () => {
     expect(description).toContain("active workProduct is registered through the official workflow API");
     expect(description).toContain("ordinary issue comments are display-only evidence");
   });
+
+  it("keeps toolInvocationArgs evidence visible (empty-args definition defects) with secrets redacted", () => {
+    const build = (evidence: string[]) => buildToolStepRecoveryDescription({
+      marker: "m", missionTitle: "t", workflowName: "w", workflowRunId: "run-1", stepId: "s",
+      displayStepName: "S", toolNames: ["x"],
+      classification: { className: "unknown", retryPolicy: "manual_owner_decision_required", rationale: "r", requiredAction: "a", evidence },
+    });
+    expect(build(["toolInvocationArgs: {}"])).toContain("- toolInvocationArgs: {}");
+    const withSecret = build(['toolInvocationArgs: {"date":"2026-10-03","apiKey":"SENTINEL_SECRET_123"}']);
+    expect(withSecret).toContain("toolInvocationArgs:");
+    expect(withSecret).toContain("2026-10-03");
+    expect(withSecret).not.toContain("SENTINEL_SECRET_123");
+  });
 });
