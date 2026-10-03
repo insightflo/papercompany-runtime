@@ -38,6 +38,12 @@ export {
   type TestToolRequest,
 } from "./tool-definition.js";
 export {
+  toolRecoveryMetadataV1,
+  parseToolRecoveryMetadata,
+  type ToolRecoveryMetadataV1,
+  type ToolRecoveryMetadataParseResult,
+} from "./tool-recovery-metadata.js";
+export {
   companySkillSourceTypeSchema,
   companySkillTrustLevelSchema,
   companySkillCompatibilitySchema,

@@ -10,6 +10,8 @@ import { and, eq } from "drizzle-orm";
 import { badRequest, conflict, forbidden, unauthorized } from "../../errors.js";
 import { issueService } from "../issues.js";
 import { assertOwnerRecoveryTarget } from "./owner-recovery-target.js";
+import { ownerDecisionRequestsHuman } from "./owner-tool-recovery-eligibility.js";
+import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryIdentityMatches } from "./owner-recovery-submission-guards.js";
 import {
   recordMissionOwnerDecision,
   type MissionOwnerDecisionSubmission,
@@ -54,9 +56,10 @@ function toSubmission(data: MissionOwnerDecisionSubmit): MissionOwnerDecisionSub
 
 export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: OwnerRecoveryApiActor,
   recoveryTarget?: MissionOwnerDecisionSubmit["recoveryTarget"]) {
-  if (actor.actorType !== "agent") throw forbidden("Agent authentication required");
+  const actorFailure = ownerRecoveryActorFailure(actor);
+  if (actorFailure === "agent_required") throw forbidden("Agent authentication required");
+  if (actorFailure === "run_required" || !actor.runId) throw unauthorized("Agent run id required");
   if (!actor.agentId) throw forbidden("Agent authentication required");
-  if (!actor.runId) throw unauthorized("Agent run id required");
 
   const [issue] = await db.select({
     id: issues.id,
@@ -70,7 +73,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     description: issues.description,
   }).from(issues).where(eq(issues.id, issueId)).limit(1);
   if (!issue) return null;
-  if (issue.originKind !== "mission_main_executor_unblock") {
+  if (ownerRecoveryIssueFailure(issue) === "unblock_required") {
     throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
   }
   // [fail closed] owner-action issue 는 반드시 mission scope 를 가져야 한다. missionId 가 없거나
@@ -82,7 +85,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     .from(missions)
     .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
     .limit(1).for("update");
-  if (!mission || mission.ownerAgentId !== actor.agentId) {
+  if (!ownerRecoveryOwnerMatches(mission, actor.agentId)) {
     throw forbidden("Only the mission owner agent may submit owner-recovery decisions");
   }
   const sourceIssueId = issue.originId;
@@ -96,7 +99,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     .from(issues)
     .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
     .limit(1).for("share");
-  if (!sourceIssue || sourceIssue.missionId !== issue.missionId) {
+  if (!ownerRecoverySourceMatches(sourceIssue, issue.missionId)) {
     throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
   }
   // The issuing heartbeat belongs to this owner-action issue, NOT the recovery target.
@@ -106,10 +109,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     .where(eq(heartbeatRuns.id, actor.runId)).limit(1).for("share");
   const [currentIssue] = await db.select().from(issues)
     .where(eq(issues.id, issue.id)).limit(1).for("update");
-  if (!heartbeat || heartbeat.companyId !== issue.companyId || heartbeat.agentId !== actor.agentId
-    || heartbeat.issueId !== issue.id || !currentIssue || currentIssue.companyId !== issue.companyId
-    || currentIssue.missionId !== issue.missionId || currentIssue.originId !== issue.originId
-    || currentIssue.originKind !== issue.originKind) {
+  if (!ownerRecoveryIdentityMatches({ heartbeat, issue, currentIssue, agentId: actor.agentId })) {
     throw conflict("Owner-recovery submission requires the same company, agent and owner-action heartbeat", {
       reason: "owner_recovery_submission_identity_mismatch",
     });
@@ -150,7 +150,7 @@ export async function submitMissionOwnerDecision(input: {
         }
       }
     }
-    const needsHumanAlert = effectiveSubmission.decision === "request_input" || effectiveSubmission.decision === "escalate";
+    const needsHumanAlert = ownerDecisionRequestsHuman(effectiveSubmission.decision);
     let humanPayload: Awaited<ReturnType<typeof materializeHumanOperatorRequestEvent>>["payload"] = null;
     let humanInserted = false;
     const recorded = await recordMissionOwnerDecision({

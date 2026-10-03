@@ -7,6 +7,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dependencyToolEvidence } from "./dependency-tool-evidence.js";
+import { isIssueLessToolStep } from "./issue-less-tool-shape.js";
 import { readWorkflowToolArtifactPath } from "./tool-artifact-path.js";
 import {
   ensureWorkflowStepRunRecords,
@@ -2231,17 +2232,6 @@ function hasRecoverableQaRequestChangesDependency(
     if (hasRemainingBackEdgeRework) return true;
   }
   return false;
-}
-
-function isIssueLessToolStep(step: WorkflowStep): boolean {
-  const hasToolNames = Array.isArray(step.toolNames)
-    && step.toolNames.some((toolName) => typeof toolName === "string" && toolName.trim().length > 0);
-  const agentId = typeof step.agentId === "string" ? step.agentId.trim() : "";
-  const persistedStep = step as PersistedWorkflowStep;
-  const stepType = typeof persistedStep.type === "string" ? persistedStep.type.trim().toLowerCase() : "";
-  const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : "";
-  if (stepType === "agent" || agentName.length > 0) return false;
-  return hasToolNames && agentId.length === 0;
 }
 
 function getSingleToolStepName(step: WorkflowStep): string {

@@ -6,6 +6,7 @@ import type { IssueCreateInput, IssueRow } from "./shared-types.js";
 import { classifyToolStepFailure, getWorkflowStepToolNames } from "./tool-step-failure.js";
 import { buildToolStepRecoveryDescription } from "./tool-step-recovery-description.js";
 import { logger } from "../../middleware/logger.js";
+import { loadToolRecoveryBriefFacts } from "./tool-recovery-brief-facts.js";
 
 /** Identity link only, not permission to execute. Creation and link commit together. */
 export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, input: {
@@ -23,12 +24,14 @@ export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, i
         eq(workflowTransitionEvents.workflowStepRunId, input.stepRun.id),
         eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1"))).limit(1);
     if (linked) return { issue: linked.issue, created: false };
+    // All optional context reads use nested SAVEPOINTs in this creation transaction.
+    const facts = await loadToolRecoveryBriefFacts(tx as unknown as Db, input);
     // Legacy cards are not parsed or silently migrated. Explicit v2 submission can still target them.
     const issue = await createIssue(tx as unknown as Db, input.mission.companyId, {
       assigneeAgentId: input.mission.ownerAgentId,
       description: buildToolStepRecoveryDescription({ marker: `tool-step-recovery:${input.run.id}:${input.stepRun.stepId}`,
         missionTitle: input.mission.title, workflowName: input.workflowName, workflowRunId: input.run.id,
-        stepId: input.stepRun.stepId, displayStepName: input.step?.name?.trim() || input.stepRun.stepId, toolNames, classification }),
+        stepId: input.stepRun.stepId, displayStepName: input.step?.name?.trim() || input.stepRun.stepId, toolNames, classification, facts }),
       missionId: input.mission.id, originKind: "mission_main_executor_unblock", originId: input.oversightIssue.id,
       parentId: input.oversightIssue.parentId ? undefined : input.oversightIssue.id,
       priority: "high", status: "todo", title: `[Owner Action] Tool step failed: ${input.stepRun.stepId}`,

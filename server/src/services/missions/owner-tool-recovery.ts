@@ -3,7 +3,7 @@ import { issues, missions, workflowStepRuns, workflowTransitionEvents, type Db }
 import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep } from "../workflow/dag-engine.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
-import { issueLessToolRecoveryOwnsFailure } from "./tool-step-recovery-authority.js";
+import { evaluateOwnerToolRecoverySnapshot, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
 import type { MissionSupervisionIssue, MissionSupervisionMission, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 import type { MissionOwnerSupervisionAppliedAction } from "./supervision-types.js";
 import type { OwnerRecoveryTarget } from "./mission-owner-recovery-events.js";
@@ -37,33 +37,22 @@ export async function applyOwnerToolRecovery(input: {
     eq(workflowTransitionEvents.issueId, issue.id)));
   const toolCard = links.some((link) => link.eventType === "owner_tool_recovery_target_v1");
   const qaCard = links.some((link) => link.eventType === "qa_cap_oversight_claim");
-  if (!toolCard && target?.kind === "issue") return null;
-  if (!toolCard && target?.kind !== "tool_step"
-    && (qaCard || input.sourceIssue?.originKind !== "mission_main_executor_oversight")) return null;
+  const eligibility = evaluateOwnerToolRecoverySnapshot({ ...input, decision, toolCard, qaCard });
+  if (eligibility.kind === "not_applicable") return null;
   const base = { schemaVersion: 1 as const, ownerActionIssueId: issue.id, decisionEventId: decision?.eventId ?? null, target };
   const noOp = (reason: string, outcome: OwnerToolRecoveryOutcome["outcome"] = "blocked") => ({
     outcome: { ...base, kind: "no_op" as const, outcome, reason },
   });
-  if (!target || target.kind !== "tool_step") return noOp("target_missing", "requires_decision");
-  if (!decision || decision.missionId !== mission.id || decision.authorAgentId !== mission.ownerAgentId
-    || decision.sourceIssueId !== issue.originId) return noOp("decision_scope_mismatch");
-  const matches = input.stepRows.filter(({ run, stepRun }) =>
-    run.id === target.workflowRunId && stepRun.id === target.stepRunId
-    && stepRun.workflowRunId === target.workflowRunId && run.companyId === mission.companyId && run.missionId === mission.id);
-  if (matches.length !== 1) return noOp(matches.length ? "target_ambiguous" : "no_step_run");
-  const row = matches[0]!;
-  if (row.run.status !== "failed") return noOp("run_not_failed");
-  if (row.run.dispatchAuthorityVersion !== target.expectedAuthorityVersion
-    || row.stepRun.executionGeneration !== target.expectedExecutionGeneration
-    || row.stepRun.lastDispatchRequestId !== target.failedDispatchRequestId) return noOp("stale_generation");
-  if (!issueLessToolRecoveryOwnsFailure(row)) return noOp("step_not_retryable");
-  if (!input.apply) return noOp("not_requested");
+  if (eligibility.kind === "blocked") return noOp(eligibility.reason, eligibility.outcome);
+  // Narrowing only: the shared guard already proves these identities.
+  if (!decision || target?.kind !== "tool_step") return noOp("target_missing", "requires_decision");
+  const row = eligibility.row;
 
   const retryKey = `mission-native-tool-step-retry:${mission.id}:${issue.id}:${row.run.id}:${row.stepRun.stepId}`;
   const [previous] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
     .where(and(eq(workflowTransitionEvents.companyId, mission.companyId), eq(workflowTransitionEvents.idempotencyKey, retryKey))).limit(1);
   if (previous) return noOp("retry_key_consumed", "requires_decision");
-  if (decision.decision.decision === "recover_artifact") {
+  if (toolRecoveryDecisionEffect(decision.decision.decision) === "artifact") {
     const evidence = await loadAuthorizedNativeToolStepRecovery({ db, companyId: mission.companyId,
       missionId: mission.id, missionOwnerAgentId: mission.ownerAgentId, ownerActionIssue: issue, sourceIssue: input.sourceIssue });
     if (!evidence) return noOp("missing_artifact", "requires_decision");
@@ -83,7 +72,7 @@ export async function applyOwnerToolRecovery(input: {
         ownerActionIssueId: issue.id, workflowRunId: row.run.id, stepId: row.stepRun.stepId,
         stepRunId: row.stepRun.id, artifactPath: evidence.artifactPath, resultStatus: result.status } };
   }
-  if (decision.decision.decision !== "retry_source_issue") return noOp("retry_not_requested", "requires_decision");
+  if (toolRecoveryDecisionEffect(decision.decision.decision) !== "retry") return noOp("retry_not_requested", "requires_decision");
   // Explicit owner intent + current failure + existing consumption ledger, in one transaction.
   const retry = await retryIssueLessToolWorkflowStep(db, { companyId: mission.companyId,
     runId: target.workflowRunId, stepId: row.stepRun.stepId, recoveryRequestReference: retryKey,

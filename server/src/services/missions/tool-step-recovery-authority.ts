@@ -34,8 +34,12 @@ export function issueLessToolRecoveryOwnsFailure(
 ): boolean {
   const workflowSteps = (row.definition.stepsJson as WorkflowStep[] | null) ?? [];
   const workflowStep = workflowSteps.find((step) => step.id === row.stepRun.stepId) ?? null;
-  if (!isIssueLessToolWorkflowStep(workflowStep, row.stepRun.issueId)) return false;
-  if (row.stepRun.status !== "failed") return false;
-  if (!hasToolStepFailureExecutionEvidence(row.stepRun)) return false;
-  return record(row.stepRun.metadata).workflowRetryExhaustion === undefined;
+  return toolRecoveryOwnsStepFailure(workflowStep, row.stepRun);
+}
+
+export function toolRecoveryOwnsStepFailure(step: WorkflowStep | null, stepRun: MissionSupervisionWorkflowStepRow["stepRun"]): boolean {
+  if (!isIssueLessToolWorkflowStep(step, stepRun.issueId)) return false;
+  if (stepRun.status !== "failed") return false;
+  if (!hasToolStepFailureExecutionEvidence(stepRun)) return false;
+  return record(stepRun.metadata).workflowRetryExhaustion === undefined;
 }

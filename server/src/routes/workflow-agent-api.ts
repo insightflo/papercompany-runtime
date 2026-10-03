@@ -1,4 +1,5 @@
 import { Router, type Request } from "express";
+import { isWorkflowApiIssue, isDirectWorkflowApiAssignee } from "../services/workflow/issue-api-guards.js";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, issues, missions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
@@ -102,14 +103,14 @@ async function authorizeWorkflowApi(
   options?: { readonly allowMissionOwnerUnblockDelegation?: boolean },
 ) {
   assertCompanyAccess(req, issue.companyId);
-  if (issue.originKind !== "workflow_execution") {
+  if (!isWorkflowApiIssue(issue)) {
     throw conflict("Workflow API can only be used for workflow execution issues");
   }
   const actor = getActorInfo(req);
   if (req.actor.type !== "agent") return { actor, delegation: null };
   if (!actor.agentId) throw forbidden("Agent authentication required");
   if (!actor.runId) throw unauthorized("Agent run id required");
-  if (issue.status === "in_progress" && issue.assigneeAgentId === actor.agentId) {
+  if (isDirectWorkflowApiAssignee(issue, actor.agentId)) {
     await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
     return { actor, delegation: null };
   }

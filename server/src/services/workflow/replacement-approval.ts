@@ -7,10 +7,10 @@ import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import { lockReplacementScope, lockReplacementDefinition } from "./replacement-scope.js";
 import { replacementDefinitionHash } from "./replacement-definition.js";
 import { normalizeWorkflowRunInputs } from "./run-input-normalization.js";
+import { replacementOperatorEligible } from "./replacement-snapshot-guards.js";
 
 function board(actor: Express.Request["actor"], companyId: string) {
-  if (actor.type !== "board" || (!actor.userId && actor.source !== "local_implicit")
-    || (actor.source !== "local_implicit" && !actor.isInstanceAdmin && !actor.companyIds?.includes(companyId))) throw forbidden("replacement_operator_required");
+  if (!replacementOperatorEligible(actor, companyId)) throw forbidden("replacement_operator_required");
   return actor.userId ?? "local-board";
 }
 export async function proposeReplacement(db: Db, companyId: string, actor: Express.Request["actor"], raw: unknown) {
