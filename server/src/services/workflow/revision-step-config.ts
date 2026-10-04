@@ -10,7 +10,7 @@ export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [],
   // The generated-description binding rides on the step (passthrough) but never hashes as raw config.
   const { id: _id, sourceStepId: _source, name: _name, title: _title, description: _description,
     agentName: _agentName, revisionDescriptionBinding: _revisionDescriptionBinding, ...config } =
-    step as WorkflowStep & { revisionDescriptionBinding?: unknown };
+    step as WorkflowStep & { revisionDescriptionBinding?: unknown; sourceStepId?: string };
   const remap = (id: string) => ids.get(id) ?? id;
   // Exact native machine tokens/typed step-reference fields only; never inspect prose.
   const normalize = (value: unknown, key?: string): unknown => {

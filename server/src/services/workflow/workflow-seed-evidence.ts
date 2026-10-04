@@ -45,7 +45,7 @@ export async function verifySeedProductBytes(db: Db, selected: Awaited<ReturnTyp
 }
 
 /** Revalidate the original attempt and bytes, never restamp a producer for the target. */
-export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$inferSelect, visited?: Set<string>) {
+export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$inferSelect, visited?: Set<string>): Promise<Array<Awaited<ReturnType<typeof selectSameRunWorkProduct>>>> {
   const evidence = workflowSeedEvidenceSchema.safeParse(seed.evidence);
   if (!evidence.success || !seed.approvedByUserId) throw seedError("provenance_invalid");
   const [target] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.targetRunId), eq(workflowRuns.companyId, seed.companyId)));
@@ -97,7 +97,7 @@ export async function findWorkflowSeed(db: Db, scope: { companyId: string; workf
   return seed ?? null;
 }
 
-export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }, visited?: Set<string>) {
+export async function readSeededStepProducts(db: Db, scope: { companyId: string; workflowRunId: string; stepId: string }, visited?: Set<string>): Promise<Array<Awaited<ReturnType<typeof selectSameRunWorkProduct>>> | null> {
   const seed = await findWorkflowSeed(db, scope);
   if (!seed) return null;
   const [target] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.targetStepRunId),
