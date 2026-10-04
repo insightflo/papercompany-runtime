@@ -10,6 +10,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
 import { revisionStepHash } from "./revision-step-config.js";
 import { parseToolSeedEvidence, verifyToolSeedEvidence } from "./workflow-seed-tool-output.js";
+import { verifySeedInterpretedInputs } from "./seed-interpreted-inputs.js";
 
 export const seedError = (reason: string, details: Record<string, unknown> = {}) =>
   unprocessable(`workflow_seed_${reason}`, { code: `workflow_seed_${reason}`, ...details });
@@ -62,6 +63,14 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   const [sourceStepRun] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.sourceStepRunId),
     eq(workflowStepRuns.workflowRunId, seed.sourceRunId), eq(workflowStepRuns.stepId, seed.sourceStepId)));
   if (!sourceStepRun || sourceStepRun.status !== "completed") throw seedError("source_attempt_changed");
+  // [Q11] 실제 해석 입력 재검증: 승인 때 바인딩한 실제 인자값과 지금 재렌더한 원본 좌표 값이 같아야 물화된다.
+  if (evidence.data.interpretedInputs) {
+    const [bindingSourceRun] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.sourceRunId),
+      eq(workflowRuns.companyId, seed.companyId)));
+    if (!bindingSourceRun) throw seedError("source_attempt_changed");
+    await verifySeedInterpretedInputs(db, { companyId: seed.companyId, targetStepId: seed.targetStepId,
+      binding: evidence.data.interpretedInputs, sourceRun: bindingSourceRun, sourceStep, sourceSteps: sourceDef.steps });
+  }
   const seen = visited ?? new Set<string>();
   if (seen.has(seed.sourceStepRunId)) throw seedError("provenance_invalid");
   seen.add(seed.sourceStepRunId);

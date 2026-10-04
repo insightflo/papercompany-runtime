@@ -9,6 +9,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
 import { readSeededStepProducts, requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } from "./workflow-seed-evidence.js";
+import { bindSeedInterpretedInputs, hasSeedInterpretedInputTokens } from "./seed-interpreted-inputs.js";
 import { isNativeToolStep, readToolStepSeedArtifact } from "./workflow-seed-tool-output.js";
 import type { TriggerActor } from "./replacement-admission.js";
 import type { CreateWorkflowRunInput } from "./types.js";
@@ -90,13 +91,22 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
         }
       }
+      // [Q11] 설정 해시가 같아도 실제 해석 인자(토큰 → 실제 산출물·metadata 값)가 다르면 재사용을 거절하고
+      // 승인 당시의 실제 값을 증거에 바인딩해 물화 때 재대조한다. 해석은 원본 run 좌표(sourceDef)에서 수행.
+      const original = sourceDef.steps.find(s => s.id === sourceId) as RevisionStep;
+      const interpretedInputs = !toolArtifact && hasSeedInterpretedInputTokens(original)
+        ? await bindSeedInterpretedInputs(t, { companyId: input.companyId, sourceRun: source, targetRun: run,
+          sourceStep: original, sourceSteps: sourceDef.steps, sourceStepRunId: step.id, targetStepId: id,
+          requestedStepIds: request.stepIds, targetSteps: targetDef.steps })
+        : undefined;
       const evidence = toolArtifact
         ? { schemaVersion: "workflow.seed.tool-output.v1", sourceDefinitionHash: sourceDef.definitionHash,
           targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
           stepConfigHash: seedStepHash(targetStep, targetDef.steps), artifact: toolArtifact }
         : { schemaVersion: "workflow.seed.v1", sourceDefinitionHash: sourceDef.definitionHash,
           targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
-          stepConfigHash: seedStepHash(targetStep, targetDef.steps), products };
+          stepConfigHash: seedStepHash(targetStep, targetDef.steps), products,
+          ...(interpretedInputs ? { interpretedInputs } : {}) };
       await tx.insert(workflowRunSeeds).values({ companyId: input.companyId, targetRunId: run.id,
         targetStepId: id, targetStepRunId: randomUUID(), sourceRunId: source.id, sourceStepRunId: step.id, sourceStepId: sourceId,
         approvedByUserId: actor!.userId!, evidence });
