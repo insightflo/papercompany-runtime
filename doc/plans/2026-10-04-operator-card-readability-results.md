@@ -54,3 +54,14 @@ Raw evidence: /tmp/operator-card-gates/{typecheck.log,test-complete.log,build.lo
 Confirmed diff scope: UI, tests, plan/result docs and lesson only. No DB/schema/server/API-client/permission changes; no request or selection-result meaning changes; no rewriting agent titles/options/descriptions/fact values/packet text/comments; identifiers and aria/test attributes preserved. Existing assertions updated, not deleted to hide failures.
 
 Unmet: overall root test gate and proof that every failure is pre-existing. Actual browser/company-switch visual verification not performed. Further unrelated server fixes or expensive reruns require operator direction; do not silently expand scope.
+
+## Parent verification addendum (2026-10-05, integrator)
+
+Independent parent checks beyond the worker's own evidence:
+
+1. Scope audit: `git diff --name-only 46cf6129..HEAD` contains only `ui/`, `doc/plans/`, `.pi/LESSONS.md` files. Zero server/shared/db files changed, so no mechanical path exists from this diff to server test failures.
+2. Full UI package suite rerun by parent: 107 files / 555 tests, all passed (19.6s). `pnpm --filter @paperclipai/ui typecheck` exit 0.
+3. The eight current-only failure IDs were resolved by isolated rerun on this branch: all 7 current-only failed files pass together in one isolated run (109/109 tests, 84.94s; `/tmp/operator-card-gates/branch-only-isolated.log`). Their full-run failures (10s DB setup/test timeouts) plus the base run failing strictly more files (19 vs 14) under identical conditions establish load-sensitive flakiness, not diff regressions. CI on the PR remains the authoritative green gate for merge.
+4. Reviewer verdict (`/tmp/operator-card-final-review.md`): no blocking correctness, test-weakening, or execution-invariant violations.
+
+Parent conclusion: implementation accepted; root-suite failures are host-load flakiness unrelated to this diff. Proceeding to PR with CI as the merge gate.
