@@ -9,6 +9,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
 import { readSeededStepProducts, requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } from "./workflow-seed-evidence.js";
+import { isNativeToolStep, readToolStepSeedArtifact } from "./workflow-seed-tool-output.js";
 import type { TriggerActor } from "./replacement-admission.js";
 import type { CreateWorkflowRunInput } from "./types.js";
 import type { WorkflowStep } from "./dag-engine.js";
@@ -25,7 +26,10 @@ export function assertSeedActor(input: CreateWorkflowRunInput, actor?: TriggerAc
 
 function assertSupported(step: WorkflowStep) {
   const role = classifyWorkflowStepRole(step);
-  if ((role !== "action" && (role !== "unknown" || (step.type && step.type !== "agent"))) || !step.agentId || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
+  // Native tool steps (issue-less tool execution) join the seed spine without an agent producer.
+  const nativeTool = isNativeToolStep(step);
+  if ((role !== "action" && (role !== "unknown" || (step.type && step.type !== "agent")) && !nativeTool)
+    || (!step.agentId && !nativeTool) || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
     || step.bootstrapOnly || step.triggerOn === "escalation" || step.executionMode === "dynamic_owner_plan"
     || resolveEdges(step).some(e => !e.isBackEdge && e.when !== "success")) throw seedError("unsupported_step", { stepId: step.id });
 }
@@ -57,8 +61,10 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
       const sourceId = targetStep.sourceStepId ?? id;
       const [step] = await tx.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, source.id), eq(workflowStepRuns.stepId, sourceId))).for("share");
       if (!step || step.status !== "completed") throw seedError("source_incomplete", { stepId: id });
+      const toolArtifact = isNativeToolStep(sourceDef.steps.find(s => s.id === sourceId)!)
+        ? await readToolStepSeedArtifact(t, { companyId: input.companyId, run: source, stepRun: step }) : null;
       const products = [];
-      if (step.issueId === null) {
+      if (!toolArtifact && step.issueId === null) {
         // A materialized source (completed, issueId:null) can only be re-seeded through its own
         // validated seed chain: never a fabricated issue or a latest-output fallback.
         const seeded = await readSeededStepProducts(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId });
@@ -68,7 +74,7 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) throw seedError("sha_missing", { stepId: id });
           products.push({ id: s.product.id, type: s.product.type as "document", title: s.product.title, sha256, path: s.file, producer: s.producer });
         }
-      } else {
+      } else if (!toolArtifact) {
         const rows = await tx.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.companyId, input.companyId),
           eq(issueWorkProducts.issueId, step.issueId), ne(issueWorkProducts.status, "archived"))).for("share");
         if (!rows.length) throw seedError("products_missing", { stepId: id });
@@ -82,10 +88,16 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
         }
       }
+      const evidence = toolArtifact
+        ? { schemaVersion: "workflow.seed.tool-output.v1", sourceDefinitionHash: sourceDef.definitionHash,
+          targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
+          stepConfigHash: seedStepHash(targetStep, targetDef.steps), artifact: toolArtifact }
+        : { schemaVersion: "workflow.seed.v1", sourceDefinitionHash: sourceDef.definitionHash,
+          targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
+          stepConfigHash: seedStepHash(targetStep, targetDef.steps), products };
       await tx.insert(workflowRunSeeds).values({ companyId: input.companyId, targetRunId: run.id,
         targetStepId: id, targetStepRunId: randomUUID(), sourceRunId: source.id, sourceStepRunId: step.id, sourceStepId: sourceId,
-        approvedByUserId: actor!.userId!, evidence: { schemaVersion: "workflow.seed.v1", sourceDefinitionHash: sourceDef.definitionHash,
-          targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2, stepConfigHash: seedStepHash(targetStep, targetDef.steps), products } });
+        approvedByUserId: actor!.userId!, evidence });
     }
     await tx.insert(activityLog).values({ companyId: input.companyId, actorType: "user", actorId: actor!.userId!,
       action: "workflow_run.seed_approved", entityType: "workflow_run", entityId: run.id,

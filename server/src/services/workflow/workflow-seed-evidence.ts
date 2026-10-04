@@ -9,6 +9,7 @@ import { captureArtifactRoot, readArtifactBytes, digest } from "./artifact-files
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
 import { revisionStepHash } from "./revision-step-config.js";
+import { parseToolSeedEvidence, verifyToolSeedEvidence } from "./workflow-seed-tool-output.js";
 
 export const seedError = (reason: string, details: Record<string, unknown> = {}) =>
   unprocessable(`workflow_seed_${reason}`, { code: `workflow_seed_${reason}`, ...details });
@@ -46,6 +47,8 @@ export async function verifySeedProductBytes(db: Db, selected: Awaited<ReturnTyp
 
 /** Revalidate the original attempt and bytes, never restamp a producer for the target. */
 export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$inferSelect, visited?: Set<string>): Promise<Array<Awaited<ReturnType<typeof selectSameRunWorkProduct>>>> {
+  // Native tool-output seeds carry no issue work products; their artifact verifies on its own spine.
+  if (parseToolSeedEvidence(seed.evidence)) { await verifyToolSeedEvidence(db, seed); return []; }
   const evidence = workflowSeedEvidenceSchema.safeParse(seed.evidence);
   if (!evidence.success || !seed.approvedByUserId) throw seedError("provenance_invalid");
   const [target] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.targetRunId), eq(workflowRuns.companyId, seed.companyId)));

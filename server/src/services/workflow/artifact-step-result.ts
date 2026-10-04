@@ -8,6 +8,7 @@ import { captureArtifactRoot, readArtifactBytes } from './artifact-files.js';
 import { adaptPublication } from './publication-result.js';
 import { verifyQaCompletion } from './qa-artifact-receipt.js';
 import { resolveQaReceiptPath } from './qa-artifact-consumer.js';
+import { readSeededToolArtifact } from './workflow-seed-tool-output.js';
 
 type Row = { stepRun: typeof workflowStepRuns.$inferSelect; run: typeof workflowRuns.$inferSelect };
 function artifactRole(row: Row, declared: unknown) {
@@ -79,6 +80,10 @@ export async function resolveToolResultPaths(input: { db: Db; run: { id: string;
     } else if (typeof stored.artifactPath === 'string' && stored.artifactPath.trim()) {
       // Preserve the non-contract legacy transport.
       paths.set(s.stepId, path.resolve(stored.artifactPath.trim()));
+    } else {
+      // A seeded native tool output resolves only through its verified seed evidence, never a loose copy.
+      const seeded = await readSeededToolArtifact(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId: s.stepId });
+      if (seeded) paths.set(s.stepId, seeded.path);
     }
   }
 }
