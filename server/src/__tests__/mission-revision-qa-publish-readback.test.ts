@@ -30,7 +30,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 import { admittedProducer } from "./helpers/admitted-producer.js";
 import { board } from "./helpers/workflow-seed-world.js";
 import { workProductService } from "../services/work-products.js";
-import { createAdmittedWorkflowRun } from "services/workflow/agent-run-create.js";
+import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
 import { completeWorkflowToolStepFromResult, executeWorkflowRun, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "../services/workflow/core-tool-executor.js";
