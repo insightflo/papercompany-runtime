@@ -1,9 +1,29 @@
 import { and, eq, ne } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { heartbeatRuns, issueWorkProducts, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
-import { workProductProducerSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
+import { workProductProducerRebindMarkerSchema, workProductProducerSchema, type WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
 import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
+
+/**
+ * [producer provenance rebind] 보드 승인 재바인딩 표시가 현재 단계 행과 정합한지 검증.
+ * 표시가 유효한 경우에만 하트비트/시도증명의 세대 비교를 fromGeneration 기준으로 평가하고
+ * 디스크 바이트(sha256/byteSize)를 매 소비마다 재검증한다. 그 외 모든 검증은 기본 경로와 동일.
+ */
+function validRebindMarker(product: typeof issueWorkProducts.$inferSelect, producer: {
+  executionGeneration: number; heartbeatRunId: string;
+}, step: typeof workflowStepRuns.$inferSelect) {
+  const parsed = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
+  if (!parsed.success) return null;
+  const marker = parsed.data;
+  if (marker.toGeneration !== step.executionGeneration
+    || marker.fromHeartbeatRunId !== producer.heartbeatRunId
+    || producer.executionGeneration !== marker.toGeneration
+    || product.sourceExecutionGeneration !== marker.toGeneration) return null;
+  return marker;
+}
 
 /** Ordinary same-run selector: cross-run approval must never weaken these checks. */
 export async function selectSameRunWorkProduct(db: Db, scope: { companyId: string; workflowRunId: string;
@@ -24,16 +44,30 @@ export async function selectSameRunWorkProduct(db: Db, scope: { companyId: strin
   if (workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product }).length > 0) {
     throw new Error("workproduct_selector_stale_producer");
   }
+  const rebind = validRebindMarker(product, p, s);
   const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, p.heartbeatRunId));
+  const heartbeatGenerationHolds = heartbeat
+    && (heartbeat.workflowExecutionGeneration === s.executionGeneration
+      || (rebind && heartbeat.workflowExecutionGeneration === rebind.fromGeneration));
   if (!heartbeat || heartbeat.companyId !== p.companyId || heartbeat.issueId !== s.issueId
-    || heartbeat.workflowStepRunId !== s.id || heartbeat.workflowExecutionGeneration !== s.executionGeneration) {
+    || heartbeat.workflowStepRunId !== s.id || !heartbeatGenerationHolds) {
     throw new Error("workproduct_selector_heartbeat_mismatch");
   }
   try {
-    const attempt = await producerAttempt(db, heartbeat, s);
+    // [producer provenance rebind] 유효한 재바인딩 표시가 있으면 시도증명의 세대 기준만
+    //   fromGeneration(실제 생산 세대)으로 평가한다. retry/iteration 은 현재 값 그대로 비교된다.
+    const attempt = await producerAttempt(db, heartbeat,
+      rebind ? { ...s, executionGeneration: rebind.fromGeneration } : s);
     if (attempt.retryCount !== p.retryCount || attempt.iterationIndex !== p.iterationIndex) throw new Error("attempt mismatch");
   } catch { throw new Error("workproduct_selector_stale_producer"); }
   const file = resolveWorkProductLocalFilePath(product);
   if (!file || !["local", "local_file"].includes(product.provider)) throw new Error("workproduct_selector_not_local");
+  if (rebind) {
+    const bytes = await readFile(file);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (sha256 !== rebind.sha256 || bytes.byteLength !== rebind.byteSize) {
+      throw new Error("workproduct_selector_rebind_bytes_mismatch");
+    }
+  }
   return { product, producer: p, file };
 }

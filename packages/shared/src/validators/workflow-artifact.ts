@@ -23,6 +23,22 @@ export const workProductProducerSchema = z.object({
   stepId: z.string().min(1), executionGeneration: count, retryCount: count, iterationIndex: count,
   heartbeatRunId: z.string().uuid(),
 }).strict();
+/**
+ * [producer provenance rebind] 보드 승인으로 생산자 귀속 세대만 현재 세대로 재귀속한 흔적.
+ * 생산 시도(하트비트/웨이크 증명)는 fromGeneration 시점 그대로 유효함을 증명한 뒤에만 기록되며,
+ * 소비 시점마다 sha256/byteSize 로 바이트 동일성이 재검증된다(workproduct-same-run).
+ */
+export const workProductProducerRebindMarkerSchema = z.object({
+  schemaVersion: z.literal("workflow.work-product-producer-rebind.v1"),
+  fromGeneration: count, toGeneration: count,
+  fromHeartbeatRunId: z.string().uuid(),
+  sha256: hash, byteSize: count,
+  reboundAt: z.string().datetime(),
+  reboundBy: z.object({ actorType: z.string().min(1), actorId: z.string().min(1) }).strict(),
+  reason: z.string().min(1),
+  authorityIdempotencyKey: z.string().min(1),
+}).strict();
+export type WorkProductProducerRebindMarker = z.infer<typeof workProductProducerRebindMarkerSchema>;
 export const assetDigestSchema = z.object({ fileName: z.string().min(1), sha256: hash, byteSize: count }).strict();
 const check = z.object({ id: z.string().min(1), ok: z.boolean(), detail: z.unknown().optional(), problems: z.array(z.unknown()).optional() }).passthrough();
 const qaBase = { schemaVersion: artifactSchemaVersionSchema, command: z.literal("qa"),
