@@ -17,6 +17,7 @@ import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-pla
 import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
+import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
 import {
@@ -2208,10 +2209,9 @@ export function buildPaqoWorkflowSteps(
       ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
       ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : { type: group }),
       ...(!isStructural && group === "qa" && typeof unit.qaType === "string" ? { qaType: unit.qaType } : {}),
-      description: [
+      // [생성 설명 계약] 표시용 미션 제목은 실행 지시와 분리된 typed 입력으로만 주입한다(문자열 필터링 아님).
+      ...buildPaqoStepDescription(mission.title, [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
-        "",
-        `Mission: ${mission.title}`,
         isStructural
           ? `Materialized as issue-less structural tool gate (no agent heartbeat).`
           : `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
@@ -2220,7 +2220,7 @@ export function buildPaqoWorkflowSteps(
         toNonEmptyString(unit.instructions) ? `Revision delta instructions: ${toNonEmptyString(unit.instructions)}` : null,
         ...outcomeContractLines,
         sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
-      ].filter(Boolean).join("\n"),
+      ]),
     } satisfies WorkflowStep;
   });
   const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);
