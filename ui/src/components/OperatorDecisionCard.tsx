@@ -25,9 +25,9 @@ function toneClass(tone: OperatorDecisionAction["tone"]) {
   return "border-border bg-background text-foreground hover:bg-accent";
 }
 
-function sourceLabel(decision: OperatorDecisionView) {
-  if (!decision.requestedBy) return "System";
-  return `${decision.requestedBy.type === "agent" ? "Agent" : "Board"} ${decision.requestedBy.id.slice(0, 8)}`;
+function sourceLabel(decision: OperatorDecisionView, lang: ReturnType<typeof useCompanyLanguage>) {
+  if (!decision.requestedBy) return L(lang, { en: "System", ko: "시스템" });
+  return `${decision.requestedBy.type === "agent" ? L(lang, { en: "Agent", ko: "에이전트" }) : L(lang, { en: "Board", ko: "운영자" })} ${decision.requestedBy.id.slice(0, 8)}`;
 }
 
 export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCardProps) {
@@ -118,7 +118,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     try {
       await onResolve(decision.id, input);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Failed to resolve this Interactive Card.");
+      setError(cause instanceof Error ? cause.message : L(lang, { en: "Failed to resolve this Interactive Card.", ko: "결정 카드를 처리하지 못했습니다." }));
     } finally {
       setSubmittingActionId(null);
     }
@@ -128,17 +128,17 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     <article className="border border-border bg-card p-4" aria-labelledby={`operator-decision-${decision.id}-heading`}>
       {(decision.missionTitle || decision.issueIdentifier || decision.issueTitle) && (
         <div data-operator-decision-context className="mb-2 flex flex-col gap-0.5 border-b border-border pb-2 text-xs">
-          {decision.missionTitle && <span className="text-muted-foreground">미션: {decision.missionTitle}</span>}
+          {decision.missionTitle && <span className="text-muted-foreground">{L(lang, { en: "Mission:", ko: "미션:" })} {decision.missionTitle}</span>}
           {(decision.issueIdentifier || decision.issueTitle) && (
             <span className="font-medium text-foreground">
-              이슈: {decision.issueIdentifier ?? ""}{decision.issueIdentifier && decision.issueTitle ? " — " : ""}{decision.issueTitle ?? ""}
+              {L(lang, { en: "Issue:", ko: "이슈:" })} {decision.issueIdentifier ?? ""}{decision.issueIdentifier && decision.issueTitle ? " — " : ""}{decision.issueTitle ?? ""}
             </span>
           )}
         </div>
       )}
       <div data-operator-decision-meta className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span className="font-semibold text-foreground" title={decision.priority}>{humanLabel(lang, "priority", decision.priority).label}</span>
-        <span>{L(lang, { en: "Requested by", ko: "요청:" })} {sourceLabel(decision)}</span>
+        <span>{L(lang, { en: "Requested by", ko: "요청:" })} {sourceLabel(decision, lang)}</span>
         <span>{timeAgo(decision.createdAt)}</span>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">{L(lang, { en: "What needs deciding?", ko: "무엇을 결정해야 하나요?" })}</p>

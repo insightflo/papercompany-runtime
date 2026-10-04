@@ -6,6 +6,8 @@ import type { ReactNode } from "react";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
 import { OperatorDecisionCard } from "./OperatorDecisionCard";
 import { CompanyLanguageProvider } from "../lib/companyLanguage";
+import { CompanyContext } from "../context/CompanyContext";
+import { koCompanyContext } from "../test-utils/koCompanyContext";
 
 vi.mock("../lib/router", () => ({
   Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a href={to} className={className}>{children}</a>,
@@ -140,6 +142,8 @@ describe("OperatorDecisionCard behavior", () => {
     } as OperatorDecisionView);
     const header = host.querySelector("[data-operator-decision-context]")!;
     expect(header).toBeTruthy();
+    expect(header.textContent).toContain("Mission:");
+    expect(header.textContent).toContain("Issue:");
     expect(header.textContent).toContain("2026-08-25 gazua-evening");
     expect(header.textContent).toContain("GAZ-1352 — [Unblock] GAZ-1350: 미국시장 시그널 해석");
     const priorityRow = host.querySelector("[data-operator-decision-meta]")!;
@@ -181,12 +185,26 @@ describe("OperatorDecisionCard behavior", () => {
   });
 
   it("uses Korean chrome without translating agent-authored content", async () => {
-    await act(async () => root.render(<CompanyLanguageProvider language="ko"><OperatorDecisionCard decision={baseDecision} onResolve={vi.fn()} /></CompanyLanguageProvider>));
+    const decision = { ...baseDecision, missionTitle: "Mission original", issueTitle: "Issue original", requestedBy: { type: "user" as const, id: "board-id" } };
+    await act(async () => root.render(<CompanyContext.Provider value={koCompanyContext}><OperatorDecisionCard decision={decision} onResolve={vi.fn().mockRejectedValue("not an Error")} /></CompanyContext.Provider>));
+    expect(host.textContent).toContain("미션: Mission original");
+    expect(host.textContent).toContain("이슈: Issue original");
+    expect(host.textContent).toContain("요청: 운영자 board-id");
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Hold")!));
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("결정 카드를 처리하지 못했습니다.");
     expect(host.textContent).toContain("무엇을 결정해야 하나요?");
     expect(host.textContent).toContain("선택지");
     expect(host.textContent).toContain("높음");
     expect(host.textContent).toContain("Choose one opportunity?");
     expect(host.textContent).toContain("One");
+  });
+
+  it.each([
+    [null, "요청: 시스템"],
+    [{ type: "agent" as const, id: "agent-original" }, "요청: 에이전트 agent-or"],
+  ])("localizes requester roles without changing requester identities: %s", async (requestedBy, label) => {
+    await act(async () => root.render(<CompanyContext.Provider value={koCompanyContext}><OperatorDecisionCard decision={{ ...baseDecision, requestedBy }} onResolve={vi.fn()} /></CompanyContext.Provider>));
+    expect(host.querySelector("[data-operator-decision-meta]")?.textContent).toContain(label);
   });
 
   it("promotes the decision subject and keeps the original title as supporting context", async () => {

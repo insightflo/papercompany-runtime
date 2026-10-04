@@ -26,7 +26,6 @@ function formatDecisionDate(value: string | null | undefined, lang: CompanyDefau
     minute: "2-digit",
   }).format(new Date(value));
 }
-
 // Display-only context; decision logs are not execution-control authority.
 const fieldClass = "mt-1 w-full rounded border border-border bg-background px-2 py-1 text-sm";
 function statusClass(status: MissionDecisionRecord["status"]) {
@@ -126,26 +125,26 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
           <div>
             <h3 className="text-sm font-medium">{L(lang, { en: "Mission Decision Log", ko: "미션 결정 기록" })}</h3>
             <p className="text-xs text-muted-foreground">
-              Context handoff state only — not an execution-control authority
+              {L(lang, { en: "Context handoff state only — not an execution-control authority", ko: "맥락 전달 상태만 표시 — 실행을 제어하는 근거가 아닙니다" })}
             </p>
           </div>
         </div>
         <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">
-          board-authorable record
+          {L(lang, { en: "board-authorable record", ko: "운영자가 작성할 수 있는 기록" })}
         </span>
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>rev {log?.revision ?? 0}</span>
-        <span>{decisions.length} decisions</span>
-        <span>{confirmedCount} confirmed</span>
-        <span>{underReviewCount} under review</span>
-        <span>updated {formatDecisionDate(log?.updatedAt, lang)}</span>
+        <span>{L(lang, { en: `rev ${log?.revision ?? 0}`, ko: `개정 ${log?.revision ?? 0}` })}</span>
+        <span>{L(lang, { en: `${decisions.length} decisions`, ko: `결정 ${decisions.length}개` })}</span>
+        <span>{L(lang, { en: `${confirmedCount} confirmed`, ko: `확정 ${confirmedCount}개` })}</span>
+        <span>{L(lang, { en: `${underReviewCount} under review`, ko: `검토 중 ${underReviewCount}개` })}</span>
+        <span>{L(lang, { en: "updated", ko: "갱신" })} {formatDecisionDate(log?.updatedAt, lang)}</span>
       </div>
 
       {decisions.length === 0 ? (
         <p className="rounded border border-border/70 p-3 text-sm text-muted-foreground">
-          No decisions recorded yet. Agents and the board report decisions via POST /api/missions/{missionId}/decision-reports.
+          {L(lang, { en: `No decisions recorded yet. Agents and the board report decisions via POST /api/missions/${missionId}/decision-reports.`, ko: `아직 기록된 결정이 없습니다. 에이전트와 운영자는 POST /api/missions/${missionId}/decision-reports로 결정을 보고합니다.` })}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -156,7 +155,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                   <p className="font-medium">
                     {record.id}
                     {record.supersedes ? (
-                      <span className="ml-2 text-xs text-muted-foreground">supersedes {record.supersedes}</span>
+                      <span className="ml-2 text-xs text-muted-foreground">{L(lang, { en: "supersedes", ko: "대체" })} {record.supersedes}</span>
                     ) : null}
                   </p>
                   <p className={`mt-1 ${record.status === "retired" ? "text-muted-foreground" : ""}`}>
@@ -169,7 +168,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                     className="rounded-full border border-amber-500/40 px-1.5 text-xs font-medium text-amber-600"
                     title={`Demoted by machine evidence check: ${record.demotedByEvidence.mismatches.map((m) => `${m.type} ${m.id} (${m.current})`).join(", ")}`}
                   >
-                    evidence stale
+                    {L(lang, { en: "evidence stale", ko: "근거가 오래됨" })}
                   </span>
                 ) : null}
                 {record.source === "board" ? <span className="rounded-full border border-border px-1.5 text-xs text-muted-foreground">board</span> : null}
@@ -177,10 +176,10 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span>{formatDecisionDate(record.updatedAt, lang)}</span>
                 <span>{provenanceLabel(record, lang)}</span>
-                {record.lastConflictingProposal ? <span>proposal pending ({record.lastConflictingProposal.from})</span> : null}
+                {record.lastConflictingProposal ? <span>{L(lang, { en: "proposal pending", ko: "제안 대기 중" })} ({record.lastConflictingProposal.from})</span> : null}
                 {record.evidenceRefs?.length ? (
                   <span title={evidenceRefsFullTitle(record.evidenceRefs)}>
-                    evidence: {evidenceRefsLabel(record.evidenceRefs)}
+                    {L(lang, { en: "evidence:", ko: "근거:" })} {evidenceRefsLabel(record.evidenceRefs)}
                   </span>
                 ) : null}
                 {record.status === "confirmed" || record.status === "under_review" ? (

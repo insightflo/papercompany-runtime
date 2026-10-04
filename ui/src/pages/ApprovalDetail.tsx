@@ -6,7 +6,6 @@ import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
-import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
 import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -68,10 +67,10 @@ export function ApprovalDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Approvals", href: "/approvals" },
-      { label: approval?.id?.slice(0, 8) ?? approvalId ?? "Approval" },
+      { label: L(lang, { en: "Approvals", ko: "승인" }), href: "/approvals" },
+      { label: approval?.id?.slice(0, 8) ?? approvalId ?? L(lang, { en: "Approval", ko: "승인 요청" }) },
     ]);
-  }, [setBreadcrumbs, approval, approvalId]);
+  }, [setBreadcrumbs, approval, approvalId, lang]);
 
   const refresh = () => {
     if (!approvalId) return;
@@ -112,7 +111,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Revision request failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Revision request failed", ko: "수정 요청을 보내지 못했습니다." })),
   });
 
   const resubmitMutation = useMutation({
@@ -121,7 +120,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Resubmit failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Resubmit failed", ko: "재제출하지 못했습니다." })),
   });
 
   const addCommentMutation = useMutation({
@@ -131,7 +130,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Comment failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Comment failed", ko: "댓글을 게시하지 못했습니다." })),
   });
 
   const deleteAgentMutation = useMutation({
@@ -141,7 +140,7 @@ export function ApprovalDetail() {
       refresh();
       navigate("/approvals");
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Delete failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Delete failed", ko: "삭제하지 못했습니다." })),
   });
 
   if (isLoading) return <PageSkeleton variant="detail" />;
@@ -318,7 +317,7 @@ export function ApprovalDetail() {
               variant="outline"
               className="text-destructive border-destructive/40"
               onClick={() => {
-                if (!window.confirm("Delete this disapproved agent? This cannot be undone.")) return;
+                if (!window.confirm(L(lang, { en: "Delete this disapproved agent? This cannot be undone.", ko: "거절된 에이전트를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다." }))) return;
                 deleteAgentMutation.mutate(linkedAgentId);
               }}
               disabled={deleteAgentMutation.isPending}
