@@ -32,6 +32,9 @@ import { workProductProducerMismatches } from "./workproduct-producer-comparison
 export const PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS: ReadonlySet<string> = new Set([
   "workproduct_selector_stale_producer",
   "workproduct_selector_heartbeat_mismatch",
+  // 회복으로 세대가 진행된 소비 단계의 또 다른 펜스 양상: 얼려진 계약 스냅숏 낡음.
+  //   재발사가 새 requestId 로 스냅숏을 다시 얼리므로, 여기서 필요한 것은 생산자 재바인딩뿐이다.
+  "artifact_contract_snapshot_stale",
 ]);
 
 export type ProducerProvenanceRebindResult =
