@@ -121,20 +121,28 @@ it("[RED-2a] 훼손된 기록은 승인 단계에서 구조화 이유로 거절�
 });
 
 it("[RED-2b] 승인 후 원본 파일이 유실되면 소비가 구조화 이유로 거절되고 부분 재사용이 없다", async () => {
+  // 물화 전 유실: 엔진 초기화 재검증이 구조화 이유로 거절하고 스텝 삽입도 롤백된다.
   const f = await toolWorld();
   const target = await f.admit();
   await rm(f.file);
-  await expect(readToolSeed(f, target.id)).rejects.toThrow("workflow_seed_artifact_unreadable");
   await expect(executeWorkflowRun(db, target.id)).rejects.toThrow("workflow_seed_artifact_unreadable");
   expect((await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, target.id)))
     .find(s => s.stepId === "render2" && s.status === "completed")).toBeUndefined(); // 부분 물화 없음
+  // 물화 후 유실: 소비자 읽기는 물화 행을 신뢰하지 않고 매번 원본 바이트를 재검증한다.
+  const consumed = await toolWorld();
+  const consumedTarget = await consumed.admit();
+  await executeWorkflowRun(db, consumedTarget.id); // 원본이 살아있을 때 정상 물화+소비
+  await rm(consumed.file);
+  await expect(readToolSeed(consumed, consumedTarget.id)).rejects.toThrow("workflow_seed_artifact_unreadable");
 });
 
 it("[RED-2c] 회사/실행 스코프 불일치와 stale attempt 는 구조화 이유로 거절된다", async () => {
   // 회사 불일치: 승인 증거가 다른 회사 run 의 step run 을 가리키면 same-run/회사 스코프가 어긋난다.
+  // 소비자 읽기는 물화된 대상 스텝 행을 먼저 확인하므로 정상 물화 후에 증거를 훼손한다.
   const other = await toolWorld();
   const f = await toolWorld();
   const target = await f.admit();
+  await executeWorkflowRun(db, target.id); // 원본이 살아있을 때 정상 물화+소비
   const [seed] = await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.targetRunId, target.id));
   const evidence = parseToolSeedEvidence(seed.evidence)!;
   await db.update(workflowRunSeeds).set({ evidence: { ...evidence, artifact: { ...evidence.artifact, stepRunId: other.renderStep.id } } })
@@ -144,10 +152,15 @@ it("[RED-2c] 회사/실행 스코프 불일치와 stale attempt 는 구조화 �
   const stale = await toolWorld();
   const staleTarget = await stale.admit();
   await db.update(workflowStepRuns).set({ retryCount: 1 }).where(eq(workflowStepRuns.id, stale.renderStep.id));
-  await expect(readToolSeed(stale, staleTarget.id)).rejects.toThrow("workflow_seed_source_attempt_changed");
   await expect(executeWorkflowRun(db, staleTarget.id)).rejects.toThrow("workflow_seed_source_attempt_changed");
   expect((await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, staleTarget.id)))
     .filter(s => s.status === "completed")).toEqual([]); // 부분 재사용 없음
+  // 물화된 seed 도 원본 재시도 상승 즉시 권한을 잃는다(소비자 재검증, 복사본 대체 없음).
+  const staleConsumed = await toolWorld();
+  const staleConsumedTarget = await staleConsumed.admit();
+  await executeWorkflowRun(db, staleConsumedTarget.id);
+  await db.update(workflowStepRuns).set({ retryCount: 1 }).where(eq(workflowStepRuns.id, staleConsumed.renderStep.id));
+  await expect(readToolSeed(staleConsumed, staleConsumedTarget.id)).rejects.toThrow("workflow_seed_source_attempt_changed");
 });
 
 it("[대조-3] agent action seed 경로는 그대로 승인·물화·소비된다", async () => {
