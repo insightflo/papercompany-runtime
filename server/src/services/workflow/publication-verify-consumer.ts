@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, eq } from 'drizzle-orm';
 import { workflowRuns, workflowStepRuns } from '@paperclipai/db';
-import { readFrozenArtifactAttempt, type FrozenArtifactAttempt } from './artifact-contract-runtime.js';
+import { readCompletedSourceArtifactAttempt, type FrozenArtifactAttempt } from './artifact-contract-runtime.js';
 import { captureArtifactRoot, readArtifactBytes } from './artifact-files.js';
 import { createArtifactDirectory } from './artifact-writer.js';
 import { captureQaDispatch, type QaDispatchScope } from './qa-dispatch-guard.js';
@@ -26,8 +26,8 @@ export async function preparePublicationVerifyConsumer(input: QaDispatchScope & 
   const { step, run } = matches[0], stored = readObject(step.metadata.toolResult);
   if (step.status !== 'completed' || step.metadata.cacheHit || stored.success !== true
     || stored.requestId !== step.lastDispatchRequestId) throw new Error('qa_publication_receipt_unavailable');
-  const producer = readFrozenArtifactAttempt(step.metadata.artifactExecution,
-    { executionGeneration: step.executionGeneration, requestId: step.lastDispatchRequestId ?? '' });
+  // 완료 소스: 종결/복구가 행 세대를 올려도 생성 시도의 냉동 계약이 권위다(전방향 유효).
+  const producer = readCompletedSourceArtifactAttempt(step.metadata.artifactExecution, step);
   if (producer.contract.role !== 'publication' || path.basename(sourcePath) !== producer.contract.resultFileName)
     throw new Error('qa_publication_receipt_contract_mismatch');
   const root = await captureArtifactRoot(path.dirname(sourcePath));
@@ -37,7 +37,7 @@ export async function preparePublicationVerifyConsumer(input: QaDispatchScope & 
   if (storedPath !== sourcePath || !isDeepStrictEqual(raw, storedData)) throw new Error('qa_publication_receipt_bytes_changed');
   const sourcePublication = adaptPublication(raw, producer.contract);
   const producerScope: PublicationScope = { companyId: input.companyId, missionId: run.missionId!, workflowRunId: run.id,
-    stepRunId: step.id, stepId: step.stepId, requestId: step.lastDispatchRequestId!, executionGeneration: step.executionGeneration,
+    stepRunId: step.id, stepId: step.stepId, requestId: step.lastDispatchRequestId!, executionGeneration: producer.executionGeneration,
     retryCount: step.retryCount, iterationIndex: step.iterationIndex };
   if (!run.missionId || !isDeepStrictEqual(sourcePublication.scope, producerScope)) throw new Error('qa_publish_result_scope_mismatch');
   const consumer = rows.find(({ step: s }) => s.id === input.stepRunId)?.step;

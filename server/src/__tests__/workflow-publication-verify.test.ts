@@ -80,18 +80,28 @@ it.each([
   expect(result.status).toBe(500); expect(result.artifactPath).toBeUndefined();
   expect(result.body.error).toMatch(/qa_publish_result_(target|input|scope)_mismatch/);
 });
-it.each(['bytes', 'attempt', 'request', 'incomplete', 'retry', 'iteration'])('rejects %s changes in durable publication authority before launching', async scenario => {
+it.each(['bytes', 'request', 'incomplete', 'retry', 'iteration'])('rejects %s changes in durable publication authority before launching', async scenario => {
   const f = await setup(), db = database();
   if (scenario === 'bytes') {
     const raw = JSON.parse(await readFile(f.published.artifactPath!, 'utf8')); raw.id = 'changed';
     await chmod(f.published.artifactPath!, 0o600);
     await writeFile(f.published.artifactPath!, JSON.stringify(raw));
-  } else await db.update(workflowStepRuns).set(scenario === 'attempt' ? { executionGeneration: 1 }
-    : scenario === 'request' ? { lastDispatchRequestId: 'new' } : scenario === 'retry' ? { retryCount: 1 }
+  } else await db.update(workflowStepRuns).set(
+    scenario === 'request' ? { lastDispatchRequestId: 'new' } : scenario === 'retry' ? { retryCount: 1 }
       : scenario === 'iteration' ? { iterationIndex: 1 } : { status: 'running' }).where(eq(workflowStepRuns.id, f.publishId));
   const result = await f.invoke();
   expect(result.status).not.toBe(200); expect(result.artifactPath).toBeUndefined();
   expect(result.body.invocationProvenance).toBeNull();
+});
+
+// [2026-10-04 tech-scout 사고 교정] 종결/복구 세대 상승(발사 id·바이트 불변)은 완료 발행 권위를
+// 무효화하지 않는다 — 검증기는 이를 소비한다.
+it('consumes the durable publication across recovery generation bumps', async () => {
+  const f = await setup(), db = database();
+  await db.update(workflowStepRuns).set({ executionGeneration: 1 }).where(eq(workflowStepRuns.id, f.publishId));
+  const result = await f.invoke();
+  expect(result.status, JSON.stringify(result.body)).toBe(200);
+  expect(result.artifactPath).toMatch(/\/verified.json$/);
 });
 it('rejects an undeclared path parameter instead of routing by its familiar name', async () => {
   const f = await setup('durableReceipt'), result = await f.invoke({ publishResultPath: f.published.artifactPath });

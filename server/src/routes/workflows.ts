@@ -9,6 +9,7 @@ import {
   cancelWorkflowRunSchema,
   createWorkflowDefinitionSchema,
   manualCompleteWorkflowIssueSchema,
+  rebindProducerProvenanceSchema,
   resumeWorkflowRunSchema,
   triggerWorkflowRunSchema,
   updateWorkflowDefinitionSchema,
@@ -27,6 +28,7 @@ import {
 } from "../services/operator-approval-wait.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
+import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, rebindProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
@@ -621,6 +623,46 @@ export function workflowRoutes(db: Db) {
       stepRunId: retryResult.stepRunId,
       result: serializeValue(retryResult.result),
     });
+  });
+
+  // [producer provenance rebind] board-only. 런 회복으로 세대가 진행돼 변경 없는 생산자 workProduct
+  //   귀속이 셀렉터에 차인 경우(fail-closed 조건 검증 후) 귀속을 현재 세대로 재귀속한다.
+  //   재발사는 기존 rerun 경로를 별도 호출한다(재바인딩과 재발사의 조합은 운영자 판단).
+  router.post("/workflow-step-runs/:stepRunId/rebind-producer-provenance", validate(rebindProducerProvenanceSchema), async (req, res) => {
+    assertBoard(req);
+    const stepRunId = req.params.stepRunId as string;
+    const [consumer] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)).limit(1);
+    if (!consumer) throw notFound("Workflow step run not found");
+    const run = await workflowService.getRun(db, consumer.workflowRunId);
+    if (!run || !canAccessRecord(req, run.companyId)) throw notFound("Workflow step run not found");
+    const toolInvocation = consumer.metadata?.toolInvocation as { dispatchError?: unknown } | undefined;
+    const dispatchError = typeof consumer.lastDispatchErrorSummary === "string" && consumer.lastDispatchErrorSummary.length > 0
+      ? consumer.lastDispatchErrorSummary
+      : typeof toolInvocation?.dispatchError === "string" ? toolInvocation.dispatchError : "";
+    if (consumer.status !== "failed" || !PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS.has(dispatchError)) {
+      throw unprocessable("Only steps fenced by a stale-producer selector error can rebind producer provenance");
+    }
+    const actor = actorForActivity(req);
+    const result = await rebindProducerProvenance(db, {
+      companyId: run.companyId,
+      workflowRunId: run.id,
+      producerStepId: req.body.producerStepId,
+      productId: req.body.productId,
+      actor: { actorType: actor.actorType, actorId: actor.actorId },
+    });
+    await logActivity(db, {
+      companyId: run.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "workflow_step_run.producer_provenance_rebound",
+      entityType: "workflow_step_run",
+      entityId: stepRunId,
+      details: { workflowRunId: run.id, workflowId: run.workflowId, stepId: consumer.stepId,
+        producerStepId: req.body.producerStepId, productId: req.body.productId, result },
+    });
+    res.json(result);
   });
 
   // [operator cap boost] board-only. operator 가 특정 stepRun 의 QA rework cap 을 일시적으로

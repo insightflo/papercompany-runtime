@@ -343,6 +343,11 @@ export const workflowToolGrantSchema = z.object({
   toolName: z.string().min(1),
 }).strict();
 
+export const rebindProducerProvenanceSchema = z.object({
+  producerStepId: z.string().min(1),
+  productId: z.string().uuid(),
+}).strict();
+
 export type WorkflowToolGrantInput = z.infer<typeof workflowToolGrantSchema>;
 export { triggerWorkflowRunSchema, type TriggerWorkflowRun } from "./workflow-trigger.js";
 

@@ -5,7 +5,7 @@ import { workflowStepRuns, type Db } from "@paperclipai/db";
 import { adaptQaResult, toolArtifactReceiptSchema, type ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { artifactRelativePathSchema } from "@paperclipai/shared/validators/artifact-contract";
 import { captureArtifactRoot, digest, readArtifactBytes } from "./artifact-files.js";
-import { readFrozenArtifactAttempt, type FrozenArtifactAttempt } from "./artifact-contract-runtime.js";
+import { readCompletedSourceArtifactAttempt, readFrozenArtifactAttempt, type FrozenArtifactAttempt } from "./artifact-contract-runtime.js";
 import { evaluateQaRules } from "./qa-rules.js";
 import type { QaRequest } from "./qa-artifact-request.js";
 import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
@@ -73,16 +73,25 @@ export function assertQaReceiptScope(raw: unknown, row: { run: { id: string; com
   stepRun: typeof workflowStepRuns.$inferSelect }, requestId?: string) {
   const receipt = toolArtifactReceiptSchema.parse(raw), s = row.stepRun;
   const request = s.metadata.toolArtifactRequest as Snapshot | undefined;
+  // [2026-10-04 tech-scout] 완료 소스의 영수증은 생성 시도의 냉동 스냅숏 기준으로 세대를 검증한다
+  //   (종결/복구가 완료 행 세대를 올려도 유효). running/failed 행은 기존 정확-일치 스코프.
+  const completedSource = s.status === "completed";
+  const sourceFrozen = completedSource && s.metadata.artifactExecution !== undefined
+    ? readCompletedSourceArtifactAttempt(s.metadata.artifactExecution, s) : null;
+  const receiptGenerationOk = completedSource
+    ? (sourceFrozen ? receipt.executionGeneration === sourceFrozen.executionGeneration
+      : receipt.executionGeneration <= s.executionGeneration)
+    : receipt.executionGeneration === s.executionGeneration;
   if (!request || receipt.role !== "qa" || receipt.companyId !== row.run.companyId || receipt.missionId !== row.run.missionId
     || receipt.workflowRunId !== row.run.id || receipt.stepRunId !== s.id || receipt.stepId !== s.stepId
     || receipt.requestId !== requestId || receipt.requestId !== s.lastDispatchRequestId
-    || receipt.executionGeneration !== s.executionGeneration || receipt.retryCount !== s.retryCount
+    || !receiptGenerationOk || receipt.retryCount !== s.retryCount
     || receipt.iterationIndex !== s.iterationIndex || receipt.outputRoot !== request.outputRoot
     || receipt.outputRootHash !== request.outputRootHash || !isDeepStrictEqual(receipt.input, request.input)) {
     throw new Error("qa_artifact_receipt_scope_mismatch");
   }
   if (receipt.schemaVersion === "workflow.tool-artifact.v2") {
-    const frozen = readFrozenArtifactAttempt(s.metadata.artifactExecution,
+    const frozen = sourceFrozen ?? readFrozenArtifactAttempt(s.metadata.artifactExecution,
       { executionGeneration: s.executionGeneration, requestId: receipt.requestId });
     if (!isDeepStrictEqual(frozen, request.artifactExecution) || receipt.contractHash !== frozen.contractHash
       || receipt.qaConfigHash !== frozen.qaConfigHash || receipt.relativePath !== frozen.contract.resultFileName
