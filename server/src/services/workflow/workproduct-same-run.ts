@@ -8,9 +8,10 @@ import { producerAttempt } from "../work-products/producer-attempt.js";
 import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
 
 /**
- * [producer provenance rebind] 보드 승인 재바인딩 표시가 현재 단계 행과 정합한지 검증.
- * 표시가 유효한 경우에만 하트비트/시도증명의 세대 비교를 fromGeneration 기준으로 평가하고
+ * [producer provenance rebind] 보드 승인 재바인딩 표시가 생산 사실과 정합한지 검증.
+ * 유효한 경우에만 세대 비교를 실제 생산 세대(fromGeneration) 기준으로 평가하고
  * 디스크 바이트(sha256/byteSize)를 매 소비마다 재검증한다. 그 외 모든 검증은 기본 경로와 동일.
+ * 표시는 fromGeneration 이후 어떤 현재 세대에서도 유효하다(회복/재발사의 세대 진행에 강건).
  */
 function validRebindMarker(product: typeof issueWorkProducts.$inferSelect, producer: {
   executionGeneration: number; heartbeatRunId: string;
@@ -18,10 +19,9 @@ function validRebindMarker(product: typeof issueWorkProducts.$inferSelect, produ
   const parsed = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
   if (!parsed.success) return null;
   const marker = parsed.data;
-  if (marker.toGeneration !== step.executionGeneration
+  if (marker.fromGeneration !== producer.executionGeneration
     || marker.fromHeartbeatRunId !== producer.heartbeatRunId
-    || producer.executionGeneration !== marker.toGeneration
-    || product.sourceExecutionGeneration !== marker.toGeneration) return null;
+    || step.executionGeneration < marker.fromGeneration) return null;
   return marker;
 }
 
@@ -41,14 +41,15 @@ export async function selectSameRunWorkProduct(db: Db, scope: { companyId: strin
   const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
   if (!parsed.success) throw new Error("workproduct_selector_provenance_missing");
   const p = parsed.data, s = source.step;
-  if (workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product }).length > 0) {
+  const rebind = validRebindMarker(product, p, s);
+  const toleratedFields = rebind ? ["executionGeneration", "sourceExecutionGeneration"] : [];
+  if (workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product })
+    .some((field) => !toleratedFields.includes(field))) {
     throw new Error("workproduct_selector_stale_producer");
   }
-  const rebind = validRebindMarker(product, p, s);
   const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, p.heartbeatRunId));
   const heartbeatGenerationHolds = heartbeat
-    && (heartbeat.workflowExecutionGeneration === s.executionGeneration
-      || (rebind && heartbeat.workflowExecutionGeneration === rebind.fromGeneration));
+    && heartbeat.workflowExecutionGeneration === (rebind ? rebind.fromGeneration : s.executionGeneration);
   if (!heartbeat || heartbeat.companyId !== p.companyId || heartbeat.issueId !== s.issueId
     || heartbeat.workflowStepRunId !== s.id || !heartbeatGenerationHolds) {
     throw new Error("workproduct_selector_heartbeat_mismatch");

@@ -24,13 +24,15 @@ export const workProductProducerSchema = z.object({
   heartbeatRunId: z.string().uuid(),
 }).strict();
 /**
- * [producer provenance rebind] 보드 승인으로 생산자 귀속 세대만 현재 세대로 재귀속한 흔적.
- * 생산 시도(하트비트/웨이크 증명)는 fromGeneration 시점 그대로 유효함을 증명한 뒤에만 기록되며,
- * 소비 시점마다 sha256/byteSize 로 바이트 동일성이 재검증된다(workproduct-same-run).
+ * [producer provenance rebind] 보드 승인으로 “생산 이후 생산자가 변하지 않았음”을 증명한 흔적.
+ * fromGeneration 은 실제 생산 세대(변경 불가 원본 사실)이고, 재바인딩은 이후 어느 세대에서든
+ * 유효하다(회복/재발사가 세대를 진행시켜도 무효화되지 않는다). 소비 시점마다 sha256/byteSize 로
+ * 바이트 동일성이 재검증된다(workproduct-same-run).
  */
 export const workProductProducerRebindMarkerSchema = z.object({
   schemaVersion: z.literal("workflow.work-product-producer-rebind.v1"),
-  fromGeneration: count, toGeneration: count,
+  fromGeneration: count,
+  reboundAtGeneration: count,
   fromHeartbeatRunId: z.string().uuid(),
   sha256: hash, byteSize: count,
   reboundAt: z.string().datetime(),

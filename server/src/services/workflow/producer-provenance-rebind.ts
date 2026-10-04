@@ -22,10 +22,11 @@ import { workProductProducerMismatches } from "./workproduct-producer-comparison
  *   4) 기존 귀속과의 불일치가 세대 필드(executionGeneration/sourceExecutionGeneration)뿐 (정방향)
  *   5) 하트비트 연결(회사/이슈/stepRun) 동일, 하트비트 세대 = fromGeneration
  *   6) 시도 증명(producerAttempt)을 fromGeneration 기준으로 재현 가능하고 retry/iteration 일치
- * [기록] product.sourceExecutionGeneration + metadata.workflowProducer.executionGeneration → 현재 세대,
- *   metadata.workflowProducerRebind = 마커(sha256/byteSize 포함), workflow_transition_events 1건.
- * [수정시 주의] 셀렉터(workproduct-same-run)는 마커가 유효할 때만 하트비트/시도증명 세대를
- *   fromGeneration 기준으로 평가하고 매 소비마다 바이트를 재검증한다. 마커 스키마를 바꾸면 양쪽 함께.
+ * [기록] metadata.workflowProducerRebind = 마커(sha256/byteSize 포함), workflow_transition_events 1건.
+ *   원본 귀속 사실(workflowProducer.executionGeneration, sourceExecutionGeneration)은 그대로 보존한다 —
+ *   마커는 fromGeneration 이후 어떤 세대에서든 유효하므로 회복/재발사의 세대 진행에 강건하다.
+ * [수정시 주의] 셀렉터(workproduct-same-run)는 마커가 유효할 때만 세대 필드 불일치를 용인하고
+ *   하트비트/시도증명 세대를 fromGeneration 기준으로 평가하며 매 소비마다 바이트를 재검증한다.
  */
 
 export const PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS: ReadonlySet<string> = new Set([
@@ -34,8 +35,8 @@ export const PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS: ReadonlySet<string> = new
 ]);
 
 export type ProducerProvenanceRebindResult =
-  | { status: "rebound"; productId: string; producerStepRunId: string; fromGeneration: number; toGeneration: number; sha256: string; byteSize: number }
-  | { status: "already_rebound"; productId: string; toGeneration: number };
+  | { status: "rebound"; productId: string; producerStepRunId: string; fromGeneration: number; reboundAtGeneration: number; sha256: string; byteSize: number }
+  | { status: "already_rebound"; productId: string; fromGeneration: number };
 
 export async function rebindProducerProvenance(db: Db, input: {
   companyId: string; workflowRunId: string; producerStepId: string; productId: string;
@@ -68,11 +69,11 @@ export async function rebindProducerProvenance(db: Db, input: {
     const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
     if (!parsed.success) throw conflict("producer_rebind_provenance_missing");
     const p = parsed.data;
-    // 멱등: 이미 현재 세대로 재귀속돼 있으면 추가 쓰기 없이 반혼한다(감사 이벤트도 중복하지 않는다).
+    // 멱등: 이 생산 사실에 대해 이미 유효한 마커가 있으면 추가 쓰기 없이 반혼한다(감사 이벤트도 중복하지 않는다).
     const existingMarker = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
-    if (existingMarker.success && existingMarker.data.toGeneration === step.executionGeneration
-      && p.executionGeneration === step.executionGeneration) {
-      return { status: "already_rebound", productId: product.id, toGeneration: step.executionGeneration };
+    if (existingMarker.success && existingMarker.data.fromGeneration === p.executionGeneration
+      && existingMarker.data.fromHeartbeatRunId === p.heartbeatRunId) {
+      return { status: "already_rebound", productId: product.id, fromGeneration: p.executionGeneration };
     }
     const mismatches = workProductProducerMismatches(p, {
       companyId: input.companyId, workflowRunId: run.id,
@@ -107,21 +108,20 @@ export async function rebindProducerProvenance(db: Db, input: {
     const marker = {
       schemaVersion: "workflow.work-product-producer-rebind.v1" as const,
       fromGeneration: p.executionGeneration,
-      toGeneration: step.executionGeneration,
+      reboundAtGeneration: step.executionGeneration,
       fromHeartbeatRunId: p.heartbeatRunId,
       sha256, byteSize: bytes.byteLength,
       reboundAt: now.toISOString(),
       reboundBy: { actorType: input.actor.actorType, actorId: input.actor.actorId },
       reason: "board_producer_provenance_rebind",
-      authorityIdempotencyKey: `producer-provenance-rebind:${product.id}:${step.executionGeneration}`,
+      authorityIdempotencyKey: `producer-provenance-rebind:${product.id}:${p.executionGeneration}`,
     };
     const nextMetadata = {
       ...(product.metadata ?? {}),
-      workflowProducer: { ...p, executionGeneration: step.executionGeneration },
       workflowProducerRebind: marker,
     };
     await tx.update(issueWorkProducts)
-      .set({ sourceExecutionGeneration: step.executionGeneration, metadata: nextMetadata, updatedAt: now })
+      .set({ metadata: nextMetadata, updatedAt: now })
       .where(eq(issueWorkProducts.id, product.id));
     await appendWorkflowAuthorityTransition(tx, {
       companyId: input.companyId, workflowRunId: run.id, workflowStepRunId: step.id,
@@ -129,10 +129,12 @@ export async function rebindProducerProvenance(db: Db, input: {
       executionGeneration: step.executionGeneration,
       reason: marker.reason, idempotencyKey: marker.authorityIdempotencyKey,
       payload: { version: 1, transition: "producer_provenance_rebound", productId: product.id,
-        producerStepRunId: step.id, fromGeneration: marker.fromGeneration, toGeneration: marker.toGeneration,
+        producerStepRunId: step.id, fromGeneration: marker.fromGeneration,
+        reboundAtGeneration: marker.reboundAtGeneration,
         sha256, byteSize: marker.byteSize, reboundBy: marker.reboundBy },
     });
     return { status: "rebound", productId: product.id, producerStepRunId: step.id,
-      fromGeneration: marker.fromGeneration, toGeneration: marker.toGeneration, sha256, byteSize: marker.byteSize };
+      fromGeneration: marker.fromGeneration, reboundAtGeneration: marker.reboundAtGeneration,
+      sha256, byteSize: marker.byteSize };
   });
 }

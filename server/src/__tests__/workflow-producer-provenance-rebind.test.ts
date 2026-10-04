@@ -56,19 +56,19 @@ it("selector fences the producer product before rebind", async () => {
   await expect(f.select()).rejects.toThrow("workproduct_selector_stale_producer");
 });
 
-it("rebind moves provenance to the current generation and records an authority transition", async () => {
+it("rebind records a forward-valid marker and an authority transition, preserving production truth", async () => {
   const f = await fixture();
   const result = await f.rebind();
-  expect(result).toMatchObject({ status: "rebound", fromGeneration: 1, toGeneration: 3 });
+  expect(result).toMatchObject({ status: "rebound", fromGeneration: 1, reboundAtGeneration: 3 });
   const row = await f.readProduct();
-  expect(row.sourceExecutionGeneration).toBe(3);
-  expect((row.metadata!.workflowProducer as Record<string, unknown>).executionGeneration).toBe(3);
+  expect(row.sourceExecutionGeneration).toBe(1);
+  expect((row.metadata!.workflowProducer as Record<string, unknown>).executionGeneration).toBe(1);
   const marker = row.metadata!.workflowProducerRebind as Record<string, unknown>;
-  expect(marker).toMatchObject({ fromGeneration: 1, toGeneration: 3, reason: "board_producer_provenance_rebind" });
+  expect(marker).toMatchObject({ fromGeneration: 1, reboundAtGeneration: 3, reason: "board_producer_provenance_rebind" });
   expect(typeof marker.sha256).toBe("string");
   const events = await f.rebindEvents();
   expect(events).toHaveLength(1);
-  expect(events[0]!.idempotencyKey).toBe(`producer-provenance-rebind:${f.product!.id}:3`);
+  expect(events[0]!.idempotencyKey).toBe(`producer-provenance-rebind:${f.product!.id}:1`);
 });
 
 it("selector accepts the rebound product end-to-end", async () => {
@@ -76,7 +76,17 @@ it("selector accepts the rebound product end-to-end", async () => {
   await f.rebind();
   const selected = await f.select();
   expect(selected.product.id).toBe(f.product!.id);
-  expect(selected.producer.executionGeneration).toBe(3);
+  expect(selected.producer.executionGeneration).toBe(1);
+});
+
+it("selector keeps accepting the rebound product after further generation advances (rerun/recovery)", async () => {
+  const f = await fixture();
+  await f.rebind();
+  // 재발사(rerun)/회복이 세대를 진행시켜도 마커는 유효해야 한다.
+  await db.update(workflowStepRuns).set({ executionGeneration: 5 }).where(eq(workflowStepRuns.id, f.stepId));
+  await expect(f.select()).resolves.toMatchObject({ product: { id: f.product!.id } });
+  await db.update(workflowStepRuns).set({ executionGeneration: 9 }).where(eq(workflowStepRuns.id, f.stepId));
+  await expect(f.select()).resolves.toMatchObject({ product: { id: f.product!.id } });
 });
 
 it("selector re-verifies rebound bytes on every consumption", async () => {
@@ -91,7 +101,8 @@ it("selector re-verifies rebound bytes on every consumption", async () => {
 it("second rebind is idempotent and writes no duplicate authority transition", async () => {
   const f = await fixture();
   await f.rebind();
-  await expect(f.rebind()).resolves.toMatchObject({ status: "already_rebound", toGeneration: 3 });
+  await db.update(workflowStepRuns).set({ executionGeneration: 4 }).where(eq(workflowStepRuns.id, f.stepId));
+  await expect(f.rebind()).resolves.toMatchObject({ status: "already_rebound", fromGeneration: 1 });
   expect(await f.rebindEvents()).toHaveLength(1);
 });
 
