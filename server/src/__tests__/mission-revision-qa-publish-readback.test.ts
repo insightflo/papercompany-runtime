@@ -41,7 +41,7 @@ import { board } from "./helpers/workflow-seed-world.js";
 import { workProductService } from "../services/work-products.js";
 import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
-import { completeWorkflowToolStepFromResult, executeWorkflowRun, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, executeWorkflowRun, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 import { executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "../services/workflow/core-tool-executor.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
 import { resolveQaReceiptPath } from "../services/workflow/qa-artifact-consumer.js";
@@ -213,9 +213,19 @@ async function world(changed?: { stop?: "after-qa" | "after-publish" | "complete
   let sourcePublishStep: typeof workflowStepRuns.$inferSelect | undefined, sourcePublishArtifact: string | undefined;
   if (stop !== "after-qa") {
     const originalPublishRequestId = `${sourceRun.id}:publish:1`;
-    const [originalPublishRun] = await db.insert(workflowStepRuns).values({ workflowRunId: sourceRun.id, stepId: "publish",
-      status: "running", lastDispatchRequestId: originalPublishRequestId, metadata: { artifactExecution: freezeArtifactAttempt({
-        adapterConfig: { artifactContract: publishContract }, step: sourcePublish, executionGeneration: 0, requestId: originalPublishRequestId }) } }).returning();
+    // 검수 완료 기록의 sync 가 이미 publish 스텝런을 물화·발화했다(완료 sync 가 후속 단계를 큐에
+    // 올린다) — (run, stepId) 유일 제약에 걸리지 않도록 새 행 삽입 대신 기존 행을 이번 시도의
+    // 실행 계약(lastDispatchRequestId·artifactExecution)으로 조정한다.
+    const originalPublishExecution = freezeArtifactAttempt({ adapterConfig: { artifactContract: publishContract },
+      step: sourcePublish, executionGeneration: 0, requestId: originalPublishRequestId });
+    const existingPublishRun = (await db.select().from(workflowStepRuns)
+      .where(and(eq(workflowStepRuns.workflowRunId, sourceRun.id), eq(workflowStepRuns.stepId, "publish"))))[0];
+    const originalPublishRun = existingPublishRun ?? (await db.insert(workflowStepRuns).values({ workflowRunId: sourceRun.id,
+      stepId: "publish", status: "running", lastDispatchRequestId: originalPublishRequestId,
+      metadata: { artifactExecution: originalPublishExecution } }).returning())[0]!;
+    if (existingPublishRun) await db.update(workflowStepRuns).set({ status: "running",
+      lastDispatchRequestId: originalPublishRequestId, metadata: { artifactExecution: originalPublishExecution } })
+      .where(eq(workflowStepRuns.id, existingPublishRun.id));
     const originalPublishArgs = await resolveWorkflowToolStepArgs({ db, run: sourceRun, step: sourcePublish,
       workflowSteps: sourceSteps, consumerStepRunId: originalPublishRun.id });
     const originalPublishResult = await executeCoreWorkflowTool({ db, companyId, toolName: "revision-publish",
@@ -448,7 +458,9 @@ it.each(["after-qa", "after-publish", "completed"] as const)
   await executeWorkflowRun(db, target.id); // research seed 물화 + 본문 수정(revision-edit) 이슈 발사
   const edited = await completeEditedBody(f, target);
   for (let round = 0; round < 6 && (await stepRunOf(target.id, "revision-readback")).status !== "completed"; round++) {
-    await executeWorkflowRun(db, target.id); await processQueuedWorkflowToolStepRuns(db); // 새 검수→게시→확인 파이프라인
+    // 이미 running 인 실행의 executeWorkflowRun 재진입은 start claim 이 busy 로 no-op 다 —
+    // 수동 마감된 수정 단계 이후의 파이프라인은 실제 공개 sync 경로로 발화한다.
+    await syncWorkflowRunState(db, target.id); await processQueuedWorkflowToolStepRuns(db); // 새 검수→게시→확인 파이프라인
   }
   const research = await stepRunOf(target.id, "revision-research"), edit = await stepRunOf(target.id, "revision-edit"),
     qa = await stepRunOf(target.id, "revision-qa"), publish = await stepRunOf(target.id, "revision-publish"),
@@ -532,7 +544,7 @@ it.each(["after-qa", "after-publish", "completed"] as const)
   await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
   await executeWorkflowRun(db, target.id); // research seed 물화 + 본문 수정 이슈 발사
   await completeEditedBody(f, target);
-  await executeWorkflowRun(db, target.id); // 수정 본문에 대한 새 검수 dispatch(queued, 아직 실행 전)
+  await syncWorkflowRunState(db, target.id); // 수정 본문에 대한 새 검수 dispatch(queued, 아직 실행 전) — 실행 재진입은 busy no-op 므로 실제 sync 로 발화
   const qa = await stepRunOf(target.id, "revision-qa");
   expect(qa.status).toBe("running");
   // 1) 완료 기록 경로: 원본 검수 영수증을 이번 실행 통과로 제출하면 스코프 불일치로 거절된다
