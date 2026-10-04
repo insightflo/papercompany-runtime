@@ -13,6 +13,7 @@ import { companiesApi } from "../api/companies";
 import { ApiError } from "../api/client";
 import { queryKeys } from "../lib/queryKeys";
 import type { CompanySelectionSource } from "../lib/company-selection";
+import { CompanyLanguageProvider, resolveCompanyLanguage } from "../lib/companyLanguage";
 type CompanySelectionOptions = { source?: CompanySelectionSource };
 
 interface CompanyContextValue {
@@ -34,7 +35,7 @@ interface CompanyContextValue {
 
 const STORAGE_KEY = "paperclip.selectedCompanyId";
 
-const CompanyContext = createContext<CompanyContextValue | null>(null);
+export const CompanyContext = createContext<CompanyContextValue | null>(null);
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -141,7 +142,7 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;
+  return <CompanyContext.Provider value={value}><CompanyLanguageProvider language={resolveCompanyLanguage(selectedCompany)}>{children}</CompanyLanguageProvider></CompanyContext.Provider>;
 }
 
 export function useCompany() {

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
 import { OperatorDecisionCard } from "./OperatorDecisionCard";
+import { CompanyLanguageProvider } from "../lib/companyLanguage";
 
 vi.mock("../lib/router", () => ({
   Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a href={to} className={className}>{children}</a>,
@@ -66,7 +67,7 @@ let root: Root;
 
 async function renderCard(decision = baseDecision, onResolve = vi.fn().mockResolvedValue(undefined)) {
   await act(async () => {
-    root.render(<OperatorDecisionCard decision={decision} onResolve={onResolve} />);
+    root.render(<CompanyLanguageProvider language={decision.definition.optionGroups ? "ko" : "en"}><OperatorDecisionCard decision={decision} onResolve={onResolve} /></CompanyLanguageProvider>);
   });
   return onResolve;
 }
@@ -177,6 +178,50 @@ describe("OperatorDecisionCard behavior", () => {
     expect(alert.textContent).toContain("Conflict");
     expect(document.activeElement).toBe(alert);
     expect((host.querySelector('input[value="one"]') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("uses Korean chrome without translating agent-authored content", async () => {
+    await act(async () => root.render(<CompanyLanguageProvider language="ko"><OperatorDecisionCard decision={baseDecision} onResolve={vi.fn()} /></CompanyLanguageProvider>));
+    expect(host.textContent).toContain("무엇을 결정해야 하나요?");
+    expect(host.textContent).toContain("선택지");
+    expect(host.textContent).toContain("높음");
+    expect(host.textContent).toContain("Choose one opportunity?");
+    expect(host.textContent).toContain("One");
+  });
+
+  it("promotes the decision subject and keeps the original title as supporting context", async () => {
+    await renderCard();
+    expect(host.querySelector("[data-operator-decision-heading]")?.textContent).toBe("Choose one opportunity?");
+    expect(host.textContent).toContain("Choose an opportunity");
+    expect(host.textContent).toContain("What needs deciding?");
+  });
+
+  it("shows shared facts once and preserves unique, unknown and long facts", async () => {
+    const shared = [
+      { label: "Source", value: "source sentinel", status: "known" as const },
+      { label: "Count", value: "42", status: "known" as const },
+      { label: "Missing", value: "not yet verified", status: "unknown" as const },
+    ];
+    const longValue = "Long evidence ".repeat(30);
+    await renderCard({
+      ...baseDecision,
+      definition: { ...baseDecision.definition, options: baseDecision.definition.options.map((option, index) => ({
+        ...option, facts: [...shared, { label: `Unique ${index}`, value: index === 0 ? longValue : "unique sentinel", status: "known" as const }],
+      })) },
+    });
+    for (const fact of shared) expect(host.textContent?.split(fact.value)).toHaveLength(2);
+    expect(host.querySelectorAll("fieldset dl")).toHaveLength(2);
+    expect(host.querySelector("fieldset dl")?.textContent).not.toContain("source sentinel");
+    expect(host.textContent).toContain("Common facts");
+    expect(host.textContent).toContain("Unverified");
+    expect(host.textContent).not.toContain("(known)");
+    expect(host.textContent).not.toContain("(unknown)");
+    const details = host.querySelector("details")!;
+    expect(details).toBeTruthy();
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toBe(`${longValue.slice(0, 120)}…`);
+    expect(details.querySelector("p")?.textContent).toBe(longValue);
+    expect(host.textContent).toContain("unique sentinel");
   });
 
 describe("OperatorDecisionCard option groups", () => {
