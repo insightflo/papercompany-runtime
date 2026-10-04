@@ -25,10 +25,8 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { HumanReviewPacket } from "../components/HumanReviewPacket";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
 
 const MAX_PROPOSALS_PER_AGENT_PER_DAY = 3;
 
@@ -114,15 +112,13 @@ interface ReviewFormProps {
 }
 
 function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
+  const lang = useCompanyLanguage();
   const queryClient = useQueryClient();
   const [reviewNote, setReviewNote] = useState("");
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
 
-  // We need a reviewedByAgentId — use the proposedBy agent's counterpart or
-  // a sentinel value; the server only validates it is non-empty.
-  // In a real flow the logged-in user's agent ID would come from auth context.
-  // For now we send "board" which the server accepts for board actors.
+  // Board actor uses the existing server-accepted reviewer sentinel.
   const REVIEWER_ID = "board";
 
   const mutation = useMutation({
@@ -153,7 +149,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
       <label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={reviewAcknowledged} onChange={(event) => setReviewAcknowledged(event.target.checked)} /><span>원본 규칙, 적용 영향과 오판 위험을 확인했습니다.</span></label>
       <textarea
         className="w-full h-16 text-xs rounded-md border border-input bg-background px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
-        placeholder="Review note (optional)"
+        placeholder={L(lang, { en: "Review note (optional)", ko: "검토 메모(선택)" })}
         value={reviewNote}
         onChange={(e) => setReviewNote(e.target.value)}
       />
@@ -166,7 +162,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
           disabled={mutation.isPending || !reviewAcknowledged}
         >
           <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
-          Approve
+          {L(lang, { en: "Approve", ko: "승인" })}
         </Button>
         <Button
           size="sm"
@@ -176,7 +172,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
           disabled={mutation.isPending}
         >
           <XCircle className="h-3.5 w-3.5 mr-1.5" />
-          Reject
+          {L(lang, { en: "Reject", ko: "거절" })}
         </Button>
         <Button
           size="sm"
@@ -185,7 +181,7 @@ function ReviewForm({ proposal, agentMap, onDone }: ReviewFormProps) {
           onClick={onDone}
           disabled={mutation.isPending}
         >
-          Cancel
+          {L(lang, { en: "Cancel", ko: "취소" })}
         </Button>
       </div>
     </div>
@@ -202,6 +198,7 @@ interface ProposalRowProps {
 }
 
 function ProposalRow({ proposal, agentMap }: ProposalRowProps) {
+  const lang = useCompanyLanguage();
   const [expanded, setExpanded] = useState(false);
   const [reviewing, setReviewing] = useState(false);
 
@@ -250,7 +247,7 @@ function ProposalRow({ proposal, agentMap }: ProposalRowProps) {
         {/* Status */}
         <div className={cn("shrink-0 flex items-center gap-1 text-xs", statusClasses)}>
           <StatusIcon className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">{statusLabel}</span>
+          <span className="hidden sm:inline" title={status}>{humanLabel(lang, "approvalStatus", status === "proposed" ? "pending" : status).label}</span>
         </div>
 
         {/* Review button — only for pending */}

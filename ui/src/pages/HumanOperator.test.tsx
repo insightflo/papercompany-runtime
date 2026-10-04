@@ -58,7 +58,7 @@ vi.mock("@tanstack/react-query", () => ({
     };
   },
 }));
-vi.mock("../context/CompanyContext", () => ({ useCompany: () => ({ selectedCompanyId: "company-1" }) }));
+vi.mock("../context/CompanyContext", async (importOriginal) => ({ ...await importOriginal<typeof import("../context/CompanyContext")>(), useCompany: () => ({ selectedCompanyId: "company-1" }) }));
 vi.mock("../context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("../components/ExternalAutomationApprovals", () => ({ ExternalAutomationApprovals: () => <section>External automation approvals</section> }));
 vi.mock("../lib/router", () => ({ Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a> }));

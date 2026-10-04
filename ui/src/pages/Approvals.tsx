@@ -12,10 +12,12 @@ import { Tabs } from "@/components/ui/tabs";
 import { ShieldCheck } from "lucide-react";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
 
 type StatusFilter = "pending" | "all";
 
 export function Approvals() {
+  const lang = useCompanyLanguage();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
@@ -49,7 +51,7 @@ export function Approvals() {
       navigate(`/approvals/${id}?resolved=approved`);
     },
     onError: (err) => {
-      setActionError(err instanceof Error ? err.message : "Failed to approve");
+      setActionError(err instanceof Error ? err.message : L(lang, { en: "Failed to approve", ko: "승인하지 못했습니다." }));
     },
   });
 
@@ -60,7 +62,7 @@ export function Approvals() {
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
     },
     onError: (err) => {
-      setActionError(err instanceof Error ? err.message : "Failed to reject");
+      setActionError(err instanceof Error ? err.message : L(lang, { en: "Failed to reject", ko: "거절하지 못했습니다." }));
     },
   });
 
@@ -75,7 +77,7 @@ export function Approvals() {
   ).length;
 
   if (!selectedCompanyId) {
-    return <p className="text-sm text-muted-foreground">Select a company first.</p>;
+    return <p className="text-sm text-muted-foreground">{L(lang, { en: "Select a company first.", ko: "먼저 회사를 선택하세요." })}</p>;
   }
 
   if (isLoading) {
@@ -87,7 +89,7 @@ export function Approvals() {
       <div className="flex items-center justify-between">
         <Tabs value={statusFilter} onValueChange={(v) => navigate(`/approvals/${v}`)}>
           <PageTabBar items={[
-            { value: "pending", label: <>Pending{pendingCount > 0 && (
+            { value: "pending", label: <>{L(lang, { en: "Pending", ko: "대기 중" })}{pendingCount > 0 && (
               <span className={cn(
                 "ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
                 "bg-yellow-500/20 text-yellow-500"
@@ -95,7 +97,7 @@ export function Approvals() {
                 {pendingCount}
               </span>
             )}</> },
-            { value: "all", label: "All" },
+            { value: "all", label: L(lang, { en: "All", ko: "전체" }) },
           ]} />
         </Tabs>
       </div>
@@ -107,7 +109,7 @@ export function Approvals() {
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <ShieldCheck className="h-8 w-8 text-muted-foreground/30 mb-3" />
           <p className="text-sm text-muted-foreground">
-            {statusFilter === "pending" ? "No pending approvals." : "No approvals yet."}
+            {statusFilter === "pending" ? L(lang, { en: "No pending approvals.", ko: "대기 중인 승인이 없습니다." }) : L(lang, { en: "No approvals yet.", ko: "아직 승인 요청이 없습니다." })}
           </p>
         </div>
       )}

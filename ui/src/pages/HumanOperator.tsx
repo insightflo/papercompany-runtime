@@ -14,6 +14,8 @@ import { Button } from "../components/ui/button";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
 
 function formatRequestTime(value: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -27,6 +29,7 @@ function missionLink(request: MissionHumanOperatorRequest): string {
 }
 
 function HumanOperatorRow({ request }: { request: MissionHumanOperatorRequest }) {
+  const lang = useCompanyLanguage();
   return (
     <li className="border border-border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -43,7 +46,7 @@ function HumanOperatorRow({ request }: { request: MissionHumanOperatorRequest })
           </div>
         </div>
         <Button asChild variant="outline" size="sm" className="w-full shrink-0 lg:w-auto">
-          <Link to={missionLink(request)}>Open mission<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+          <Link to={missionLink(request)}>{L(lang, { en: "Open mission", ko: "미션 열기" })}<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
         </Button>
       </div>
     </li>
@@ -71,6 +74,7 @@ function ContinuationAttention({
   decision: OperatorDecisionView;
   onRetry: (decision: OperatorDecisionView) => Promise<void>;
 }) {
+  const lang = useCompanyLanguage();
   const continuation = decision.continuation!;
   const [retryError, setRetryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
@@ -82,7 +86,7 @@ function ContinuationAttention({
     try {
       await onRetry(decision);
     } catch (error) {
-      setRetryError(error instanceof Error ? error.message : "Failed to retry this continuation.");
+      setRetryError(error instanceof Error ? error.message : L(lang, { en: "Failed to retry this continuation.", ko: "이어서 진행 재시도에 실패했습니다." }));
     } finally {
       setIsRetrying(false);
     }
@@ -106,12 +110,12 @@ function ContinuationAttention({
             <p className="mt-0.5 text-xs text-muted-foreground">{continuation.retryHint}</p>
           )}
           <p className="mt-1 text-xs text-muted-foreground">
-            {continuation.effectiveStatus} · generation {continuation.generation} · attempt {continuation.attemptCount}
+            <span title={continuation.effectiveStatus}>{humanLabel(lang, "continuationStatus", continuation.effectiveStatus).label}</span> · {L(lang, { en: `Generation ${continuation.generation}`, ko: `재시도 회차 ${continuation.generation}` })} · {L(lang, { en: `Attempt ${continuation.attemptCount}`, ko: `시도 ${continuation.attemptCount}회` })}
           </p>
         </div>
         <div className="space-y-1">
           <Button type="button" variant="outline" size="sm" disabled={!retryable || isRetrying} onClick={() => void retry()}>
-            {isRetrying ? "Retrying…" : "Retry continuation"}
+            {isRetrying ? L(lang, { en: "Retrying…", ko: "재시도 중…" }) : L(lang, { en: "Retry continuation", ko: "이어서 재시도" })}
           </Button>
           {retryError && <p role="alert" className="text-xs text-destructive">{retryError}</p>}
         </div>
@@ -128,6 +132,7 @@ export function focusOperatorDecisionSuccessTarget(root: ParentNode = document) 
 }
 
 export function HumanOperator() {
+  const lang = useCompanyLanguage();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
@@ -241,7 +246,7 @@ export function HumanOperator() {
       {requests.length > 0 ? <ul className="space-y-2">{requests.map((request) => (
         <HumanOperatorRow key={request.id} request={request} />
       ))}</ul> : pending.length === 0 && attention.length === 0 ? (
-        <h2 data-human-operator-empty-heading tabIndex={-1} className="text-sm font-medium">No open human operator requests.</h2>
+        <h2 data-human-operator-empty-heading tabIndex={-1} className="text-sm font-medium">{L(lang, { en: "No open human operator requests.", ko: "열려 있는 사람 운영자 요청이 없습니다." })}</h2>
       ) : null}
     </div>
   );

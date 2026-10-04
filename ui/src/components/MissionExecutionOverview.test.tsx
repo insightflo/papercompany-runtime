@@ -105,7 +105,8 @@ vi.mock("@tanstack/react-query", () => ({
   useMutation: () => ({ isPending: false, mutate: vi.fn() }),
 }));
 
-vi.mock("../context/CompanyContext", () => ({
+vi.mock("../context/CompanyContext", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../context/CompanyContext")>(),
   useCompany: () => ({
     selectedCompanyId: "company-1",
   }),

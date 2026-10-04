@@ -149,7 +149,7 @@ describe("MissionDecisionLogPanel", () => {
     expect(html).toContain("Supersedes");
     expect(html).toContain("Record decision");
     // Retire 버튼은 confirmed(D-2), under_review(D-3, D-4)에만 렌더링된다. retired(D-1) 제외.
-    expect(html.split("Retire").length - 1).toBe(3);
+    expect((html.match(/<button[^>]*>\s*Retire\s*<\/button>/g) ?? []).length).toBe(3);
     // 헤더 배지: 읽기 전용 → board 작성 가능 기록.
     expect(html).toContain("board-authorable record");
   });
