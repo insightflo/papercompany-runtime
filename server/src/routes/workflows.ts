@@ -28,7 +28,7 @@ import {
 } from "../services/operator-approval-wait.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
-import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, rebindProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
+import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, rebindOrPromoteProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
@@ -640,10 +640,10 @@ export function workflowRoutes(db: Db) {
       ? consumer.lastDispatchErrorSummary
       : typeof toolInvocation?.dispatchError === "string" ? toolInvocation.dispatchError : "";
     if (consumer.status !== "failed" || !PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS.has(dispatchError)) {
-      throw unprocessable("Only steps fenced by a stale-producer selector error can rebind producer provenance");
+      throw unprocessable("Only steps fenced by a stale-producer or delegated-provenance selector error can rebind or promote producer provenance");
     }
     const actor = actorForActivity(req);
-    const result = await rebindProducerProvenance(db, {
+    const result = await rebindOrPromoteProducerProvenance(db, {
       companyId: run.companyId,
       workflowRunId: run.id,
       producerStepId: req.body.producerStepId,
