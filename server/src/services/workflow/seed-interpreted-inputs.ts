@@ -11,7 +11,7 @@
 // 토큰 없는 스텝은 기존 게이트 그대로다(완화 없음).
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
-import { issueWorkProducts, workflowRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
+import { issueWorkProducts, workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import { workProductSelectorsSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
@@ -35,7 +35,7 @@ export type SeedInterpretedInputBinding = {
 };
 
 // bind/verify 가 실제로 읽는 run 좌표만 요구한다(드리즐 원본 row 와 매핑된 WorkflowRun 양쪽 호환).
-type SeedRun = Pick<typeof workflowRuns.$inferSelect, "id" | "companyId" | "runDate" | "metadata">;
+type SeedRun = { id: string; companyId: string; runDate?: string | null; metadata?: Record<string, unknown> | null };
 
 function scanTokens(value: unknown, refs: Set<string>, metadataKeys: Map<string, "run" | "child">) {
   if (typeof value === "string") {
