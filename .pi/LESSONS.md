@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-05 — full gate lifetime must outlive the tool deadline
+- Date: 2026-10-05
+- Task: Operator card readability root verification at 0b9f4ac4.
+- What failed: A combined typecheck/test invocation hit the 1,800s tool deadline; typecheck completed in 274.82s, but the test log ended after about 1,525s without summary/exit and build had not run.
+- Root cause: The outer command deadline bounded the complete gate sequence rather than a test case; the log still showed completed files at interruption. Resource contention is plausible but not proven causal.
+- Category: verification orchestration / command lifetime.
+- Fix: Launch the identical root test command detached from the tool lifetime, persist its actual exit and wall duration, then run build regardless of test exit. Preserve the interrupted log and unrelated processes.
+- Prevention rule: Budget full gate time independently; use durable asynchronous exit recording for long suites. An incomplete log is never full-suite success, and individual failing lines are not proven pre-existing without exact-base same-condition evidence.
+- Reuse trigger: Large multi-project root test suites exceeding a synchronous tool timeout.
+- Evidence: `/tmp/operator-card-gates/test.log` (29,902 lines, no summary), `verification-report.md`, `run-gates.py`, `results.json`.
+
 ### 2026-10-04 — fixture fidelity for recovery-advice language-boundary regression
 - Date: 2026-10-04
 - Task: Essential closeout language-boundary regression (issue-comment work).

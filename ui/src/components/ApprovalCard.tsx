@@ -7,6 +7,8 @@ import { timeAgo } from "../lib/timeAgo";
 import type { Approval, Agent } from "@paperclipai/shared";
 import { HumanReviewPacket } from "./HumanReviewPacket";
 import { approvalHumanReview } from "../lib/humanReview";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
 
 function statusIcon(status: string) {
   if (status === "approved") return <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />;
@@ -33,8 +35,9 @@ export function ApprovalCard({
   detailLink?: string;
   isPending: boolean;
 }) {
+  const lang = useCompanyLanguage();
   const Icon = typeIcon[approval.type] ?? defaultTypeIcon;
-  const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null);
+  const label = approvalLabel(approval.type, approval.payload as Record<string, unknown> | null, lang);
   const showResolutionButtons =
     approval.type !== "budget_override_required" &&
     (approval.status === "pending" || approval.status === "revision_requested");
@@ -50,14 +53,14 @@ export function ApprovalCard({
             <span className="font-medium text-sm">{label}</span>
             {requesterAgent && (
               <span className="text-xs text-muted-foreground">
-                requested by <Identity name={requesterAgent.name} size="sm" className="inline-flex" />
+                {L(lang, { en: "requested by", ko: "요청:" })} <Identity name={requesterAgent.name} size="sm" className="inline-flex" />
               </span>
             )}
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           {statusIcon(approval.status)}
-          <span className="text-xs text-muted-foreground capitalize">{approval.status}</span>
+          <span className="text-xs text-muted-foreground" title={approval.status}>{humanLabel(lang, "approvalStatus", approval.status).label}</span>
           <span className="text-xs text-muted-foreground">· {timeAgo(approval.createdAt)}</span>
         </div>
       </div>
@@ -69,7 +72,7 @@ export function ApprovalCard({
       {/* Decision note */}
       {approval.decisionNote && (
         <div className="mt-3 text-xs text-muted-foreground italic border-t border-border pt-2">
-          Note: {approval.decisionNote}
+          {L(lang, { en: "Note:", ko: "결정 메모:" })} {approval.decisionNote}
         </div>
       )}
 
@@ -81,9 +84,9 @@ export function ApprovalCard({
             className="bg-green-700 hover:bg-green-600 text-white"
             onClick={onApprove}
             disabled={isPending || !reviewPacket || (approval.type === "workflow_replacement" && approval.status !== "pending")}
-            title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
+            title={!reviewPacket ? L(lang, { en: "Review information and source locations are required before approval.", ko: "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." }) : undefined}
           >
-            Approve
+            {L(lang, { en: "Approve", ko: "승인" })}
           </Button>
           <Button
             variant="destructive"
@@ -91,18 +94,18 @@ export function ApprovalCard({
             onClick={onReject}
             disabled={isPending}
           >
-            Reject
+            {L(lang, { en: "Reject", ko: "거절" })}
           </Button>
         </div>
       )}
       <div className="mt-3">
         {detailLink ? (
           <Button variant="ghost" size="sm" className="text-xs px-0" asChild>
-            <Link to={detailLink}>View details</Link>
+            <Link to={detailLink}>{L(lang, { en: "View details", ko: "자세히 보기" })}</Link>
           </Button>
         ) : (
           <Button variant="ghost" size="sm" className="text-xs px-0" onClick={onOpen}>
-            View details
+            {L(lang, { en: "View details", ko: "자세히 보기" })}
           </Button>
         )}
       </div>

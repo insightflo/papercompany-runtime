@@ -10,6 +10,9 @@ import { Link } from "../lib/router";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { HumanReviewPacket } from "./HumanReviewPacket";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
+import { commonDecisionFacts, uniqueDecisionFacts, OperatorDecisionFacts } from "./OperatorDecisionFacts";
 
 interface OperatorDecisionCardProps {
   decision: OperatorDecisionView;
@@ -22,12 +25,15 @@ function toneClass(tone: OperatorDecisionAction["tone"]) {
   return "border-border bg-background text-foreground hover:bg-accent";
 }
 
-function sourceLabel(decision: OperatorDecisionView) {
-  if (!decision.requestedBy) return "System";
-  return `${decision.requestedBy.type === "agent" ? "Agent" : "Board"} ${decision.requestedBy.id.slice(0, 8)}`;
+function sourceLabel(decision: OperatorDecisionView, lang: ReturnType<typeof useCompanyLanguage>) {
+  if (!decision.requestedBy) return L(lang, { en: "System", ko: "시스템" });
+  return `${decision.requestedBy.type === "agent" ? L(lang, { en: "Agent", ko: "에이전트" }) : L(lang, { en: "Board", ko: "운영자" })} ${decision.requestedBy.id.slice(0, 8)}`;
 }
 
 export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCardProps) {
+  const lang = useCompanyLanguage();
+  const commonFacts = commonDecisionFacts(decision.definition.options);
+  const subject = decision.definition.humanReview?.decisionSubject ?? decision.title;
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [comment, setComment] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +75,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
   function localError(action: OperatorDecisionAction): string | null {
     if (action.requiresSelection) {
       const bounds = decision.definition.selection;
-      if (!bounds) return "This action cannot accept a selection.";
+      if (!bounds) return L(lang, { en: "This action cannot accept a selection.", ko: "이 조치는 선택지를 받을 수 없습니다." });
       // 그룹별 안내를 먼저 — 무엇을 더 골라야 하는지 구체적이다.
       for (const group of optionGroups ?? []) {
         if (!group.selection) continue;
@@ -78,19 +84,19 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
           const want = group.selection.min === group.selection.max
             ? `${group.selection.min}`
             : `${group.selection.min}~${group.selection.max}`;
-          return `${group.label ?? group.id}: ${want}개를 선택하세요.`;
+          return L(lang, { en: `${group.label ?? group.id}: Select ${want} option(s).`, ko: `${group.label ?? group.id}: ${want}개를 선택하세요.` });
         }
       }
       if (selectedOptionIds.length < bounds.min || selectedOptionIds.length > bounds.max) {
         return bounds.min === bounds.max
-          ? `Select ${bounds.min} option${bounds.min === 1 ? "" : "s"}.`
-          : `Select between ${bounds.min} and ${bounds.max} options.`;
+          ? L(lang, { en: `Select ${bounds.min} option${bounds.min === 1 ? "" : "s"}.`, ko: `선택지를 ${bounds.min}개 선택하세요.` })
+          : L(lang, { en: `Select between ${bounds.min} and ${bounds.max} options.`, ko: `선택지를 ${bounds.min}~${bounds.max}개 선택하세요.` });
       }
     }
     const trimmed = comment.trim();
-    if (decision.definition.comment.mode === "required" && !trimmed) return "A comment is required.";
+    if (decision.definition.comment.mode === "required" && !trimmed) return L(lang, { en: "A comment is required.", ko: "메모를 입력해야 합니다." });
     if (trimmed.length > decision.definition.comment.maxLength) {
-      return `Comment must be ${decision.definition.comment.maxLength} characters or fewer.`;
+      return L(lang, { en: `Comment must be ${decision.definition.comment.maxLength} characters or fewer.`, ko: `메모는 ${decision.definition.comment.maxLength}자 이하여야 합니다.` });
     }
     return null;
   }
@@ -112,7 +118,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     try {
       await onResolve(decision.id, input);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Failed to resolve this Interactive Card.");
+      setError(cause instanceof Error ? cause.message : L(lang, { en: "Failed to resolve this Interactive Card.", ko: "결정 카드를 처리하지 못했습니다." }));
     } finally {
       setSubmittingActionId(null);
     }
@@ -122,27 +128,29 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     <article className="border border-border bg-card p-4" aria-labelledby={`operator-decision-${decision.id}-heading`}>
       {(decision.missionTitle || decision.issueIdentifier || decision.issueTitle) && (
         <div data-operator-decision-context className="mb-2 flex flex-col gap-0.5 border-b border-border pb-2 text-xs">
-          {decision.missionTitle && <span className="text-muted-foreground">미션: {decision.missionTitle}</span>}
+          {decision.missionTitle && <span className="text-muted-foreground">{L(lang, { en: "Mission:", ko: "미션:" })} {decision.missionTitle}</span>}
           {(decision.issueIdentifier || decision.issueTitle) && (
             <span className="font-medium text-foreground">
-              이슈: {decision.issueIdentifier ?? ""}{decision.issueIdentifier && decision.issueTitle ? " — " : ""}{decision.issueTitle ?? ""}
+              {L(lang, { en: "Issue:", ko: "이슈:" })} {decision.issueIdentifier ?? ""}{decision.issueIdentifier && decision.issueTitle ? " — " : ""}{decision.issueTitle ?? ""}
             </span>
           )}
         </div>
       )}
       <div data-operator-decision-meta className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span className="font-semibold uppercase text-foreground">{decision.priority}</span>
-        <span>Requested by {sourceLabel(decision)}</span>
+        <span className="font-semibold text-foreground" title={decision.priority}>{humanLabel(lang, "priority", decision.priority).label}</span>
+        <span>{L(lang, { en: "Requested by", ko: "요청:" })} {sourceLabel(decision, lang)}</span>
         <span>{timeAgo(decision.createdAt)}</span>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">{L(lang, { en: "What needs deciding?", ko: "무엇을 결정해야 하나요?" })}</p>
       <h2
         id={`operator-decision-${decision.id}-heading`}
         data-operator-decision-heading
         tabIndex={-1}
         className="mt-2 text-base font-semibold"
       >
-        {decision.title}
+        {subject}
       </h2>
+      {subject !== decision.title && <p className="mt-1 text-xs text-muted-foreground">{decision.title}</p>}
       {/* 판단 카드(humanReview)가 있으면 마크다운 description 은 중복 — 표시하지 않는다. */}
       {!decision.definition.humanReview && (
         <p id={descriptionId} className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{decision.description}</p>
@@ -153,12 +161,12 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       <div className="mt-3 flex flex-wrap gap-2">
         {decision.issueId && (
           <Button asChild variant="outline" size="sm">
-            <Link to={`/issues/${decision.issueId}`}>Open linked work<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+            <Link to={`/issues/${decision.issueId}`}>{L(lang, { en: "Open linked work", ko: "연관 업무 열기" })}<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
           </Button>
         )}
         {decision.sourceContext.missionId && (
           <Button asChild variant="outline" size="sm">
-            <Link to={`/missions/${decision.sourceContext.missionId}`}>Open mission<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+            <Link to={`/missions/${decision.sourceContext.missionId}`}>{L(lang, { en: "Open mission", ko: "미션 열기" })}<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
           </Button>
         )}
       </div>
@@ -172,6 +180,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
         ))}
       </div>
 
+      {commonFacts.length > 0 && <section className="mt-4"><h3 className="text-sm font-medium">{L(lang, { en: "Common facts", ko: "공통 사실" })}</h3><OperatorDecisionFacts facts={commonFacts} /></section>}
       {decision.interactionType !== "action" && (() => {
         const renderOption = (option: OperatorDecisionView["definition"]["options"][number], nameSuffix: string, asRadio: boolean) => {
           const checked = selectedOptionIds.includes(option.id);
@@ -192,15 +201,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
                   {option.description && <span className="block text-xs text-muted-foreground">{option.description}</span>}
                 </span>
               </span>
-              {option.facts.length > 0 && (
-                <dl className="mt-2 grid gap-1 text-xs">
-                  {option.facts.map((fact) => (
-                    <div key={`${fact.label}:${fact.value}`} className="flex gap-2">
-                      <dt>{fact.label}</dt><dd>{fact.value} ({fact.status})</dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
+              <OperatorDecisionFacts facts={uniqueDecisionFacts(option.facts, commonFacts)} />
               {option.evidenceRefs.map((ref) => (
                 <a key={ref.href} className="mt-2 block text-xs" href={ref.href} target="_blank" rel="noreferrer">
                   {ref.label}
@@ -218,7 +219,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
                 <fieldset key={group.id} className="space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
                   <legend className="text-sm font-medium">{group.label ?? group.id}
                     <span className="ml-1 text-xs text-muted-foreground">
-                      {group.selection?.min === group.selection?.max && group.selection?.max === 1 ? "(1개 선택)" : ""}
+                      {group.selection?.min === group.selection?.max && group.selection?.max === 1 ? L(lang, { en: "(Select 1)", ko: "(1개 선택)" }) : ""}
                     </span>
                   </legend>
                   {decision.definition.options
@@ -228,7 +229,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
               ))}
               {ungrouped.length > 0 && (
                 <fieldset className="space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
-                  <legend className="text-sm font-medium">Options</legend>
+                  <legend className="text-sm font-medium">{L(lang, { en: "Options", ko: "선택지" })}</legend>
                   {ungrouped.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
                 </fieldset>
               )}
@@ -237,7 +238,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
         }
         return (
           <fieldset className="mt-4 space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
-            <legend className="text-sm font-medium">Options</legend>
+            <legend className="text-sm font-medium">{L(lang, { en: "Options", ko: "선택지" })}</legend>
             {decision.definition.options.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
           </fieldset>
         );
@@ -245,8 +246,8 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
 
       {(decision.definition.approvedScope.length > 0 || decision.definition.forbiddenScope.length > 0) && (
         <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
-          <div><strong>Approved scope</strong><ul>{decision.definition.approvedScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
-          <div><strong>Forbidden scope</strong><ul>{decision.definition.forbiddenScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
+          <div><strong>{L(lang, { en: "Approved scope", ko: "승인된 범위" })}</strong><ul>{decision.definition.approvedScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
+          <div><strong>{L(lang, { en: "Forbidden scope", ko: "금지된 범위" })}</strong><ul>{decision.definition.forbiddenScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
         </div>
       )}
 
@@ -262,7 +263,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
             required={decision.definition.comment.mode === "required"}
             aria-describedby={`${descriptionId} ${errorId}`}
             disabled={submittingActionId !== null || !decision.definition.humanReview}
-            title={!decision.definition.humanReview ? "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." : undefined}
+            title={!decision.definition.humanReview ? L(lang, { en: "Decision information and source locations are required before deciding.", ko: "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." }) : undefined}
             className="mt-1 min-h-20 w-full border border-border bg-background p-2 text-sm"
           />
         </div>
@@ -278,10 +279,10 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
             type="button"
             onClick={() => void submit(action)}
             disabled={submittingActionId !== null || !decision.definition.humanReview}
-            title={!decision.definition.humanReview ? "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." : undefined}
+            title={!decision.definition.humanReview ? L(lang, { en: "Decision information and source locations are required before deciding.", ko: "판단 정보와 원본 위치를 보완해야 결정할 수 있습니다." }) : undefined}
             className={cn("border px-3 py-2 text-sm font-medium disabled:opacity-50", toneClass(action.tone))}
           >
-            {submittingActionId === action.id ? "Submitting…" : action.label}
+            {submittingActionId === action.id ? L(lang, { en: "Submitting…", ko: "제출 중…" }) : action.label}
           </button>
         ))}
       </div>
