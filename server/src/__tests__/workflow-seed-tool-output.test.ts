@@ -10,7 +10,9 @@
 //   검증을 거쳐 seed evidence 로 승인되고, 대상 run 에 물화(completed+issueId:null)되어 소비자
 //   toolArgs/dispatch 표현이 원본 검증 파일 경로를 해석한다(복사 영수증·최신 output 아님).
 // RED-2) 기록 훼손(승인 거절) / 파일 유실 / 회사 불일치 / stale attempt 가 각각 구조화 이유로
-//   보수적 거절되고 부분 재사용이 남지 않는다.
+//   보수적 거절되고 부분 재사용이 남지 않는다. 영수증 없는 기록은 생산 시점 저장 다이제스트
+//   (toolResult.artifactSha256) 를 요구하고, 승인 전 변조는 현재 bytes 와의 비교로 잡히며
+//   잘못된 영수증 기록은 toolResult 분기로 내려가지 않고 즉시 거절된다.
 // 대조-3) agent action seed 경로는 그대로 동작한다(회귀 방지).
 import "./helpers/workflow-control-node-boundary.js";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -52,7 +54,7 @@ const renamedToolSteps = (agentId: string): ToolStep[] => [
 ];
 
 // seedWorld 과 동일 구조이되 producer 가 issue 없는 native tool 스텝: 완료 기록은 metadata.toolResult
-// (성공+절대 artifactPath+현재 requestId)이고 산출물은 회사 미션 출력 루트 아래 파일이다.
+// (성공+절대 artifactPath+현재 requestId+생산 시점 artifactSha256)이고 산출물은 회사 미션 출력 루트 아래 파일이다.
 async function toolWorld(toolResult?: Record<string, unknown>) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Seed", issuePrefix: randomUUID(), workProductRoot: root });
@@ -69,8 +71,8 @@ async function toolWorld(toolResult?: Record<string, unknown>) {
   const file = path.join(dir, "result.json"), bytes = Buffer.from('{"rendered":true}');
   await writeFile(file, bytes);
   const recorded = toolResult === undefined
-    ? { requestId, toolName: "render-tool", success: true, artifactPath: file, stdout: null, stderr: null,
-      exitCode: 0, error: null, completedAt: new Date().toISOString() }
+    ? { requestId, toolName: "render-tool", success: true, artifactPath: file, artifactSha256: sha(bytes),
+      stdout: null, stderr: null, exitCode: 0, error: null, completedAt: new Date().toISOString() }
     : toolResult;
   await db.update(workflowStepRuns).set({ status: "completed", completedAt: new Date(),
     metadata: { toolResult: recorded } }).where(eq(workflowStepRuns.id, renderStep.id));
@@ -161,6 +163,34 @@ it("[RED-2c] 회사/실행 스코프 불일치와 stale attempt 는 구조화 �
   await executeWorkflowRun(db, staleConsumedTarget.id);
   await db.update(workflowStepRuns).set({ retryCount: 1 }).where(eq(workflowStepRuns.id, staleConsumed.renderStep.id));
   await expect(readToolSeed(staleConsumed, staleConsumedTarget.id)).rejects.toThrow("workflow_seed_source_attempt_changed");
+});
+
+it("[RED-2d] 생산 후 변조·다이제스트 부재·잘못된 영수증 기록은 승인 자체를 구조화 거절한다", async () => {
+  // 생산 후 승인 전 변조: 현재 bytes 가 기록된 생산 시점 다이제스트와 어긋나면 새 기준 없이 거절.
+  const tampered = await toolWorld();
+  await writeFile(tampered.file, Buffer.from('{"rendered":false,"tampered":true}')); // 생산 이후 교체
+  await expect(tampered.admit()).rejects.toThrow("workflow_seed_tool_output_digest_mismatch");
+  expect(await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.companyId, tampered.companyId))).toEqual([]);
+  expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, tampered.revision.id))).toEqual([]); // 부분 재사용 없음
+  // 다이제스트 부재: 생산 시점 무결성 증거가 없는 기록은 보수적으로 거절된다(승인 시 재기준화 금지).
+  const digestless = await toolWorld();
+  const [digestlessRow] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, digestless.renderStep.id));
+  const digestlessRecord = { ...((digestlessRow.metadata ?? {}) as { toolResult: Record<string, unknown> }).toolResult };
+  delete digestlessRecord.artifactSha256; // 생산 시점 다이제스트만 제거
+  await db.update(workflowStepRuns).set({ metadata: { toolResult: digestlessRecord } })
+    .where(eq(workflowStepRuns.id, digestless.renderStep.id));
+  await expect(digestless.admit()).rejects.toThrow("workflow_seed_tool_output_digest_missing");
+  expect(await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.companyId, digestless.companyId))).toEqual([]);
+  // 잘못된 영수증 기록: 유효한 toolResult 가 있어도 toolResult 분기로 내려가지 않고 즉시 거절.
+  const malformed = await toolWorld();
+  const [malformedRow] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, malformed.renderStep.id));
+  const malformedRecord = ((malformedRow.metadata ?? {}) as { toolResult: Record<string, unknown> }).toolResult;
+  await db.update(workflowStepRuns).set({ metadata: { toolResult: malformedRecord,
+    toolArtifactReceipt: { schemaVersion: "workflow.tool-artifact.v2", junk: true } } })
+    .where(eq(workflowStepRuns.id, malformed.renderStep.id));
+  await expect(malformed.admit()).rejects.toThrow("workflow_seed_tool_output_receipt_invalid");
+  expect(await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.companyId, malformed.companyId))).toEqual([]);
+  expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, malformed.revision.id))).toEqual([]);
 });
 
 it("[대조-3] agent action seed 경로는 그대로 승인·물화·소비된다", async () => {

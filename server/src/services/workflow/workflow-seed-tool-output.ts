@@ -27,11 +27,18 @@ export function parseToolSeedEvidence(evidence: unknown): WorkflowSeedToolOutput
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
+/** Production-time digest the durable toolResult record must carry for receipt-less seed reuse. */
+const storedArtifactDigest = (value: unknown): string | null =>
+  typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+
 /**
  * Read the artifact a completed native tool step actually recorded (receipt authority first,
  * toolResult otherwise) and prove it against the current row: same-run producer binding,
- * company+mission scope, current dispatch attempt and byte-level SHA. Any gap refuses with a
- * structured reason — never a silent reuse and never a loose fallback match.
+ * company+mission scope, current dispatch attempt and byte-level SHA anchored to the digest
+ * stored at production time (receipt sha256, or toolResult artifactSha256 when receipt-less).
+ * A present-but-malformed receipt, a receipt-less record without a stored digest, or current
+ * bytes diverging from that digest each refuse with a structured reason — approval never
+ * re-baselines a digest from the current file; never a silent reuse, never a loose fallback.
  */
 export async function readToolStepSeedArtifact(db: Db, input: { companyId: string;
   run: typeof workflowRuns.$inferSelect; stepRun: typeof workflowStepRuns.$inferSelect }): Promise<WorkflowSeedToolOutput["artifact"]> {
@@ -39,7 +46,11 @@ export async function readToolStepSeedArtifact(db: Db, input: { companyId: strin
   if (s.workflowRunId !== input.run.id || s.issueId !== null) throw seedError("tool_output_scope_mismatch");
   if (s.status !== "completed") throw seedError("source_incomplete");
   const stored = record(s.metadata?.toolResult);
-  const receipt = toolArtifactReceiptSchema.safeParse(s.metadata?.toolArtifactReceipt);
+  const rawReceipt = s.metadata?.toolArtifactReceipt ?? null;
+  const receipt = toolArtifactReceiptSchema.safeParse(rawReceipt);
+  // A present-but-malformed receipt is durable-record corruption, not an absent receipt: refuse
+  // outright instead of falling through to the weaker receipt-less toolResult branch.
+  if (rawReceipt !== null && !receipt.success) throw seedError("tool_output_receipt_invalid");
   let file = "", sha256 = "", byteSize = 0, requestId: string | null = null;
   if (receipt.success) {
     const r = receipt.data;
@@ -53,6 +64,11 @@ export async function readToolStepSeedArtifact(db: Db, input: { companyId: strin
     file = readWorkflowToolArtifactPath(stored) ?? "";
     if (!file) throw seedError("tool_output_record_invalid");
     requestId = typeof stored.requestId === "string" && stored.requestId ? stored.requestId : null;
+    const producedDigest = storedArtifactDigest(stored.artifactSha256);
+    // Without the digest stamped when the tool completed, approval-time bytes cannot be told
+    // apart from post-production tampering: refuse conservatively, never re-baseline.
+    if (!producedDigest) throw seedError("tool_output_digest_missing");
+    sha256 = producedDigest;
   }
   // The producing attempt must still be the step run's current recorded attempt.
   if (!requestId || requestId !== s.lastDispatchRequestId) throw seedError("source_attempt_changed");
@@ -66,7 +82,10 @@ export async function readToolStepSeedArtifact(db: Db, input: { companyId: strin
     if (receipt.success) {
       if (digest(bytes) !== sha256 || bytes.length !== byteSize) throw seedError("sha_mismatch");
     } else {
-      sha256 = digest(bytes); byteSize = bytes.length;
+      // Current bytes must be the produced bytes: divergence from the stored production-time
+      // digest refuses with a structured reason — no new baseline, no partial reuse.
+      if (digest(bytes) !== sha256) throw seedError("tool_output_digest_mismatch");
+      byteSize = bytes.length;
     }
     return { stepRunId: s.id, requestId, path: file, sha256, byteSize,
       executionGeneration: s.executionGeneration, retryCount: s.retryCount, iterationIndex: s.iterationIndex };

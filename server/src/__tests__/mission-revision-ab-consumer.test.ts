@@ -69,7 +69,7 @@ type ToolStep = { id: string; sourceStepId?: string; name: string; type: string;
   dependencies: string[]; toolNames?: string[]; toolArgs?: Record<string, string> };
 
 // 원본 실행: 유튜브 A 를 수집한 native tool 스텝이 완료 기록(metadata.toolResult · 현재 requestId ·
-// 회사 미션 출력 루트 안 artifact)을 남긴 채 실패 종료했다. 수정 실행 계획은 A 만 seed 로 재사용하고
+// 생산 시점 artifactSha256 · 회사 미션 출력 루트 안 artifact)을 남긴 채 실패 종료했다. 수정 실행 계획은 A 만 seed 로 재사용하고
 // B(collect-b) 는 원본에 없는 신규 단계, 종합(combine) 은 A+B 를 모두 필수 입력으로 선언한다.
 async function abWorld() {
   const companyId = randomUUID(), agentId = randomUUID();
@@ -93,7 +93,7 @@ async function abWorld() {
   await writeFile(aFile, aBytes);
   await db.update(workflowStepRuns).set({ status: "completed", completedAt: new Date(),
     metadata: { toolResult: { requestId, toolName: "youtube-collect", success: true, artifactPath: aFile,
-      stdout: null, stderr: null, exitCode: 0, error: null, completedAt: new Date().toISOString() } } })
+      artifactSha256: sha(aBytes), stdout: null, stderr: null, exitCode: 0, error: null, completedAt: new Date().toISOString() } } })
     .where(eq(workflowStepRuns.id, aStep.id));
   await db.update(workflowRuns).set({ status: "failed" }).where(eq(workflowRuns.id, sourceRun.id));
   const [revision] = await db.insert(missions).values({ companyId, ownerAgentId: agentId, title: "Revision", status: "active",
