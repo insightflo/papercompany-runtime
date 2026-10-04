@@ -68,7 +68,7 @@ function buildHandbackComment(input: {
   childWorkProduct: Pick<DelegatedChildWorkProduct, "id" | "title" | "type" | "provider">;
 }) {
   return [
-    "Delegated artifact ready for this workflow step.",
+    "Delegated artifact ready for review, not yet accepted by this workflow step. Next action: inspect the artifact below, then register it here if acceptable.",
     "",
     `Child issue: ${issueLabel(input.childIssue)} - ${input.childIssue.title}`,
     `Child workProduct: ${input.childWorkProduct.title} (${input.childWorkProduct.type}/${input.childWorkProduct.provider}, ${input.childWorkProduct.id})`,

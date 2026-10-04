@@ -1,9 +1,5 @@
 // server/src/services/missions/terminal-mission-human-operator-alert.ts
-// [파일 목적] mission 이 "정말 종단(truly terminal)" — 실행 가능한 continuation 이 하나도 남지 않아
-//   유일한 전진 경로가 Human Operator 판단뿐일 때 — terminal evidence snapshot 마다 정확히 한 번의
-//   Human Operator 요청을 발행한다. 기존 recordHumanOperatorRequestEvent channel(materialize + publish
-//   primitive)을 그대로 재사용하고 병렬 channel/중복 구현을 만들지 않는다.
-//
+// Terminal reports use structured authority; localization changes only the comment wrapper.
 // Contract: authoritative fail-closed classification plus one transaction for
 // scoped idempotency claim, system comment, and Human Operator activity.
 //   - snapshot idempotency: one report per (company,mission,workflowRun,sorted-failed-run-fingerprint-set).
@@ -14,9 +10,10 @@
 //   - sanitize: human comment + workflowTransitionEvents payload 모두 한 줄 bounded. control char/JSON-fragment/raw stderr·error body 제거.
 //   - terminal failure status: approved failed/timed_out 만(cancelled 제외).
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { type SystemLanguage } from "./system-language.js";
+import { companies, issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
 import {
   materializeHumanOperatorRequestPayload,
   publishHumanOperatorRequestEvent,
@@ -105,7 +102,7 @@ export type TerminalMissionFailedRun = {
 };
 
 export type TerminalMissionHumanOperatorCommentInput = {
-  issueId: string;
+  language?: SystemLanguage; issueId: string;
   issueIdentifier: string | null;
   missionTitle: string | null;
   sourceIssueIdentifier: string | null;
@@ -153,8 +150,8 @@ export function buildTerminalMissionHumanOperatorComment(
     "### Mission owner decision",
     `Decision: ${TERMINAL_REPORT_DECISION}`,
     `Source issue: ${sourceToken}`,
-    "Reason: Mission cannot continue automatically. The workflow or its owner-action recovery reached a terminal failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
-    "Next action: Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.",
+    input.language === "ko" ? "Reason: 자동으로 계속할 수 없습니다. 작업 흐름 또는 복구 업무가 실패로 종결됐고, 실행 중인 작업이나 재개 요청, 실행 가능한 다음 단계가 남아 있지 않습니다." : "Reason: Mission cannot continue automatically. The workflow or its owner-action recovery reached a terminal failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
+    input.language === "ko" ? "Next action: 운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다." : "Next action: Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.",
     `Evidence: ${evidence}`,
   ].join("\n");
 }
@@ -231,7 +228,7 @@ export async function emitTerminalMissionHumanOperatorReport(
   const txResult = await db.transaction(async (tx) => {
     // [finding 6] scope enforcement: issue 행을 잠그고 companyId/missionId/originKind 검증. mismatch → fail-closed.
     const locked = await tx
-      .select({ id: issues.id, companyId: issues.companyId, missionId: issues.missionId, originKind: issues.originKind })
+      .select({ id: issues.id, companyId: issues.companyId, missionId: issues.missionId, originKind: issues.originKind, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
       .from(issues)
       .where(eq(issues.id, input.issue.id))
       .limit(1)
@@ -284,7 +281,7 @@ export async function emitTerminalMissionHumanOperatorReport(
         issueId: input.issue.id,
         authorAgentId: null,
         authorUserId: null,
-        body,
+        body: locked.language === "ko" ? buildTerminalMissionHumanOperatorComment({ ...input, issueId: input.issue.id, issueIdentifier: input.issue.identifier, failedRuns: terminalFailedRuns, language: "ko" }) : body,
       })
       .returning();
     void comment;

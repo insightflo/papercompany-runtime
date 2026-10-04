@@ -9,9 +9,9 @@
 //   If the issue fails scope, ALL downstream queries are skipped — no products
 //   are returned for an unverified issue.
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issueWorkProducts, issues, workflowStepRuns } from "@paperclipai/db";
+import { companies, issueWorkProducts, issues, workflowStepRuns } from "@paperclipai/db";
 import type { ProducerWorkProductRef } from "./rework-contract.js";
 
 type StepRun = typeof workflowStepRuns.$inferSelect;
@@ -49,7 +49,7 @@ export async function loadProducerOwnReworkContext(input: {
   workflowRunId?: string | null;
   producerStepId?: string | null;
   producerIssueId: string | null;
-}): Promise<{ instruction: string | null; workProducts: readonly ProducerWorkProductRef[] }> {
+}): Promise<{ instruction: string | null; workProducts: readonly ProducerWorkProductRef[]; defaultLanguage?: string | null }> {
   if (!input.producerIssueId) return { instruction: null, workProducts: [] };
 
   // Guard 1: verify the issue belongs to this company (+ mission when provided).
@@ -59,7 +59,7 @@ export async function loadProducerOwnReworkContext(input: {
   ];
   if (input.missionId) issueConditions.push(eq(issues.missionId, input.missionId));
   const [issueRow] = await input.db
-    .select({ title: issues.title, description: issues.description })
+    .select({ title: issues.title, description: issues.description, defaultLanguage: sql<string | null>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
     .from(issues)
     .where(and(...issueConditions))
     .limit(1);
@@ -112,7 +112,7 @@ export async function loadProducerOwnReworkContext(input: {
     workProducts.push({ title: product.title, ref: ref.trim() });
   }
 
-  return { instruction, workProducts };
+  return { instruction, workProducts, defaultLanguage: issueRow.defaultLanguage };
 }
 
 /**

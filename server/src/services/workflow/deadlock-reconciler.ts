@@ -268,7 +268,7 @@ async function blockIssueOnDeadlock(
 ) {
   const marker = `[${DEADLOCK_COMMENT_MARKER}:${input.runId}:${input.stepId}]`;
   const issue = await db
-    .select({ status: issues.status })
+    .select({ status: issues.status, language: sql<string>`(select default_language from companies where id = ${issues.companyId})` })
     .from(issues)
     .where(eq(issues.id, input.issueId))
     .limit(1)
@@ -290,7 +290,7 @@ async function blockIssueOnDeadlock(
     companyId: input.companyId,
     issueId: input.issueId,
     authorUserId: null,
-    body: `unreachable: upstream step failed; replan or cancel ${marker}`,
+    body: `unreachable: upstream step failed; replan or cancel ${marker}\n${issue.language === "ko" ? "선행 단계 실패로 이 단계를 실행할 수 없습니다. 다음 행동: 실패한 의존 업무를 확인한 뒤 수정 계획을 제출하거나 업무를 취소해 주세요. 이 차단은 재시도를 요청하지 않습니다." : "The upstream failure prevents this step from running. Next action: review the failed dependency, then submit a revised plan or cancel the work. This block does not request a retry."}`,
     createdAt: now,
     updatedAt: now,
   });

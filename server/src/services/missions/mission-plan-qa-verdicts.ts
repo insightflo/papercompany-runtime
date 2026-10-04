@@ -23,6 +23,7 @@ import { planQaSubmissionDocumentSchema, readVerifiedPlanQaGate } from "./plan-q
 import { issueService } from "../issues.js";
 import type { ValidationVerdict } from "../validation-verdict.js";
 import { lockMissionPlanQaAuthority } from "./plan-qa-admission-lock.js";
+import { buildPlanQaResultComment, loadCompanySystemLanguage } from "./system-comment-display.js";
 
 export type PlanQaVerdictActor =
   | { actorType: "agent"; actorId: string }
@@ -39,9 +40,8 @@ export async function recordMissionPlanQaVerdict(input: {
     await lockMissionPlanQaAuthority(db, input.companyId, input.missionId);
     await writeBaseVerdict({ ...input, db });
   });
-  const body = input.verdict === "pass" ? "Plan is sound.\nPASS"
-    : `Plan has gaps.\nREQUEST_CHANGES: ${input.diagnostics?.map((d) => d.message ?? d.code ?? "").filter(Boolean).join("; ") || "needs work"}`;
   try {
+    const body = buildPlanQaResultComment({ ...input, language: await loadCompanySystemLanguage(input.db, input.companyId) });
     await issueService(input.db).addComment(input.planQaIssueId, body, {
       ...(input.reviewedBy.actorType === "agent" ? { agentId: input.reviewedBy.actorId } : {}),
     });

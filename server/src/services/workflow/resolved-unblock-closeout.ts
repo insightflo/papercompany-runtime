@@ -1,7 +1,7 @@
-import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
-import { issues, type Db } from "@paperclipai/db";
-import { logActivity } from "../activity-log.js";
-import { issueService } from "../issues.js";
+import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { companies, issues, type Db } from "@paperclipai/db";
+import { logActivity } from "../activity-log.js"; import { issueService } from "../issues.js";
+import { buildTerminalCloseoutComment } from "../missions/system-comment-display.js";
 import { RECOVERY_UNBLOCK_ORIGIN_KIND } from "../missions/recovery-ownership-guard.js";
 import { ensureMissionKnowledgeCompileIssueSafe } from "../missions/mission-knowledge-compile.js";
 
@@ -42,7 +42,7 @@ export async function closeResolvedWorkflowUnblocks(input: ResolvedUnblockCloseo
   if (doneSourceIds.length === 0) return;
 
   const openUnblocks = await db
-    .select({ id: issues.id, originId: issues.originId, status: issues.status })
+    .select({ id: issues.id, originId: issues.originId, status: issues.status, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
     .from(issues)
     .where(and(
       eq(issues.companyId, run.companyId),
@@ -61,7 +61,7 @@ export async function closeResolvedWorkflowUnblocks(input: ResolvedUnblockCloseo
 
     await service.addComment(
       unblock.id,
-      `Resolved automatically: source issue ${unblock.originId} reached done; this unblock action no longer represents open mission work.`,
+      buildTerminalCloseoutComment({ language: unblock.language === "ko" ? "ko" : "en", sourceIssueId: unblock.originId, sourceStatus: "done" }),
       {},
     );
     await logActivity(db, {

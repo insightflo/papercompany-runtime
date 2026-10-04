@@ -67,7 +67,7 @@ export function buildAssignedIssueArtifactWorkflowLine(): string {
 }
 
 export function buildMissingWorkProductRegistrationGateComment(input: {
-  runId: string;
+  language?: "ko" | "en"; runId: string;
   claimedArtifactPaths: readonly string[];
   commentClaimedArtifactPaths?: readonly string[];
   sourceCommentIds?: readonly string[];
@@ -83,11 +83,11 @@ export function buildMissingWorkProductRegistrationGateComment(input: {
     ? input.sourceCommentIds.map((commentId) => `- ${commentId}`).join("\n")
     : null;
   return [
-    "## Mission artifact gate: workProduct registration missing",
+    "## 산출물 미등록으로 업무가 차단됐습니다 (Mission artifact gate: workProduct registration missing)", input.language === "en" ? "The issue is blocked because no official workProduct is registered. A successful run or reported file path is not registration. Next action: register the existing file through the Workflow API below, then request workflow resume." : "공식 산출물이 등록되지 않아 업무를 차단했습니다. 실행 성공이나 보고된 파일 경로는 등록을 뜻하지 않습니다. 다음 행동: 아래 Workflow API로 기존 파일을 등록한 뒤 작업 흐름 재개를 요청해 주세요.",
     `- 실행 runId: \`${input.runId}\``,
-    "- 감지: run은 succeeded로 종료됐고 산출물 파일 경로를 보고했지만, issue에 공식 `workProduct`가 등록되어 있지 않습니다.",
-    "- 조치: downstream workflow가 비공식 comment 경로만 보고 진행하지 않도록 source issue를 `blocked`로 전이합니다.",
-    "- 복구: 아래 파일을 이 issue의 `workProduct`로 등록한 뒤 workflow를 resume하세요.",
+    "- 이유: 실행은 성공(succeeded)으로 종료되고 파일 경로도 보고됐지만, 이 업무에 공식 산출물(workProduct)이 등록되지 않았습니다.",
+    "- 영향: 댓글에 적힌 파일 경로만으로 다음 작업이 진행되지 않도록 원래 업무를 차단(blocked) 상태로 변경합니다.",
+    "- 다음 행동: 아래 절차에 따라 파일을 이 업무의 공식 산출물(workProduct)로 등록한 뒤 작업 흐름 재개를 요청해 주세요.",
     input.allowedArtifactRoot
       ? `- 허용 경로: 이 mission의 local workProduct는 \`${input.allowedArtifactRoot}\` 아래에 있어야 합니다.`
       : null,
