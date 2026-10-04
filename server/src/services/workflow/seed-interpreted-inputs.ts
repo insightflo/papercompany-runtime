@@ -61,7 +61,7 @@ export function hasSeedInterpretedInputTokens(step: { toolArgs?: unknown }) {
 
 /** 서버가 의존관계로 유도한 영향 집합(대상 정의 좌표): 원점 스텝 + 요청 seed 중 그 하류만. 독립 분기 제외. */
 export function seedImpactStepIds(targetSteps: RevisionStep[], requestedStepIds: string[], originStepId: string): string[] {
-  const requested = new Set(requestedIds), affected = new Set([originStepId]);
+  const requested = new Set(requestedStepIds), affected = new Set([originStepId]);
   for (let grew = true; grew;) {
     grew = false;
     for (const step of targetSteps) {
