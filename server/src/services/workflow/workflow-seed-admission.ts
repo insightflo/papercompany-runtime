@@ -75,8 +75,10 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           products.push({ id: s.product.id, type: s.product.type as "document", title: s.product.title, sha256, path: s.file, producer: s.producer });
         }
       } else if (!toolArtifact) {
+        const issueId = step.issueId;
+        if (!issueId) throw seedError("source_incomplete", { stepId: id });
         const rows = await tx.select().from(issueWorkProducts).where(and(eq(issueWorkProducts.companyId, input.companyId),
-          eq(issueWorkProducts.issueId, step.issueId), ne(issueWorkProducts.status, "archived"))).for("share");
+          eq(issueWorkProducts.issueId, issueId), ne(issueWorkProducts.status, "archived"))).for("share");
         if (!rows.length) throw seedError("products_missing", { stepId: id });
         for (const product of rows) {
           let selected;
