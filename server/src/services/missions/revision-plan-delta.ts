@@ -8,8 +8,9 @@
 //   - reuse + 변경된 지시/해석 입력 모순
 //   - 계획 단위 ↔ 변경안 단위 불일치, 알 수 없는 참조
 //   - 서로 다른 별칭이 같은 생산 단위로 합쳐지는 모호한 매핑(mission_revision_unit_reference_ambiguous)
-//   - 변경안이 선언한 필수 입력(requiredInputs)을 계획의 결과 선택자가 소비하지 않음 — 이 입력 연결
-//     검사는 validateRevisionPlanDeltaWiring 으로 분리되어 현재 템플릿 상속 적용 후 실행된다
+//   - 변경안이 선언한 필수 입력(requiredInputs)을 계획의 결과 선택자가 소비하지 않음, 또는 필수 입력의
+//     selector 값이 실제 선택자 값과 다름(같은 생산자의 다른 파일 혼동) — 이 입력 연결 검사는
+//     validateRevisionPlanDeltaWiring 으로 분리되어 현재 템플릿 상속 적용 후 실행된다
 //   - 선언된 필수 기능(capabilityRequirements)을 활성 도구가 제공하지 않음(mission_revision_capability_gap)
 // [연결] mission-owner-plan-decisions.ts recordLatestAuthorizedMissionOwnerPlanDecision — 실행 배치(도구/권한)
 //   검증 통과 직후 호출되고, 검증을 통과한 원본 delta 객체를 활성 plan refs 보존에 돌려준다.
@@ -51,6 +52,19 @@ function readUnitSourceStepId(unit: Record<string, unknown>): string | null {
 function toolCapabilities(tool: PlanningArtifactTool | undefined): string[] {
   const capabilities = tool && Array.isArray(tool.adapterConfig.capabilities) ? tool.adapterConfig.capabilities : [];
   return capabilities.filter((capability): capability is string => typeof capability === "string");
+}
+
+// [선택자 값 동등성 — Q12] 결과 선택자 값은 JSON 계약 값(workProductSelectorsSchema — {type,title}
+//   strict, 선택 필드 없음) 이다. 키 순서 무관 정규형 직렬화로 동등성을 판정하고 진단 메시지에도 같은
+//   정규형을 쓴다. 스키마가 선택 필드를 갖지 않으므로 '생략 vs 기본값' 호환 형태는 존재하지 않는다 —
+//   정규형이 다르면 다른 값이다(완화 없음).
+function canonicalSelectorJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalSelectorJson).join(",")}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort()
+      .map(key => `${JSON.stringify(key)}:${canonicalSelectorJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 // [목적] 공개 제출된 revisionDelta 를 검증하고 활성 계획 refs 보존용 원본을 반환한다.
@@ -188,9 +202,11 @@ export async function validateRevisionPlanDelta(input: {
 
 // [입력 연결·별칭 모호성 — 상속 후 검사 단계] 선택자 키는 단위 id/원본 단계 별칭으로 해석된다. 서로 다른
 //   키가 같은 생산 단위로 합쳐지면 모호하고, 변경안이 선언한 필수 입력은 실제 선택자 연결로 소비되어야
-//   한다. 이 검사는 현재 템플릿 상속(inheritCurrentTemplateWiring) 이 적용된 effective units 에 대해
-//   실행된다 — 상속 전 초안에서 requiredInputs 를 거절하면 생략된 selector 를 상속해 소비할 수 있는 정상
-//   계획이 막힌다. 명시적 {} 로 필수 입력을 없앤 제출도 여기서 계속 거절된다.
+//   한다. 필수 입력의 selector 값도 해당 생산 단위를 향한 실제 선택자 값과 정규형 동등해야 한다 — 같은
+//   생산자의 다른 파일(다른 type/title)을 가리키는 필수 입력은 혼동 가능 연결로 구조화 거절한다. 이 검사는
+//   현재 템플릿 상속(inheritCurrentTemplateWiring) 이 적용된 effective units 에 대해 실행된다 — 상속 전
+//   초안에서 requiredInputs 를 거절하면 생략된 selector 를 상속해 소비할 수 있는 정상 계획이 막힌다.
+//   명시적 {} 로 필수 입력을 없앤 제출도 여기서 계속 거절된다.
 // [연결] revision-plan-decision-state.ts validateRevisionPlanDeltaOrRecordRejection — 상속 적용 직후.
 export function validateRevisionPlanDeltaWiring(input: {
   readonly delta: Record<string, unknown>;
@@ -218,7 +234,7 @@ export function validateRevisionPlanDeltaWiring(input: {
     const unitId = readUnitId(unit);
     const deltaUnit = unitId ? deltaUnitById.get(unitId) : undefined;
     if (!unitId || !deltaUnit) continue;
-    const resolvedProducers = new Set<string>();
+    const selectorByProducer = new Map<string, unknown>();
     if (isPlainObject(unit.workProductSelectors)) {
       for (const key of Object.keys(unit.workProductSelectors)) {
         const producer = aliasToUnitId.get(key);
@@ -227,12 +243,12 @@ export function validateRevisionPlanDeltaWiring(input: {
             `단위 ${unitId} 의 결과 선택자 키 ${key} 가 알 수 없는 단계 참조입니다.`));
           continue;
         }
-        if (resolvedProducers.has(producer)) {
+        if (selectorByProducer.has(producer)) {
           diagnostics.push(unitAmbiguous(
             `단위 ${unitId} 의 선택자 별칭 ${key} 이(가) 같은 생산 단위 ${producer} 로 합쳐집니다.`));
           continue;
         }
-        resolvedProducers.add(producer);
+        selectorByProducer.set(producer, unit.workProductSelectors[key]);
       }
     }
     for (const requirement of deltaUnit.requiredInputs ?? []) {
@@ -242,9 +258,17 @@ export function validateRevisionPlanDeltaWiring(input: {
           `단위 ${unitId} 의 필수 입력이 알 수 없는 단위 ${requirement.fromUnitId} 를 참조합니다.`));
         continue;
       }
-      if (!resolvedProducers.has(producer)) {
+      const actualSelector = selectorByProducer.get(producer);
+      if (actualSelector === undefined) {
         diagnostics.push(deltaInvalid(
           `변경안이 선언한 필수 입력(${requirement.fromUnitId}) 이 계획 단위 ${unitId} 의 결과 선택자에서 소비되지 않습니다.`));
+        continue;
+      }
+      // [Q12 — 값 동등성] 생산 단위 존재만으로 충분하지 않다: selector 값까지 같아야 같은 파일이다.
+      if (canonicalSelectorJson(requirement.selector) !== canonicalSelectorJson(actualSelector)) {
+        diagnostics.push(deltaInvalid(
+          `단위 ${unitId} 의 필수 입력(${requirement.fromUnitId}) 선택자가 계획의 결과 선택자 값과 다릅니다 `
+          + `(변경안 ${canonicalSelectorJson(requirement.selector)} / 계획 ${canonicalSelectorJson(actualSelector)}).`));
       }
     }
   }

@@ -5,6 +5,8 @@
 //   조기 invalid + 거부 원장 진단 + PLAN-QA·revision run 부재를, 성공 계열은 pending refs → 실제
 //   PLAN-QA 승인 → recorded 그래프 일치 → 동일 decision 재제출 noop/동일 정의를 독립 it 로 증명한다.
 //   정의 전용 executor 경계(실제 실행 없음)와 기존 template-apply 두 it 는 그대로다.
+//   [Q12] requiredInputs selector 값 동등성(같은 생산자·다른 파일 혼동 거절) it 들도 같은 공개 경로로
+//   검증한다.
 import "./helpers/workflow-control-node-boundary.js";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
@@ -14,8 +16,9 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { createDb, missionPlanDecisionSubmissions, workflowRuns, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
-  activePlanRefs, diagnosticsOf, documentSelector, grantSlice1Tool, openPlanQaIssueIds, paqoDefinitionSteps,
-  registerSlice1Tool, slice1Decision, slice1PublicationContract, slice1Unit, slice1VerifyContract, slice1World,
+  activePlanRefs, diagnosticsOf, documentSelector, findPaqoDefinition, grantSlice1Tool, openPlanQaIssueIds,
+  paqoDefinitionSteps, registerSlice1Tool, slice1Decision, slice1PublicationContract, slice1Unit, slice1VerifyContract,
+  slice1World,
 } from "./helpers/mission-revision-slice1-world.js";
 import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 
@@ -196,4 +199,41 @@ it("explicitly empty steps dependency declaration stays empty while omitted wiri
   expect(persisted?.dependencies).toEqual([]); // 명시적 빈 선언 보존 — 템플릿 의존성 미상속
   expect(persisted?.workProductSelectors).toEqual({ write: documentSelector("report-current.md") }); // 생략은 상속
   expect(persisted?.toolArgs).toEqual({ content: "{$steps.write.workProductPath}" });
+});
+
+// [Q12 — 선택자 값 동등성] 필수 입력(requiredInputs) 의 selector 값이 실제 결과 선택자 값과 정규형
+//   (키 순서 무관) 으로 같아야 한다. 같은 생산 단위를 가리키더라도 값이 다르면(다른 title/type) 같은
+//   생산자의 다른 파일을 혼동하는 연결이므로 구조화 거절한다. 호환 형태는 JSON 객체 무순서성뿐이며,
+//   결과 선택자 스키마({type,title} strict, 선택 필드 없음) 가 다르게 취급하는 형태는 완화 없이 거절된다.
+it("requiredInputs selector value equal to the wired selector passes regardless of key order", async () => {
+  const w = await prepareWorld(agentId => templateSteps(agentId));
+  const { writeStep, publishStep } = await expectRecordedSteps(w, () => slice1Decision(w.revision.id,
+    templateUnits(w), templateDelta(w, {
+      requiredInputs: [{ fromUnitId: "write", selector: { title: "report-current.md", type: "document" } }],
+    })));
+  expect(writeStep).toBeTruthy();
+  expect(publishStep!.workProductSelectors).toEqual({ [writeStep!.id]: documentSelector("report-current.md") });
+  expect(publishStep!.toolArgs).toEqual({ content: `{$steps.${writeStep!.id}.workProductPath}` });
+});
+
+it("requiredInputs selector value pointing at another file of the same producer is rejected", async () => {
+  const w = await prepareWorld(agentId => templateSteps(agentId));
+  const diagnostics = await expectStructuredRejection(w, slice1Decision(w.revision.id,
+    templateUnits(w), templateDelta(w, {
+      requiredInputs: [{ fromUnitId: "write", selector: documentSelector("report-draft.md") }],
+    })), "mission_revision_delta_invalid");
+  expect(diagnostics.some(d => d.message.includes("report-draft.md") && d.message.includes("report-current.md"))).toBe(true);
+  expect(await findPaqoDefinition(db, w.companyId, w.revision.id)).toBeNull(); // 거부는 정의를 만들지 않는다
+});
+
+it("requiredInputs selector forms the selector schema does not treat equal are not loosened", async () => {
+  // {type,title} strict 스키마에 선택 필드가 없으므로 추가 필드·다른 type 은 '다른 값' 이다.
+  const w = await prepareWorld(agentId => templateSteps(agentId));
+  for (const selector of [{ type: "document", title: "report-current.md", note: "latest" },
+    { type: "artifact", title: "report-current.md" }]) {
+    const diagnostics = await expectStructuredRejection(w, slice1Decision(w.revision.id,
+      templateUnits(w), templateDelta(w, { requiredInputs: [{ fromUnitId: "write", selector }] })),
+      "mission_revision_delta_invalid");
+    expect(diagnostics.some(d => d.message.includes("선택자가 계획의 결과 선택자 값과 다릅니다"))).toBe(true);
+  }
 });
