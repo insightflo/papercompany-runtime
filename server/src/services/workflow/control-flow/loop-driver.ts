@@ -49,7 +49,7 @@ import { resetStepRunForRework } from "./step-reset.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
 import { isDeliveryReadbackStep, isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
-import { buildWorkflowReworkContract, renderSourceScopeTag, renderWorkflowReworkComment, applyRecurrencePromotion } from "./rework-contract.js";
+import { buildWorkflowReworkContract, renderSourceScopeTag, renderWorkflowReworkComment, applyRecurrencePromotion } from "./rework-contract.js"; import { normalizeSystemLanguage } from "../../missions/system-language.js";
 import { loadProducerDependencyArtifacts, loadProducerOwnReworkContext } from "./rework-producer-context.js";
 import { applyCapAcceptancePass } from "./qa-cap-acceptance.js";
 import { loadWorkflowApiFeedback, loadWorkflowApiFindings, loadPriorRejectedFindings } from "../validation-verdict-ledger.js";
@@ -485,7 +485,7 @@ export async function applyBackEdgeReworkPass(
       await db.insert(issueComments).values({
         companyId: run.companyId,
         issueId: stepRun.issueId,
-        body: renderWorkflowReworkComment(reworkContract),
+        body: renderWorkflowReworkComment(reworkContract, normalizeSystemLanguage(producerOwnContext.defaultLanguage)),
       });
     }
     reworkedCount += 1;

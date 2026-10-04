@@ -11,8 +11,9 @@ import { buildExistingArtifactRegistrationActionLines } from "../work-products/a
 import { metadataDigestPath } from "./mission-execution-digest.js";
 import { prose, type SystemLanguage } from "./system-language.js";
 export { buildMainExecutorBrief, buildMissionOwnerUnblockDescription } from "./mission-owner-unblock-description.js";
+const display = (language: SystemLanguage | undefined, ko: string, en: string) => language === "ko" ? ko : en;
 export function buildRetrySourceIssueWakeupResultComment(input: {
-  status: MissionOwnerDecisionWakeupDispatchStatus;
+  language?: SystemLanguage; status: MissionOwnerDecisionWakeupDispatchStatus;
   missionId: string;
   ownerActionIssueId: string;
   ownerActionLabel: string;
@@ -24,8 +25,7 @@ export function buildRetrySourceIssueWakeupResultComment(input: {
   detailReason?: string | null;
 }) {
   const common = {
-    missionId: input.missionId,
-    ownerActionIssueId: input.ownerActionIssueId,
+    language: input.language, missionId: input.missionId, ownerActionIssueId: input.ownerActionIssueId,
     ownerActionLabel: input.ownerActionLabel,
     sourceIssueId: input.sourceIssueId,
     sourceLabel: input.sourceLabel,
@@ -39,7 +39,7 @@ export function buildRetrySourceIssueWakeupResultComment(input: {
     return buildRetrySourceIssueWakeupDispatchedComment(common);
   }
   return [
-    "### Mission owner retry wakeup not queued",
+    display(input.language, "### Mission owner retry wakeup not queued\n재시도 실행 요청이 대기열에 들어가지 않았습니다. 다음 행동: 대기열 결과와 검증 내용을 확인한 뒤 복구를 다시 요청해 주세요.", "### Mission owner retry wakeup not queued\nNo retry wakeup was queued. Check the queue result and validation detail before requesting recovery again."),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     `Queue result: ${input.status}`,
@@ -87,7 +87,7 @@ export function extractLatestRequestChangesSummary(texts: Array<string | null | 
 }
 
 export function buildStaleSourceIssueWakeupDispatchedComment(input: {
-  missionId: string;
+  language?: SystemLanguage; missionId: string;
   sourceIssueId: string;
   sourceLabel: string;
   failedRunId: string;
@@ -96,7 +96,7 @@ export function buildStaleSourceIssueWakeupDispatchedComment(input: {
   idempotencyKey: string;
 }) {
   return [
-    "### Mission supervision stale source wakeup dispatched",
+    display(input.language, "### Mission supervision stale source wakeup dispatched\n이전 실행이 종료되어 복구 실행을 요청했습니다. 다음 행동: 다음 실행 기록을 확인해 주세요. 요청만으로 실제 실행을 확인할 수는 없습니다.", "### Mission supervision stale source wakeup dispatched\nA recovery wakeup was requested after the previous run ended. Check the next run record; this request does not confirm execution."),
     buildStaleSourceIssueWakeupDispatchedMarker({
       missionId: input.missionId,
       sourceIssueId: input.sourceIssueId,
@@ -111,7 +111,7 @@ export function buildStaleSourceIssueWakeupDispatchedComment(input: {
 }
 
 export function buildWorkProductReuseWakeDispatchedComment(input: {
-  missionId: string;
+  language?: SystemLanguage; missionId: string;
   sourceIssueId: string;
   sourceLabel: string;
   artifactPath: string;
@@ -122,7 +122,7 @@ export function buildWorkProductReuseWakeDispatchedComment(input: {
   idempotencyKey: string;
 }) {
   return [
-    "### Mission supervision workProduct-reuse wakeup dispatched",
+    display(input.language, "### Mission supervision workProduct-reuse wakeup dispatched\n기존 파일의 산출물 등록을 위한 실행을 요청했습니다. 파일은 있지만 등록과 후속 실행은 아직 확인되지 않았습니다. 다음 행동: 아래 경로를 등록하고 실행 기록을 확인해 주세요.", "### Mission supervision workProduct-reuse wakeup dispatched\nAn artifact-registration wakeup was requested. The file exists, but registration and subsequent execution are not confirmed by this request."),
     buildWorkProductReuseWakeDispatchedMarker({
       missionId: input.missionId,
       sourceIssueId: input.sourceIssueId,
@@ -140,12 +140,12 @@ export function buildWorkProductReuseWakeDispatchedComment(input: {
 }
 
 export function buildValidatorRetryEvidenceComment(input: {
-  sourceLabel: string;
+  language?: SystemLanguage; sourceLabel: string;
   childLabel: string;
   evidenceLines: string[];
 }) {
   return [
-    "### Validator retry evidence",
+    display(input.language, "### Validator retry evidence\n수정 업무는 완료됐지만 새 검증 결과가 필요합니다. 다음 행동: 아래 근거를 검토하고 PASS 또는 REQUEST_CHANGES를 제출해 주세요.", "### Validator retry evidence\nA correction is complete; validation still needs a new verdict. Review the evidence below before deciding PASS or REQUEST_CHANGES."),
     `Source issue: ${input.sourceLabel}`,
     `Completed correction issue: ${input.childLabel}`,
     "Re-run the validator against the corrected artifact context below.",
@@ -234,7 +234,7 @@ export function buildRetrySourceIssueComment(input: {
   ].filter((line): line is string => line !== null).join("\n\n");
   const products = (input.activeWorkProducts ?? []).slice(0, SOURCE_RETRY_WORK_PRODUCT_MAX);
   return [
-    prose(language, "retry_comment_heading"),
+    prose(language, "retry_comment_heading"), prose(language, "retry_comment_status"),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     "Decision: retry_source_issue",
@@ -268,14 +268,14 @@ export function buildRetrySourceIssueComment(input: {
   ].filter((line): line is string => line !== null).join("\n");
 }
 export function buildRetrySourceIssueRequestChangesContextComment(input: {
-  ownerActionIssueId: string;
+  language?: SystemLanguage; ownerActionIssueId: string;
   ownerActionLabel: string;
   sourceIssueId: string;
   sourceLabel: string;
   requestChangesSummary: string;
 }) {
   return [
-    "### Mission owner retry REQUEST_CHANGES context",
+    display(input.language, "### Mission owner retry REQUEST_CHANGES context\n다음 행동: 아래 검증 지적 사항을 수정한 뒤 다시 검토를 요청해 주세요.", "### Mission owner retry REQUEST_CHANGES context\nNext action: address the validation feedback below before requesting another review."),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
     "Use this latest validation objection when retrying the source issue.",
@@ -288,7 +288,7 @@ export function buildRetrySourceIssueRequestChangesContextComment(input: {
 }
 
 export function buildRetrySourceIssueWakeupDispatchedComment(input: {
-  missionId: string;
+  language?: SystemLanguage; missionId: string;
   ownerActionIssueId: string;
   ownerActionLabel: string;
   sourceIssueId: string;
@@ -297,7 +297,7 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
   idempotencyKey: string;
 }) {
   return [
-    "### Mission owner retry wakeup dispatched",
+    display(input.language, "### Mission owner retry wakeup dispatched\n재시도 실행을 요청했습니다. 이 댓글은 실제 실행을 확인한 기록이 아닙니다.\n다음 행동: 담당 에이전트의 다음 실행 기록을 확인해 주세요.", "### Mission owner retry wakeup dispatched\nThe retry wakeup was requested; execution is not confirmed by this comment.\nNext action: check the target agent's next run record."),
     buildMissionOwnerDecisionAppliedMarker({
       ownerActionIssueId: input.ownerActionIssueId,
       sourceIssueId: input.sourceIssueId,
@@ -318,7 +318,7 @@ export function buildRetrySourceIssueWakeupDispatchedComment(input: {
 }
 
 export function buildRetrySourceIssueWakeupHandledByWorkflowComment(input: {
-  missionId: string;
+  language?: SystemLanguage; missionId: string;
   ownerActionIssueId: string;
   ownerActionLabel: string;
   sourceIssueId: string;
@@ -327,7 +327,7 @@ export function buildRetrySourceIssueWakeupHandledByWorkflowComment(input: {
   idempotencyKey: string;
 }) {
   return [
-    "### Mission owner retry wakeup handled by workflow",
+    display(input.language, "### Mission owner retry wakeup handled by workflow\n기존 작업 흐름 재개 요청이 이 업무를 이미 포함하여 추가 실행을 요청하지 않았습니다.\n다음 행동: 기존 작업 흐름의 실행 진행 상황을 확인해 주세요.", "### Mission owner retry wakeup handled by workflow\nAn existing workflow resume request already covers this issue; no second wakeup was requested.\nNext action: check the existing workflow run for execution progress."),
     buildMissionOwnerDecisionAppliedMarker({
       ownerActionIssueId: input.ownerActionIssueId,
       sourceIssueId: input.sourceIssueId,

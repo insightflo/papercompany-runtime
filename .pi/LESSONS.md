@@ -1,5 +1,16 @@
 # Runtime verification lessons
 
+### 2026-10-04 — fixture fidelity for recovery-advice language-boundary regression
+- Date: 2026-10-04
+- Task: Essential closeout language-boundary regression (issue-comment work).
+- What failed: New fixture omitted the required mission owner agent (setup error misread as product RED); a blocked/no-official-QA fixture wrongly expected a non-null operatorComment.
+- Root cause: Incomplete schema fixture and wrong production-branch expectation before asserting rendered comments.
+- Category: fixture fidelity / test design.
+- Fix: Insert schema-valid owner agent and a current structured PLAN-QA request_changes verdict; assert the actual producer_rework branch.
+- Prevention rule: Keep setup RED separate from product RED; inspect which production branch fires before expecting a rendered comment; keep embedded-PG fixture tests serial (`--maxWorkers=1`).
+- Reuse trigger: Recovery advice / operatorComment boundary tests.
+- Evidence: `/tmp/issue-comment-essential-evidence/boundary-red.log`, `boundary-red-confirmed.log`, `targeted-final.log`.
+
 ### 2026-10-03 — recovery diagnostics need whole-header and non-HTTP URI redaction
 - Date: 2026-10-03
 - Task: Stage 1 review fixes (display only).

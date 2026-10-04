@@ -14,10 +14,12 @@
 //   - producer 판정은 "공식 계획/실행표 장부"에서만 읽는다. 텍스트 제목 예외를 늘리지 말 것.
 //   - comments are display/audit only and never decide recovery action.
 //   - operatorComment는 한국어 paste-ready. plan 회수 시 템플릿만 교체.
-import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { buildRecoveryDraft } from "./system-comment-display.js";
+import { normalizeSystemLanguage, type SystemLanguage } from "./system-language.js";
 import {
-  issues,
+  companies, issues,
   heartbeatRuns,
   issueWorkProducts,
   missionPlanArtifacts,
@@ -338,7 +340,7 @@ export function resolveMissionRecoveryAdvice(input: {
   runs: RunForAdvice[];
   workProducts?: WorkProductForAdvice[];
   workflowSteps?: WorkflowStepForAdvice[];
-  selectedIssueId?: string | null;
+  selectedIssueId?: string | null; language?: SystemLanguage;
 }): MissionRecoveryAdvice {
   const evidence: RecoveryEvidence[] = [];
   const missingEvidence: string[] = [];
@@ -479,7 +481,7 @@ export function resolveMissionRecoveryAdvice(input: {
         targetAction: "qa_recheck",
         leafCause: `producer(${producer.identifier ?? producer.id})가 QA REQUEST_CHANGES 이후 workProduct를 수정했습니다. QA 재검이 필요합니다.`,
         evidence,
-        operatorComment: buildQaRecheckComment({ qa: qaSignal.issue, producer }),
+        operatorComment: buildQaRecheckComment({ qa: qaSignal.issue, producer, language: input.language }),
         executionInstruction: buildIssueActivationInstruction({
           issue: qaSignal.issue,
           actionLabel: "QA recheck",
@@ -504,7 +506,7 @@ export function resolveMissionRecoveryAdvice(input: {
       targetAction: "rework",
       leafCause: qaSignal.summary,
       evidence,
-      operatorComment: buildProducerReworkComment({ producer, qa: qaSignal.issue, leafCause: qaSignal.summary }),
+      operatorComment: buildProducerReworkComment({ producer, qa: qaSignal.issue, leafCause: qaSignal.summary, language: input.language }),
       executionInstruction: buildIssueActivationInstruction({
         issue: producer,
         actionLabel: "producer rework",
@@ -566,31 +568,17 @@ export function resolveMissionRecoveryAdvice(input: {
 function buildProducerReworkComment(input: {
   producer: IssueForAdvice;
   qa: IssueForAdvice;
-  leafCause: string;
+  leafCause: string; language?: SystemLanguage;
 }): string {
-  const producerLabel = input.producer.identifier ?? input.producer.id;
-  const qaLabel = input.qa.identifier ?? input.qa.id;
-  return [
-    "재작업 요청입니다.",
-    "",
-    `QA가 verdict를 통과시키지 못했습니다. QA 이슈(${qaLabel})를 억지로 PASS 처리하지 말고, ${producerLabel}의 산출물을 다시 고쳐주세요.`,
-    "",
-    `QA가 지적한 사유: ${input.leafCause}`,
-    "",
-    "수정 후 workProduct를 다시 등록하고 workflow complete를 호출한 뒤, 그 다음에만 QA를 다시 실행하세요.",
-  ].join("\n");
+  return buildRecoveryDraft({ language: input.language ?? "ko", kind: "producer_rework",
+    producerLabel: input.producer.identifier ?? input.producer.id,
+    qaLabel: input.qa.identifier ?? input.qa.id, leafCause: input.leafCause });
 }
 
-function buildQaRecheckComment(input: { qa: IssueForAdvice; producer: IssueForAdvice }): string {
-  const qaLabel = input.qa.identifier ?? input.qa.id;
-  const producerLabel = input.producer.identifier ?? input.producer.id;
-  return [
-    "QA 재검 요청입니다.",
-    "",
-    `producer(${producerLabel})가 산출물을 수정한 뒤 workflow complete를 호출했습니다. QA 이슈(${qaLabel})를 다시 실행해 재검해 주세요.`,
-    "",
-    "producer가 추가로 손대기 전에 QA가 먼저 verdict를 내려야 합니다.",
-  ].join("\n");
+function buildQaRecheckComment(input: { qa: IssueForAdvice; producer: IssueForAdvice; language?: SystemLanguage }): string {
+  return buildRecoveryDraft({ language: input.language ?? "ko", kind: "qa_recheck",
+    producerLabel: input.producer.identifier ?? input.producer.id,
+    qaLabel: input.qa.identifier ?? input.qa.id });
 }
 
 // ---------------------------------------------------------------------------
@@ -603,7 +591,7 @@ export async function getMissionRecoveryAdvice(
 ): Promise<MissionRecoveryAdvice> {
   const { companyId, missionId } = input;
   const issueRows = await db
-    .select()
+    .select({ ...getTableColumns(issues), defaultLanguage: sql<string | null>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
     .from(issues)
     .where(and(eq(issues.companyId, companyId), eq(issues.missionId, missionId)));
   const issueIds = issueRows.map((r) => r.id);
@@ -841,6 +829,6 @@ export async function getMissionRecoveryAdvice(
       updatedAt: r.updatedAt,
     })),
     workflowSteps,
-    selectedIssueId: input.issueId ?? null,
+    selectedIssueId: input.issueId ?? null, language: normalizeSystemLanguage(issueRows[0]?.defaultLanguage),
   });
 }

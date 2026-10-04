@@ -4,10 +4,10 @@
 // 인텐트는 권위가 아니라 실행할 사실이며, 실행기는 단일 인텐트 실패로 절대 죽지 않는다.
 // 각 효과는 대상 상태를 실행 시점에 재검증한다(캡처 후 세상이 바뀌었을 수 있다).
 
-import { and, eq, gte, inArray, isNull, lt, lte, notInArray, or } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  agentWakeupRequests,
+  companies, agentWakeupRequests,
   heartbeatRuns,
   issues,
   workflowRuns,
@@ -15,6 +15,7 @@ import {
   workflowTerminalEffectIntents,
 } from "@paperclipai/db";
 import { issueService } from "../issues.js";
+import { buildTerminalCloseoutComment } from "../missions/system-comment-display.js";
 import { stopMissionRuntimesForMission } from "../missions/mission-runtime-manager.js";
 import { sanitizeErrorSummary } from "./retry-metadata.js";
 
@@ -105,12 +106,11 @@ async function executeSupersedeUnblockIssue(db: Db, intent: TerminalEffectIntent
         eq(issues.id, intent.targetId),
         notInArray(issues.status, ["done", "cancelled"]),
       ))
-      .returning({ id: issues.id });
+      .returning({ id: issues.id, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` });
     if (updated.length === 0) return; // 이미 종결 = 바람직한 상태 — 멱등 no-op.
     await issueService(tx as unknown as Db).addComment(
       intent.targetId,
-      `Superseded (cancelled) by workflow terminal decision ${intent.terminalDecisionId}: `
-        + "this owner action no longer represents open mission work after the run was finalized.",
+      buildTerminalCloseoutComment({ language: updated[0].language === "ko" ? "ko" : "en", terminalDecisionId: intent.terminalDecisionId }),
       {},
     );
   });

@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { activityLog, adoptionGateVerdicts, companySkills, issueComments, issues } from "@paperclipai/db";
 import { unprocessable } from "../errors.js";
+import { buildAdoptionNotification, loadCompanySystemLanguage } from "./missions/system-comment-display.js";
 import { assertAdoptionCandidatesNotQualityLinked } from "./quality/write-guard.js";
 import { companySkillService, parseFrontmatterMarkdown } from "./company-skills.js";
 import {
@@ -419,17 +420,10 @@ export function selfImprovementAdoptionService(db: Db) {
               await db.insert(issueComments).values({
                 companyId: input.companyId,
                 issueId: sourceIssueId,
-                body: [
-                  "자기개선 채택이 적용되었습니다 (system notification).",
-                  "",
-                  `- 스킬: ${appliedEntry.resolvedRef}`,
-                  `- 작업: ${appliedEntry.operation} — ${appliedEntry.section}`,
-                  `- 게이트 오너: ${gateOwner ?? "unknown"}`,
-                  `- 후보 해시: ${candidateHashes[appliedEntry.candidateIndex] ?? "unknown"}`,
-                  `- 적용 전 내용 해시: ${appliedEntry.contentHashBefore}`,
-                  `- 적용 후 내용 해시: ${appliedEntry.contentHashAfter}`,
-                  `- 생산자 에이전트: ${producerAgentId ?? "unknown"}`,
-                ].join("\n"),
+                body: buildAdoptionNotification({ ...appliedEntry,
+                  language: await loadCompanySystemLanguage(db, input.companyId), gateOwner,
+                  candidateHash: candidateHashes[appliedEntry.candidateIndex], producerAgentId,
+                }),
               });
             }
           } catch (error) {

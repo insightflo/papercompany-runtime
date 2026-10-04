@@ -833,7 +833,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.issue.id,
       [
-        "### Native tool step retry failed",
+        "### Native tool step retry failed\nThe tool retry failed; recovery is still unresolved. Next action: inspect the recorded failure and decide the next structured recovery action.",
         `Workflow run: ${input.runId}`,
         `Step: ${input.stepId}`,
         `Step run: ${input.stepRun.id}`,
@@ -870,7 +870,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.ownerActionIssue.id,
       [
-        "### Mission owner retry unresolved",
+        "### Mission owner retry unresolved\nThe requested recovery has not resolved the source issue. Next action: check the source run and structured recovery record before requesting another retry.",
         `<!-- ${input.marker} -->`,
         "Previous decision: retry_source_issue",
         `Retry target: ${input.retryTargetLabel}`,
@@ -903,7 +903,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.issue.id,
       [
-        "### Duplicate native tool step recovery closed",
+        "### Duplicate native tool step recovery closed\nThis duplicate recovery issue was closed, not the original work. Next action: follow the canonical recovery issue below; no new retry is implied.",
         `Canonical recovery issue: ${input.canonicalIssue.identifier ?? input.canonicalIssue.id}`,
         `Workflow run: ${input.runId}`,
         `Step: ${input.stepId}`,

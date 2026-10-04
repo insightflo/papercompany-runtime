@@ -13,7 +13,7 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { withSeedReworkBindings } from "../seed-rework-bindings.js";
 import type { Db } from "@paperclipai/db";
-import { issueComments, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { issueComments, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db"; import { normalizeSystemLanguage } from "../../missions/system-language.js";
 import { resolveEdges } from "./edge-condition.js";
 import {
   buildWorkflowReworkContract,
@@ -213,7 +213,7 @@ export const applyStructuralGatePass = withSeedReworkBindings(async (input: {
     if (casResult.length === 0) continue; // CAS failed — another sync won
 
     if (pRun.issueId) {
-      await db.insert(issueComments).values({ companyId: run.companyId, issueId: pRun.issueId, body: renderWorkflowReworkComment(contract) });
+      await db.insert(issueComments).values({ companyId: run.companyId, issueId: pRun.issueId, body: renderWorkflowReworkComment(contract, normalizeSystemLanguage(producerOwnContext.defaultLanguage)) });
     }
     resetIds.add(pStep.id);
     reworkedCount++;

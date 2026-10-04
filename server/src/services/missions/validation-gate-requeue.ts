@@ -11,7 +11,7 @@ import { findValidationGateNeedingFreshPass } from "./validation-gate-assessment
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction } from "./supervision-types.js";
 import type { MissionSupervisionIssue, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 
-type IssueRow = typeof issues.$inferSelect;
+type IssueRow = typeof issues.$inferSelect; type Language = { language?: "ko" | "en" };
 type ApplyResult = { findings: string[]; appliedAction?: MissionOwnerSupervisionAppliedAction };
 type GateMarkerInput = { missionId: string; ownerActionIssueId: string; sourceIssueId: string; validationIssueId: string; requiredAfter: Date | null };
 
@@ -34,7 +34,7 @@ function buildBlockMarker(input: GateMarkerInput) {
   })} -->`;
 }
 
-async function addBlockCommentOnce(input: {
+async function addBlockCommentOnce(input: Language & {
   db: Db; mission: MissionRow; ownerActionIssue: IssueRow; ownerActionLabel: string; sourceIssue: IssueRow; sourceLabel: string;
   validationIssueId: string; validationLabel: string; requiredAfter: Date | null; reason: string;
 }): Promise<boolean> {
@@ -48,7 +48,7 @@ async function addBlockCommentOnce(input: {
     .then((rows: Array<{ body: string }>) => rows.some((row) => row.body.includes(marker)));
   if (existing) return false;
   await issueService(input.db).addComment(input.sourceIssue.id, [
-    "### Mission owner retry blocked by validation gate", marker,
+    input.language === "ko" ? "### Mission owner retry blocked by validation gate\n검증이 해결되지 않아 재시도를 보류했습니다. 다음 행동: 아래 공식 검증 결과와 부족한 근거를 확인한 뒤 복구를 요청해 주세요." : "### Mission owner retry blocked by validation gate\nRetry is on hold because the validation gate is unresolved. Next action: review the official verdict and missing evidence below before requesting recovery.", marker,
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssue.id})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssue.id})`,
     `Validation gate issue: ${input.validationLabel} (${input.validationIssueId})`,
@@ -66,7 +66,7 @@ async function activeHeartbeatRunId(db: Db, issueId: string): Promise<string | n
     .then((rows: Array<{ id: string }>) => rows[0]?.id ?? null);
 }
 
-async function resetValidationGateIssue(input: {
+async function resetValidationGateIssue(input: Language & {
   db: Db; issue: IssueRow; now: Date; mission: MissionRow; ownerActionIssue: IssueRow; ownerActionLabel: string;
   sourceIssue: IssueRow; sourceLabel: string; gateLabel: string; reason: string; decisionEventId: string;
   heartbeatRunId: string | null; actionIdempotencyKey: string;
@@ -93,7 +93,7 @@ async function resetValidationGateIssue(input: {
   });
   if (!issue) return null;
   const comment = await issueService(input.db).addComment(input.issue.id, [
-    "### Mission owner validation gate requeued",
+    input.language === "ko" ? "### Mission owner validation gate requeued\n새 검토를 위해 검증 업무를 초기화했습니다. 새 검증 결과나 실행 완료를 뜻하지는 않습니다. 다음 행동: 다음 실행과 공식 검증 결과를 확인해 주세요." : "### Mission owner validation gate requeued\nThe validation gate was reset for a new review; no new verdict or completed execution is implied. Next action: check the gate's next run and official verdict.",
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssue.id})`,
     `Blocked source issue: ${input.sourceLabel} (${input.sourceIssue.id})`,
     `Validation gate issue: ${input.gateLabel} (${input.issue.id})`, `Reason: ${input.reason}.`,
@@ -101,7 +101,7 @@ async function resetValidationGateIssue(input: {
   return { issue, commentId: comment.id };
 }
 
-export async function requeueStaleValidationGateBeforeOwnerRetry(input: {
+export async function requeueStaleValidationGateBeforeOwnerRetry(input: Language & {
   db: Db;
   mission: MissionRow;
   ownerActionIssue: IssueRow;
@@ -142,7 +142,7 @@ export async function requeueStaleValidationGateBeforeOwnerRetry(input: {
 
   const findings = [`owner_action_validation_gate_not_passed: ${input.sourceLabel} retry blocked; ${gate.reason}`];
   if (gate.action === "block_source_retry") {
-    const commented = await addBlockCommentOnce({
+    const commented = await addBlockCommentOnce({ language: input.language,
       db: input.db,
       mission: input.mission,
       ownerActionIssue: input.ownerActionIssue,
@@ -195,7 +195,7 @@ export async function requeueStaleValidationGateBeforeOwnerRetry(input: {
   let retryIssue = gate.issue;
   let wakeCommentId: string | undefined;
   if (!activeRunId && existingAction.length === 0) {
-    const reset = await resetValidationGateIssue({
+    const reset = await resetValidationGateIssue({ language: input.language,
       db: input.db, issue: gate.issue, now: input.now, mission: input.mission, ownerActionIssue: input.ownerActionIssue,
       ownerActionLabel: input.ownerActionLabel, sourceIssue: input.sourceIssue, sourceLabel: input.sourceLabel,
       gateLabel: gate.label, reason: gate.reason, decisionEventId: structuredDecision.eventId,
@@ -238,7 +238,7 @@ export async function requeueStaleValidationGateBeforeOwnerRetry(input: {
           reasonCode: "owner_recovery_api", correlationId: structuredDecision.eventId, idempotencyKey,
           payload: { kind: "mission_owner_recovery_wakeup", action: "validation_gate_requeue", decisionEventId: structuredDecision.eventId, ownerActionIssueId: input.ownerActionIssue.id, sourceIssueId: input.sourceIssue.id, validationIssueId: gate.issue.id, targetAgentId: retryIssue.assigneeAgentId, status: wakeupDispatchStatus },
         }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
-        if (wake.length > 0) await issueService(input.db).addComment(gate.issue.id, buildRetrySourceIssueWakeupResultComment({
+        if (wake.length > 0) await issueService(input.db).addComment(gate.issue.id, buildRetrySourceIssueWakeupResultComment({ language: input.language,
           status: wakeupDispatchStatus, missionId: input.mission.id, ownerActionIssueId: input.ownerActionIssue.id,
           ownerActionLabel: input.ownerActionLabel, sourceIssueId: gate.issue.id, sourceLabel: gate.label,
           targetAgentId: retryIssue.assigneeAgentId, idempotencyKey,

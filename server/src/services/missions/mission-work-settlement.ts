@@ -1,4 +1,4 @@
-import { activityLog, issueComments, issues } from "@paperclipai/db";
+import { companies, activityLog, issueComments, issues } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 
@@ -35,7 +35,7 @@ export function createMissionWorkSettlement(db: Db) {
       await db.transaction(async (tx) => {
         const [source] = await tx
           .select({
-            id: issues.id,
+            id: issues.id, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})`,
             identifier: issues.identifier,
             status: issues.status,
             completedAt: issues.completedAt,
@@ -82,7 +82,7 @@ export function createMissionWorkSettlement(db: Db) {
         await tx.insert(issueComments).values({
           companyId,
           issueId: action.id,
-          body: `Resolved automatically: source issue ${source.identifier ?? source.id} reached ${source.status}; this unblock action no longer represents open mission work.`,
+          body: source.language === "ko" ? `원래 업무 ${source.identifier ?? source.id}의 상태가 ${source.status}로 종결되어 복구 업무를 자동 정리했습니다. 다음 행동: 추가 작업이 필요하면 원래 업무의 최종 기록을 확인해 주세요. 이 정리는 새 실행을 요청하지 않습니다.` : `Resolved automatically: source issue ${source.identifier ?? source.id} reached ${source.status}; this unblock action no longer represents open mission work. Next action: check the source issue's final record if further work is needed; this closeout does not start another run.`,
         });
         await tx.insert(activityLog).values({
           companyId,

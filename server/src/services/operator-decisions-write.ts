@@ -1,7 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, getTableColumns, sql } from "drizzle-orm"; import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-language.js";
 import type { Db } from "@paperclipai/db";
 import {
-  activityLog,
+  activityLog, companies,
   agents,
   issueComments,
   issues,
@@ -50,7 +50,7 @@ async function insertOperatorDecisionResolvedComment(
   input: {
     companyId: string;
     issueId: string;
-    operatorDecisionId: string;
+    operatorDecisionId: string; language: SystemLanguage;
     selectedOptions: { id: string; label: string; description: string | null }[];
   },
 ): Promise<void> {
@@ -60,7 +60,7 @@ async function insertOperatorDecisionResolvedComment(
     "## 운영자 결정 반영 (operator decision resolved)",
     ...selectionLines,
     `- operatorDecisionId: ${input.operatorDecisionId}`,
-    "- 다음 실행자는 이 결정을 우선 지시로 따른다.",
+    input.language === "ko" ? "- 다음 행동: 다음 실행자는 이 결정을 우선 지시로 따른다. 선택 기록은 실행 완료를 뜻하지 않습니다." : "- Next action: the next executor follows this decision as the priority instruction (다음 실행자는 이 결정을 우선 지시로 따른다.). A recorded selection does not mean execution is complete.",
   ].join("\n");
   try {
     await db.insert(issueComments).values({
@@ -181,7 +181,7 @@ export function operatorDecisionWriteService(db: Db) {
   }
 
   async function resolve(id: string, rawInput: unknown, resolvedByUserId: string) {
-    const before = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id))
+    const before = await db.select({ ...getTableColumns(operatorDecisions), defaultLanguage: sql<string | null>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${operatorDecisions.companyId})` }).from(operatorDecisions).where(eq(operatorDecisions.id, id))
       .then((rows) => rows[0] ?? null);
     if (!before) throw notFound("Operator decision not found");
     // [T5] Quality 연결 결정은 전용 경로로만: 실제 컬럼 연결(qualityActionId) 기준.
@@ -249,7 +249,7 @@ export function operatorDecisionWriteService(db: Db) {
       await insertOperatorDecisionResolvedComment(db, {
         companyId: decision.companyId,
         issueId: decision.issueId,
-        operatorDecisionId: id,
+        operatorDecisionId: id, language: normalizeSystemLanguage(before.defaultLanguage),
         selectedOptions: resolveSelectedOptions(decision.definition, result.selectedOptionIds),
       });
     }
