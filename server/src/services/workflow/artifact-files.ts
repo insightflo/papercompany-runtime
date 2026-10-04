@@ -56,3 +56,18 @@ export async function readArtifactBytes(root: ArtifactRoot, relative: string, ma
     { cwd: root.path, encoding: "buffer", maxBuffer: maxBytes + 16384, timeout: 10000 });
   return result.stdout;
 }
+
+/**
+ * [Q3 생산 시점 다이제스트] 완료 경로(completeWorkflowToolStepFromResult)가 영수증 없는 내구
+ * toolResult 에 artifactSha256 를 찍을 때 쓰는 안전 읽기. 읽을 수 없는 산출물(유실·초과·비정규
+ * 루트)은 null — 완료 자체를 실패시키지 않는 additive 기록이고, 이후 seed 검증은 다이제스트
+ * 부재 기록에 대해 여전히 fail-closed 로 재사용을 거절한다(현 bytes 재기준화 없음).
+ */
+export async function readArtifactDigest(file: string): Promise<string | null> {
+  try {
+    const root = await captureArtifactRoot(path.dirname(file));
+    return digest(await readArtifactBytes(root, path.basename(file), 32 * 1024 * 1024));
+  } catch {
+    return null;
+  }
+}
