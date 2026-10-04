@@ -34,7 +34,8 @@ export type SeedInterpretedInputBinding = {
   metadataValues: Record<string, string>;
 };
 
-type SeedRun = typeof workflowRuns.$inferSelect;
+// bind/verify 가 실제로 읽는 run 좌표만 요구한다(드리즐 원본 row 와 매핑된 WorkflowRun 양쪽 호환).
+type SeedRun = Pick<typeof workflowRuns.$inferSelect, "id" | "companyId" | "runDate" | "metadata">;
 
 function scanTokens(value: unknown, refs: Set<string>, metadataKeys: Map<string, "run" | "child">) {
   if (typeof value === "string") {
@@ -132,10 +133,10 @@ export async function bindSeedInterpretedInputs(db: Db, input: {
     const targetBag = kind === "child" ? targetChild : targetMetadata;
     const sourceValue = stringifyWorkflowRunMetadataValue(sourceBag[key]);
     const targetValue = stringifyWorkflowRunMetadataValue(targetBag[key]);
-    if (sourceValue === null) refuse({ phase: "admission_metadata", metadataKey: key, cause: "source_value_missing" });
-    if (targetValue !== sourceValue) refuse({ phase: "admission_metadata", metadataKey: key, cause: "value_changed",
+    if (sourceValue === null || targetValue !== sourceValue) refuse({ phase: "admission_metadata", metadataKey: key,
+      cause: sourceValue === null ? "source_value_missing" : "value_changed",
       sourceValue, targetValue: targetValue ?? null });
-    metadataValues[`${kind === "child" ? "childInputs" : "runMetadata"}:${key}`] = sourceValue;
+    if (sourceValue !== null) metadataValues[`${kind === "child" ? "childInputs" : "runMetadata"}:${key}`] = sourceValue;
   }
   return { schemaVersion: INTERPRETED_INPUT_BINDING_VERSION, argsDigest: hashStructuredValue(rendered), references, metadataValues };
 }
