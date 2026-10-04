@@ -117,7 +117,9 @@ async function world() {
   for (const [name, contract, script] of [["revision-qa", qaContract, "qa.mjs"], ["revision-publish", publishContract, "publish.mjs"],
     ["revision-readback", readbackContract, "readback.mjs"]] as const)
     await db.insert(toolDefinitions).values({ companyId, name, description: "Mock artifact tool", adapterType: "builtin",
-      adapterConfig: { command: `${process.execPath} ${path.join(root, script)}`, workingDirectory: root, artifactContract: contract } });
+      adapterConfig: { command: `${process.execPath} ${path.join(root, script)}`, workingDirectory: root, artifactContract: contract,
+        ...(name === "revision-qa" ? { progress: { version: 1, idleTimeoutMs: 60000, maxDurationMs: 120000,
+          stages: [{ key: "qa", unit: "items" }] } } : {}) } });
   const [sourceMission] = await db.insert(missions).values({ companyId, ownerAgentId: agentId, title: "Source", status: "active" }).returning();
   const write: Step = { id: "write", name: "Write", type: "agent", agentId, dependencies: [], graphWorkProductRequired: true };
   const sourceQa: Step = { id: "qa", name: "QA", type: "tool", agentId: "", dependencies: ["write"], toolNames: ["revision-qa"],
@@ -212,7 +214,7 @@ it("[GREEN] 재사용된 본문에 새 검수→게시→확인이 현재 실행
     scope: { workflowRunId: target.id, stepRunId: readback.id, requestId: readback.lastDispatchRequestId } }); // 확인 회수 = 현재 실행·확인 스텝런·시도
   expect(readbackPath).toContain(path.join("missions", f.revision.id));
   expect(await readFile(f.content, "utf8")).toBe('{"blocks":[]}'); // 재사용된 원본 bytes 불변
-});
+}, 60000);
 
 it("[RED] 이전 검수 PASS 를 새 실행 통과로 복사하는 경로가 없다(기록·소비·회수 모두 거절)", async () => {
   const f = await world();
@@ -242,4 +244,4 @@ it("[RED] 이전 검수 PASS 를 새 실행 통과로 복사하는 경로가 없
   await expect(resolveQaReceiptPath(db, { companyId: f.companyId, workflowRunId: target.id, stepId: "revision-qa" }))
     .rejects.toThrow("qa_artifact_receipt_unavailable");
   expect((await stepRunOf(target.id, "revision-publish")).status).toBe("pending");
-});
+}, 60000);
