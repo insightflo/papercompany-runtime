@@ -15,9 +15,9 @@
 // [수정시 주의] source 직접 checkout/status 변경/새 endpoint/범용 retry framework 금지. 공식
 //   retry/iteration/QA verdict 는 workflow layer 소유. wake 은 오직 검증된 native workflow_resume
 //   경로(wakeExistingWorkflowStepIssue)로만 — bare queueIssueAssignmentWakeup 합성 금지.
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql, getTableColumns } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, issues, missions } from "@paperclipai/db";
+import { companies, agentWakeupRequests, issues, missions } from "@paperclipai/db";
 import { issueService } from "../issues.js";
 import { conflict, notFound, unprocessable } from "../../errors.js";
 import { dispatchSourceIssueNativeResume, type SourceIssueNativeResumeOutcome } from "../workflow/source-issue-native-resume.js";
@@ -74,7 +74,7 @@ export async function completeUnblockActionWithSourceHandback(
 
   // source 이슈 조회 — 같은 company scope.
   const [source] = await db
-    .select()
+    .select({ ...getTableColumns(issues), language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
     .from(issues)
     .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, input.companyId)))
     .limit(1);
@@ -166,7 +166,7 @@ export async function completeUnblockActionWithSourceHandback(
     dispatchKind = "report_only";
     const reportComment = await svc.addComment(
       unblock.id,
-      buildUnblockHandbackReportComment(evidence, classification, null, null),
+      buildUnblockHandbackReportComment(evidence, classification, null, null, source.language === "ko" ? "ko" : "en"),
       {
         agentId: input.actor.agentId ?? undefined,
         userId: input.actor.userId ?? undefined,
@@ -204,7 +204,7 @@ export async function completeUnblockActionWithSourceHandback(
   if (dispatchKind !== "report_only") {
     await svc.addComment(
       unblock.id,
-      buildUnblockHandbackReportComment(evidence, classification, dispatchedWakeupRequestId, null),
+      buildUnblockHandbackReportComment(evidence, classification, dispatchedWakeupRequestId, null, source.language === "ko" ? "ko" : "en"),
       {
         agentId: input.actor.agentId ?? undefined,
         userId: input.actor.userId ?? undefined,

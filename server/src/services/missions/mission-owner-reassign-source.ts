@@ -14,7 +14,7 @@ import {
   buildMissionOwnerDecisionWakeupIdempotencyKey,
 } from "./mission-owner-recovery-events.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
-import { summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
+import { summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js"; import type { SystemLanguage } from "./system-language.js";
 import {
   normalizeMissionOwnerDecisionWakeupDispatchResult,
   type MissionOwnerDecisionWakeupDispatchStatus,
@@ -34,7 +34,7 @@ type ReassignSourceIssueResult = {
   readonly appliedAction?: MissionOwnerSupervisionAppliedAction;
 };
 
-export function buildReassignSourceIssueComment(input: {
+export function buildReassignSourceIssueComment(input: { readonly language?: SystemLanguage;
   readonly ownerActionIssueId: string;
   readonly ownerActionLabel: string;
   readonly sourceIssueId: string;
@@ -44,7 +44,7 @@ export function buildReassignSourceIssueComment(input: {
   readonly decisionReason?: string;
 }): string {
   return [
-    "### Mission owner reassignment applied",
+    input.language === "ko" ? "### Mission owner reassignment applied\n원래 업무의 담당자를 변경했습니다. 담당 변경만으로 실행을 확인할 수 없습니다. 다음 행동: 실행 요청 결과와 실행 기록을 확인해 주세요." : "### Mission owner reassignment applied\nThe source issue now has a new assignee. This assignment change does not confirm execution; check the wakeup result and run record next.",
     buildMissionOwnerDecisionAppliedMarker({ ownerActionIssueId: input.ownerActionIssueId, sourceIssueId: input.sourceIssueId, decision: "reassign_source_issue" }),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
@@ -54,11 +54,11 @@ export function buildReassignSourceIssueComment(input: {
   ].join("\n");
 }
 export function buildReassignSourceIssueWakeupResultComment(input: {
-  readonly status: MissionOwnerDecisionWakeupDispatchStatus; readonly missionId: string; readonly ownerActionIssueId: string;
+  readonly language?: SystemLanguage; readonly status: MissionOwnerDecisionWakeupDispatchStatus; readonly missionId: string; readonly ownerActionIssueId: string;
   readonly ownerActionLabel: string; readonly sourceIssueId: string; readonly sourceLabel: string; readonly targetAgentId: string; readonly idempotencyKey: string;
 }): string {
   return [
-    input.status === "workflow_already_dispatched" ? "### Mission owner reassignment wakeup handled by workflow" : "### Mission owner reassignment wakeup dispatched",
+    input.language === "ko" ? (input.status === "workflow_already_dispatched" ? "### Mission owner reassignment wakeup handled by workflow\n기존 작업 흐름 재개 요청이 있어 추가 실행을 요청하지 않았습니다. 다음 행동: 기존 실행 기록을 확인해 주세요." : "### Mission owner reassignment wakeup dispatched\n새 담당자에게 실행을 요청했습니다. 실제 실행은 아직 확인되지 않았습니다. 다음 행동: 다음 실행 기록을 확인해 주세요.") : input.status === "workflow_already_dispatched" ? "### Mission owner reassignment wakeup handled by workflow\nAn existing workflow resume request covers the issue; no second wakeup was requested. Check the existing run next." : "### Mission owner reassignment wakeup dispatched\nA wakeup was requested for the new assignee; execution is not confirmed. Check the next run record.",
     buildMissionOwnerDecisionWakeupDispatchedMarker({ missionId: input.missionId, ownerActionIssueId: input.ownerActionIssueId, sourceIssueId: input.sourceIssueId, decision: "reassign_source_issue", idempotencyKey: input.idempotencyKey }),
     `Owner-action issue: ${input.ownerActionLabel} (${input.ownerActionIssueId})`,
     `Source issue: ${input.sourceLabel} (${input.sourceIssueId})`,
@@ -66,7 +66,7 @@ export function buildReassignSourceIssueWakeupResultComment(input: {
   ].join("\n");
 }
 
-export async function applyReassignSourceIssueDecision(input: {
+export async function applyReassignSourceIssueDecision(input: { readonly language?: SystemLanguage;
   readonly db: Db;
   readonly mission: MissionRow;
   readonly ownerActionIssue: typeof issues.$inferSelect;
@@ -175,7 +175,7 @@ export async function applyReassignSourceIssueDecision(input: {
     if (duplicate.length === 0) return fail(`canonical source issue is status=${input.sourceIssue.status}, not todo/backlog/blocked for safe reassignment`);
   } else {
     updatedSourceIssue = reassigned;
-    await issueService(input.db).addComment(input.sourceIssue.id, buildReassignSourceIssueComment({
+    await issueService(input.db).addComment(input.sourceIssue.id, buildReassignSourceIssueComment({ language: input.language,
       ownerActionIssueId: input.ownerActionIssue.id, ownerActionLabel: input.ownerActionLabel,
       sourceIssueId: input.sourceIssue.id, sourceLabel, previousAgentId: input.sourceIssue.assigneeAgentId,
       targetAgentId, decisionReason: structuredDecision.decision.reason,
@@ -200,7 +200,7 @@ export async function applyReassignSourceIssueDecision(input: {
         }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
         if (wake.length > 0) await issueService(input.db).addComment(
           input.sourceIssue.id,
-          buildReassignSourceIssueWakeupResultComment({ status: wakeupDispatchStatus, missionId: input.mission.id, ownerActionIssueId: input.ownerActionIssue.id, ownerActionLabel: input.ownerActionLabel, sourceIssueId: input.sourceIssue.id, sourceLabel, targetAgentId, idempotencyKey }),
+          buildReassignSourceIssueWakeupResultComment({ language: input.language, status: wakeupDispatchStatus, missionId: input.mission.id, ownerActionIssueId: input.ownerActionIssue.id, ownerActionLabel: input.ownerActionLabel, sourceIssueId: input.sourceIssue.id, sourceLabel, targetAgentId, idempotencyKey }),
           { agentId: input.mission.ownerAgentId },
         );
       } catch (err) {

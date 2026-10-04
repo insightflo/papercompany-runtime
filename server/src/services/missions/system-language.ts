@@ -62,13 +62,14 @@ const PROSE: Record<string, ProseEntry> = {
     en: "### Mission owner retry requested",
     ko: "### 미션 오너 재시도 요청",
   },
+  retry_comment_status: { en: "A retry was requested. Check the run record to confirm execution.", ko: "재시도를 요청했습니다. 실제 실행 여부는 실행 기록에서 확인해 주세요." },
   retry_comment_action_line: {
     en: "Action: record the recovery reason and request native workflow resume; the queue runner owns the source issue state transition.",
-    ko: "조치: 복구 사유를 기록하고 네이티브 워크플로우 이어달리기를 요청하세요. 소스 이슈의 상태 전환은 큐 러너가 담당합니다.",
+    ko: "다음 행동: 복구 사유를 기록하고 기존 작업 흐름 재개(native workflow resume)를 요청해 주세요. 원래 업무 상태는 실행 대기열 처리기(queue runner)가 변경합니다.",
   },
   retry_comment_default_reason: {
     en: "Owner requested source issue retry.",
-    ko: "오너가 소스 이슈 재시도를 요청했습니다.",
+    ko: "업무 책임자가 원래 업무의 재시도를 요청했습니다.",
   },
   retry_comment_instruction_label: {
     en: "Original source issue instruction:",

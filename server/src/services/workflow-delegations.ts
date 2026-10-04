@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   companies,
@@ -153,7 +153,7 @@ export async function startDelegatedWorkflowStep(input: {
   }
 
   const [targetCompany] = await input.db
-    .select({ id: companies.id })
+    .select({ id: companies.id, language: sql<string>`(select source_company.default_language from companies source_company where source_company.id = ${input.run.companyId})` })
     .from(companies)
     .where(eq(companies.id, targetCompanyId))
     .limit(1);
@@ -234,7 +234,7 @@ export async function startDelegatedWorkflowStep(input: {
     companyId: sourceIssue.companyId,
     issueId: sourceIssue.id,
     authorUserId: "system",
-    body: `Delegated to company ${targetCompanyId} as ${targetIssue.identifier ?? targetIssue.id}.`,
+    body: targetCompany.language === "ko" ? `회사 ${targetCompanyId}에 업무 ${targetIssue.identifier ?? targetIssue.id}로 위임했습니다. 업무 생성은 실제 실행을 뜻하지 않습니다. 다음 행동: 대상 업무에서 진행 상황과 산출물을 확인해 주세요.` : `Delegated to company ${targetCompanyId} as ${targetIssue.identifier ?? targetIssue.id}. This creates the delegated work, not proof of execution. Next action: check the target issue for progress and artifacts.`,
   });
 
   await applyIssueCreatedSideEffects({

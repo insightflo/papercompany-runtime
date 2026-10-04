@@ -259,13 +259,13 @@ export function buildUnblockHandbackReportComment(
   evidence: UnblockSourceEvidence,
   classification: UnblockDispatchClassification,
   dispatchedWakeupRequestId: string | null,
-  oversightWakeupRequestId: string | null = null,
+  oversightWakeupRequestId: string | null = null, language: "ko" | "en" = "en",
 ): string {
   const label = (v: string | number | boolean | null | undefined): string => (v === null || v === undefined ? "none" : String(v));
   return [
     UNBLOCK_HANDBACK_REPORT_MARKER,
-    "Structured Oversight handback report. Do not checkout or retry the source issue directly;",
-    "recovery is initiated only by Oversight/native workflow_resume. Source status is unchanged by this report.",
+    language === "ko" ? "복구 근거를 감독 업무에 전달했습니다. 이 보고만으로 복구를 확인할 수 없습니다. 원래 업무를 직접 가져가거나 재시도하지 마세요." : "Recovery evidence was handed back to Oversight; this report alone does not confirm recovery. Do not checkout or retry the source issue directly;",
+    language === "ko" ? "Next action: 다음 행동: 감독 담당자가 구조화된 근거를 검토하고 복구가 필요하면 기본 workflow_resume 경로를 사용해야 합니다. 이 보고는 원래 업무 상태를 변경하지 않습니다." : "Next action: Oversight must review the structured evidence and use native workflow_resume if recovery is needed. Source status is unchanged by this report.",
     "",
     `sourceIssueId: ${evidence.sourceIssueId}`,
     `sourceIssueIdentifier: ${label(evidence.sourceIssueIdentifier)}`,

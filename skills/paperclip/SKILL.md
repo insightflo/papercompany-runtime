@@ -202,19 +202,13 @@ If you are asked to install a skill for the company or an agent you MUST read:
 
 ## Comment Style (Required)
 
-When posting issue comments or writing issue descriptions, use concise markdown with:
-
-- a short status line
-- bullets for what changed / what is blocked
-- links to related entities when available
-
+Use **im-human** for new human-facing issue comments and final output. Read the bundled sibling skill at `../im-human/SKILL.md` (relative to this skill directory); follow company language.
 **Ticket references are links (required):** If you mention another issue identifier such as `PAP-224`, `ZED-24`, or any `{PREFIX}-{NUMBER}` ticket id inside a comment body or issue description, wrap it in a Markdown link:
 
 - `[PAP-224](/PAP/issues/PAP-224)`
 - `[ZED-24](/ZED/issues/ZED-24)`
 
 Never leave bare ticket ids in issue descriptions or comments when a clickable internal link can be provided.
-
 **Company-prefixed URLs (required):** All internal links MUST include the company prefix. Derive the prefix from any issue identifier you have (e.g., `PAP-315` → prefix is `PAP`). Use this prefix in all UI links:
 
 - Issues: `/<prefix>/issues/<issue-identifier>` (e.g., `/PAP/issues/PAP-224`)

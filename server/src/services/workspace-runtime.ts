@@ -1545,10 +1545,10 @@ export async function persistAdapterManagedRuntimeServices(input: {
 }
 
 export function buildWorkspaceReadyComment(input: {
-  workspace: RealizedExecutionWorkspace;
+  language?: "ko" | "en"; workspace: RealizedExecutionWorkspace;
   runtimeServices: RuntimeServiceRef[];
 }) {
-  const lines = ["## Workspace Ready", ""];
+  const lines = ["## Workspace Ready", input.language === "ko" ? "실행 작업 공간이 준비됐습니다. 업무 실행을 확인한 기록은 아닙니다. 다음 행동: 아래 디렉터리와 서비스 링크에서 맡은 업무를 수행해 주세요." : "The execution workspace is prepared, not proof that the task has run. Next action: use the directory and service links below to perform the assigned work."];
   lines.push(`- Strategy: \`${input.workspace.strategy}\``);
   if (input.workspace.branchName) lines.push(`- Branch: \`${input.workspace.branchName}\``);
   lines.push(`- CWD: \`${input.workspace.cwd}\``);

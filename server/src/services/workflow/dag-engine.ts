@@ -822,7 +822,7 @@ async function commentOnValidationRecheckQueued(input: {
     companyId: input.companyId,
     issueId: input.issueId,
     body: [
-      "### Workflow validation recheck",
+      "### Workflow validation recheck\nA validation recheck was requested because the dependency artifacts changed. Next action: inspect the updated inputs and the next official verdict; this request does not confirm a new review result.",
       "",
       "The producer/dependency completed after the previous REQUEST_CHANGES verdict.",
       "Re-run this validation using the current dependency workProducts below.",
@@ -3693,7 +3693,7 @@ async function commentOnMainExecutorOversightForFailures(
     await db.insert(issueComments).values({
       authorAgentId: oversightIssue.assigneeAgentId,
       body: [
-        "### Workflow step failed",
+        "### Workflow step failed\nA workflow step failed; the failure evidence is below. Next action: the mission owner should inspect the structured recovery options before requesting another run.",
         `<!-- ${marker} -->`,
         `- Workflow: ${context.definition.name}`,
         `- Run: ${context.run.id}`,

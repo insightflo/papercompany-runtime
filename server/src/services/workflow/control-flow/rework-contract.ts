@@ -144,16 +144,16 @@ export function readWorkflowReworkContract(value: unknown): WorkflowReworkContra
   };
 }
 
-export function renderWorkflowReworkComment(contract: WorkflowReworkContract): string {
-  const multi = contract.qaFeedbacks.length > 1;
+export function renderWorkflowReworkComment(contract: WorkflowReworkContract, language: "ko" | "en" = "en"): string {
+  const t = (ko: string, en: string) => language === "ko" ? ko : en; const multi = contract.qaFeedbacks.length > 1;
   const qaList = contract.qaFeedbacks
-    .map((feedback) => `- QA step \`${feedback.qaStepId}\` (issue ${feedback.qaIssueId ?? "unknown"}) requested changes`)
+    .map((feedback) => t(`- 검증 단계(QA) \`${feedback.qaStepId}\` (issue ${feedback.qaIssueId ?? "unknown"})에서 수정을 요청했습니다`, `- QA step \`${feedback.qaStepId}\` (issue ${feedback.qaIssueId ?? "unknown"}) requested changes`))
     .join("\n");
   const feedbackSections = contract.qaFeedbacks
     .map((feedback, index) => {
       const sectionHeader = multi ? `\n#### QA feedback ${index + 1}: \`${feedback.qaStepId}\`` : "";
       const body = feedback.feedback
-        ?? "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.";
+        ?? t("검증 업무에서 피드백을 찾지 못했습니다. 진행하기 전에 검증 업무의 기록을 확인해 주세요.", "No QA feedback comment was found on the validator issue. Inspect the validator issue before proceeding.");
       return `${sectionHeader}${sectionHeader ? "\n" : ""}${body}`;
     })
     .join("\n");
@@ -177,11 +177,11 @@ export function renderWorkflowReworkComment(contract: WorkflowReworkContract): s
     "- A wholesale rewrite that discards accepted work is itself a rework failure, even if the flagged items are fixed.",
   ].join("\n");
   return [
-    "## Workflow QA rework request",
+    t("## 작업 흐름 검증 후 재작업을 요청했습니다 (Workflow QA rework request)", "## Workflow QA rework request"),
     "",
-    `Producer step \`${contract.producerStepId}\` was reset for rework because the following QA validator(s) requested changes.`,
+    t(`생산 단계 \`${contract.producerStepId}\`를 재작업 상태로 되돌렸습니다. 아래 검증 단계에서 수정을 요청했기 때문입니다. 다음 행동: 기존 산출물에서 지적된 부분과 직접 영향받는 부분만 수정하고, 등록 후 재검을 요청해 주세요. 이 기록은 재실행 완료를 뜻하지 않습니다.`, `Producer step \`${contract.producerStepId}\` was reset for rework because the following QA validator(s) requested changes. Next action: revise the flagged and directly affected parts of prior work products, register them, then request recheck. This record does not confirm re-execution.`),
     qaList,
-    `- Rework iteration: ${contract.iterationLabel}`,
+    t(`- 재작업 회차: ${contract.iterationLabel}`, `- Rework iteration: ${contract.iterationLabel}`),
     instructionSection,
     ownProductsSection,
     surgicalSection,
