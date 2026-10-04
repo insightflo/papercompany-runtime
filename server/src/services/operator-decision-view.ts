@@ -77,6 +77,22 @@ function buildContinuationRetryHint(
 export function deriveOperatorDecisionContinuationStatus(
   input: ContinuationStatusInput,
 ): DerivedContinuationStatus {
+  const result = deriveContinuationStatusInternal(input);
+  const { issue } = input;
+  // [terminal cleanup 2026-10-04] 연결 이슈가 완료/취소로 종결된 continuation 은 어떤
+  //   상태(failed/deferred/unassigned/exhausted/…)도 운영자 행동 대상이 아니다 — 미션은
+  //   이미 지나갔다(attention 뷰에는 지우기 수단이 없어 카드가 영구히 남는다).
+  //   성공 전달(completed, 원래 비-attention)은 그대로 둔다. blocked 상태에 대한 기존
+  //   GAZ-1315 정리와 같은 원칙을 전 상태로 확장한다.
+  if (result.attention && issue && ["done", "cancelled"].includes(issue.status)) {
+    return { effectiveStatus: "skipped", errorCode: "issue_terminal", attention: false };
+  }
+  return result;
+}
+
+function deriveContinuationStatusInternal(
+  input: ContinuationStatusInput,
+): DerivedContinuationStatus {
   const { continuation, wakeup, run, issue, targetAgent, now } = input;
   if (continuation.state === "blocked") {
     // [terminal cleanup] A blocked continuation whose linked issue has since reached a
