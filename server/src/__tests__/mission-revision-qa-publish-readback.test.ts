@@ -15,6 +15,10 @@
 // RED) 원본 실행의 이전 검수 PASS 를 새 실행 통과로 복사하는 경로가 없다: 완료 기록은 영수증 스코프
 //   불일치로 거절되고(부분 통과 기록 없음), 게시자는 원본 영수증 경로를 받지 않으며(게시물 0), 현재
 //   실행 검수 단계에서 회수 가능한 영수증이 없다(게시 단계는 대기).
+// [Q2 게시 범위 변경 행동 검사] 모형 게시기는 게시 toolArgs 의 대상(entry)·공개 범위(access) 인자를
+//   받아 게시 위치(publicUrl)·audience 를 결과에 기록한다. 게시 위치·공개 범위만 바꾸는 수정 실행은
+//   본문을 재수집하지 않고(검증 seed 재사용) 이번 실행에 묶인 새 검수를 소비해 변경된 범위로 게시·
+//   확인되며, 구 공개(public) 범위 게시 영수증은 새 비공개 범위 확인을 통과하지 못한다.
 // [범위 고지] UI·리팩터·승인/회사/검증 게이트 변경은 이 슬라이스 범위 밖이다(게이트 약화 없음).
 import "./helpers/workflow-control-node-boundary.js";
 import { execFileSync } from "node:child_process";
@@ -24,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, issues, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, companies, createDb, issues, issueWorkProducts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { ArtifactContract } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
@@ -51,16 +55,20 @@ const r={schemaVersion:'workflow.qa-result.v1',ok:true,checks:[{id:'fixture',ok:
 inputDigest:{sha256:v.content.sha256,mode:'content'},
 assetManifest:v.assets.map(({fileName,sha256,byteSize})=>({fileName,sha256,byteSize}))};
 fs.writeFileSync(4,JSON.stringify(r));`);
-  // 모형 게시 도구: 검수 봉투(content+qa bytes)를 소비하고 게시 스코프를 결과에 되돬린다.
+  // 모형 게시 도구: 검수 봉투(content+qa bytes)를 소비하고, 게시 toolArgs 에서 전달된 대상(--entry)·
+  // 공개 범위(--access)·날짜(--day) 인자를 받아 게시 위치(URL)·audience·스코프를 결과에 되돬린다.
   await writeFile(path.join(root, "publish.mjs"), `import fs from 'node:fs';
-const v=JSON.parse(fs.readFileSync(0,'utf8')),url='https://example.org/article';
+const v=JSON.parse(fs.readFileSync(0,'utf8'));
+const a={};process.argv.slice(2).forEach((x,i,all)=>{if(x.startsWith('--'))a[x.slice(2)]=all[i+1];});
+const entry=a.entry??'article',access=a.access,day=a.day??'2026-10-01';
+const audience=access==='hidden'?'private':'public',url='https://example.org/'+entry;
 const r={schemaVersion:'workflow.publication-result.v1',ok:true,command:'publish',mode:'content',section:'articles',
-id:'article',date:'2026-10-01',title:null,publishedAt:'2026-10-01T00:00:00Z',publicUrl:url,
+id:entry,date:day,title:null,publishedAt:day+'T00:00:00Z',publicUrl:url,
 scope:JSON.parse(process.env.PAPERCOMPANY_ARTIFACT_SCOPE),
 inputDigest:{mode:'content',sha256:v.content.sha256,qaSha256:v.qa.sha256,
 assetManifest:v.assets.map(({fileName,sha256,byteSize})=>({fileName,sha256,byteSize}))},
-cms:{ok:true,audience:'public',contentId:'article',slug:'article',publicUrl:url,liveStatus:200,blocks:1,assets:0,
-commandKey:'article:1',contentHash:'a'.repeat(64),contentBytes:123}};
+cms:{ok:true,audience,contentId:entry,slug:entry,publicUrl:url,liveStatus:200,blocks:1,assets:0,
+commandKey:entry+':1',contentHash:'a'.repeat(64),contentBytes:123}};
 fs.writeFileSync(4,JSON.stringify(r));`);
   // 모형 확인 도구: 게시 결과 bytes 를 읽어 command/scope 만 확인용으로 교체해 돌려준다.
   await writeFile(path.join(root, "readback.mjs"), `import fs from 'node:fs';
@@ -110,7 +118,8 @@ type Step = { id: string; sourceStepId?: string; name: string; type: string; age
 
 // 원본 실행: 본문(write)+검수 PASS(qa)까진 끝났고 게시 전에 종료됐다. 수정 실행 계획은 본문만
 // seed 로 재사용하고, 검수·게시·확인은 이번 실행의 새 단계로 새 실행 계약에 묶여 돈다.
-async function world() {
+// changed: 수정 실행 요청이 게시 위치/공개 범위를 바꾸는 경우의 게시·확인 toolArgs 덮개.
+async function world(changed?: { publishArgs?: Record<string, string>; readbackArgs?: Record<string, string> }) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "RevPub", issuePrefix: randomUUID(), workProductRoot: root });
   await db.insert(agents).values({ id: agentId, companyId, name: "Writer", role: "operator", adapterType: "process" });
@@ -170,10 +179,11 @@ async function world() {
   const revisionPublish: Step = { id: "revision-publish", name: "Publish", type: "tool", agentId: "",
     dependencies: ["revision-qa", "revision-write"], toolNames: ["revision-publish"],
     workProductSelectors: { "revision-write": { type: "document", title: "content.json" } },
-    toolArgs: { review: "{$steps.revision-qa.workProductPath}", source: "{$steps.revision-write.workProductPath}", entry: "article", day: "2026-10-01" } };
+    toolArgs: { review: "{$steps.revision-qa.workProductPath}", source: "{$steps.revision-write.workProductPath}",
+      entry: "article", day: "2026-10-01", ...(changed?.publishArgs ?? {}) } };
   const revisionReadback: Step = { id: "revision-readback", name: "Readback", type: "tool", agentId: "",
     dependencies: ["revision-publish"], toolNames: ["revision-readback"],
-    toolArgs: { publishResultPath: "{$steps.revision-publish.workProductPath}" } };
+    toolArgs: { publishResultPath: "{$steps.revision-publish.workProductPath}", ...(changed?.readbackArgs ?? {}) } };
   await db.update(workflowDefinitions).set({ stepsJson: [revisionWrite, revisionQa, revisionPublish, revisionReadback] })
     .where(eq(workflowDefinitions.id, definition.id));
   return { companyId, sourceMission, sourceRun, writeStep, content, contentBytes, sourceReceipt,
@@ -244,4 +254,76 @@ it("[RED] 이전 검수 PASS 를 새 실행 통과로 복사하는 경로가 없
   await expect(resolveQaReceiptPath(db, { companyId: f.companyId, workflowRunId: target.id, stepId: "revision-qa" }))
     .rejects.toThrow("qa_artifact_receipt_unavailable");
   expect((await stepRunOf(target.id, "revision-publish")).status).toBe("pending");
+}, 60000);
+
+it("[GREEN] 게시 위치·공개 범위 변경 요청이 재사용 본문+새 검수 후 변경된 범위로 게시·확인된다", async () => {
+  const f = await world({ publishArgs: { entry: "exclusive", access: "hidden" }, readbackArgs: { access: "hidden" } });
+  const target = await f.admit();
+  await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
+  for (let round = 0; round < 4; round++) { await executeWorkflowRun(db, target.id); await processQueuedWorkflowToolStepRuns(db); }
+  const write = await stepRunOf(target.id, "revision-write"), qa = await stepRunOf(target.id, "revision-qa"),
+    publish = await stepRunOf(target.id, "revision-publish"), readback = await stepRunOf(target.id, "revision-readback");
+  expect([write, qa, publish, readback].map(s => s.status)).toEqual(["completed", "completed", "completed", "completed"]);
+  // 본문 재수집 없음: seed 물화 스텝런은 실행 이슈·디스패치 없이 완료됐고 추가 수집 스텝도 없다
+  expect(write).toMatchObject({ issueId: null, lastDispatchRequestId: null, startedAt: null });
+  expect((await db.select({ stepId: workflowStepRuns.stepId }).from(workflowStepRuns)
+    .where(eq(workflowStepRuns.workflowRunId, target.id))).map(r => r.stepId).sort())
+    .toEqual(["revision-publish", "revision-qa", "revision-readback", "revision-write"]);
+  const receipt = meta(qa).toolArtifactReceipt as Receipt;
+  expect(receipt).toMatchObject({ role: "qa", workflowRunId: target.id, requestId: qa.lastDispatchRequestId,
+    input: { path: f.content, sha256: sha(f.contentBytes), // 새 검수 = 현재 실행·시도 + 원본 생산자 계보
+      producer: { workflowRunId: f.sourceRun.id, stepRunId: f.writeStep.id } } });
+  const publicationPath = (meta(publish).toolResult as { artifactPath: string }).artifactPath;
+  const publication = JSON.parse(await readFile(publicationPath, "utf8"));
+  expect(publication).toMatchObject({ id: "exclusive", publicUrl: "https://example.org/exclusive", // 변경된 게시 위치
+    cms: { audience: "private", contentId: "exclusive", slug: "exclusive", commandKey: "exclusive:1" }, // 변경된 공개 범위
+    scope: { companyId: f.companyId, missionId: f.revision.id, workflowRunId: target.id, stepRunId: publish.id,
+      requestId: publish.lastDispatchRequestId }, inputDigest: { sha256: sha(f.contentBytes) } }); // 본문 bytes 재사용
+  expect(publicationPath).toContain(path.join("missions", f.revision.id)); // 게시 결과 경로 = 현재 실행 미션
+  const freshQaBytes = await readFile(path.join(receipt.outputRoot, receipt.relativePath));
+  expect(publication.inputDigest.qaSha256).toBe(sha(freshQaBytes)); // 게시는 이번 실행의 새 검수 결과를 소비
+  const readbackPath = (meta(readback).toolResult as { artifactPath: string }).artifactPath;
+  const verified = JSON.parse(await readFile(readbackPath, "utf8"));
+  expect(verified).toMatchObject({ command: "verify", id: "exclusive", publicUrl: "https://example.org/exclusive",
+    cms: { audience: "private" }, scope: { workflowRunId: target.id, stepRunId: readback.id,
+      requestId: readback.lastDispatchRequestId } }); // 확인 회수도 변경된 위치·범위+현재 실행 결합
+  expect(await readFile(f.content, "utf8")).toBe('{"blocks":[]}'); // 재사용된 원본 bytes 불변
+  const products = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.companyId, f.companyId));
+  expect(products).toHaveLength(1);
+  expect(products[0]!.metadata).toMatchObject({ path: f.content, sha256: sha(f.contentBytes) }); // 원본 본문 산출물 불변
+}, 60000);
+
+it("[RED] 구 공개(public) 범위로 발급된 게시 영수증은 변경된 비공개 범위 확인을 통과하지 못한다", async () => {
+  const f = await world({ publishArgs: { entry: "exclusive", access: "hidden" }, readbackArgs: { access: "hidden" } });
+  const target = await f.admit();
+  await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
+  let qaStatus = "pending";
+  for (let round = 0; round < 4 && qaStatus !== "completed"; round++) {
+    await executeWorkflowRun(db, target.id); await processQueuedWorkflowToolStepRuns(db); // seed 물화 + 새 검수 실행
+    qaStatus = (await stepRunOf(target.id, "revision-qa")).status;
+  }
+  expect(qaStatus).toBe("completed");
+  const receiptPath = await resolveQaReceiptPath(db, { companyId: f.companyId, workflowRunId: target.id, stepId: "revision-qa" });
+  // 구 범위 게시 영수증: 이번 실행의 새 검수 영수증을 실제 소비 경로로 소비해 public 으로 게시한다
+  const [oldPublish] = await db.insert(workflowStepRuns).values({ workflowRunId: target.id, stepId: "old-scope-publish",
+    status: "running", lastDispatchRequestId: "old-pub-1", metadata: { artifactExecution: freezeArtifactAttempt({
+      adapterConfig: { artifactContract: publishContract }, step: {}, executionGeneration: 0, requestId: "old-pub-1" }) } }).returning();
+  const oldResult = await executeCoreWorkflowTool({ db, companyId: f.companyId, toolName: "revision-publish",
+    workflowRunId: target.id, stepRunId: oldPublish.id, stepId: "old-scope-publish", requestId: "old-pub-1",
+    parameters: { review: receiptPath, source: f.content, entry: "article", day: "2026-10-01" } }); // 접근 인자 없음 = 구 public 범위
+  expect(oldResult.status).toBe(200);
+  expect(JSON.parse(await readFile(oldResult.artifactPath!, "utf8")).cms.audience).toBe("public");
+  await completeWorkflowToolStepFromResult(db, { companyId: f.companyId, stepRunId: oldPublish.id, requestId: "old-pub-1",
+    workflowRunId: target.id, stepId: "old-scope-publish", toolName: "revision-publish", success: true,
+    stdout: oldResult.body.content, data: oldResult.body.data, artifactPath: oldResult.artifactPath, stderr: "", exitCode: 0 });
+  // 변경 범위(hidden) 확인 요청은 구 범위 게시 영수증을 거절한다(변경된 범위 게시물만 만족)
+  const [scopeVerify] = await db.insert(workflowStepRuns).values({ workflowRunId: target.id, stepId: "scope-verify",
+    status: "running", lastDispatchRequestId: "scope-verify-1", metadata: { artifactExecution: freezeArtifactAttempt({
+      adapterConfig: { artifactContract: readbackContract }, step: {}, executionGeneration: 0, requestId: "scope-verify-1" }) } }).returning();
+  const refused = await executeCoreWorkflowTool({ db, companyId: f.companyId, toolName: "revision-readback",
+    workflowRunId: target.id, stepRunId: scopeVerify.id, stepId: "scope-verify", requestId: "scope-verify-1",
+    parameters: { publishResultPath: oldResult.artifactPath!, access: "hidden" } });
+  expect(refused.status).toBe(500);
+  expect(refused.body.error).toContain("qa_publish_result_target_mismatch");
+  expect((await stepRunOf(target.id, "scope-verify")).status).toBe("running"); // 부분 통과 기록 없음
 }, 60000);
