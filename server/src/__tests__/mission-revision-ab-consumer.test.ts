@@ -288,7 +288,7 @@ async function completeCombinedOutput(f: AbWorld, target: { id: string; companyI
   const heartbeat = randomUUID();
   await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date() }).where(eq(workflowStepRuns.id, combine.id));
   await admittedProducer(db, { companyId: f.companyId, agentId: f.agentId, issueId: combine.issueId, stepRunId: combine.id, heartbeatId: heartbeat });
-  const dir = path.join(root, "missions", f.revision.id, "combine");
+  const dir = path.join(root, "missions", f.revision.id, "runs", target.id, "steps", "combine");
   await mkdir(dir, { recursive: true });
   const file = path.join(dir, "combined.json");
   const bytes = Buffer.from(JSON.stringify({ schemaVersion: "ab.combined.v1",
