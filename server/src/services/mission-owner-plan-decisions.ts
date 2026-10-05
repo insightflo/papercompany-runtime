@@ -15,6 +15,7 @@ import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
 import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
+import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-blocked-outcomes.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
@@ -1154,7 +1155,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     : await reviewMissionPlanExecutionPlacement({
       db,
       companyId,
-      selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+      // [슬라이스 Q4 부분진행] 변경안이 blocked 로 선언한 단위는 사전 도구/권한 거절에서 제외한다.
+      //   해당 단위의 실제 toolNames 상태는 차단 단위 구조화 결과(revisionBlockedUnits)가 기록한다.
+      selectedExecutionUnits: withoutDeclaredBlockedRevisionUnits(
+        draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+        collected.decision,
+      ),
     });
   const executionValidationDiagnostics = sourceValidationDiagnostics.length > 0
     ? sourceValidationDiagnostics
@@ -1583,6 +1589,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const refs = buildRevisionDecisionRefs({
     activePlanRefs: activePlan?.refs, effectiveDraftRefs: effectiveDraft.refs,
     decisionHash, revisionDelta: revisionDeltaValidation.delta,
+    blockedUnitOutcomes: revisionDeltaValidation.blockedUnitOutcomes,
   });
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
@@ -2151,8 +2158,11 @@ export function buildPaqoWorkflowSteps(
   mission: typeof missions.$inferSelect,
   options: { researchWorkbenchAvailable?: boolean; tools?: readonly PlanningArtifactTool[] } = {},
 ): WorkflowStep[] {
+  // [슬라이스 Q4 부분진행] 변경안이 차단(revisionBlocked) 으로 선언한 단위는 실행 그래프에서 제외된다 —
+  //   차단 단계가 정의에 물화되지 않으므로 해당 도구 실행은 발생할 수 없다(대체 게시/전체완료 아님).
+  //   진행 단위의 차단 참조(의존/선택자/실행인자)는 제출 게이트에서 선제 거부된다.
   const dependencyGraph = normalizeMissionPlanDependencyGraph(
-    draft.refs.selectedExecutionUnits,
+    draft.refs.selectedExecutionUnits.filter(unit => unit.revisionBlocked !== true),
     draft.steps,
   );
   if (!dependencyGraph.ok) {

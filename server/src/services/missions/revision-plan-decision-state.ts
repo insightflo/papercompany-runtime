@@ -22,6 +22,13 @@ import {
 import { applyRevisionDeltaUnitInputs } from "./revision-plan-delta-inputs.js";
 import { inheritCurrentTemplateWiring } from "./revision-plan-template-inheritance.js";
 import type { PlanningArtifactTool } from "./mission-plan-publication-contract.js";
+import {
+  assessRevisionBlockedUnitOutcomes,
+  collectProceedingReferencesToBlockedUnits,
+  parseRevisionDeltaBlockedScope,
+  type RevisionBlockedUnitOutcome,
+} from "./revision-plan-blocked-outcomes.js";
+import { readUnitId } from "./revision-plan-declaration-targets.js";
 
 type MissionPlanDecisionLedgerSubmission = Omit<
   Parameters<typeof upsertMissionPlanDecisionSubmission>[0],
@@ -38,9 +45,14 @@ export type RevisionPlanDeltaInvalidResponse = {
   diagnostics: RevisionPlanDeltaDiagnostic[];
 };
 
-/** [슬라이스1] 변경안 검증 결과: 통과하면 원본 delta 와 상속·입력연결 검증까지 통과한 유효 유닛, 거부하면 invalid 응답. */
+/** [슬라이스 Q4] 차단 단위 구조화 결과 — 활성 계획 refs(revisionBlockedUnits) 보존·시작 화면 표시로만 소비. */
+export type { RevisionBlockedUnitOutcome } from "./revision-plan-blocked-outcomes.js";
+
+/** [슬라이스1] 변경안 검증 결과: 통과하면 원본 delta 와 상속·입력연결 검증까지 통과한 유효 유닛, 거부하면 invalid 응답.
+ *  [슬라이스 Q4] blocked 선언 단위는 revisionBlocked 마킹과 함께 남고, 그 실제 toolNames 진단은
+ *  blockedUnitOutcomes 로 함께 반환된다(전체 invalid 아님 — 부분진행). */
 export type RevisionPlanDeltaGate =
-  | { ok: true; delta: Record<string, unknown> | null; units: Record<string, unknown>[] }
+  | { ok: true; delta: Record<string, unknown> | null; units: Record<string, unknown>[]; blockedUnitOutcomes: readonly RevisionBlockedUnitOutcome[] }
   | { ok: false; response: RevisionPlanDeltaInvalidResponse };
 
 // [슬라이스1] 버전 있는 수정 변경안(revisionDelta) 검증 + 현재 템플릿 상속 적용. 실행 배치(도구/권한)
@@ -66,7 +78,7 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
     tools: input.tools,
   });
   if (validation.ok) {
-    if (validation.delta === null) return { ok: true, delta: null, units: [...input.selectedExecutionUnits] };
+    if (validation.delta === null) return { ok: true, delta: null, units: [...input.selectedExecutionUnits], blockedUnitOutcomes: [] };
     const inheritance = await inheritCurrentTemplateWiring({
       db: input.ledgerSubmission.db,
       companyId: input.ledgerSubmission.companyId,
@@ -78,10 +90,55 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
       ? validateRevisionPlanDeltaWiring({ delta: validation.delta, selectedExecutionUnits: inheritance.units })
       : inheritance.diagnostics;
     if (inheritance.ok && wiringDiagnostics.length === 0) {
+      // [슬라이스 Q4 부분진행] 변경안이 blocked 로 선언한 단위만 실행 초안에서 제외(revisionBlocked 마킹)되고
+      //   나머지 독립 단위는 그대로 진행한다. 진행 단위가 차단 단위를 의존/선택자/실행인자로 참조하면 조용히
+      //   끊지 않고 전체 거절하고, 차단 단위의 실제 toolNames 진단은 구조화 결과로 활성 계획 refs 에 보존된다.
+      const blockedScope = parseRevisionDeltaBlockedScope(validation.delta);
+      if (blockedScope && blockedScope.blockedUnitIds.size > 0) {
+        const blockedReferenceDiagnostics = collectProceedingReferencesToBlockedUnits(inheritance.units, blockedScope.blockedUnitIds);
+        if (blockedReferenceDiagnostics.length > 0) {
+          await upsertMissionPlanDecisionSubmission({
+            ...input.ledgerSubmission,
+            status: "rejected",
+            rejectionReason: blockedReferenceDiagnostics[0]!.code,
+            diagnostics: blockedReferenceDiagnostics,
+          });
+          return {
+            ok: false,
+            response: {
+              status: "invalid",
+              reason: blockedReferenceDiagnostics[0]!.code,
+              planningIssueId: input.ledgerSubmission.planningIssueId,
+              commentId: input.commentId,
+              decisionHash: input.ledgerSubmission.decisionHash,
+              diagnostics: blockedReferenceDiagnostics,
+            },
+          };
+        }
+        const blockedUnitOutcomes = await assessRevisionBlockedUnitOutcomes({
+          db: input.ledgerSubmission.db,
+          companyId: input.ledgerSubmission.companyId,
+          units: inheritance.units,
+          blockedUnitIds: blockedScope.blockedUnitIds,
+          capabilityRequirements: blockedScope.capabilityRequirements,
+          tools: input.tools,
+        });
+        return {
+          ok: true,
+          delta: validation.delta,
+          units: applyRevisionDeltaUnitInputs(validation.delta, inheritance.units)
+            .map(unit => {
+              const unitId = readUnitId(unit);
+              return unitId !== null && blockedScope.blockedUnitIds.has(unitId) ? { ...unit, revisionBlocked: true } : unit;
+            }),
+          blockedUnitOutcomes,
+        };
+      }
       return {
         ok: true,
         delta: validation.delta,
         units: applyRevisionDeltaUnitInputs(validation.delta, inheritance.units),
+        blockedUnitOutcomes: [],
       };
     }
     const reason = inheritance.ok ? wiringDiagnostics[0]!.code : inheritance.reason;
@@ -137,6 +194,7 @@ export function buildRevisionDecisionRefs(input: {
   readonly effectiveDraftRefs: RevisionDecisionDraftRefs;
   readonly decisionHash: string;
   readonly revisionDelta: Record<string, unknown> | null;
+  readonly blockedUnitOutcomes?: readonly RevisionBlockedUnitOutcome[];
 }): ReturnType<typeof mergeMissionPlanRefs> {
   const refs = mergeMissionPlanRefs(
     input.activePlanRefs,
@@ -145,6 +203,10 @@ export function buildRevisionDecisionRefs(input: {
       ownerPlanDecision: { ...input.effectiveDraftRefs.ownerPlanDecision, decisionHash: input.decisionHash },
       // [슬라이스1] 검증을 통과한 버전 있는 변경안은 활성 계획 refs 에 그대로 보존된다.
       ...(input.revisionDelta ? { revisionDelta: input.revisionDelta } : {}),
+      // [슬라이스 Q4] 차단 단위의 구조화 결과(실제 toolNames 진단 포함)도 활성 계획 refs 에 보존된다.
+      ...(input.blockedUnitOutcomes && input.blockedUnitOutcomes.length > 0
+        ? { revisionBlockedUnits: input.blockedUnitOutcomes }
+        : {}),
     },
     { selectedExecutionUnits: "replace" },
   );
@@ -153,5 +215,9 @@ export function buildRevisionDecisionRefs(input: {
   delete (refs as Record<string, unknown>).planQa;
   // 새 decision 이 변경안을 포함하지 않으면 이전 변경안 계약이 활성 계획을 계속 지배하지 않는다.
   if (!input.revisionDelta) delete (refs as Record<string, unknown>).revisionDelta;
+  // 새 decision 에 차단 단위가 없으면 이전 차단 결과가 활성 계획을 계속 지배하지 않는다.
+  if (!input.blockedUnitOutcomes || input.blockedUnitOutcomes.length === 0) {
+    delete (refs as Record<string, unknown>).revisionBlockedUnits;
+  }
   return refs;
 }

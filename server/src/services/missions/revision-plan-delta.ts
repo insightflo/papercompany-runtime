@@ -23,7 +23,7 @@ import {
   missionRevisionDeltaSchema,
 } from "@paperclipai/shared/validators/mission-revision";
 import { computePaqoDefinitionHash } from "../workflow/paqo-definition-identity.js";
-import type { PlanningArtifactTool } from "./mission-plan-publication-contract.js";
+import { selectedUnitToolNames, type PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 
 export type RevisionPlanDeltaDiagnostic = { code: string; message: string; severity: "invalid" };
 
@@ -49,7 +49,7 @@ function readUnitSourceStepId(unit: Record<string, unknown>): string | null {
   return typeof unit.sourceStepId === "string" && unit.sourceStepId.trim() !== "" ? unit.sourceStepId : null;
 }
 
-function toolCapabilities(tool: PlanningArtifactTool | undefined): string[] {
+export function toolCapabilities(tool: PlanningArtifactTool | undefined): string[] {
   const capabilities = tool && Array.isArray(tool.adapterConfig.capabilities) ? tool.adapterConfig.capabilities : [];
   return capabilities.filter((capability): capability is string => typeof capability === "string");
 }
@@ -176,12 +176,24 @@ export async function validateRevisionPlanDelta(input: {
   //   적용된 effective units 에 대해 게이트에서 실행된다(상속 전 초안에서 requiredInputs 를 거절하면
   //   생략된 selector 를 상속해 소비하는 정상 계획이 막힌다). 검사 내용·진단 코드는 그대로 유지된다.
 
-  // [필수 기능] 등록·활성 도구가 요청 capability 를 실제로 제공해야 한다(등록만으로 충족되지 않는다).
+  // [필수 기능 — Q4 toolNames 결합] 요청 capability 는 해당 단위가 실제로 사용하는 toolNames 의 도구가
+  //   제공해야 한다(등록만으로 충족되지 않는다). 요구 도구가 단위의 실제 toolNames 에 없으면 계약 위반이고
+  //   진단은 그 실제 도구 이름을 정확히 지칭한다. 변경안이 단위를 blocked 로 선언했으면 불충족 기능은
+  //   전체 거절 대신 차단 단위 구조화 결과(revision-plan-decision-state)로 남는다.
+  const deltaUnitOperationByUnitId = new Map(delta.units.map(unit => [unit.unitId, unit.operation] as const));
   for (const requirement of delta.capabilityRequirements ?? []) {
     if (!planUnitIds.has(requirement.unitId)) {
       diagnostics.push(deltaInvalid(`기능 요구가 계획에 없는 단위 ${requirement.unitId} 를 참조합니다.`));
       continue;
     }
+    const requirementUnit = input.selectedExecutionUnits.find(unit => readUnitId(unit) === requirement.unitId);
+    const actualToolNames = requirementUnit ? selectedUnitToolNames(requirementUnit) : [];
+    if (!actualToolNames.includes(requirement.toolName)) {
+      diagnostics.push(deltaInvalid(
+        `기능 요구 도구 ${requirement.toolName} 은(는) 단위 ${requirement.unitId} 가 실제로 사용하는 도구(${actualToolNames.join(", ") || "없음"}) 가 아닙니다.`));
+      continue;
+    }
+    if (deltaUnitOperationByUnitId.get(requirement.unitId) === "blocked") continue;
     const tool = input.tools.find(candidate => candidate.name === requirement.toolName);
     if (!toolCapabilities(tool).includes(requirement.capability)) {
       diagnostics.push({

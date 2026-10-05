@@ -35,3 +35,19 @@ it("surfaces rejected start without claiming execution", async () => {
   await act(async () => { await new Promise(r => setTimeout(r, 20)); });
   expect(host.textContent).toContain("mission_revision_repeat_failure");
 });
+it("renders per-unit capability-gap blocked reason as display-only status", async () => {
+  vi.mocked(api.get).mockResolvedValue({ workflowDefinitionId: "wf", sourceMissionId: "source", sourceWorkflowRunId: "run",
+    candidates: [{ stepId: "new", sourceStepId: "old", name: "완료된 보고서", dependencies: [] }],
+    blockedUnits: [{ unitId: "publishBlog", label: "블로그 발행", toolName: "tistory-publish", code: "mission_revision_capability_gap",
+      message: "차단 단위 블로그 발행 의 필수 결과(blog-published) 에 필요한 기능 blog_publish 을(를) 실행 도구 tistory-publish 이(가) 제공하지 않습니다." }] });
+  host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+  await act(async () => { root.render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <MissionRevisionStart missionId="revision" onStarted={() => {}} /></QueryClientProvider>); });
+  await act(async () => { await new Promise(r => setTimeout(r, 20)); });
+  expect(host.textContent).toContain("블로그 발행");
+  expect(host.textContent).toContain("tistory-publish");
+  expect(host.textContent).toContain("mission_revision_capability_gap");
+  expect(host.textContent).toContain("미해결");
+  expect(host.textContent).toContain("재사용 후보"); // 기존 후보 데이터의 재사용 상태 표시
+  expect(host.querySelectorAll("button")).toHaveLength(2); // 표시 전용 — 새 상호작용 없음
+});
