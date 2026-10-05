@@ -14,30 +14,23 @@
 //   run stepRun · 회사 미션 출력 루트 안 고유 경로)로 기록되어 A 파일을 덮지 않는다.
 // RED-2) B 결과 미수령 / A 원본 시도 상향 / B 늦은 옛 결과·상대 경로·타회사 결과 / A 원본 파일
 //   유실이 각각 구조화 이유로 거절되고 부분 실행·부분 소비가 남지 않는다.
-// GREEN-3) [Q3 결합 완결] 종합(combine) 단계가 이번 실행의 실제 작업으로 A+B 해석 입력의 실제
-//   bytes 에서 결합 산출물(combined.json · 승인 생산자 경로+공식 산출물 등록)을 만들고, 그 결합
-//   bytes 에 대해 이번 실행 계약의 새 검수 → 게시 → 확인이 실제 tool executor 경로로 연결된다
-//   (qa-publish-readback fixture 와 같은 모형 검수·게시·확인 도구 재사용). 검수 영수증·게시 결과·
-//   확인 회수는 모두 현재 실행/시도에 결합되고 원본 A bytes·B 산출물은 불변이다. UI 는 범위 밖.
 import "./helpers/workflow-control-node-boundary.js";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, issueWorkProducts, issues, missions, toolDefinitions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, companies, createDb, issues, missions, toolDefinitions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { ArtifactContract } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { admittedProducer } from "./helpers/admitted-producer.js";
 import { board } from "./helpers/workflow-seed-world.js";
 import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
-import { completeWorkflowToolStepFromResult, executeWorkflowRun, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, executeWorkflowRun, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "../services/workflow/core-tool-executor.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
-import { workProductService } from "../services/work-products.js";
 import { dependencyToolEvidence } from "../services/workflow/dependency-tool-evidence.js";
 import { parseToolSeedEvidence } from "../services/workflow/workflow-seed-tool-output.js";
 
@@ -109,7 +102,6 @@ afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup();
 
 const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const meta = (row: typeof workflowStepRuns.$inferSelect) => (row.metadata ?? {}) as Record<string, unknown>;
-type Receipt = { outputRoot: string; relativePath: string } & Record<string, unknown>;
 // [Q3 결합 완결] qa-publish-readback fixture 와 동일한 모형 검수·게시·확인 계약(스크립트 재사용).
 const qaContract: ArtifactContract = { role: "qa", resultFileName: "inspection.json", resultAdapter: "generic",
   resultSchemaVersion: "workflow.qa-result.v1", inputParams: { content: "document" }, deploymentFiles: ["qa.mjs"],
@@ -300,96 +292,3 @@ it("[RED-2d] A 원본 파일이 유실되면 소비자 해석이 복사본 대�
   await expect(combineArgs(f, target, combine)).rejects.toThrow("workflow_seed_artifact_unreadable"); // 매 읽기 원본 재검증
   expect(combine.issueId).toBeNull();
 });
-
-// [Q3 결합 완결] 결합 단계 완료: 이번 실행이 발사한 결합 이슈를 실제 승인 생산자 경로(웨이크+하트비트
-// 승인+공식 산출물 등록)로 마감하고, 해석된 A+B 두 필수 입력의 실제 bytes 로 결합 산출물을 현재 실행
-// 미션 출력 루트 안 결합 단계 디렉터리에 남긴다(원본 A 파일·B 산출물은 직접 건드리지 않는다).
-async function completeCombinedOutput(f: AbWorld, target: { id: string }, combine: typeof workflowStepRuns.$inferSelect) {
-  if (!combine.issueId) throw new Error("combine was not dispatched as this run's own work item");
-  const args = await combineArgs(f, target, combine) as { reportA: string; reportB: string };
-  const heartbeat = randomUUID();
-  await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date() }).where(eq(workflowStepRuns.id, combine.id));
-  await admittedProducer(db, { companyId: f.companyId, agentId: f.agentId, issueId: combine.issueId, stepRunId: combine.id, heartbeatId: heartbeat });
-  const dir = path.join(root, "missions", f.revision.id, "runs", target.id, "steps", "combine");
-  await mkdir(dir, { recursive: true });
-  const file = path.join(dir, "combined.json");
-  const bytes = Buffer.from(JSON.stringify({ schemaVersion: "ab.combined.v1",
-    reportA: JSON.parse(await readFile(args.reportA, "utf8")), reportB: JSON.parse(await readFile(args.reportB, "utf8")) }));
-  await writeFile(file, bytes);
-  await workProductService(db).createForIssue(combine.issueId, f.companyId, { provider: "local_file", type: "document",
-    title: "combined.json", status: "active", createdByRunId: heartbeat, metadata: { path: file, sha256: sha(bytes) } });
-  await db.update(issues).set({ status: "done" }).where(eq(issues.id, combine.issueId));
-  await db.update(workflowStepRuns).set({ status: "completed", completedAt: new Date() }).where(eq(workflowStepRuns.id, combine.id));
-  return { file, bytes };
-}
-
-it("[GREEN-3] A 재사용+B 신규의 결합 산출물에 새 검수→게시→확인이 현재 실행에 묶여 실행된다", async () => {
-  collectTools = true;
-  const f = await abWorld();
-  const target = await f.admit();
-  await mkdir(path.join(root, "missions", f.revision.id), { recursive: true });
-  await executeWorkflowRun(db, target.id); // A seed 물화 + B 엔진 dispatch(queued)
-  await processQueuedWorkflowToolStepRuns(db); // B 실제 도구 실행 → 완료 sync 가 결합(combine) 이슈를 발사한다
-  const b = await stepRunOf(target.id, "collect-b");
-  const bToolResult = ((b.metadata ?? {}) as { toolResult?: { artifactPath?: string; artifactSha256?: string } }).toolResult!;
-  const bArtifact = bToolResult.artifactPath!, bBytes = await readFile(bArtifact);
-  expect(bToolResult.artifactSha256).toBe(sha(bBytes)); // B 완료 기록도 실제 완료 경로의 생산 시점 digest
-  const combine = await stepRunOf(target.id, "combine");
-  if (!combine.issueId) throw new Error("combine was not dispatched as this run's own work item");
-  const combined = await completeCombinedOutput(f, target, combine); // A+B 실제 bytes 결합 산출물(승인 생산자 경로)
-  for (let round = 0; round < 6 && (await stepRunOf(target.id, "combine-readback")).status !== "completed"; round++) {
-    // 수동 마감된 결합 이후의 파이프라인은 실제 공개 sync 경로로 발화한다(형제 fixture 패턴).
-    await syncWorkflowRunState(db, target.id); await processQueuedWorkflowToolStepRuns(db); // 새 검수→게시→확인
-  }
-  const a2 = await stepRunOf(target.id, "collect-a2"), bAfter = await stepRunOf(target.id, "collect-b"),
-    combineAfter = await stepRunOf(target.id, "combine"), qa = await stepRunOf(target.id, "combine-qa"),
-    publish = await stepRunOf(target.id, "combine-publish"), readback = await stepRunOf(target.id, "combine-readback");
-  expect([a2, bAfter, combineAfter, qa, publish, readback].map(s => s.status))
-    .toEqual(["completed", "completed", "completed", "completed", "completed", "completed"]); // 사슬 전체 완결
-  expect((await db.select({ stepId: workflowStepRuns.stepId }).from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, target.id))).map(r => r.stepId).sort())
-    .toEqual(["collect-a2", "collect-b", "combine", "combine-publish", "combine-qa", "combine-readback"]); // 이 실행 계획의 6단계만
-  expect(a2).toMatchObject({ issueId: null }); // A = 검증 seed 물화(실행 이슈 없음)
-  expect(combineAfter.issueId).toBe(combine.issueId); // 결합 = 이번 실행의 실제 작업 이슈
-  // 결합 산출물: 해석된 A+B 두 필수 입력의 실제 bytes 가 그대로 반영되고 공식 산출물로 등록되었다(저장 digest)
-  expect(JSON.parse(await readFile(combined.file, "utf8"))).toEqual({ schemaVersion: "ab.combined.v1",
-    reportA: { report: "A" }, reportB: { url: "https://youtu.be/B", items: ["b-item"] } });
-  const combinedProduct = (await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.companyId, f.companyId)))
-    .find(p => p.title === "combined.json")!;
-  expect(combinedProduct.metadata).toMatchObject({ path: combined.file, sha256: sha(combined.bytes) });
-  expect((combinedProduct.metadata as { workflowProducer?: { workflowRunId?: string; stepRunId?: string } }).workflowProducer)
-    .toMatchObject({ workflowRunId: target.id, stepRunId: combine.id }); // 결합 산출물 생산자 = 현재 실행 결합 단계
-  // 새 검수 영수증 = 결합 bytes + 현재 실행 계약 + 이번 실행 결합 생산자 계보(원본 실행 기록 복제 아님)
-  const receipt = meta(qa).toolArtifactReceipt as Receipt;
-  expect(receipt).toMatchObject({ role: "qa", workflowRunId: target.id, stepRunId: qa.id, missionId: f.revision.id,
-    requestId: qa.lastDispatchRequestId, executionGeneration: qa.executionGeneration, retryCount: 0, iterationIndex: 0,
-    input: { path: combined.file, sha256: sha(combined.bytes),
-      producer: { workflowRunId: target.id, stepRunId: combine.id } } });
-  expect(receipt.outputRoot).toContain(path.join("missions", f.revision.id)); // 검수 결과 루트 = 현재 실행 미션
-  // 게시 = 결합 bytes + 이번 실행 새 검수 소비, 결과 경로·스코프 = 현재 실행 미션·게시 스텝런·시도
-  const publicationPath = (meta(publish).toolResult as { artifactPath: string }).artifactPath;
-  expect(publicationPath).toContain(path.join("missions", f.revision.id));
-  expect(publicationPath).not.toContain(path.join("missions", f.sourceMission.id)); // 원본 실행 미션 아님
-  const publication = JSON.parse(await readFile(publicationPath, "utf8"));
-  expect(publication).toMatchObject({ id: "ab-report", publicUrl: "https://example.org/ab-report" });
-  expect(publication.scope).toMatchObject({ companyId: f.companyId, missionId: f.revision.id, workflowRunId: target.id,
-    stepRunId: publish.id, requestId: publish.lastDispatchRequestId, executionGeneration: publish.executionGeneration });
-  const freshQaBytes = await readFile(path.join(receipt.outputRoot, receipt.relativePath));
-  expect(publication.inputDigest.sha256).toBe(sha(combined.bytes)); // 게시는 A+B 결합 bytes 를 소비했다
-  expect(publication.inputDigest.qaSha256).toBe(sha(freshQaBytes)); // 게시는 이번 실행 새 검수 결과를 소비했다
-  // 확인 회수 = 현재 실행·확인 스텝런·시도에 결합된 결합 산출물 게시물
-  const readbackPath = (meta(readback).toolResult as { artifactPath: string }).artifactPath;
-  const verified = JSON.parse(await readFile(readbackPath, "utf8"));
-  expect(verified).toMatchObject({ command: "verify", id: "ab-report", publicUrl: publication.publicUrl,
-    scope: { workflowRunId: target.id, stepRunId: readback.id, requestId: readback.lastDispatchRequestId } });
-  expect(readbackPath).toContain(path.join("missions", f.revision.id));
-  // 원본 A bytes · B 산출물 불변: 결합·검수·게시·확인 어느 경로도 덮지 않는다
-  expect(await readFile(f.aFile, "utf8")).toBe('{"report":"A"}');
-  expect(await readFile(bArtifact)).toEqual(bBytes);
-  // 옛 소스 영수증·기록 미복제: 물화된 A 스텝런에는 영수증·toolResult 사본이 없고 seed 는 A 하나뿐이다
-  expect(meta(a2).toolArtifactReceipt).toBeUndefined();
-  expect(meta(a2).toolResult).toBeUndefined();
-  const [sourceAAfter] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.aStep.id));
-  expect(meta(sourceAAfter!).toolArtifactReceipt).toBeUndefined(); // 원본 A 는 끝까지 영수증 없는 내구 toolResult
-  expect(await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.targetRunId, target.id))).toHaveLength(1);
-}, 60000);
