@@ -4,6 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { heartbeatRuns, issueWorkProducts, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { workProductDelegatedProducerSchema, workProductProducerPromotionMarkerSchema, workProductProducerRebindMarkerSchema, workProductProducerSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { badRequest, conflict } from "../../errors.js";
+import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
 import { appendWorkflowAuthorityTransition } from "./authority/transitions.js";
@@ -39,6 +40,54 @@ export const PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS: ReadonlySet<string> = new
   //   같은 럼 셀렉터가 규속 파싱 단계에서 확정 거부한다. 보드 승격(promotion) 대상.
   "workproduct_selector_provenance_missing",
 ]);
+
+// [확장 — board recovery fence-erase] 런 회복/리컨실러가 소비 단계를 재무장·스킵해 실패 흔적(dispatch
+//   error)이 지워진 경우에도, 종료-실패 런 + 실제 소비자 관계 + 서비스 층 전체 증명 사슬이 유지되면
+//   보드가 재귀속을 승인할 수 있다. 이 헬퍼는 그중 "실제 소비자 관계"만 증명한다: 얼려진 실행정의
+//   (스냅숏, requireHistorical)에서 소비 단계로부터 생산자 단계로의 직접/전이 의존 경로를 역방향
+//   탐색으로 확인한다. 엣지 해석은 런타임 전칭(control-node-validation legacyDeps)과 동일 —
+//   dependencies+dependsOn 병합, isBackEdge 가 아닌 conditionalDependencies 만 선행으로 인정.
+//   정의를 못 읽거나(스냅숏 누락/변조) 경로가 없으면 미증명(false) — fail-closed.
+export async function consumerDependsOnProducer(db: Db, input: {
+  workflowRunId: string;
+  consumerStepId: string;
+  producerStepId: string;
+}): Promise<boolean> {
+  if (input.consumerStepId === input.producerStepId) return false;
+  let steps;
+  try {
+    const definition = await loadExecutionDefinition(db, input.workflowRunId, { requireHistorical: true });
+    steps = definition.steps;
+  } catch {
+    return false;
+  }
+  const predecessorsByStep = new Map<string, string[]>();
+  for (const step of steps) {
+    const predecessors = new Set<string>();
+    for (const dependency of [...(step.dependencies ?? []), ...(step.dependsOn ?? [])]) {
+      if (typeof dependency === "string" && dependency.length > 0) predecessors.add(dependency);
+    }
+    for (const edge of step.conditionalDependencies ?? []) {
+      if (edge && edge.isBackEdge !== true && typeof edge.stepId === "string" && edge.stepId.length > 0) {
+        predecessors.add(edge.stepId);
+      }
+    }
+    predecessorsByStep.set(step.id, Array.from(predecessors));
+  }
+  const visited = new Set<string>([input.consumerStepId]);
+  const stack = [input.consumerStepId];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const predecessor of predecessorsByStep.get(current) ?? []) {
+      if (predecessor === input.producerStepId) return true;
+      if (!visited.has(predecessor)) {
+        visited.add(predecessor);
+        stack.push(predecessor);
+      }
+    }
+  }
+  return false;
+}
 
 export type ProducerProvenanceRebindResult =
   | { status: "rebound"; productId: string; producerStepRunId: string; fromGeneration: number; reboundAtGeneration: number; sha256: string; byteSize: number }

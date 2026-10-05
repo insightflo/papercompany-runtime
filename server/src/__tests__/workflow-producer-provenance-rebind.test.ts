@@ -2,14 +2,19 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import express from "express";
+import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issues, issueWorkProducts,
-  workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+  workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { workProductService } from "../services/work-products.js";
 import { selectOfficialWorkProduct } from "../services/workflow/workproduct-selector.js";
 import { rebindProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
+import { workflowRoutes } from "../routes/workflows.js";
+import { errorHandler } from "../middleware/index.js";
+import { createFrozenRun } from "./helpers/workflow-frozen-execution-fixture.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, dir: string;
@@ -133,4 +138,117 @@ it("refuses an unlinked producer heartbeat", async () => {
   const heartbeatRunId = (row.metadata!.workflowProducer as Record<string, unknown>).heartbeatRunId as string;
   await db.update(heartbeatRuns).set({ workflowStepRunId: randomUUID() }).where(eq(heartbeatRuns.id, heartbeatRunId));
   await expect(f.rebind()).rejects.toThrow("producer_rebind_heartbeat_unlinked");
+});
+
+// ---- route 레벨: board producer-provenance rebind API (펜스 경로 + 회복 확장 분기) ----
+
+const UNCHANGED_FENCE_422 = "Only steps fenced by a stale-producer or delegated-provenance selector error can rebind or promote producer provenance";
+
+function boardApp(database: Db) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.actor = { type: "board", source: "local_implicit", userId: "route-board" } as typeof req.actor;
+    next();
+  });
+  app.use("/api", workflowRoutes(database));
+  app.use(errorHandler);
+  return app;
+}
+
+/** [route fixture] 실제 store(createWorkflowRun)로 얼려진 실행정의 스냅숏을 가진 런 + 완료된 생산자
+ *   (admittedProducer 실제 등록) + 소비 단계. 소비 상태/오류는 인자로 넣어 "펜스가 지워진" 상황을 재현한다.
+ *   서비스 층 증명 사슬 구성(하트비트, 로컬 파일, 세대 불일치)은 위 fixture 와 동일하다. */
+async function routeFixture(input: {
+  steps: unknown[];
+  producerStepId: string;
+  consumerStepId: string;
+  consumerStatus?: string;
+  runStatus?: string;
+  consumerMetadata?: Record<string, unknown>;
+}) {
+  const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), workflowId = randomUUID();
+  await db.insert(companies).values({ id: companyId, name: "RebindRoute", issuePrefix: companyId.slice(0, 8) });
+  await db.insert(agents).values({ id: agentId, companyId, name: "Builder" });
+  await db.insert(issues).values({ id: issueId, companyId, title: "Build" });
+  await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "RebindRoute", stepsJson: input.steps as never });
+  const run = await createFrozenRun(db, { workflowId, companyId });
+  const [producerStepRun] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: input.producerStepId,
+    issueId, status: "completed", executionGeneration: 0, startedAt: new Date("2026-01-01") }).returning();
+  const admitted = await admittedProducer(db, { companyId, agentId, issueId, stepRunId: producerStepRun!.id, heartbeatId: randomUUID() });
+  const file = path.join(dir, `${issueId}.json`); await writeFile(file, "{}");
+  const product = await workProductService(db).createForIssue(issueId, companyId, { provider: "local_file",
+    type: "document", title: "content.json", status: "active", createdByRunId: admitted.heartbeatId, metadata: { path: file } });
+  const [consumerStepRun] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: input.consumerStepId,
+    issueId: null, status: input.consumerStatus ?? "skipped", executionGeneration: 3, startedAt: new Date("2026-01-02"),
+    ...(input.consumerMetadata ? { metadata: input.consumerMetadata as never } : {}) }).returning();
+  // 회복(recovery)/리컨실러가 세대를 진행시키고 런을 종료-실패로 닫은 상황 재현.
+  await db.update(workflowStepRuns).set({ executionGeneration: 3 }).where(eq(workflowStepRuns.id, producerStepRun!.id));
+  await db.update(workflowRuns).set({ status: input.runStatus ?? "failed" }).where(eq(workflowRuns.id, run.id));
+  const rebind = () => request(boardApp(db)).post(`/api/workflow-step-runs/${consumerStepRun!.id}/rebind-producer-provenance`)
+    .send({ producerStepId: input.producerStepId, productId: product!.id });
+  return { companyId, run, producerStepRun, consumerStepRun, product, rebind };
+}
+
+it("route: board rebinds when the reconciler erased the fence (skipped consumer, transitive downstream of producer)", async () => {
+  const f = await routeFixture({
+    steps: [
+      { id: "build", name: "Build", agentId: "", dependencies: [], type: "tool" },
+      { id: "assemble", name: "Assemble", agentId: "", dependencies: ["build"], type: "tool" },
+      { id: "publish", name: "Publish", agentId: "", dependencies: ["assemble"], type: "tool" },
+    ],
+    producerStepId: "build",
+    consumerStepId: "publish",
+    consumerStatus: "skipped",
+  });
+  const res = await f.rebind();
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ status: "rebound", fromGeneration: 0, reboundAtGeneration: 3 });
+});
+
+it("route: rebind is rejected when the consumer has no dependency path from the producer step", async () => {
+  const f = await routeFixture({
+    steps: [
+      { id: "build", name: "Build", agentId: "", dependencies: [], type: "tool" },
+      { id: "publish", name: "Publish", agentId: "", dependencies: [], type: "tool" },
+    ],
+    producerStepId: "build",
+    consumerStepId: "publish",
+    consumerStatus: "skipped",
+  });
+  const res = await f.rebind();
+  expect(res.status).toBe(422);
+  expect(res.body.error).toBe(UNCHANGED_FENCE_422);
+});
+
+it("route: rebind stays rejected when the run is not failed (no recovery branch)", async () => {
+  const f = await routeFixture({
+    steps: [
+      { id: "build", name: "Build", agentId: "", dependencies: [], type: "tool" },
+      { id: "publish", name: "Publish", agentId: "", dependencies: ["build"], type: "tool" },
+    ],
+    producerStepId: "build",
+    consumerStepId: "publish",
+    consumerStatus: "skipped",
+    runStatus: "running",
+  });
+  const res = await f.rebind();
+  expect(res.status).toBe(422);
+  expect(res.body.error).toBe(UNCHANGED_FENCE_422);
+});
+
+it("route: fenced path is unchanged — eligible dispatch error still rebinds without needing ancestry", async () => {
+  const f = await routeFixture({
+    steps: [
+      { id: "build", name: "Build", agentId: "", dependencies: [], type: "tool" },
+      { id: "publish", name: "Publish", agentId: "", dependencies: [], type: "tool" },
+    ],
+    producerStepId: "build",
+    consumerStepId: "publish",
+    consumerStatus: "failed",
+    consumerMetadata: { toolInvocation: { dispatchError: "workproduct_selector_stale_producer" } },
+  });
+  const res = await f.rebind();
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ status: "rebound" });
 });
