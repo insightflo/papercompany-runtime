@@ -10,13 +10,18 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 import { board, seedWorld } from "./helpers/workflow-seed-world.js";
 import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { revisionStartOptions } from "../services/missions/revision-start-options.js";
 import { revisionPlanDiagnostics } from "../services/missions/revision-plan-validation.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-declarations-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-declarations-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-declarations-")));
+  // [Q7 생성 시점 도구 재검사] native tool 후보의 실제 승인(admit)이 engine 과 같은 준비성 검사를
+  // 지나므로 프로세스에 tool executor 가 설정돼 있어야 한다(기존 workflow-seed-tool-output fixture 와
+  // 동일한 test double — 이 파일의 다른 검사에는 toolNames 스텝 입장이 없어 영향 없다).
+  setWorkflowToolStepExecutor(async () => ({ accepted: true })); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
 async function boardWait(f: { companyId: string; agentId: string; revision: { id: string } }, steps: unknown[]) {
   const [definition] = await db.insert(workflowDefinitions).values({ companyId: f.companyId, missionId: f.revision.id,
     name: "Revision", sourceKind: "paqo", definitionHash: "a".repeat(64), stepsJson: steps }).returning();

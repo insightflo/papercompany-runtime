@@ -21,7 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, issues, missions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agents, companies, createDb, issues, missions, toolDefinitions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { board, seedWorld } from "./helpers/workflow-seed-world.js";
 import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
@@ -59,6 +59,9 @@ async function toolWorld(toolResult?: Record<string, unknown>) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Seed", issuePrefix: randomUUID(), workProductRoot: root });
   await db.insert(agents).values({ id: agentId, companyId, name: "Renderer", role: "operator", adapterType: "process" });
+  // [Q7 생성 시점 도구 재검사] admission 이 도구 카탈로그를 대조하므로 render-tool 을 회사에 실제 등록한다.
+  await db.insert(toolDefinitions).values({ companyId, name: "render-tool", description: "Render fixture",
+    adapterType: "builtin", adapterConfig: { command: "true" } });
   const [sourceMission] = await db.insert(missions).values({ companyId, ownerAgentId: agentId, title: "Source", status: "completed" }).returning();
   const [definition] = await db.insert(workflowDefinitions).values({ companyId, name: "Seed", stepsJson: toolSteps(agentId) }).returning();
   const sourceRun = await createWorkflowRun(db, { companyId, workflowId: definition.id, missionId: sourceMission.id, triggeredBy: "board" });

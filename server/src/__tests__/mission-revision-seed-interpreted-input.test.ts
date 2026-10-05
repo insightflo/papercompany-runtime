@@ -20,20 +20,24 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, issueWorkProducts, issues, missions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepOutputBindings, workflowStepRuns, type Db } from "@paperclipai/db";
+import { agents, companies, createDb, issueWorkProducts, issues, missions, toolDefinitions, workflowDefinitions, workflowRunSeeds, workflowRuns, workflowStepOutputBindings, workflowStepRuns, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
 import { board } from "./helpers/workflow-seed-world.js";
 import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
 import { createWorkflowRun } from "../services/workflow/workflow-store.js";
+import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { verifySeedEvidence } from "../services/workflow/workflow-seed-evidence.js";
 import { verifyToolSeedEvidence } from "../services/workflow/workflow-seed-tool-output.js";
 import { workProductService } from "../services/work-products.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-seed-interpreted-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-seed-interpreted-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "revision-seed-interpreted-")));
+  // [Q7 생성 시점 도구 재검사] (f) native tool 스텝 admission 이 engine 과 같은 준비성 검사를 지나므로
+  // 프로세스에 tool executor 가 설정돼 있어야 한다(기존 workflow-seed-tool-output fixture 와 동일한 test double).
+  setWorkflowToolStepExecutor(async () => ({ accepted: true })); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); await rm(root, { recursive: true, force: true }); });
 
 const RUN_DATE = "2026-10-03";
 const selector = { type: "document" as const, title: "content.json" };
@@ -119,6 +123,9 @@ async function nativeToolWorld(db: Db, topic: string) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Seed", issuePrefix: randomUUID(), workProductRoot: root });
   await db.insert(agents).values({ id: agentId, companyId, name: "Renderer", role: "operator", adapterType: "process" });
+  // [Q7 생성 시점 도구 재검사] admission 이 도구 카탈로그를 대조하므로 render-tool 을 회사에 실제 등록한다.
+  await db.insert(toolDefinitions).values({ companyId, name: "render-tool", description: "Render fixture",
+    adapterType: "builtin", adapterConfig: { command: "true" } });
   const [sourceMission] = await db.insert(missions).values({ companyId, ownerAgentId: agentId, title: "Source", status: "completed" }).returning();
   const [definition] = await db.insert(workflowDefinitions).values({ companyId, name: "Seed", stepsJson: [
     { id: "render", name: "Render", type: "tool", agentId: "", toolNames: ["render-tool"], dependencies: [],

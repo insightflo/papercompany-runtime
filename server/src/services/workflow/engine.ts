@@ -9,19 +9,17 @@ import type { Db } from "@paperclipai/db";
 import { activityLog, companies, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { issueService } from "../issues.js";
-import { assertWorkflowToolStepsReady, validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
+import { validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
 import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
 import { createAdmittedWorkflowRun } from "./agent-run-create.js";
 import { assertRevisionBoardStart } from "./revision-run-admission.js";
 import { assertSeedActor } from "./workflow-seed-admission.js";
 import { lockUnreplacedRun } from "./run-replacement-guard.js";
-import { assertWorkflowToolReferencesSelectable } from "./tool-catalog.js";
+import { assertWorkflowToolReadinessForSteps } from "./admission-tool-readiness.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
 import { normalizeWorkflowRunInputs, type WorkflowRunInputPolicy } from "./run-input-normalization.js";
 import { formatDateKeyInTimezone } from "./workflow-run-date.js";
 import { resetFailedControlNodesForResume, resetStaleIfControlNodesForResume } from "./control-flow/control-node-executor.js";
-import { validateStructuralGateReadinessForSteps } from "./control-flow/structural-gate-readiness.js";
-import { getStructuralTopologyErrors } from "./control-flow/structural-topology.js";
 import { missionService } from "../missions.js";
 import { listCompanyPlanningArtifactTools } from "../missions/mission-plan-publication-contract.js";
 import { resolveWorkflowMissionOwnerAgentId } from "../missions/mission-create-records.js";
@@ -168,19 +166,10 @@ async function assertWorkflowToolReadiness(
   companyId: string,
   steps: WorkflowStep[],
 ): Promise<void> {
-  await assertWorkflowToolStepsReady({ companyId, steps });
-  await assertWorkflowToolReferencesSelectable(db, { companyId, steps });
-  // [Hybrid QA] Structural gates fail closed at create/update/trigger/resume
-  //   unless their single named tool is registered, enabled, declares the
-  //   structural_validation_v1 capability, and the assignee has a grant.
-  //   A plugin-only or unregistered name cannot bypass this. Ordinary tool/agent
-  //   steps are unaffected (isStructuralGateStep skips them).
-  const structuralErrors = await validateStructuralGateReadinessForSteps({ db, companyId, steps });
-  const topologyErrors = getStructuralTopologyErrors(steps);
-  const allErrors = [...structuralErrors, ...topologyErrors];
-  if (allErrors.length > 0) {
-    throw new Error(`Structural gate validation failed: ${allErrors.join("; ")}`);
-  }
+  // [Q7 구현 단일화] 검사 본체는 admission-tool-readiness.ts 로 옮겼다 — create/update/trigger/
+  //   resume 검사(:272/:313/:353/:500 호출점)와 시작 승인(생성) 시점 재검사가 같은 순서·같은
+  //   오류로 하나의 구현을 공유한다(동작 변경 없음, 호출부 서명 불변).
+  await assertWorkflowToolReadinessForSteps(db, { companyId, steps });
 }
 
 /**
