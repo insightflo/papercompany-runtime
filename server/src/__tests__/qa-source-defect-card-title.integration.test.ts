@@ -94,7 +94,7 @@ describeDb("QA owner card title reflects effective structured finding layers", (
     const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, created.decisionId));
     expect(card).toMatchObject({
       title,
-      requestKey: `qa-source-defect:${seed.runId}:produce:0`,
+      requestKey: `qa-source-defect:v2:${seed.runId}:produce:0`,
       sourceType: "workflow_qa_rejection", sourceId: `${seed.runId}:produce:0`,
       sourceContext: { missionId: seed.missionId, workflowRunId: seed.runId },
       issueId: seed.oversightIssueId, continuationMode: "issue_current_assignee", interactionType: "single_select",
