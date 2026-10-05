@@ -58,8 +58,6 @@ const v=JSON.parse(readFileSync(0,'utf8'));const h=b=>createHash('sha256').updat
 writeFileSync(4,JSON.stringify({schemaVersion:'manual-onboarding.qa.v1',command:'qa',mode:'content',section:null,ok:true,
 checks:[{id:'fixture',ok:true}],checkedAt:new Date().toISOString(),artifactPath:a.out,
 contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
-  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
-    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
   const dispatch = async (concurrent = false) => {
     const requestId = randomUUID();
     const token = await captureStructuralGateProducerToken({ db, workflowRunId: target.id, gate: steps[1], steps });

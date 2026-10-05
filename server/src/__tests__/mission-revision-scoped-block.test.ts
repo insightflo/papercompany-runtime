@@ -51,7 +51,11 @@ const publishTemplate = (agentId: string, toolNames: string[]) => [
     agentId, dependencies: ["tpl-write"], graphWorkProductRequired: true, toolNames: [toolName],
     toolArgs: { content: "{$steps.tpl-write.workProductPath}" } })),
 ];
-const sourceUnits = [{ id: "write", title: "Write report", graphWorkProductRequired: true, dependencies: [] }];
+// (e) seed 승인은 재사용 스텝과 원본 스텝의 canonical 실행 해시(revisionStepHash v2 — description 실행줄
+//     SHA 포함)가 정확히 같아야 한다. 원본 계획 유닛도 재사용 유닛(slice1Unit) 과 같은 reason·sourceRef
+//     실행줄을 가진다(mission-revision-paqo.test.ts 의 source-unit spread 관례와 동일한 정합성).
+const sourceUnits = [{ id: "write", title: "Write report", reason: "revision plan unit",
+  sourceRef: { type: "mission_plan_unit", id: "write" }, graphWorkProductRequired: true, dependencies: [] }];
 
 it("(a) declared-blocked capability gap unit stays durably blocked while the independent sibling proceeds", async () => {
   const w = await slice1World(db, root, sourceUnits, agentId => publishTemplate(agentId, ["tistory-publish"]));
