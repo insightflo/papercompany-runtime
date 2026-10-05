@@ -18,6 +18,11 @@ export function uniqueDecisionFacts(facts: Fact[], common: Fact[]): Fact[] {
   return facts.filter((fact) => !common.some((candidate) => sameFact(candidate, fact)));
 }
 
+function safePreview(value: string) {
+  const end = /[\uD800-\uDBFF]/.test(value[119] ?? "") && /[\uDC00-\uDFFF]/.test(value[120] ?? "") ? 119 : 120;
+  return value.slice(0, end);
+}
+
 export function OperatorDecisionFacts({ facts }: { facts: Fact[] }) {
   const lang = useCompanyLanguage();
   if (facts.length === 0) return null;
@@ -25,7 +30,7 @@ export function OperatorDecisionFacts({ facts }: { facts: Fact[] }) {
     <div key={`${fact.label}:${fact.value}:${index}`} className="flex gap-2">
       <dt>{fact.label}</dt><dd>
         {fact.value.length > 200
-          ? <details><summary>{fact.value.slice(0, 120)}…</summary><p className="whitespace-pre-wrap">{fact.value}</p></details>
+          ? <details><summary>{safePreview(fact.value)}…</summary><p className="whitespace-pre-wrap">{fact.value}</p></details>
           : fact.value}
         {fact.status === "unknown" && <span className="ml-1 rounded bg-muted px-1.5 py-0.5">{L(lang, { en: "Unverified", ko: "미확인" })}</span>}
       </dd>

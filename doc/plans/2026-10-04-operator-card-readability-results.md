@@ -61,7 +61,7 @@ Independent parent checks beyond the worker's own evidence:
 
 1. Scope audit: `git diff --name-only 46cf6129..HEAD` contains only `ui/`, `doc/plans/`, `.pi/LESSONS.md` files. Zero server/shared/db files changed, so no mechanical path exists from this diff to server test failures.
 2. Full UI package suite rerun by parent: 107 files / 555 tests, all passed (19.6s). `pnpm --filter @paperclipai/ui typecheck` exit 0.
-3. The eight current-only failure IDs were resolved by isolated rerun on this branch: all 7 current-only failed files pass together in one isolated run (109/109 tests, 84.94s; `/tmp/operator-card-gates/branch-only-isolated.log`). Their full-run failures (10s DB setup/test timeouts) plus the base run failing strictly more files (19 vs 14) under identical conditions establish load-sensitive flakiness, not diff regressions. CI on the PR remains the authoritative green gate for merge.
+3. The eight current-only failure IDs were resolved by isolated rerun on this branch: all 7 current-only failed files pass together in one isolated run (109/109 tests, 84.94s; `/tmp/operator-card-gates/branch-only-isolated.log`). Their full-run failures (10s DB setup/test timeouts) plus the base run failing strictly more files (19 vs 14) under identical conditions strongly suggest load-sensitive flakiness, but do not conclusively exclude diff regressions. CI on the PR remains the authoritative green gate for merge.
 4. Reviewer verdict (`/tmp/operator-card-final-review.md`): no blocking correctness, test-weakening, or execution-invariant violations.
 
-Parent conclusion: implementation accepted; root-suite failures are host-load flakiness unrelated to this diff. Proceeding to PR with CI as the merge gate.
+Parent conclusion: implementation accepted; isolated recovery and base comparisons strongly suggest host-load flakiness, without proving every root-suite failure unrelated to this diff. Proceeding to PR with CI as the authoritative merge gate.

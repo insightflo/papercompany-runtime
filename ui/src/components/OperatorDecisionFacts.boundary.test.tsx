@@ -30,16 +30,16 @@ describe("exact common fact boundaries", () => {
     expect(commonDecisionFacts([option("a", [known, known])])).toEqual([]);
     expect(uniqueDecisionFacts([known, known], [])).toEqual([known, known]);
   });
-  it("keeps 200 characters inline and folds 201 with the full original preserved", () => {
-    const value200 = "a".repeat(200);
-    const value201 = "b".repeat(201);
+  it("keeps 200 UTF-16 units inline and folds 201 without splitting the preview emoji", () => {
+    const value200 = "a".repeat(198) + "😀";
+    const value201 = "b".repeat(119) + "😀" + "c".repeat(80);
     const host = document.createElement("div");
     host.innerHTML = renderToStaticMarkup(<OperatorDecisionFacts facts={[{ ...known, value: value200 }, { ...known, value: value201 }]} />);
     expect(host.querySelectorAll("details")).toHaveLength(1);
     expect(host.querySelector("dd")?.textContent).toBe(value200);
     const details = host.querySelector("details")!;
     expect(details.open).toBe(false);
-    expect(details.querySelector("summary")?.textContent).toBe(`${"b".repeat(120)}…`);
+    expect(details.querySelector("summary")?.textContent).toBe(`${"b".repeat(119)}…`);
     expect(details.querySelector("p")?.textContent).toBe(value201);
   });
 });
