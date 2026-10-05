@@ -9,21 +9,30 @@
 //       blocked 미선언 기능 부족 → 기존 전체 거절 유지, 차단 결과는 실제 도구 이름 지침).
 //   (c) 부정: 차단 도구의 물화 스텝/실행(대체 게시)·전체완료 실행 기록 0건.
 //   (d) 진행 단위가 차단 단위를 의존/실행인자로 참조하면 조용히 끊지 않고 전체 거절.
+//   (e) [Q4 자동 완료 방지] 차단 필수작업이 활성 계획 refs 에 남으면 남은 단계 전부 실제 실행·종결 후에도
+//       reconcile 자동 completed 가 보류되고, 차단 없는 대조 미션은 기존처럼 completed 다(과차단 아님).
 // 판정 근거는 문구가 아니라 record 결과·mission_plan_decision_submissions·활성 plan refs·물화 정의다.
 import "./helpers/workflow-control-node-boundary.js";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { createDb, missionPlanDecisionSubmissions, workflowRuns } from "@paperclipai/db";
+import { createDb, issues, missionPlanDecisionSubmissions, missions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import {
-  activePlanRefs, diagnosticsOf, grantSlice1Tool, openPlanQaIssueIds, paqoDefinitionSteps, registerSlice1Tool,
+  activePlanRefs, diagnosticsOf, findPaqoDefinition, grantSlice1Tool, openPlanQaIssueIds, paqoDefinitionSteps, registerSlice1Tool,
   slice1Decision, slice1Unit, slice1World,
 } from "./helpers/mission-revision-slice1-world.js";
+import { board } from "./helpers/workflow-seed-world.js";
+import { admittedProducer } from "./helpers/admitted-producer.js";
 import { revisionStartOptions } from "../services/missions/revision-start-options.js";
-import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import { createOwnerActions } from "../services/missions/owner-actions.js";
+import { workProductService } from "../services/work-products.js";
+import { createAdmittedWorkflowRun } from "../services/workflow/agent-run-create.js";
+import { ensureWorkflowStepRunRecords } from "../services/workflow/workflow-step-materialization.js";
+import { setWorkflowToolStepExecutor, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("revision-scoped-block-"); db = createDb(temp.connectionString);
@@ -171,4 +180,85 @@ it("(d) a proceeding unit referencing a blocked unit is rejected instead of sile
   expect(await noRevisionRuns(w.revision.id)).toEqual([]);
   const rows = await db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, w.revision.id));
   expect(rows.every(row => row.status === "rejected")).toBe(true);
+});
+
+// (e) [Q4 자동 완료 방지] 차단 단위는 그래프에서 제외되므로 남은 형제 단계가 전부 실제 입장·실행·종결돼도
+//     활성 계획 refs 의 차단 필수작업이 온전목표 자동 완료를 막는다(대조 미션은 기존처럼 completed).
+it("(e) blocked required work suspends automatic whole-mission completion after siblings finish", async () => {
+  const blockedWorld = await slice1World(db, root, sourceUnits, agentId => publishTemplate(agentId, ["tistory-publish"]));
+  const gapTool = await registerSlice1Tool(db, blockedWorld.companyId, "tistory-publish", {});
+  await grantSlice1Tool(db, blockedWorld.companyId, blockedWorld.agentId, gapTool.id);
+  const blockedUnits = [
+    slice1Unit(blockedWorld.agentId, "write", "Write report", { sourceStepId: blockedWorld.source[0]!.id, graphWorkProductRequired: true, dependencies: [] }),
+    slice1Unit(blockedWorld.agentId, "publishBlog", "Publish to blog", { toolNames: ["tistory-publish"], graphWorkProductRequired: true,
+      dependencies: ["write"], toolArgs: { content: "{$steps.write.workProductPath}" } }),
+  ];
+  const blockedDecision = () => slice1Decision(blockedWorld.revision.id, blockedUnits, blockedWorld.delta([
+    { unitId: "write", operation: "reuse", sourceStepId: blockedWorld.source[0]!.id },
+    { unitId: "publishBlog", operation: "blocked" },
+  ], { capabilityRequirements: [{ unitId: "publishBlog", requiredOutcomeId: "blog-published", toolName: "tistory-publish", capability: "blog_publish" }] }));
+  const blockedFirst = await blockedWorld.submit(blockedDecision());
+  expect(blockedFirst).toMatchObject({ status: "plan_qa_pending" });
+  await blockedWorld.approve(blockedFirst);
+  expect(await blockedWorld.submit(blockedDecision())).toMatchObject({ status: "recorded" });
+  expect((await activePlanRefs(db, blockedWorld.companyId, blockedWorld.revision.id)).revisionBlockedUnits).toBeDefined();
+  expect((await paqoDefinitionSteps(db, blockedWorld.companyId, blockedWorld.revision.id))
+    .every(s => (s.toolNames ?? []).every(name => name !== "tistory-publish"))).toBe(true); // 차단 단위 비물화
+
+  const controlWorld = await slice1World(db, root, sourceUnits, agentId => publishTemplate(agentId, ["tistory-publish"]));
+  const noteTool = await registerSlice1Tool(db, controlWorld.companyId, "note-publish", {});
+  await grantSlice1Tool(db, controlWorld.companyId, controlWorld.agentId, noteTool.id);
+  const controlUnits = [
+    slice1Unit(controlWorld.agentId, "write", "Write report", { sourceStepId: controlWorld.source[0]!.id, graphWorkProductRequired: true, dependencies: [] }),
+    slice1Unit(controlWorld.agentId, "publishNote", "Publish note", { toolNames: ["note-publish"], graphWorkProductRequired: true,
+      dependencies: ["write"], toolArgs: { content: "{$steps.write.workProductPath}" } }),
+  ];
+  const controlDecision = () => slice1Decision(controlWorld.revision.id, controlUnits, controlWorld.delta([
+    { unitId: "write", operation: "reuse", sourceStepId: controlWorld.source[0]!.id },
+    { unitId: "publishNote", operation: "add" },
+  ]));
+  const controlFirst = await controlWorld.submit(controlDecision());
+  expect(controlFirst).toMatchObject({ status: "plan_qa_pending" });
+  await controlWorld.approve(controlFirst);
+  expect(await controlWorld.submit(controlDecision())).toMatchObject({ status: "recorded" });
+  expect((await activePlanRefs(db, controlWorld.companyId, controlWorld.revision.id)).revisionBlockedUnits).toBeUndefined();
+
+  // 남은 단계 전부를 실제 입장(board 시작 승인)→실행(heartbeat·work product)→완료→run 종결 뒤 reconcile.
+  const finishMissionExecution = async (w: Awaited<ReturnType<typeof slice1World>>) => {
+    const definition = await findPaqoDefinition(db, w.companyId, w.revision.id);
+    expect(definition).not.toBeNull();
+    const steps = definition!.stepsJson as Array<{ id: string; sourceStepId?: string }>;
+    const reusable = steps.find(s => s.sourceStepId === w.source[0]!.id)!;
+    const run = await createAdmittedWorkflowRun(db, { companyId: w.companyId, workflowId: definition!.id, missionId: w.revision.id,
+      triggeredBy: "board", seedFromRun: { sourceWorkflowRunId: w.sourceRun.id, stepIds: [reusable.id] } }, board);
+    await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, run.id));
+    await ensureWorkflowStepRunRecords(db, { runId: run.id, steps: steps as never, buildMetadata: () => ({}), syncControls: async (_db, rows) => rows });
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
+    expect(rows.length).toBeGreaterThan(0);
+    const dir = path.join(root, "missions", w.revision.id); await mkdir(dir, { recursive: true });
+    for (const row of rows) {
+      const [issue] = await db.insert(issues).values({ companyId: w.companyId, missionId: w.revision.id,
+        title: `Execute ${row.stepId}`, status: "done", completedAt: new Date() }).returning();
+      await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date(), issueId: issue!.id }).where(eq(workflowStepRuns.id, row.id));
+      const heartbeatId = randomUUID();
+      await admittedProducer(db, { companyId: w.companyId, agentId: w.agentId, issueId: issue!.id, stepRunId: row.id, heartbeatId });
+      const file = path.join(dir, `${row.stepId}.json`), bytes = `{"step":"${row.stepId}"}`;
+      await writeFile(file, bytes);
+      await workProductService(db).createForIssue(issue!.id, w.companyId, { provider: "local_file", type: "document",
+        title: "content.json", status: "active", createdByRunId: heartbeatId,
+        metadata: { path: file, sha256: createHash("sha256").update(bytes).digest("hex") } });
+      await db.update(workflowStepRuns).set({ status: "completed", completedAt: new Date() }).where(eq(workflowStepRuns.id, row.id));
+    }
+    await db.update(issues).set({ status: "done", completedAt: new Date() })
+      .where(and(eq(issues.companyId, w.companyId), eq(issues.missionId, w.revision.id),
+        inArray(issues.originKind, ["mission_main_executor_plan", "mission_plan_qa"])));
+    await syncWorkflowRunState(db, run.id);
+    const [finished] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, run.id));
+    expect(finished.status, JSON.stringify(finished)).toBe("completed"); // 남은 단계 실제 종결 증명
+    const [missionRow] = await db.select().from(missions).where(eq(missions.id, w.revision.id));
+    return createOwnerActions({ db, deps: {} }).reconcileMissionStatusFromWorkflowRuns(missionRow!);
+  };
+
+  expect((await finishMissionExecution(blockedWorld)).status).toBe("active"); // 차단 필수작업 → 자동 완료 보류
+  expect((await finishMissionExecution(controlWorld)).status).toBe("completed"); // 차단 없음 → 기존 정산 유지
 });

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { createDb, workflowDefinitions, workflowStepRuns, workflowRuns, workflowStepOutputBindings,
+import { agentToolGrants, createDb, workflowDefinitions, workflowStepRuns, workflowRuns, workflowStepOutputBindings,
   workflowRunSeeds, toolDefinitions, issues, instanceSettings, activityLog } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedWorld } from "./helpers/workflow-seed-world.js";
@@ -16,33 +16,41 @@ import { admittedProducer } from "./helpers/admitted-producer.js";
 import { ensureWorkflowStepRunRecords } from "../services/workflow/workflow-step-materialization.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
-import { completeWorkflowToolStepFromResult, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 import { captureStructuralGateProducerToken } from "../services/workflow/control-flow/structural-semantic-readiness.js";
 import { workProductService } from "../services/work-products.js";
 import { atomicStructuralCompletion } from "../services/workflow/control-flow/structural-completion.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("seed-binding-rework-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "seed-binding-rework-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "seed-binding-rework-")));
+  // [Q7] toolNames 스텝은 executor 설정이 있어야 생성 시점 재검사를 통과한다(실제 실행은 executeCoreWorkflowTool 경로).
+  setWorkflowToolStepExecutor(async () => ({ accepted: true })); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
 
 it.each([false, true])("native QA rework reuses both rows and refreshes frozen input (finalization=%s)", async enabled => {
   await db.insert(instanceSettings).values({ singletonKey: "default", general: {}, experimental: { enableHeartbeatFinalizationV1: enabled } })
     .onConflictDoUpdate({ target: instanceSettings.singletonKey, set: { experimental: { enableHeartbeatFinalizationV1: enabled } } });
   const f = await seedWorld(db, root);
   const steps = [f.steps[0], { id: "check", name: "Check", type: "tool", agentId: "", qaType: "structural" as const,
-    toolName: "local-qa", toolNames: ["local-qa"], dependencies: ["write"],
+    // [Q7] structural gate 는 grant 주체 assigneeAgentId 선언이 필요하다(PAQO 물화 관례).
+    toolName: "local-qa", toolNames: ["local-qa"], assigneeAgentId: f.agentId, dependencies: ["write"],
     workProductSelectors: { write: { type: "document", title: "content.json" } },
     toolArtifactContract: { schemaVersion: "manual-onboarding.qa.v1", role: "qa", inputStepId: "write" },
     toolArgs: { content: "{$steps.write.workProductPath}", assetsDir: "{$steps.write.siblingAssetsDir}" } }];
   await db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, f.definition.id));
+  // [Q7] admission 이전 도구 등록·capability·assignee grant 를 갖춘다(스크립트 기록은 원래 위치에서 수행).
+  const script = path.join(root, `${randomUUID()}.mjs`);
+  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
+    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
+  const [qaTool] = await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin", adapterConfig }).returning();
+  await db.insert(agentToolGrants).values({ companyId: f.companyId, agentId: f.agentId, toolId: qaTool!.id, grantedBy: "local-board" });
   const target = await f.admit();
   await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, target.id));
   await ensureWorkflowStepRunRecords(db, { runId: target.id, steps, buildMetadata: () => ({}), syncControls: async (_db, rows) => rows });
   const rows = () => db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, target.id));
   const initial = await rows(), producer = initial.find(s => s.stepId === "write")!, check = initial.find(s => s.stepId === "check")!;
   const seedAudit = await db.select().from(workflowRunSeeds).where(eq(workflowRunSeeds.targetRunId, target.id));
-  const script = path.join(root, `${randomUUID()}.mjs`);
   // External producer double only: real argument selection, fd4 runner, receipt and completion.
   await writeFile(script, `import{readFileSync,writeFileSync}from'node:fs';import{createHash}from'node:crypto';
 const a=Object.fromEntries(process.argv.slice(3).reduce((r,v,i,all)=>i%2?r:[...r,[v.slice(2),all[i+1]]],[]));
@@ -52,7 +60,6 @@ checks:[{id:'fixture',ok:true}],checkedAt:new Date().toISOString(),artifactPath:
 contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
   const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
     capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
-  await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin", adapterConfig });
   const dispatch = async (concurrent = false) => {
     const requestId = randomUUID();
     const token = await captureStructuralGateProducerToken({ db, workflowRunId: target.id, gate: steps[1], steps });

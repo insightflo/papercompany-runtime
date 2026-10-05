@@ -15,6 +15,7 @@ import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { runMissionTerminalCleanup } from "./terminal-cleanup-fence.js";
+import { hasActivePlanBlockedRevisionUnits } from "./mission-revision-blocked-work.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
 import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
@@ -244,6 +245,8 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       }
 
       const nextStatus: MissionStatus = cancelledWorkflowRunStatuses.has(latestStatus) ? "cancelled" : "completed";
+      // [Q4] 활성 계획 refs 의 차단 단위가 남아 있으면 자동 완료 정산만 보류한다(수동 종료·독립 실행 유지).
+      if (nextStatus === "completed" && await hasActivePlanBlockedRevisionUnits(db, mission.companyId, mission.id)) return mission;
       // [목적] 이미 같은 상태로 정산된 미션의 노오퍼레이션 재기록 방지 — 읽기 경로(list/감독
       // 스윕) reconcile이 updated_at을 매번 새로 찍어 "Recently updated" 순서를 흔들었다.
       // 상태/완료시각에 실제 변화가 있을 때만 쓴다(완료시각 원천은 런 기록 우선).
@@ -266,12 +269,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         completeOpenMissionOversightIfSettled,
       });
       if (settledLatest.aborted) return mission;
-
-      const updatedMission = {
-        ...mission,
-        ...updates,
-      };
-      return updatedMission;
+      return { ...mission, ...updates };
     }
 
     if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
@@ -304,6 +302,8 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     const nextStatus: MissionStatus = normalizedStatuses.some((status) => cancelledWorkflowRunStatuses.has(status))
       ? "cancelled"
       : "completed";
+    // [Q4] latestRun 분기와 동일하게 활성 계획 차단 단위가 남아 있으면 자동 완료만 보류한다.
+    if (nextStatus === "completed" && await hasActivePlanBlockedRevisionUnits(db, mission.companyId, mission.id)) return mission;
     const completedAt = linkedRuns
       .map((run) => run.completedAt)
       .filter((value): value is Date => value instanceof Date)
@@ -326,12 +326,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       completeOpenMissionOversightIfSettled,
     });
     if (settledAll.aborted) return mission;
-
-    const updatedMission = {
-      ...mission,
-      ...updates,
-    };
-    return updatedMission;
+    return { ...mission, ...updates };
   }
 
   async function completeOpenMissionOversightIfSettled(mission: MissionRow, completedAt: Date): Promise<void> {

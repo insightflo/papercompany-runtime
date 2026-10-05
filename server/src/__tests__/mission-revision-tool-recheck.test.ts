@@ -33,9 +33,10 @@ async function approvedToolWorld() {
   const [tool] = await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "recheck-tool",
     description: "recheck fixture", adapterType: "builtin", adapterConfig: { command: "true" } }).returning();
   await db.insert(agentToolGrants).values({ companyId: f.companyId, agentId: f.agentId, toolId: tool!.id, grantedBy: "local-board" });
+  // engine/catalog 오류 라벨은 agentName(있으면) 우선 — 이름 라벨 기대 문구 유지용 선언(식별·판정은 agentId).
   const steps = [
-    { id: "revision-write", sourceStepId: "write", name: "Write", type: "agent", agentId: f.agentId, dependencies: [], graphWorkProductRequired: true },
-    { id: "revision-check", name: "Check", type: "agent", agentId: f.agentId, dependencies: ["revision-write"], toolNames: ["recheck-tool"] },
+    { id: "revision-write", sourceStepId: "write", name: "Write", type: "agent", agentId: f.agentId, agentName: "Writer", dependencies: [], graphWorkProductRequired: true },
+    { id: "revision-check", name: "Check", type: "agent", agentId: f.agentId, agentName: "Writer", dependencies: ["revision-write"], toolNames: ["recheck-tool"] },
   ];
   const [definition] = await db.insert(workflowDefinitions).values({ companyId: f.companyId, missionId: f.revision.id,
     name: "Revision", sourceKind: "paqo", definitionHash: "a".repeat(64), stepsJson: steps }).returning();
