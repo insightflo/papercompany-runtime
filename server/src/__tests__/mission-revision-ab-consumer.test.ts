@@ -33,6 +33,7 @@ import { executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "../services/
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
 import { dependencyToolEvidence } from "../services/workflow/dependency-tool-evidence.js";
 import { parseToolSeedEvidence } from "../services/workflow/workflow-seed-tool-output.js";
+import { finishAbConsumerChain } from "./helpers/ab-consumer-chain.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 let collectTools = false; // false: 엔진 dispatch 만 승인(외부 도구 결과 미수령 상태), true: 실제 도구 실행
@@ -234,7 +235,11 @@ it("[GREEN-1] A 재사용 + B 신규 수집이 소비자의 선언된 필수 입
     description: "Board-approved tool artifact for step collect-a2" }); // A 계보 = board 승인 seed
   expect(evidence.find(e => e.path === bArtifact)).toMatchObject({ type: "dependency_tool_artifact", id: b.id,
     description: "Workflow tool artifact from step collect-b" }); // B 계보 = 이번 실행 도구 산출물
-});
+  // [Q3 결합 완결] 결합 생산자 완료 → 새 검수 → 게시 → 확인 체인과 같은 실행 영수증 증명은 분리
+  // 헬퍼가 수행한다(본 파일 300줄 제한 유지) — helpers/ab-consumer-chain.ts.
+  await finishAbConsumerChain({ db, root, companyId: f.companyId, agentId: f.agentId, revision: f.revision, target,
+    aFile: f.aFile, aBytes: f.aBytes, bArtifact });
+}, 60000);
 
 it("[RED-2a] B 결과 미수령이면 소비자 해석이 거절되고 발사·이슈가 없다(부분 실행 없음)", async () => {
   collectTools = false;

@@ -27,6 +27,7 @@ import {
 } from "./helpers/mission-revision-slice1-world.js";
 import { board } from "./helpers/workflow-seed-world.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
+import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
 import { revisionStartOptions } from "../services/missions/revision-start-options.js";
 import { createOwnerActions } from "../services/missions/owner-actions.js";
 import { workProductService } from "../services/work-products.js";
@@ -231,7 +232,7 @@ it("(e) blocked required work suspends automatic whole-mission completion after 
   const finishMissionExecution = async (w: Awaited<ReturnType<typeof slice1World>>) => {
     const definition = await findPaqoDefinition(db, w.companyId, w.revision.id);
     expect(definition).not.toBeNull();
-    const steps = definition!.stepsJson as Array<{ id: string; sourceStepId?: string }>;
+    const steps = definition!.stepsJson as Array<{ id: string; sourceStepId?: string; type?: string }>;
     const reusable = steps.find(s => s.sourceStepId === w.source[0]!.id)!;
     const run = await createAdmittedWorkflowRun(db, { companyId: w.companyId, workflowId: definition!.id, missionId: w.revision.id,
       triggeredBy: "board", seedFromRun: { sourceWorkflowRunId: w.sourceRun.id, stepIds: [reusable.id] } }, board);
@@ -241,11 +242,19 @@ it("(e) blocked required work suspends automatic whole-mission completion after 
     expect(rows.length).toBeGreaterThan(0);
     const dir = path.join(root, "missions", w.revision.id); await mkdir(dir, { recursive: true });
     for (const row of rows) {
+      // [Q4 픽스처 교정] PAQO 미션 최종 QA(type:"qa") 는 구조화 QA 결과(공식 verdict ledger) 없이 issue
+      // done 만으로는 sync 가 running 으로 재유도한다(completion-diagnostic-112: desiredValidationCheck-
+      // StepStatus 가 pass verdict 없는 done 을 running 으로 정규화). QA 이슈를 실제 실행 계약과 같은
+      // originKind 로 만들고 이번 시도 PASS 를 정상 경로(공식 workflow_api verdict 제출)로 마감한다.
+      const isQaStep = (steps.find(s => s.id === row.stepId)?.type) === "qa";
       const [issue] = await db.insert(issues).values({ companyId: w.companyId, missionId: w.revision.id,
-        title: `Execute ${row.stepId}`, status: "done", completedAt: new Date() }).returning();
+        title: `Execute ${row.stepId}`, status: "done", completedAt: new Date(),
+        ...(isQaStep ? { originKind: "workflow_execution", assigneeAgentId: w.agentId } : {}) }).returning();
       await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date(), issueId: issue!.id }).where(eq(workflowStepRuns.id, row.id));
       const heartbeatId = randomUUID();
       await admittedProducer(db, { companyId: w.companyId, agentId: w.agentId, issueId: issue!.id, stepRunId: row.id, heartbeatId });
+      if (isQaStep) await recordWorkflowValidationVerdict({ db, issue: issue!, verdict: "pass", source: "workflow_api",
+        heartbeatRunId: heartbeatId, actorAgentId: w.agentId });
       const file = path.join(dir, `${row.stepId}.json`), bytes = `{"step":"${row.stepId}"}`;
       await writeFile(file, bytes);
       await workProductService(db).createForIssue(issue!.id, w.companyId, { provider: "local_file", type: "document",
