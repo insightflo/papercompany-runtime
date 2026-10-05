@@ -28,7 +28,7 @@ import {
 } from "../services/operator-approval-wait.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
-import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, rebindOrPromoteProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
+import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, consumerDependsOnProducer, rebindOrPromoteProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
 import { workflowService } from "../services/workflow/engine.js";
@@ -640,7 +640,21 @@ export function workflowRoutes(db: Db) {
       ? consumer.lastDispatchErrorSummary
       : typeof toolInvocation?.dispatchError === "string" ? toolInvocation.dispatchError : "";
     if (consumer.status !== "failed" || !PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS.has(dispatchError)) {
-      throw unprocessable("Only steps fenced by a stale-producer or delegated-provenance selector error can rebind or promote producer provenance");
+      // [확장 — board recovery fence-erase] 런 회복/리컨실러가 소비 단계를 재무장·스킵해 실패 흔적
+      //   (dispatch error)이 지워진 경우에도, 종료-실패(failed) 런 + 얼려진 실행정의로 증명된 실제
+      //   소비자 관계(생산자 단계의 직접/전이 하위) + 서비스 층 전체 증명 사슬이 유지되면 보드가
+      //   재귀속을 승인할 수 있다. 하나라도 미증명이면 기존 422 을 그대로 낸다(fail-closed).
+      const boardRecoveryEligible = run.status === "failed"
+        && consumer.workflowRunId === run.id
+        && consumer.status !== "completed"
+        && await consumerDependsOnProducer(db, {
+          workflowRunId: run.id,
+          consumerStepId: consumer.stepId,
+          producerStepId: req.body.producerStepId,
+        });
+      if (!boardRecoveryEligible) {
+        throw unprocessable("Only steps fenced by a stale-producer or delegated-provenance selector error can rebind or promote producer provenance");
+      }
     }
     const actor = actorForActivity(req);
     const result = await rebindOrPromoteProducerProvenance(db, {
