@@ -9,6 +9,7 @@ import { captureArtifactRoot, digest, readArtifactBytes } from "./artifact-files
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { readWorkflowToolArtifactPath } from "./tool-artifact-path.js";
 import { findWorkflowSeed, requireSeedSource, seedError, seedStepHash } from "./workflow-seed-evidence.js";
+import { verifySeedInterpretedInputs } from "./seed-interpreted-inputs.js";
 
 /**
  * Native tool step: an issue-less tool execution whose durable output is the recorded
@@ -100,7 +101,8 @@ export async function verifyToolSeedEvidence(db: Db, seed: typeof workflowRunSee
   const evidence = parseToolSeedEvidence(seed.evidence);
   if (!evidence || !seed.approvedByUserId) throw seedError("provenance_invalid");
   const [target] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.targetRunId), eq(workflowRuns.companyId, seed.companyId)));
-  await requireSeedSource(db, seed.companyId, target?.missionId, seed.sourceRunId);
+  if (!target) throw seedError("source_scope_mismatch");
+  await requireSeedSource(db, seed.companyId, target.missionId, seed.sourceRunId);
   const sourceDef = await loadExecutionDefinition(db, seed.sourceRunId, { requireHistorical: true });
   const targetDef = await loadExecutionDefinition(db, seed.targetRunId, { requireHistorical: true });
   const sourceStep = sourceDef.steps.find(s => s.id === seed.sourceStepId), targetStep = targetDef.steps.find(s => s.id === seed.targetStepId);
@@ -118,6 +120,13 @@ export async function verifyToolSeedEvidence(db: Db, seed: typeof workflowRunSee
   const current = await readToolStepSeedArtifact(db, { companyId: seed.companyId, run: row.run, stepRun: row.step });
   if (current.path !== a.path || current.sha256 !== a.sha256 || current.byteSize !== a.byteSize
     || current.stepRunId !== a.stepRunId) throw seedError("tool_output_record_changed");
+  // [Q11] native tool 스텝의 실제 해석 인자 재검증 — agent seed 와 동일하게 원본 재렌더·재선택에 더해
+  // 대상(현재 실행) 레코드 실제값 대조·대상 재렌더를 수행한다(토큰 없는 스텝은 바인딩이 없어 기존 동작).
+  if (evidence.interpretedInputs) {
+    await verifySeedInterpretedInputs(db, { companyId: seed.companyId, targetStepId: seed.targetStepId,
+      binding: evidence.interpretedInputs, sourceRun: row.run, sourceStep, sourceSteps: sourceDef.steps,
+      targetRun: target, targetStep, targetSteps: targetDef.steps });
+  }
   return current;
 }
 

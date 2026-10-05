@@ -53,7 +53,8 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   const evidence = workflowSeedEvidenceSchema.safeParse(seed.evidence);
   if (!evidence.success || !seed.approvedByUserId) throw seedError("provenance_invalid");
   const [target] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.targetRunId), eq(workflowRuns.companyId, seed.companyId)));
-  await requireSeedSource(db, seed.companyId, target?.missionId, seed.sourceRunId);
+  if (!target) throw seedError("source_scope_mismatch");
+  await requireSeedSource(db, seed.companyId, target.missionId, seed.sourceRunId);
   const sourceDef = await loadExecutionDefinition(db, seed.sourceRunId, { requireHistorical: true });
   const targetDef = await loadExecutionDefinition(db, seed.targetRunId, { requireHistorical: true });
   const sourceStep = sourceDef.steps.find(s => s.id === seed.sourceStepId), targetStep = targetDef.steps.find(s => s.id === seed.targetStepId);
@@ -63,13 +64,15 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
   const [sourceStepRun] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, seed.sourceStepRunId),
     eq(workflowStepRuns.workflowRunId, seed.sourceRunId), eq(workflowStepRuns.stepId, seed.sourceStepId)));
   if (!sourceStepRun || sourceStepRun.status !== "completed") throw seedError("source_attempt_changed");
-  // [Q11] 실제 해석 입력 재검증: 승인 때 바인딩한 실제 인자값과 지금 재렌더한 원본 좌표 값이 같아야 물화된다.
+  // [Q11] 실제 해석 입력 재검증: 승인 때 바인딩한 실제 인자값과 (1) 지금 재렌더한 원본 좌표 값, (2) 현재
+  // 대상 run 레코드에서 재해석한 실제값·재렌더한 대상 인자가 모두 같아야 물화된다.
   if (evidence.data.interpretedInputs) {
     const [bindingSourceRun] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, seed.sourceRunId),
       eq(workflowRuns.companyId, seed.companyId)));
     if (!bindingSourceRun) throw seedError("source_attempt_changed");
     await verifySeedInterpretedInputs(db, { companyId: seed.companyId, targetStepId: seed.targetStepId,
-      binding: evidence.data.interpretedInputs, sourceRun: bindingSourceRun, sourceStep, sourceSteps: sourceDef.steps });
+      binding: evidence.data.interpretedInputs, sourceRun: bindingSourceRun, sourceStep, sourceSteps: sourceDef.steps,
+      targetRun: target, targetStep, targetSteps: targetDef.steps });
   }
   const seen = visited ?? new Set<string>();
   if (seen.has(seed.sourceStepRunId)) throw seedError("provenance_invalid");

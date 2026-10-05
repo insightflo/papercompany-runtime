@@ -91,10 +91,12 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
         }
       }
-      // [Q11] 설정 해시가 같아도 실제 해석 인자(토큰 → 실제 산출물·metadata 값)가 다르면 재사용을 거절하고
-      // 승인 당시의 실제 값을 증거에 바인딩해 물화 때 재대조한다. 해석은 원본 run 좌표(sourceDef)에서 수행.
+      // [Q11] 설정 해시가 같아도 실제 해석 인자(토큰 → 실제 산출물·metadata·run 좌표 값)가 다르면 재사용을
+      // 거절하고 승인 당시의 실제 값을 증거에 바인딩해 물화 때 재대조한다. 해석은 원본 run 좌표(sourceDef)에서
+      // 수행한다. native tool 스텝도 동일 게이트를 통과한다(!toolArtifact 예외 제거 — 토큰 없으면 바인딩 없이
+      // 기존 동작 그대로).
       const original = sourceDef.steps.find(s => s.id === sourceId) as RevisionStep;
-      const interpretedInputs = !toolArtifact && hasSeedInterpretedInputTokens(original)
+      const interpretedInputs = hasSeedInterpretedInputTokens(original)
         ? await bindSeedInterpretedInputs(t, { companyId: input.companyId, sourceRun: source, targetRun: run,
           sourceStep: original, sourceSteps: sourceDef.steps, sourceStepRunId: step.id, targetStepId: id,
           requestedStepIds: request.stepIds, targetSteps: targetDef.steps })
@@ -102,7 +104,8 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
       const evidence = toolArtifact
         ? { schemaVersion: "workflow.seed.tool-output.v1", sourceDefinitionHash: sourceDef.definitionHash,
           targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
-          stepConfigHash: seedStepHash(targetStep, targetDef.steps), artifact: toolArtifact }
+          stepConfigHash: seedStepHash(targetStep, targetDef.steps), artifact: toolArtifact,
+          ...(interpretedInputs ? { interpretedInputs } : {}) }
         : { schemaVersion: "workflow.seed.v1", sourceDefinitionHash: sourceDef.definitionHash,
           targetDefinitionHash: targetDef.definitionHash, stepConfigHashVersion: 2,
           stepConfigHash: seedStepHash(targetStep, targetDef.steps), products,
