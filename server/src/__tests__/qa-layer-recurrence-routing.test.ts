@@ -93,7 +93,7 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     const rendered = JSON.stringify(card!.definition);
     expect(rendered).toContain("[source_data*] (kr-index-missing)");
     expect(rendered).not.toContain("[artifact] (kr-index-missing)");
-    expect(rendered).toContain("재발 승격 1건");
+    expect(rendered).toContain("All findings concern source data (collection stage) — 1 recurring finding (repeated from the previous rejection)");
   });
 
   it("mixed recurrence (new artifact + recurring) → reset 1 + card 1 + rework feedback tags '생산자 범위 밖(재발 승격)'", async () => {
@@ -168,7 +168,7 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     const rendered = JSON.stringify(card!.definition);
     expect(rendered).toContain("[artifact] (mobile-overflow)");
     expect(rendered).not.toContain("[source_data"); // [source_data] / [source_data*] 배지 미출현
-    expect(rendered).not.toContain("재발 승격");
+    expect(rendered).not.toContain("recurring finding");
 
     const metadata = (producer.metadata ?? {}) as Record<string, unknown>;
     const contract = metadata.workflowReworkContract as { qaFeedbacks: Array<{ feedback: string | null }> } | undefined;
@@ -202,6 +202,6 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, first.decisionId));
     const rendered = JSON.stringify(card!.definition);
     expect(rendered).toContain("[source_data*] (kr-index-missing)");
-    expect(rendered).toContain("재발 승격 1건");
+    expect(rendered).toContain("All findings concern source data (collection stage) — 1 recurring finding (repeated from the previous rejection)");
   });
 });
