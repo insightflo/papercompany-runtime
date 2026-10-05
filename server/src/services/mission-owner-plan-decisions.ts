@@ -2236,7 +2236,7 @@ export function buildPaqoWorkflowSteps(
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
         toNonEmptyString(unit.instructions) ? `Revision delta instructions: ${toNonEmptyString(unit.instructions)}` : null,
         ...outcomeContractLines,
-        sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
+        sourceRef ? `Source ref: ${stableStringify(sourceRef)}` : null,
       ]),
     } satisfies WorkflowStep;
   });

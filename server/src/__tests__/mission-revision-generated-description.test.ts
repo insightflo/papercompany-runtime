@@ -163,4 +163,30 @@ describe("paqo generated-description binding", () => {
     expect(revisionStepHash({ ...step, revisionDescriptionBinding: { ...bindingOf(step), executionSha256: sha256Text("forged") } },
       steps, "failure")).toBe(failureHash);
   });
+
+  it("(i) sourceRef 실행줄은 키 순서 정규형을 쓴다; 값이 달라지면 여전히 seed 해시가 달라진다", () => {
+    const withRef = (sourceRef: Record<string, unknown>) => [{ ...writer, sourceRef }];
+    const canonicalLine = `Source ref: {"id":"write","type":"mission_plan_unit"}`;
+    // [jsonb 키 순서 회귀] 원본 정의는 메모리 삽입 순서(type→id)로, revision 정의는 jsonb 저장·재독기
+    // 순서(id→type)로 만들어져도 실행줄 바이트/SHA 는 같아야 한다. 삽입 순서 JSON.stringify 를 쓰면
+    // 의미 동일 sourceRef 가 executionSha256 불일치로 workflow_seed_incompatible_definition 거짓 거절된다.
+    const sourceSteps = buildFor(sourceMission, withRef({ type: "mission_plan_unit", id: "write" }));
+    const targetSteps = buildFor(revisionMission, withRef({ id: "write", type: "mission_plan_unit" }));
+    const source = sourceSteps[0] as BoundStep, target = targetSteps[0] as BoundStep;
+    expect(source.description).toContain(canonicalLine);
+    expect(target.description).toContain(canonicalLine);
+    expect(bindingOf(source).executionSha256).toBe(bindingOf(target).executionSha256);
+    expect(readGeneratedExecutionDescriptionSha(target)).toBe(bindingOf(source).executionSha256);
+    expect(revisionStepHash(target, targetSteps)).toBe(revisionStepHash(source, sourceSteps, "seed", "current"));
+    // 키 순서가 아니라 값이 달라지면(다른 id/타입/추가 키) 여전히 실행 해시가 달라 거절된다.
+    for (const changed of [
+      { type: "mission_plan_unit", id: "other" },
+      { type: "mission_plan_template", id: "write" },
+      { id: "write", type: "mission_plan_unit", extra: 1 },
+    ]) {
+      const changedSteps = buildFor(revisionMission, withRef(changed));
+      expect(bindingOf(changedSteps[0] as BoundStep).executionSha256).not.toBe(bindingOf(source).executionSha256);
+      expect(revisionStepHash(changedSteps[0], changedSteps)).not.toBe(revisionStepHash(source, sourceSteps, "seed", "current"));
+    }
+  });
 });
