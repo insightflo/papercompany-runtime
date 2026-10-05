@@ -4,6 +4,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import request from "supertest";
 import { activityLog, companies, companySecrets, companySecretVersions, createDb, toolDefinitions, startEmbeddedPostgresTestDatabase } from "@paperclipai/db";
@@ -11,6 +12,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import { secretService } from "../services/secrets.js";
+import { resolveDevTsxLoaderPath } from "../services/plugin-loader.js";
 import { toolDefinitionRoutes } from "../routes/tool-definitions.js";
 import { errorHandler } from "../middleware/index.js";
 
@@ -55,7 +57,7 @@ describe("tool env secrets (real DB and child process)", () => {
     await tempDb?.cleanup();
   });
   const config = (env: Record<string, unknown>) => ({
-    command: `${process.execPath} ${path.resolve("server/src/__tests__/fixtures/tool-env-probe.mjs")}`,
+    command: `${process.execPath} ${fileURLToPath(new URL("fixtures/tool-env-probe.mjs", import.meta.url))}`,
     env: { TEST_LAUNCH_MARKER: marker, ...env },
   });
   async function execute(env: Record<string, unknown>) {
@@ -86,9 +88,16 @@ describe("tool env secrets (real DB and child process)", () => {
     expect(result.body.error?.includes("synthetic-tool-token")).toBe(false);
     expect(existsSync(marker)).toBe(false);
   });
+  // Anchor paths to this file so they resolve from any cwd (CI runs vitest from
+  // the repo root; local runs often start inside server/). tsx is a server
+  // devDependency, so resolveDevTsxLoaderPath() finds it from server/node_modules
+  // under pnpm regardless of cwd; the fallback covers other layouts.
+  const tsxLoader = resolveDevTsxLoaderPath()
+    ?? fileURLToPath(new URL("../../../cli/node_modules/tsx/dist/loader.mjs", import.meta.url));
+  const migrationScript = fileURLToPath(new URL("../../../scripts/migrate-tool-env-secrets.ts", import.meta.url));
   async function migrate(apply: boolean) {
-    return promisify(execFile)(process.execPath, ["--import", path.resolve("cli/node_modules/tsx/dist/loader.mjs"),
-      path.resolve("scripts/migrate-tool-env-secrets.ts"), "--tool-name", "migration-probe", ...(apply ? ["--apply"] : [])],
+    return promisify(execFile)(process.execPath, ["--import", tsxLoader,
+      migrationScript, "--tool-name", "migration-probe", ...(apply ? ["--apply"] : [])],
     { env: { ...process.env, DATABASE_URL: tempDb.connectionString } });
   }
   it("migration CLI dry-run writes nothing, apply encrypts, and existing names rotate", async () => {

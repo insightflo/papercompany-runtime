@@ -3,6 +3,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   companies,
@@ -64,6 +65,8 @@ describeEmbeddedPostgres("mission runtime snapshot route", () => {
   }, 60_000);
 
   afterEach(async () => {
+    // [감사 정합] reconcile 승격 쓰기가 activity_log를 남긴다 — agents/companies 삭제 전에 정리.
+    await db.delete(activityLog);
     await db.delete(workflowTransitionEvents);
     await db.delete(missionPlanQaVerdicts);
     await db.delete(missionPlanDecisionSubmissions);
