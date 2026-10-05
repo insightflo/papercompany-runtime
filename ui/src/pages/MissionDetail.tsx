@@ -10,6 +10,7 @@ import { useDialog } from "../context/DialogContext";
 import { MissionRevisionActions } from "../components/MissionRevisionActions";
 import { MissionRevisionStart } from "../components/MissionRevisionStart";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useToast } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
 import { StatusBadge } from "@/components/StatusBadge";
 import { InlineEditor } from "../components/InlineEditor";
@@ -358,6 +359,7 @@ export function MissionDetail() {
   const { openNewMission } = useDialog();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const { pushToast } = useToast();
   const [selectedIssueId, setSelectedIssueIdState] = useState<string | null>(() => searchParams.get("issue"));
 
   const {
@@ -402,6 +404,15 @@ export function MissionDetail() {
       if (selectedCompanyId) {
         queryClient.invalidateQueries({ queryKey: queryKeys.missions.list(selectedCompanyId) });
       }
+    },
+    // [계약] 서버(409 등)가 돌려준 사유를 그대로 노출한다 — 종단 상태가 정합/재오픈으로
+    //   무효화된 경우 운영자가 200 인 줄 알고 넘어가지 않도록 한다.
+    onError: (error) => {
+      pushToast({
+        title: "Mission update failed",
+        body: error instanceof Error ? error.message : "Unknown error",
+        tone: "error",
+      });
     },
   });
 
