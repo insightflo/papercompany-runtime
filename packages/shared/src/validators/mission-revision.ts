@@ -25,6 +25,16 @@ const deltaIdSchema = z.string().min(1).max(200);
 
 export const missionRevisionDeltaOperationSchema = z.enum(["reuse", "rerun", "modify", "add", "clone", "blocked"]);
 
+/**
+ * [Q5 수집 구분] 수집 대상 추가 단계의 실행 범위 구분(변경지도 Q5).
+ * - oneShot: 이번 실행 1회 수집 — 새 입력 단계가 이 수정 실행 초안에만 물화되며, 정기 정의와
+ *   수집 상태(워터마크)는 어느 경로에서도 변경되지 않는다.
+ * - permanentChange: 정기 정의 영구 변경 '요구' — 이 수정 실행이 조용히 적용하지 않고 별도 범위
+ *   요청으로 구조화 기록만 남는다(정기 정의 변경은 별도 승인 범위다).
+ * 미지정/생략은 기존 동작을 그대로 유지한다(하위 호환).
+ */
+export const missionRevisionCollectionScopeSchema = z.enum(["oneShot", "permanentChange"]);
+
 export const missionRevisionDeltaUnitSchema = z.object({
   unitId: deltaIdSchema,
   operation: missionRevisionDeltaOperationSchema,
@@ -39,6 +49,8 @@ export const missionRevisionDeltaUnitSchema = z.object({
     fromUnitId: deltaIdSchema,
     selector: z.record(z.unknown()),
   })).min(1).optional(),
+  /** [Q5 수집 구분] 수집 대상 추가(add/clone) 단위의 실행 범위. 미지정은 기존 동작(이 실행 초안에만 반영). */
+  collectionScope: missionRevisionCollectionScopeSchema.optional(),
 });
 
 export const missionRevisionDeltaCapabilityRequirementSchema = z.object({

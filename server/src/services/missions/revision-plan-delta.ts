@@ -12,6 +12,8 @@
 //     selector 값이 실제 선택자 값과 다름(같은 생산자의 다른 파일 혼동) — 이 입력 연결 검사는
 //     validateRevisionPlanDeltaWiring 으로 분리되어 현재 템플릿 상속 적용 후 실행된다
 //   - 선언된 필수 기능(capabilityRequirements)을 활성 도구가 제공하지 않음(mission_revision_capability_gap)
+//   - 수집 범위 구분(collectionScope) 이 추가(add)/복제(clone) 외 단위에 선언되었거나, 선언 단위가
+//     수집 대상 인자(toolArgs)를 명시하지 않은 경우(Q5 — 정기 정의 인자·워터마크의 조용한 재사용 방지)
 // [연결] mission-owner-plan-decisions.ts recordLatestAuthorizedMissionOwnerPlanDecision — 실행 배치(도구/권한)
 //   검증 통과 직후 호출되고, 검증을 통과한 원본 delta 객체를 활성 plan refs 보존에 돌려준다.
 // [수정시 주의] 예상 진단만 반환하고 예외를 삼키지 않는다. 스냅샷 해시는 워크플로 정의 동결 규칙
@@ -22,6 +24,7 @@ import {
   MISSION_REVISION_DELTA_SCHEMA_VERSION,
   missionRevisionDeltaSchema,
 } from "@paperclipai/shared/validators/mission-revision";
+import { collectRevisionCollectionScopeDiagnostics } from "./revision-plan-collection-scope.js";
 import { computePaqoDefinitionHash } from "../workflow/paqo-definition-identity.js";
 import { selectedUnitToolNames, type PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 
@@ -157,6 +160,8 @@ export async function validateRevisionPlanDelta(input: {
       diagnostics.push(deltaInvalid(
         `재사용(reuse) 단위 ${unit.unitId} 가 변경된 지시/해석 입력을 함께 선언했습니다. modify 로 제출하세요.`));
     }
+    // [Q5 수집 구분] 수집 범위 구분 계약 검사(추가/복제 단위 전용·수집 인자 명시)는 collection-scope 모듈이다.
+    diagnostics.push(...collectRevisionCollectionScopeDiagnostics(unit, input.selectedExecutionUnits));
   }
 
   // [대응 일치] 변경안의 sourceStepId 는 계획 단위의 명시적 대응과 같아야 한다(서신 관계, 승인 아님).
@@ -180,7 +185,6 @@ export async function validateRevisionPlanDelta(input: {
   //   제공해야 한다(등록만으로 충족되지 않는다). 요구 도구가 단위의 실제 toolNames 에 없으면 계약 위반이고
   //   진단은 그 실제 도구 이름을 정확히 지칭한다. 변경안이 단위를 blocked 로 선언했으면 불충족 기능은
   //   전체 거절 대신 차단 단위 구조화 결과(revision-plan-decision-state)로 남는다.
-  const deltaUnitOperationByUnitId = new Map(delta.units.map(unit => [unit.unitId, unit.operation] as const));
   for (const requirement of delta.capabilityRequirements ?? []) {
     if (!planUnitIds.has(requirement.unitId)) {
       diagnostics.push(deltaInvalid(`기능 요구가 계획에 없는 단위 ${requirement.unitId} 를 참조합니다.`));
@@ -193,7 +197,10 @@ export async function validateRevisionPlanDelta(input: {
         `기능 요구 도구 ${requirement.toolName} 은(는) 단위 ${requirement.unitId} 가 실제로 사용하는 도구(${actualToolNames.join(", ") || "없음"}) 가 아닙니다.`));
       continue;
     }
-    if (deltaUnitOperationByUnitId.get(requirement.unitId) === "blocked") continue;
+    // [Q4/Q5 부분진행] blocked 선언 단위와 별도 범위(permanentChange) 선언 단위는 이 실행에 물화되지
+    //   않으므로, 불충족 기능은 전체 거절 대신 구조화 결과(차단 진단·별도 범위 요청)로 남는다.
+    const requirementDeltaUnit = deltaUnitById.get(requirement.unitId);
+    if (requirementDeltaUnit?.operation === "blocked" || requirementDeltaUnit?.collectionScope === "permanentChange") continue;
     const tool = input.tools.find(candidate => candidate.name === requirement.toolName);
     if (!toolCapabilities(tool).includes(requirement.capability)) {
       diagnostics.push({

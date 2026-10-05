@@ -8,7 +8,8 @@
 //   정확히 지칭하는 구조화 결과(outcome)를 남긴다. 결과는 활성 계획 refs(revisionBlockedUnits) 에
 //   보존되어 시작 화면 표시로만 소비된다(대체 게시/전체완료 아님).
 // [연결] mission-owner-plan-decisions.ts(실행 배치 검사에서 차단 선언 단위 제외·물화 필터),
-//   revision-plan-decision-state.ts(검증 통과 뒤 마킹·평가), revision-start-options.ts(표시 행 변환).
+//   revision-plan-decision-state.ts(검증 통과 뒤 마킹·평가), revision-start-options.ts(표시 행 변환),
+//   revision-plan-collection-scope.ts(Q5 별도 범위 단위도 같은 배제 참조 traversal 을 종류 문구와 재사용).
 // [수정시 주의] outcome 은 표시·감사 데이터이지 실행 권위가 아니다. 차단 단위의 도구 실행을 허용하거나
 //   미해결 필수 결과를 완료로 바꾸는 경로를 이 모듈에서 만들지 않는다.
 import type { Db } from "@paperclipai/db";
@@ -116,45 +117,64 @@ function visitStepRefTokens(value: unknown, visit: (ref: string) => void): void 
   if (isPlainObject(value)) { for (const key of Object.keys(value)) visitStepRefTokens(value[key], visit); }
 }
 
-// [참조 무결성] 차단 단위는 실행 그래프에서 제외되므로, 진행 단위가 의존/선택자/실행인자로 차단 단위를
-//   참조하면 실행 시 반드시 실패한다. 조용히 끊지 않고 전체 계획을 구조화 거절한다(부분진행 남용 방지).
-export function collectProceedingReferencesToBlockedUnits(
+/** [참조 무결성 — 배제 단위 공통 계약] 실행 그래프에서 제외되는 단위(차단/별도 범위)의 종류 표현.
+ *   진행 단위가 제외 단위를 의존/선택자/실행인자로 참조하면 실행 시 반드시 실패하므로 조용히 끊지
+ *   않고 전체 계획을 구조화 거절한다(부분진행 남용 방지). 진단 코드·문구는 종류별로 정확히 구분된다. */
+export type RevisionExcludedUnitKind = {
+  readonly dependencyCode: string;
+  readonly selectorCode: string;
+  readonly noun: string;
+  readonly dependencyRemedy: string;
+  readonly selectorRemedy: string;
+};
+
+/** [슬라이스 Q4] 차단 단위 종류 — 기존 진단 코드·문구를 그대로 유지한다. */
+export const revisionBlockedUnitKind: RevisionExcludedUnitKind = {
+  dependencyCode: "mission_revision_blocked_unit_dependency",
+  selectorCode: "mission_revision_blocked_unit_selector",
+  noun: "차단 단위",
+  dependencyRemedy: "의존 단위도 blocked 로 선언하거나 계획을 다시 구성하세요.",
+  selectorRemedy: "해당 연결을 제거하거나 소비 단위도 blocked 로 선언하세요.",
+};
+
+export function collectProceedingReferencesToExcludedUnits(
   units: readonly Record<string, unknown>[],
-  blockedUnitIds: ReadonlySet<string>,
+  excludedUnitIds: ReadonlySet<string>,
+  kind: RevisionExcludedUnitKind,
 ): RevisionPlanDeltaDiagnostic[] {
   const aliasToUnitId = unitIdAliases(units);
   const diagnostics: RevisionPlanDeltaDiagnostic[] = [];
   const seen = new Set<string>();
-  const push = (code: "mission_revision_blocked_unit_dependency" | "mission_revision_blocked_unit_selector", message: string) => {
+  const push = (code: string, message: string) => {
     if (seen.has(message)) return;
     seen.add(message);
     diagnostics.push({ code, message, severity: "invalid" });
   };
-  const isBlocked = (reference: string): boolean => {
+  const isExcluded = (reference: string): boolean => {
     const producer = aliasToUnitId.get(reference) ?? reference;
-    return blockedUnitIds.has(reference) || blockedUnitIds.has(producer);
+    return excludedUnitIds.has(reference) || excludedUnitIds.has(producer);
   };
   for (const unit of units) {
     const unitId = readUnitId(unit);
-    if (!unitId || blockedUnitIds.has(unitId)) continue;
+    if (!unitId || excludedUnitIds.has(unitId)) continue;
     for (const dependency of Array.isArray(unit.dependencies) ? unit.dependencies : []) {
-      if (typeof dependency === "string" && isBlocked(dependency)) {
-        push("mission_revision_blocked_unit_dependency",
-          `진행 단위 ${unitId} 이(가) 차단 단위 ${dependency} 에 의존합니다. 의존 단위도 blocked 로 선언하거나 계획을 다시 구성하세요.`);
+      if (typeof dependency === "string" && isExcluded(dependency)) {
+        push(kind.dependencyCode,
+          `진행 단위 ${unitId} 이(가) ${kind.noun} ${dependency} 에 의존합니다. ${kind.dependencyRemedy}`);
       }
     }
     if (isPlainObject(unit.workProductSelectors)) {
       for (const key of Object.keys(unit.workProductSelectors)) {
-        if (isBlocked(key)) {
-          push("mission_revision_blocked_unit_selector",
-            `진행 단위 ${unitId} 의 결과 선택자가 차단 단위 ${aliasToUnitId.get(key) ?? key} 를 참조합니다. 해당 연결을 제거하거나 소비 단위도 blocked 로 선언하세요.`);
+        if (isExcluded(key)) {
+          push(kind.selectorCode,
+            `진행 단위 ${unitId} 의 결과 선택자가 ${kind.noun} ${aliasToUnitId.get(key) ?? key} 를 참조합니다. ${kind.selectorRemedy}`);
         }
       }
     }
     visitStepRefTokens(unit.toolArgs, ref => {
-      if (isBlocked(ref)) {
-        push("mission_revision_blocked_unit_selector",
-          `진행 단위 ${unitId} 의 실행 인자가 차단 단위 ${aliasToUnitId.get(ref) ?? ref} 의 결과를 참조합니다({$steps.${ref}.…}).`);
+      if (isExcluded(ref)) {
+        push(kind.selectorCode,
+          `진행 단위 ${unitId} 의 실행 인자가 ${kind.noun} ${aliasToUnitId.get(ref) ?? ref} 의 결과를 참조합니다({$steps.${ref}.…}).`);
       }
     });
   }

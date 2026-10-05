@@ -24,10 +24,17 @@ import { inheritCurrentTemplateWiring } from "./revision-plan-template-inheritan
 import type { PlanningArtifactTool } from "./mission-plan-publication-contract.js";
 import {
   assessRevisionBlockedUnitOutcomes,
-  collectProceedingReferencesToBlockedUnits,
+  collectProceedingReferencesToExcludedUnits,
   parseRevisionDeltaBlockedScope,
+  revisionBlockedUnitKind,
   type RevisionBlockedUnitOutcome,
 } from "./revision-plan-blocked-outcomes.js";
+import {
+  assessRevisionSeparateScopeOutcomes,
+  readSeparateScopeRevisionUnitIds,
+  revisionSeparateScopeUnitKind,
+  type RevisionSeparateScopeOutcome,
+} from "./revision-plan-collection-scope.js";
 import { readUnitId } from "./revision-plan-declaration-targets.js";
 
 type MissionPlanDecisionLedgerSubmission = Omit<
@@ -48,11 +55,16 @@ export type RevisionPlanDeltaInvalidResponse = {
 /** [슬라이스 Q4] 차단 단위 구조화 결과 — 활성 계획 refs(revisionBlockedUnits) 보존·시작 화면 표시로만 소비. */
 export type { RevisionBlockedUnitOutcome } from "./revision-plan-blocked-outcomes.js";
 
+/** [슬라이스 Q5] 별도 범위 요청 결과 — 활성 계획 refs(revisionSeparateScopeRequests) 보존·표시로만 소비. */
+export type { RevisionSeparateScopeOutcome } from "./revision-plan-collection-scope.js";
+
 /** [슬라이스1] 변경안 검증 결과: 통과하면 원본 delta 와 상속·입력연결 검증까지 통과한 유효 유닛, 거부하면 invalid 응답.
  *  [슬라이스 Q4] blocked 선언 단위는 revisionBlocked 마킹과 함께 남고, 그 실제 toolNames 진단은
- *  blockedUnitOutcomes 로 함께 반환된다(전체 invalid 아님 — 부분진행). */
+ *  blockedUnitOutcomes 로 함께 반환된다(전체 invalid 아님 — 부분진행).
+ *  [슬라이스 Q5] permanentChange 선언 수집 추가 단위는 revisionSeparateScope 마킹과 함께 남고, 별도 범위
+ *  요청 결과가 separateScopeOutcomes 로 함께 반환된다(정기 정의 적용 아님 — 부분진행). */
 export type RevisionPlanDeltaGate =
-  | { ok: true; delta: Record<string, unknown> | null; units: Record<string, unknown>[]; blockedUnitOutcomes: readonly RevisionBlockedUnitOutcome[] }
+  | { ok: true; delta: Record<string, unknown> | null; units: Record<string, unknown>[]; blockedUnitOutcomes: readonly RevisionBlockedUnitOutcome[]; separateScopeOutcomes: readonly RevisionSeparateScopeOutcome[] }
   | { ok: false; response: RevisionPlanDeltaInvalidResponse };
 
 // [슬라이스1] 버전 있는 수정 변경안(revisionDelta) 검증 + 현재 템플릿 상속 적용. 실행 배치(도구/권한)
@@ -78,7 +90,7 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
     tools: input.tools,
   });
   if (validation.ok) {
-    if (validation.delta === null) return { ok: true, delta: null, units: [...input.selectedExecutionUnits], blockedUnitOutcomes: [] };
+    if (validation.delta === null) return { ok: true, delta: null, units: [...input.selectedExecutionUnits], blockedUnitOutcomes: [], separateScopeOutcomes: [] };
     const inheritance = await inheritCurrentTemplateWiring({
       db: input.ledgerSubmission.db,
       companyId: input.ledgerSubmission.companyId,
@@ -90,48 +102,62 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
       ? validateRevisionPlanDeltaWiring({ delta: validation.delta, selectedExecutionUnits: inheritance.units })
       : inheritance.diagnostics;
     if (inheritance.ok && wiringDiagnostics.length === 0) {
-      // [슬라이스 Q4 부분진행] 변경안이 blocked 로 선언한 단위만 실행 초안에서 제외(revisionBlocked 마킹)되고
-      //   나머지 독립 단위는 그대로 진행한다. 진행 단위가 차단 단위를 의존/선택자/실행인자로 참조하면 조용히
-      //   끊지 않고 전체 거절하고, 차단 단위의 실제 toolNames 진단은 구조화 결과로 활성 계획 refs 에 보존된다.
+      // [슬라이스 Q4 부분진행 / Q5 별도 범위] 변경안이 blocked 로 선언한 단위와 permanentChange 로 선언한
+      //   수집 추가 단위만 실행 초안에서 제외(revisionBlocked/revisionSeparateScope 마킹)되고 나머지 독립
+      //   단위는 그대로 진행한다. 진행 단위가 제외 단위를 의존/선택자/실행인자로 참조하면 조용히 끊지 않고
+      //   전체 거절하고, 차단 단위의 실제 toolNames 진단과 별도 범위 요청은 구조화 결과로 활성 계획 refs 에
+      //   보존된다.
       const blockedScope = parseRevisionDeltaBlockedScope(validation.delta);
-      if (blockedScope && blockedScope.blockedUnitIds.size > 0) {
-        const blockedReferenceDiagnostics = collectProceedingReferencesToBlockedUnits(inheritance.units, blockedScope.blockedUnitIds);
-        if (blockedReferenceDiagnostics.length > 0) {
+      const blockedUnitIds = blockedScope?.blockedUnitIds ?? new Set<string>();
+      const separateScopeUnitIds = readSeparateScopeRevisionUnitIds(validation.delta);
+      if (blockedUnitIds.size > 0 || separateScopeUnitIds.size > 0) {
+        const excludedReferenceDiagnostics = [
+          ...collectProceedingReferencesToExcludedUnits(inheritance.units, blockedUnitIds, revisionBlockedUnitKind),
+          ...collectProceedingReferencesToExcludedUnits(inheritance.units, separateScopeUnitIds, revisionSeparateScopeUnitKind),
+        ];
+        if (excludedReferenceDiagnostics.length > 0) {
           await upsertMissionPlanDecisionSubmission({
             ...input.ledgerSubmission,
             status: "rejected",
-            rejectionReason: blockedReferenceDiagnostics[0]!.code,
-            diagnostics: blockedReferenceDiagnostics,
+            rejectionReason: excludedReferenceDiagnostics[0]!.code,
+            diagnostics: excludedReferenceDiagnostics,
           });
           return {
             ok: false,
             response: {
               status: "invalid",
-              reason: blockedReferenceDiagnostics[0]!.code,
+              reason: excludedReferenceDiagnostics[0]!.code,
               planningIssueId: input.ledgerSubmission.planningIssueId,
               commentId: input.commentId,
               decisionHash: input.ledgerSubmission.decisionHash,
-              diagnostics: blockedReferenceDiagnostics,
+              diagnostics: excludedReferenceDiagnostics,
             },
           };
         }
-        const blockedUnitOutcomes = await assessRevisionBlockedUnitOutcomes({
-          db: input.ledgerSubmission.db,
-          companyId: input.ledgerSubmission.companyId,
-          units: inheritance.units,
-          blockedUnitIds: blockedScope.blockedUnitIds,
-          capabilityRequirements: blockedScope.capabilityRequirements,
-          tools: input.tools,
-        });
+        const blockedUnitOutcomes = blockedUnitIds.size > 0
+          ? await assessRevisionBlockedUnitOutcomes({
+            db: input.ledgerSubmission.db,
+            companyId: input.ledgerSubmission.companyId,
+            units: inheritance.units,
+            blockedUnitIds,
+            capabilityRequirements: blockedScope?.capabilityRequirements ?? [],
+            tools: input.tools,
+          })
+          : [];
+        const separateScopeOutcomes = assessRevisionSeparateScopeOutcomes(inheritance.units, separateScopeUnitIds);
         return {
           ok: true,
           delta: validation.delta,
           units: applyRevisionDeltaUnitInputs(validation.delta, inheritance.units)
             .map(unit => {
               const unitId = readUnitId(unit);
-              return unitId !== null && blockedScope.blockedUnitIds.has(unitId) ? { ...unit, revisionBlocked: true } : unit;
+              if (unitId === null) return unit;
+              if (blockedUnitIds.has(unitId)) return { ...unit, revisionBlocked: true };
+              if (separateScopeUnitIds.has(unitId)) return { ...unit, revisionSeparateScope: true };
+              return unit;
             }),
           blockedUnitOutcomes,
+          separateScopeOutcomes,
         };
       }
       return {
@@ -139,6 +165,7 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
         delta: validation.delta,
         units: applyRevisionDeltaUnitInputs(validation.delta, inheritance.units),
         blockedUnitOutcomes: [],
+        separateScopeOutcomes: [],
       };
     }
     const reason = inheritance.ok ? wiringDiagnostics[0]!.code : inheritance.reason;
@@ -195,6 +222,7 @@ export function buildRevisionDecisionRefs(input: {
   readonly decisionHash: string;
   readonly revisionDelta: Record<string, unknown> | null;
   readonly blockedUnitOutcomes?: readonly RevisionBlockedUnitOutcome[];
+  readonly separateScopeOutcomes?: readonly RevisionSeparateScopeOutcome[];
 }): ReturnType<typeof mergeMissionPlanRefs> {
   const refs = mergeMissionPlanRefs(
     input.activePlanRefs,
@@ -207,6 +235,10 @@ export function buildRevisionDecisionRefs(input: {
       ...(input.blockedUnitOutcomes && input.blockedUnitOutcomes.length > 0
         ? { revisionBlockedUnits: input.blockedUnitOutcomes }
         : {}),
+      // [슬라이스 Q5] 별도 범위(permanentChange) 요청 결과도 활성 계획 refs 에 보존된다(적용 아님).
+      ...(input.separateScopeOutcomes && input.separateScopeOutcomes.length > 0
+        ? { revisionSeparateScopeRequests: input.separateScopeOutcomes }
+        : {}),
     },
     { selectedExecutionUnits: "replace" },
   );
@@ -218,6 +250,10 @@ export function buildRevisionDecisionRefs(input: {
   // 새 decision 에 차단 단위가 없으면 이전 차단 결과가 활성 계획을 계속 지배하지 않는다.
   if (!input.blockedUnitOutcomes || input.blockedUnitOutcomes.length === 0) {
     delete (refs as Record<string, unknown>).revisionBlockedUnits;
+  }
+  // 새 decision 에 별도 범위 요청이 없으면 이전 요청 결과가 활성 계획을 계속 지배하지 않는다.
+  if (!input.separateScopeOutcomes || input.separateScopeOutcomes.length === 0) {
+    delete (refs as Record<string, unknown>).revisionSeparateScopeRequests;
   }
   return refs;
 }
