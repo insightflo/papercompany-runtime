@@ -86,6 +86,10 @@ describeDb("qa source-defect layer routing + owner card", () => {
     expect(card!.continuationMode).toBe("issue_current_assignee");
     expect(card!.issueId).toBe(seed.oversightIssueId);
     expect(card!.definition.humanReview).not.toBeNull();
+    // The fixture's default company language is English; the caller must load it too.
+    expect(card!.title).toBe("Quality review (QA) rejected — source data defects, choose next steps (produce · rework 0/2)");
+    expect(card!.definition.humanReview!.decisionSubject).toBe("Choose how to handle the results that did not pass quality review");
+    expect(card!.definition.options[0]!.label).toBe("Run data collection again");
     const optionIds = card!.definition.options.map((option) => option.id);
     expect(optionIds).toEqual(["rerun_source_collection", "extra_producer_rework", "maintenance_issue", "replan_mission", "cancel"]);
   });
