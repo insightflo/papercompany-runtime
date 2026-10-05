@@ -567,10 +567,21 @@ export async function listWorkflowToolCatalog(db: Db, companyId: string): Promis
   };
 }
 
-export async function assertWorkflowToolReferencesSelectable(
+// [Q7 시작시점 도구 권한 재검사 — 구조화 결과] 아래 assertWorkflowToolReferencesSelectable 이
+//   던지던 것과 정확히 같은 검사(회사 선언 존재·활성·담당 에이전트 권한)를 진단 목록으로 반환한다.
+//   시작 경로(revision-run-admission → verifyRevisionToolPermissionsAtStart)는 이 목록을 구조화
+//   거절(tool_permission_changed) 세부로 소비하고, 기존 정의 생성/수정/트리거 경로는 assert 래퍼가
+//   첫 진단을 기존과 동일한 메시지로 던진다(메시지·순서 회귀 없음). 기계를 재구축하지 않고 확장한다.
+export type WorkflowToolReferenceFinding =
+  | { reason: "tool_missing"; stepId: string; toolName: string }
+  | { reason: "tool_disabled"; stepId: string; toolName: string }
+  | { reason: "assignee_unresolved"; stepId: string; toolName: string; agentId: string; agentName: string }
+  | { reason: "tool_not_granted"; stepId: string; toolName: string; agentId: string; agentName: string };
+
+export async function reviewWorkflowToolReferencesSelectable(
   db: Db,
   input: { companyId: string; steps: WorkflowStep[] },
-): Promise<void> {
+): Promise<WorkflowToolReferenceFinding[]> {
   const references = input.steps.flatMap((step) => {
     const names = Array.isArray(step.toolNames)
       ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
@@ -582,18 +593,28 @@ export async function assertWorkflowToolReferencesSelectable(
         step: step as WorkflowStepWithToolSelection,
       }));
   });
-  if (references.length === 0) return;
+  if (references.length === 0) return [];
 
   const catalog = await listWorkflowToolCatalog(db, input.companyId);
-  const enabledToolNames = new Set(
+  const enabledToolNameSet = new Set(
     catalog.tools
       .filter((tool) => tool.enabled)
       .map((tool) => tool.name.trim())
       .filter(Boolean),
   );
-  const firstUnavailable = references.find((reference) => !enabledToolNames.has(reference.toolName));
-  if (firstUnavailable) {
-    throw new Error(`Workflow tool "${firstUnavailable.toolName}" is unavailable.`);
+  const declaredToolNameSet = new Set(
+    catalog.tools
+      .map((tool) => tool.name.trim())
+      .filter(Boolean),
+  );
+  const stepIdOf = (step: WorkflowStepWithToolSelection): string =>
+    typeof step.id === "string" ? step.id.trim() : "";
+  const findings: WorkflowToolReferenceFinding[] = [];
+  for (const reference of references) {
+    if (enabledToolNameSet.has(reference.toolName)) continue;
+    findings.push(declaredToolNameSet.has(reference.toolName)
+      ? { reason: "tool_disabled", stepId: stepIdOf(reference.step), toolName: reference.toolName }
+      : { reason: "tool_missing", stepId: stepIdOf(reference.step), toolName: reference.toolName });
   }
 
   const agentRows = await db
@@ -606,19 +627,35 @@ export async function assertWorkflowToolReferencesSelectable(
       .filter((grant) => typeof grant.agentId === "string" && grant.agentId.trim().length > 0)
       .map((grant) => `${grant.agentId!.trim()}:${grant.toolName.trim()}`),
   );
-  const missingAgentGrant = references.find((reference) => {
+  for (const reference of references) {
     const stepType = typeof reference.step.type === "string" ? reference.step.type.trim().toLowerCase() : "";
     const agentId = typeof reference.step.agentId === "string" ? reference.step.agentId.trim() : "";
     const agentName = typeof reference.step.agentName === "string" ? reference.step.agentName.trim() : "";
-    if (stepType !== "agent" && !agentId && !agentName) return false;
+    if (stepType !== "agent" && !agentId && !agentName) continue;
     const resolvedAgentId = agentId || (agentName ? uniqueAgentIdsByName.get(agentName) : undefined);
-    if (!resolvedAgentId) return true;
-    return !grantsByAgentId.has(`${resolvedAgentId}:${reference.toolName}`);
-  });
-  if (missingAgentGrant) {
-    const agentId = typeof missingAgentGrant.step.agentId === "string" ? missingAgentGrant.step.agentId.trim() : "";
-    const agentName = typeof missingAgentGrant.step.agentName === "string" ? missingAgentGrant.step.agentName.trim() : "";
-    const agentLabel = agentName || agentId || "unknown";
-    throw new Error(`Workflow tool "${missingAgentGrant.toolName}" is not granted to agent "${agentLabel}".`);
+    if (!resolvedAgentId) {
+      findings.push({ reason: "assignee_unresolved", stepId: stepIdOf(reference.step),
+        toolName: reference.toolName, agentId: "", agentName });
+      continue;
+    }
+    if (!grantsByAgentId.has(`${resolvedAgentId}:${reference.toolName}`)) {
+      findings.push({ reason: "tool_not_granted", stepId: stepIdOf(reference.step), toolName: reference.toolName,
+        agentId: resolvedAgentId, agentName });
+    }
   }
+  return findings;
+}
+
+export async function assertWorkflowToolReferencesSelectable(
+  db: Db,
+  input: { companyId: string; steps: WorkflowStep[] },
+): Promise<void> {
+  const findings = await reviewWorkflowToolReferencesSelectable(db, input);
+  const first = findings[0];
+  if (!first) return;
+  if (first.reason === "tool_missing" || first.reason === "tool_disabled") {
+    throw new Error(`Workflow tool "${first.toolName}" is unavailable.`);
+  }
+  const agentLabel = first.agentName || first.agentId || "unknown";
+  throw new Error(`Workflow tool "${first.toolName}" is not granted to agent "${agentLabel}".`);
 }
