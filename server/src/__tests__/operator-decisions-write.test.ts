@@ -154,12 +154,28 @@ describeDb("operator decision write service", () => {
     expect(activities[1]?.details).not.toHaveProperty("comment");
   });
 
-  it("blocks a decision when the human-readable packet and exact source location are missing", async () => {
+  it("rejects packet-less creation; legacy packet-less rows stay unresolvable", async () => {
     const service = operatorDecisionWriteService(db);
-    const created = await service.create(companyId, {
+    // [생성 게이트] 패킷 없는 신규 생성은 422로 거부된다(죽은 카드 원천 차단).
+    await expect(service.create(companyId, {
       ...input("missing-review"), definition: { ...definition, humanReview: null },
-    }, { type: "agent", id: agentId });
-    await expect(service.resolve(created.decision.id, {
+    }, { type: "agent", id: agentId })).rejects.toMatchObject({ status: 422, details: { code: "human_review_packet_required" } });
+    // [2차 방어] 게이트 이전 데이터(직접 삽입 행)는 resolve 도 여전히 거부한다.
+    const [legacy] = await db.insert(operatorDecisions).values({
+      companyId,
+      requestKey: "missing-review-legacy",
+      requestHash: randomUUID(),
+      priority: "high",
+      interactionType: "single_select",
+      title: "Choose",
+      description: "",
+      sourceType: "workflow_step",
+      sourceId: "x",
+      sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
+      issueId: null,
+      definition: { ...definition, humanReview: null },
+    }).returning();
+    await expect(service.resolve(legacy.id, {
       actionId: "choose", selectedOptionIds: ["one"], comment: null,
     }, "board-user")).rejects.toMatchObject({ status: 422, details: { code: "human_review_packet_required" } });
   });
