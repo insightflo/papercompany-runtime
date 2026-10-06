@@ -267,7 +267,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
   try {
     const result = await createOrReplayQaSourceDefectCard({
       db: input.db, companyId: input.companyId, language,
-      legacyRequestKey: `qa-source-defect:${sourceId}`, sourcePrefix: `${input.workflowRunId}:${input.producerStepId}:%`,
+      legacyRequestKey: `qa-source-defect:${sourceId}`, sourcePrefix: `${`${input.workflowRunId}:${input.producerStepId}:`.replace(/[\\%_]/g, "\\$&")}%`,
       buildHistorical: () => buildHistoricalQaSourceDefectCard({ ...input, findings: promotion.findings, promotedFindingIds: promotion.promotedFindingIds }),
       build: (displayLanguage) => buildCardCreateInput({
         ...input, language: displayLanguage,
