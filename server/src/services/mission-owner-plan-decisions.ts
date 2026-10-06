@@ -1790,7 +1790,9 @@ async function validateSelectedExecutionUnitSourceRefs({
     if (MISSION_PLAN_UNIT_SOURCE_TYPES.has(sourceType)) {
       // [수정 재사용] 서버가 같은 회사 원본 실행에서 검증한 무이슈 native-tool 복사 A 만 담당자 검사를
       //   면제한다(허구 담당자 금지). 저작 플래그/type/sourceStepId 만으로는 면제가 되지 않는다.
-      const copiedStep = reuseCopiedSteps?.get(sourceId);
+      //   면제 키는 단위 자신의 id 이며 sourceRef.id 도 같아야 한다(복사 A id 를 빌린 B 단위는 면제 불가).
+      const unitId = typeof unit.id === "string" ? unit.id.trim() : "";
+      const copiedStep = unitId === sourceId ? reuseCopiedSteps?.get(unitId) : undefined;
       if (copiedStep !== undefined && isNativeToolStep(copiedStep)) continue;
       const assigneeAgentId =
         typeof unit.assigneeAgentId === "string"

@@ -208,3 +208,15 @@ it("[변경 B 보호] 암묵적 조상을 modify 로 저작한 제출은 최초 
   // 거부는 물화를 만들지 않는다 — 변경한 B 가 원본 재사용으로 조용히 바뀌는 경로가 없다.
   expect(await paqoSteps(w)).toEqual([]);
 }, 60000);
+
+it("[담당자 면제 범위] 복사 A 의 id 를 sourceRef.id 로 빌린 B 단위는 담당자 검사를 면제받지 않는다", async () => {
+  const w = await verbatimWorld(db, root);
+  // a1 은 a2 재사용 클로저로 서버가 복사하는 무이슈 native-tool A. publish(B)가 그 id 를 sourceRef 로 빌리고 담당자를 비운다.
+  const authored = w.authoredUnits().map(u => u.id === "publish"
+    ? { ...u, assigneeAgentId: undefined, toolNames: undefined, toolArgs: undefined,
+      sourceRef: { type: "mission_plan_unit", id: "a1" } } : u);
+  const result = await w.submit(w.decision(authored));
+  expect(result).toMatchObject({ status: "invalid" });
+  expect(diagnostics(result).map(d => d.code)).toContain("missing_assignee_agent_id");
+  expect(await paqoSteps(w)).toEqual([]);
+}, 60000);
