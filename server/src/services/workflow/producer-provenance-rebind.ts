@@ -9,6 +9,7 @@ import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
 import { appendWorkflowAuthorityTransition } from "./authority/transitions.js";
 import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
+import { lockProducerRebindScope } from "./producer-rebind-locks.js";
 
 /**
  * [파일 목적] 보드 승인 생산자 귀속 재바인딩(board producer provenance rebind).
@@ -96,27 +97,17 @@ export type ProducerProvenanceRebindResult =
 export async function rebindProducerProvenance(db: Db, input: {
   companyId: string; workflowRunId: string; producerStepId: string; productId: string;
   actor: { actorType: string; actorId: string }; now?: Date;
+  expected?: { sha256: string; byteSize: number };
 }): Promise<ProducerProvenanceRebindResult> {
   const now = input.now ?? new Date();
   return db.transaction(async (tx) => {
-    const [run] = await tx.select().from(workflowRuns)
-      .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.companyId)))
-      .for("update");
-    if (!run) throw badRequest("producer rebind workflow run not found");
-    if (run.status !== "failed") throw conflict("producer_rebind_run_not_failed");
-    if (run.missionId) {
-      const [mission] = await tx.select().from(missions)
-        .where(and(eq(missions.id, run.missionId), eq(missions.companyId, input.companyId))).for("update");
-      if (!mission || mission.status !== "active") throw conflict("producer_rebind_mission_not_active");
-    }
-    // restampProducer 와 동일한 잠금 순서: run → step → product row.
-    const [step] = await tx.select().from(workflowStepRuns)
-      .where(and(eq(workflowStepRuns.workflowRunId, run.id), eq(workflowStepRuns.stepId, input.producerStepId)))
-      .for("update");
+    // Shared order with strict recovery: mission → run → steps (id order) → product → claim.
+    const { run, rows } = await lockProducerRebindScope(tx as unknown as Db, input.companyId, input.workflowRunId);
+    const step = rows.find(row => row.stepId === input.producerStepId);
     if (!step) throw badRequest("producer rebind producer step run not found");
     if (step.status !== "completed" || step.issueId == null) throw conflict("producer_rebind_producer_not_completed");
     const [product] = await tx.select().from(issueWorkProducts)
-      .where(eq(issueWorkProducts.id, input.productId)).for("update");
+      .where(and(eq(issueWorkProducts.id, input.productId), eq(issueWorkProducts.companyId, input.companyId))).for("update");
     if (!product || product.companyId !== input.companyId || product.issueId !== step.issueId) {
       throw badRequest("producer rebind work product not on producer issue");
     }
@@ -128,6 +119,8 @@ export async function rebindProducerProvenance(db: Db, input: {
     const existingMarker = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
     if (existingMarker.success && existingMarker.data.fromGeneration === p.executionGeneration
       && existingMarker.data.fromHeartbeatRunId === p.heartbeatRunId) {
+      if (input.expected && (existingMarker.data.sha256 !== input.expected.sha256
+        || existingMarker.data.byteSize !== input.expected.byteSize)) throw conflict("producer_rebind_bytes_changed");
       return { status: "already_rebound", productId: product.id, fromGeneration: p.executionGeneration };
     }
     const mismatches = workProductProducerMismatches(p, {
@@ -138,7 +131,8 @@ export async function rebindProducerProvenance(db: Db, input: {
       && mismatches.every((field) => field === "executionGeneration" || field === "sourceExecutionGeneration");
     if (!generationOnly) throw conflict("producer_rebind_not_generation_only");
     if (p.executionGeneration >= step.executionGeneration) throw conflict("producer_rebind_not_stale");
-    const [heartbeat] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, p.heartbeatRunId));
+    const [heartbeat] = await tx.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, p.heartbeatRunId), eq(heartbeatRuns.companyId, input.companyId)));
     if (!heartbeat || heartbeat.companyId !== p.companyId || heartbeat.issueId !== step.issueId
       || heartbeat.workflowStepRunId !== step.id) {
       throw conflict("producer_rebind_heartbeat_unlinked");
@@ -160,6 +154,9 @@ export async function rebindProducerProvenance(db: Db, input: {
     let bytes: Buffer;
     try { bytes = await readFile(file); } catch { throw conflict("producer_rebind_file_unreadable"); }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (input.expected && (sha256 !== input.expected.sha256 || bytes.byteLength !== input.expected.byteSize)) {
+      throw conflict("producer_rebind_bytes_changed");
+    }
     const marker = {
       schemaVersion: "workflow.work-product-producer-rebind.v1" as const,
       fromGeneration: p.executionGeneration,
@@ -177,7 +174,7 @@ export async function rebindProducerProvenance(db: Db, input: {
     };
     await tx.update(issueWorkProducts)
       .set({ metadata: nextMetadata, updatedAt: now })
-      .where(eq(issueWorkProducts.id, product.id));
+      .where(and(eq(issueWorkProducts.id, product.id), eq(issueWorkProducts.companyId, input.companyId)));
     await appendWorkflowAuthorityTransition(tx, {
       companyId: input.companyId, workflowRunId: run.id, workflowStepRunId: step.id,
       issueId: step.issueId, heartbeatRunId: p.heartbeatRunId,
@@ -221,16 +218,20 @@ export async function promoteDelegatedProducerProvenance(db: Db, input: {
 }): Promise<DelegatedProducerPromotionResult> {
   const now = input.now ?? new Date();
   return db.transaction(async (tx) => {
+    // Global lock order mission → run (same as lockProducerRebindScope / lockUnreplacedRun).
+    const [scope] = await tx.select({ missionId: workflowRuns.missionId }).from(workflowRuns)
+      .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.companyId)));
+    if (!scope) throw badRequest("producer rebind workflow run not found");
+    if (scope.missionId) {
+      const [mission] = await tx.select().from(missions)
+        .where(and(eq(missions.id, scope.missionId), eq(missions.companyId, input.companyId))).for("update");
+      if (!mission || mission.status !== "active") throw conflict("producer_rebind_mission_not_active");
+    }
     const [run] = await tx.select().from(workflowRuns)
       .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.companyId)))
       .for("update");
-    if (!run) throw badRequest("producer rebind workflow run not found");
+    if (!run || run.missionId !== scope.missionId) throw conflict("producer_rebind_scope_changed");
     if (run.status !== "failed") throw conflict("producer_rebind_run_not_failed");
-    if (run.missionId) {
-      const [mission] = await tx.select().from(missions)
-        .where(and(eq(missions.id, run.missionId), eq(missions.companyId, input.companyId))).for("update");
-      if (!mission || mission.status !== "active") throw conflict("producer_rebind_mission_not_active");
-    }
     const [step] = await tx.select().from(workflowStepRuns)
       .where(and(eq(workflowStepRuns.workflowRunId, run.id), eq(workflowStepRuns.stepId, input.producerStepId)))
       .for("update");

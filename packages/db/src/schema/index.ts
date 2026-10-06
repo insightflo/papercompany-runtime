@@ -107,6 +107,7 @@ export {
 } from "./workflow_webhooks.js";
 export { workflowRunSlots } from "./workflow_run_slots.js";
 export { workflowRuns } from "./workflow_runs.js";
+export { workflowQaRebindClaims } from "./workflow_qa_rebind_claims.js";
 export { workflowRunDefinitions } from "./workflow_run_definitions.js";
 export { workflowResumeRequests } from "./workflow_resume_requests.js";
 export { workflowResumeExecutions } from "./workflow_resume_executions.js";
