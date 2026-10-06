@@ -69,7 +69,7 @@ it("(a) declared-blocked capability gap unit stays durably blocked while the ind
       dependencies: ["write"], toolArgs: { content: "{$steps.write.workProductPath}" } }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "publishBlog", operation: "blocked" },
   ], { capabilityRequirements: [{ unitId: "publishBlog", requiredOutcomeId: "blog-published", toolName: "tistory-publish", capability: "blog_publish" }] }));
   const first = await w.submit(decision());
@@ -112,7 +112,7 @@ it("(b) capability diagnostics bind to the unit's actual toolNames; undeclared g
   ];
   // 요구 도구(tistory-publish) 가 단위의 실제 toolNames(local-neutral) 에 없으면 계약 위반 거절.
   const mismatch = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "publishBlog", operation: "add" },
   ], { capabilityRequirements: [{ unitId: "publishBlog", requiredOutcomeId: "blog-published", toolName: "tistory-publish", capability: "blog_publish" }] })));
   expect(mismatch.status).toBe("invalid");
@@ -120,7 +120,7 @@ it("(b) capability diagnostics bind to the unit's actual toolNames; undeclared g
     expect.objectContaining({ code: "mission_revision_delta_invalid", message: expect.stringContaining("local-neutral") })]));
   // blocked 미선언 단위의 기능 부족은 기존 전체 거절을 그대로 유지한다(진단은 실제 도구 이름 지침).
   const gap = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "publishBlog", operation: "add" },
   ], { capabilityRequirements: [{ unitId: "publishBlog", requiredOutcomeId: "blog-published", toolName: "local-neutral", capability: "blog_publish" }] })));
   expect(gap.status).toBe("invalid");
@@ -143,7 +143,7 @@ it("(b) blocked-unit tool diagnostics are structured per actual toolName: missin
     slice1Unit(w.agentId, "pubUngranted", "Publish ungranted", { toolNames: ["tistory-ungranted"], dependencies: ["write"] }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "pubMissing", operation: "blocked" },
     { unitId: "pubDisabled", operation: "blocked" },
     { unitId: "pubUngranted", operation: "blocked" },
@@ -174,7 +174,7 @@ it("(d) a proceeding unit referencing a blocked unit is rejected instead of sile
       toolArgs: { qaResultPath: "{$steps.publishBlog.workProductPath}" } }),
   ];
   const rejected = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "publishBlog", operation: "blocked" },
     { unitId: "verify", operation: "add" },
   ])));
@@ -199,7 +199,7 @@ it("(e) blocked required work suspends automatic whole-mission completion after 
       dependencies: ["write"], toolArgs: { content: "{$steps.write.workProductPath}" } }),
   ];
   const blockedDecision = () => slice1Decision(blockedWorld.revision.id, blockedUnits, blockedWorld.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: blockedWorld.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: blockedWorld.source[0]!.id },
     { unitId: "publishBlog", operation: "blocked" },
   ], { capabilityRequirements: [{ unitId: "publishBlog", requiredOutcomeId: "blog-published", toolName: "tistory-publish", capability: "blog_publish" }] }));
   const blockedFirst = await blockedWorld.submit(blockedDecision());
@@ -219,7 +219,7 @@ it("(e) blocked required work suspends automatic whole-mission completion after 
       dependencies: ["write"], toolArgs: { content: "{$steps.write.workProductPath}" } }),
   ];
   const controlDecision = () => slice1Decision(controlWorld.revision.id, controlUnits, controlWorld.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: controlWorld.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: controlWorld.source[0]!.id },
     { unitId: "publishNote", operation: "add" },
   ]));
   const controlFirst = await controlWorld.submit(controlDecision());

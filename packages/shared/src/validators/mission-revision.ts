@@ -53,6 +53,21 @@ export const missionRevisionDeltaUnitSchema = z.object({
   collectionScope: missionRevisionCollectionScopeSchema.optional(),
 });
 
+/**
+ * [수정 재사용 원문 복사] 재사용(reuse) 단위의 A 항목은 신원만 선언한다(변경지도 §3).
+ *   정확히 id/sourceStepId 두 필드만 허용하고 id === sourceStepId 를 요구한다 —
+ *   새 별칭을 만들지 않고 원본 단계 ID 를 그대로 쓴다. 지시·설명·이유·계약·담당자·
+ *   toolArgs·해석 입력·의존성 등 에이전트가 저작한 구성은 A 에 허용되지 않는다.
+ *   A 의 실제 구성은 서버가 원본 실행 스냅샷에서 복사한다(서버 소유 투영만 추가된다).
+ */
+export const missionRevisionIdentityOnlyUnitSchema = z.object({
+  id: deltaIdSchema,
+  sourceStepId: deltaIdSchema,
+}).strict().refine(value => value.id === value.sourceStepId, {
+  message: "reuse unit id must equal sourceStepId", path: ["sourceStepId"],
+});
+export type MissionRevisionIdentityOnlyUnit = z.infer<typeof missionRevisionIdentityOnlyUnitSchema>;
+
 export const missionRevisionDeltaCapabilityRequirementSchema = z.object({
   unitId: deltaIdSchema,
   requiredOutcomeId: deltaIdSchema,
@@ -72,5 +87,22 @@ export const missionRevisionDeltaSchema = z.object({
   units: z.array(missionRevisionDeltaUnitSchema).min(1),
   /** 요청 결과에 필요한 도구 기능. 등록만으로 충족되지 않는다. */
   capabilityRequirements: z.array(missionRevisionDeltaCapabilityRequirementSchema).min(1).optional(),
-}).strict();
+}).strict().superRefine((delta, ctx) => {
+  for (let index = 0; index < delta.units.length; index++) {
+    const unit = delta.units[index]!;
+    if (unit.operation !== "reuse") continue;
+    const extra = Object.keys(unit).filter(key => key !== "unitId" && key !== "operation" && key !== "sourceStepId");
+    for (const key of extra) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["units", index, key],
+        message: `reuse 단위는 신원(unitId/operation/sourceStepId)만 선언할 수 있습니다: ${key}` });
+    }
+    if (unit.sourceStepId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["units", index, "sourceStepId"],
+        message: "reuse 단위는 원본 단계 ID 를 sourceStepId 로 명시해야 합니다." });
+    } else if (unit.sourceStepId !== unit.unitId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["units", index, "unitId"],
+        message: `reuse 단위는 새 별칭 없이 원본 단계 ID 를 그대로 씁니다(unitId === sourceStepId): ${unit.unitId}` });
+    }
+  }
+});
 export type MissionRevisionDelta = z.infer<typeof missionRevisionDeltaSchema>;

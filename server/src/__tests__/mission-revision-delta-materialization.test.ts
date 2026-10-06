@@ -87,7 +87,7 @@ const explicitUnits = (w: World) => [
 ];
 // write 만 modify(templateStepId tpl-write + 지시·해석 입력), 나머지 유닛은 reuse/rerun.
 const deltaWithModify = (w: World) => w.delta([
-  { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id },
+  { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id },
   { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, templateStepId: "tpl-write",
     instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
   { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id },

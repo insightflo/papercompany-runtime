@@ -4,6 +4,8 @@ import { and, eq, inArray } from "drizzle-orm";
 import { listWorkflowToolCatalog } from "../workflow/tool-catalog.js";
 import type { WorkflowToolPlanningMetadata } from "../workflow/tool-catalog.js";
 import { mergeAgentConfig } from "../agents.js";
+import { isNativeToolStep } from "../workflow/workflow-seed-tool-output.js";
+import type { WorkflowStep } from "../workflow/dag-engine.js";
 
 export type MissionPlanExecutionPlacementDiagnostic = {
   readonly code: string;
@@ -35,6 +37,8 @@ type UnitPlacement = {
   readonly label: string;
   readonly assigneeAgentId: string;
   readonly toolNames: readonly string[];
+  /** [수정 재사용] 서버가 원본 실행에서 검증한 무이슈 native-tool 복사 A — 담당자/그랜트 검사만 면제. */
+  readonly copiedNativeTool: boolean;
 };
 
 const MISSION_PLAN_UNIT_SOURCE_TYPES = new Set(["mission_plan_unit", "mission_plan_step"]);
@@ -98,6 +102,7 @@ function hasSkillRef(profile: MissionPlanExecutionAgentSkillProfile, skillRef: s
 
 function collectToolPlacements(
   selectedExecutionUnits: readonly Record<string, unknown>[],
+  reuseCopiedSteps?: ReadonlyMap<string, WorkflowStep>,
 ): UnitPlacement[] {
   const placements: UnitPlacement[] = [];
   selectedExecutionUnits.forEach((unit, index) => {
@@ -112,6 +117,10 @@ function collectToolPlacements(
       label: readUnitLabel(unit, index),
       assigneeAgentId: readAssigneeAgentId(unit),
       toolNames,
+      copiedNativeTool: (() => {
+        const copied = reuseCopiedSteps?.get(readString(unit.id));
+        return copied !== undefined && isNativeToolStep(copied);
+      })(),
     });
   });
   return placements;
@@ -168,26 +177,32 @@ function agentNameEntries(
 export function reviewMissionPlanExecutionPlacementWithContext(input: {
   readonly selectedExecutionUnits: readonly Record<string, unknown>[];
   readonly context: MissionPlanExecutionPlacementContext;
+  readonly reuseCopiedSteps?: ReadonlyMap<string, WorkflowStep>;
 }): MissionPlanExecutionPlacementDiagnostic[] {
   const diagnostics: MissionPlanExecutionPlacementDiagnostic[] = [];
-  const placements = collectToolPlacements(input.selectedExecutionUnits);
+  const placements = collectToolPlacements(input.selectedExecutionUnits, input.reuseCopiedSteps);
   // Units have no validated produced-kind contract; prose cannot reject placement.
 
   for (const placement of placements) {
-    if (!placement.assigneeAgentId) {
-      diagnostics.push({
-        code: "workflow_tool_unit_missing_assignee",
-        message: `Execution unit "${placement.label}" selects workflow tools but has no assigneeAgentId. Assign the unit to the agent that will run those tools.`,
-      });
-      continue;
-    }
-    const agentName = input.context.agentNamesById.get(placement.assigneeAgentId);
-    if (!agentName) {
-      diagnostics.push({
-        code: "workflow_tool_assignee_unknown",
-        message: `Execution unit "${placement.label}" selects workflow tools for unknown agent ${placement.assigneeAgentId}. Assign it to an active company agent.`,
-      });
-      continue;
+    // [수정 재사용] 검증된 무이슈 native-tool 복사 A 는 담당자/그랜트 검사만 면제한다(허구 담당자 금지).
+    //   도구 카탈로그/활성 검사는 그대로 통과해야 한다 — 회사 선언·활성 상태가 재사용 조건이다.
+    const agentChecksRequired = !placement.copiedNativeTool;
+    if (agentChecksRequired) {
+      if (!placement.assigneeAgentId) {
+        diagnostics.push({
+          code: "workflow_tool_unit_missing_assignee",
+          message: `Execution unit "${placement.label}" selects workflow tools but has no assigneeAgentId. Assign the unit to the agent that will run those tools.`,
+        });
+        continue;
+      }
+      const agentName = input.context.agentNamesById.get(placement.assigneeAgentId);
+      if (!agentName) {
+        diagnostics.push({
+          code: "workflow_tool_assignee_unknown",
+          message: `Execution unit "${placement.label}" selects workflow tools for unknown agent ${placement.assigneeAgentId}. Assign it to an active company agent.`,
+        });
+        continue;
+      }
     }
     for (const toolName of placement.toolNames) {
       const tool = input.context.workflowToolsByName.get(toolName);
@@ -205,10 +220,11 @@ export function reviewMissionPlanExecutionPlacementWithContext(input: {
         });
         continue;
       }
-      if (!input.context.workflowToolGrantKeys.has(`${placement.assigneeAgentId}:${tool.name}`)) {
+      if (agentChecksRequired
+        && !input.context.workflowToolGrantKeys.has(`${placement.assigneeAgentId}:${tool.name}`)) {
         diagnostics.push({
           code: "workflow_tool_not_granted_to_assignee",
-          message: `Execution unit "${placement.label}" assigns workflow tool "${toolName}" to agent ${agentName}, but that agent does not have the tool grant. Grant the tool to that unit's assignee or reassign the unit.`,
+          message: `Execution unit "${placement.label}" assigns workflow tool "${toolName}" to agent ${input.context.agentNamesById.get(placement.assigneeAgentId) ?? placement.assigneeAgentId}, but that agent does not have the tool grant. Grant the tool to that unit's assignee or reassign the unit.`,
         });
       }
     }
@@ -234,8 +250,9 @@ export async function reviewMissionPlanExecutionPlacement(input: {
   readonly db: Db;
   readonly companyId: string;
   readonly selectedExecutionUnits: readonly Record<string, unknown>[];
+  readonly reuseCopiedSteps?: ReadonlyMap<string, WorkflowStep>;
 }): Promise<MissionPlanExecutionPlacementDiagnostic[]> {
-  const placements = collectToolPlacements(input.selectedExecutionUnits);
+  const placements = collectToolPlacements(input.selectedExecutionUnits, input.reuseCopiedSteps);
   const requestedToolNames = Array.from(new Set(placements.flatMap((placement) => placement.toolNames)));
 
   const skillBearingUnits = collectSkillBearingUnits(input.selectedExecutionUnits);
@@ -255,6 +272,7 @@ export async function reviewMissionPlanExecutionPlacement(input: {
 
   return reviewMissionPlanExecutionPlacementWithContext({
     selectedExecutionUnits: input.selectedExecutionUnits,
+    ...(input.reuseCopiedSteps ? { reuseCopiedSteps: input.reuseCopiedSteps } : {}),
     context: {
       workflowToolsByName: new Map(workflowToolEntries(catalog.tools)),
       workflowToolGrantKeys: new Set(catalog.grants

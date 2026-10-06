@@ -5,9 +5,11 @@ import type { RevisionStep } from "../workflow/revision-step-config.js";
 type WorkflowStep = PersistedWorkflowStep & RevisionStep;
 import { rewriteStepToolArgs } from "./structural-materialization.js";
 
-/** Preserve structured artifact authority when plan units become generated workflow steps. */
+/** Preserve structured artifact authority when plan units become generated workflow steps.
+ *  [수정 재사용] copiedUnitIds 로 지정된 A 단위는 원본 스냅샷 구성이 이미 완전하므로 계약 적용/재작성에서
+ *  제외한다(검증 대상 참조에는 A+B 전체가 그대로 쓰인다). 일반 계획은 기존 동작을 유지한다. */
 export function applyPaqoArtifactContracts(units: Record<string, unknown>[], selectedSteps: WorkflowStep[], steps: WorkflowStep[],
-  ids: Map<string, string>) {
+  ids: Map<string, string>, copiedUnitIds?: ReadonlySet<string>) {
   const aliases = new Map(ids);
   for (const step of selectedSteps) {
     const source = step.sourceStepId;
@@ -23,6 +25,7 @@ export function applyPaqoArtifactContracts(units: Record<string, unknown>[], sel
   };
   for (let i = 0; i < units.length; i++) {
     const unit = units[i], step = steps.find(s => s.id === selectedSteps[i].id)!;
+    if (copiedUnitIds?.has(selectedSteps[i].id)) continue; // A: 서버 복사본 — 저작 계약 적용 없음
     if (unit.qaConfig !== undefined) Object.assign(step, { qaConfig: qaConfigSchema.parse(unit.qaConfig) });
     if (unit.workProductSelectors !== undefined) {
       const selectors = workProductSelectorsSchema.parse(unit.workProductSelectors);

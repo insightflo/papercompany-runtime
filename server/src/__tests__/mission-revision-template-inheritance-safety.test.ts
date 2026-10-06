@@ -63,7 +63,7 @@ const templateUnits = (w: World, publishExtra: Record<string, unknown> = {}, ext
   ...extraUnits,
 ];
 const templateDelta = (w: World, publishExtra: Record<string, unknown> = {}, extraUnits: Record<string, unknown>[] = []) => w.delta([
-  { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
+  { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
   { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, templateStepId: "tpl-write",
     instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
   { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id, templateStepId: "tpl-check" },

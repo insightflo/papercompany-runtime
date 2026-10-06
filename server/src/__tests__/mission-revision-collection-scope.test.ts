@@ -73,7 +73,7 @@ it("(a) supported tool + oneShot new URL materializes a new input step while the
       toolArgs: { url: "https://youtu.be/B" }, dependencies: [] }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectNew", operation: "add", collectionScope: "oneShot" },
   ]));
   const first = await w.submit(decision());
@@ -104,7 +104,7 @@ it("(b) unsupported collection source stays a structured capability-gap outcome 
       toolArgs: { url: "https://example.test/feed" }, dependencies: [] }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectNew", operation: "blocked" },
   ], { capabilityRequirements: [{ unitId: "collectNew", requiredOutcomeId: "feed-collected", toolName: "collect-unsupported", capability: "web_collect" }] }));
   const first = await w.submit(decision());
@@ -133,7 +133,7 @@ it("(c) permanentChange request stays a separate-scope outcome with no silent pe
       toolArgs: { url: "https://youtu.be/B" }, dependencies: [] }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectPermanent", operation: "add", collectionScope: "permanentChange" },
   ]));
   const first = await w.submit(decision());
@@ -170,7 +170,7 @@ it("(c2) a proceeding unit referencing a separate-scope unit is rejected instead
       toolArgs: { collected: "{$steps.collectPermanent.workProductPath}" } }),
   ];
   const rejected = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectPermanent", operation: "add", collectionScope: "permanentChange" },
     { unitId: "consume", operation: "add" },
   ])));
@@ -193,7 +193,7 @@ it("(d) unspecified scope keeps the existing add-unit behavior and misplaced col
       toolArgs: { url: "https://youtu.be/B" }, dependencies: [] }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectPlain", operation: "add" },
   ]));
   const first = await w.submit(decision());
@@ -212,14 +212,14 @@ it("(d) unspecified scope keeps the existing add-unit behavior and misplaced col
   const planQaIssueIdsAfterRecord = await openPlanQaIssueIds(db, w.revision.id);
   // 계약 위반: 수집 범위 구분은 추가(add)/복제(clone) 단위에만 선언할 수 있다.
   const onReuse = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id, collectionScope: "oneShot" },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id, collectionScope: "oneShot" },
     { unitId: "collectPlain", operation: "add" },
   ])));
   expect(onReuse.status).toBe("invalid");
   expect(diagnosticsOf(onReuse)).toEqual(expect.arrayContaining([
     expect.objectContaining({ code: "mission_revision_delta_invalid", message: expect.stringContaining("collectionScope") })]));
   const onBlocked = await w.submit(slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectPlain", operation: "blocked", collectionScope: "oneShot" },
   ])));
   expect(onBlocked.status).toBe("invalid");

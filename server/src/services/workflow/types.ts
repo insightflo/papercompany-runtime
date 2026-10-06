@@ -80,6 +80,10 @@ export interface CreateWorkflowDefinitionInput {
   sourceKind?: string | null;
   legacyPluginEntityId?: string | null;
   legacyMetadata?: Record<string, unknown>;
+  /** [수정 재사용 원문 복사] 내부 전용 — 서버가 유도한 복사 A 단계 ID 집합. 저장 정규화가 새 QA
+   *   rework 엣지를 복사 A 에 추가하지 않도록 한다. 공개 요청 플래그가 아니며 일반 정의 생성은
+   *   이 값 없이 기존 동작을 그대로 유지한다. */
+  copiedStepIds?: ReadonlySet<string>;
 }
 
 /**

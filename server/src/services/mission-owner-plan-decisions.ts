@@ -18,6 +18,7 @@ import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection }
 import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-blocked-outcomes.js";
 import { withoutDeclaredSeparateScopeRevisionUnits } from "./missions/revision-plan-collection-scope.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
+import { normalizeWorkflowSteps } from "./workflow/normalize-definition-steps.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -68,6 +69,35 @@ import {
   describeMissionExecutionLiaisonBoundary,
   isMissionExecutionLiaisonAgent,
 } from "./missions/agent-role-boundaries.js";
+import { buildPaqoWorkflowSteps as buildPaqoWorkflowStepsImpl, type PaqoRevisionReuseOptions } from "./missions/paqo-workflow-steps.js";
+import {
+  assertRevisionReuseUnchanged,
+  loadRevisionReuseSteps,
+  prepareRevisionReuse,
+  reuseCopiedStepIds,
+  type RevisionReuseRuntime,
+} from "./missions/revision-reuse-materialization.js";
+import { isNativeToolStep } from "./workflow/workflow-seed-tool-output.js";
+
+/** [호환 재노출] 생성기 본체는 missions/paqo-workflow-steps.ts 로 추출되었다(행동 불변). */
+export function buildPaqoWorkflowSteps(
+  draft: PlanRevisionDraft,
+  mission: typeof missions.$inferSelect,
+  options: { researchWorkbenchAvailable?: boolean; tools?: readonly PlanningArtifactTool[];
+    reuse?: PaqoRevisionReuseOptions } = {},
+) {
+  return buildPaqoWorkflowStepsImpl(draft, mission, options);
+}
+
+/** [수정 재사용 §4.13] 미리보기와 물화/저장이 같은 변환을 쓴다 — 복사-A 수정 실행은 저장시점 정규화(같은 회사 도구·copied IDs)를 동일하게 적용한다. 일반 계획은 기존 생성 결과를 그대로 둔다. */
+function buildRevisionMaterializationSteps(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect,
+  planningTools: readonly PlanningArtifactTool[], reuse: RevisionReuseRuntime | null): WorkflowStep[] {
+  if (!reuse) return buildPaqoWorkflowStepsImpl(draft, mission, { tools: planningTools });
+  const copiedStepIds = new Set(reuse.copiedSteps.keys());
+  const built = buildPaqoWorkflowStepsImpl(draft, mission, { tools: planningTools,
+    reuse: { copiedSteps: reuse.copiedSteps, qaStepIdByUnitId: reuse.qaStepIdByUnitId, finalQaStepId: reuse.finalQaStepId } });
+  return normalizeWorkflowSteps(built, { tools: planningTools, copiedStepIds });
+}
 
 export type MissionOwnerPlanAssessment = {
   objectiveRestatement?: string;
@@ -1039,12 +1069,47 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
 
+  // [수정 재사용 원문 복사] 첫 의존 정규화 이전에 재사용 마커를 원본 실행 스냅샷에서 준비한다 —
+  //   암묵적 조상 투영이 이 시점에 합류해야 B 참조/의존 검증이 조상 부재로 조기 실패하지 않는다.
+  //   마커가 없으면 preparation:null — 일반 경로는 아래부터 기존 동작 그대로다. 원본 decision/
+  //   decisionHash/원장은 불변(원장은 raw, 활성 refs/PLAN-QA 는 표준 판을 본다).
+  const reusePreparation = await prepareRevisionReuse(db, {
+    companyId, missionId, decision: collected.decision,
+  });
+  if (!reusePreparation.ok) {
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: reusePreparation.diagnostics[0]!.code,
+      diagnostics: reusePreparation.diagnostics,
+    });
+    return {
+      status: "invalid",
+      reason: reusePreparation.diagnostics[0]!.code,
+      planningIssueId: collected.planningIssueId,
+      commentId: collected.commentId,
+      decisionHash,
+      diagnostics: reusePreparation.diagnostics,
+    };
+  }
+  const reuseRuntime = reusePreparation.preparation;
+  const canonicalDecision: Record<string, unknown> = reuseRuntime ? reuseRuntime.canonicalDecision : collected.decision;
+  const reuseDraftBase: PlanRevisionDraft = reuseRuntime
+    ? {
+      ...draftResult.draft,
+      refs: {
+        ...draftResult.draft.refs,
+        selectedExecutionUnits: reuseRuntime.projectedUnits,
+      },
+    }
+    : draftResult.draft;
+
   // Dependency identity is validated before the first persistence, wakeup,
   // delegation, or materialization effect. The canonical draft is the only
   // dependency representation used downstream.
   const initialDependencyGraph = normalizeMissionPlanDependencyGraph(
-    draftResult.draft.refs.selectedExecutionUnits,
-    draftResult.draft.steps,
+    reuseDraftBase.refs.selectedExecutionUnits,
+    reuseDraftBase.steps,
   );
   if (!initialDependencyGraph.ok) {
     return {
@@ -1057,9 +1122,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     };
   }
   const initialCanonicalDraft: PlanRevisionDraft = {
-    ...draftResult.draft,
+    ...reuseDraftBase,
     refs: {
-      ...draftResult.draft.refs,
+      ...reuseDraftBase.refs,
       selectedExecutionUnits: initialDependencyGraph.graph.units,
     },
     steps: initialDependencyGraph.graph.draftSteps,
@@ -1150,12 +1215,14 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     db,
     companyId,
     selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+    ...(reuseRuntime ? { reuseCopiedSteps: reuseRuntime.copiedSteps } : {}),
   });
   const placementDiagnostics = sourceValidationDiagnostics.length > 0
     ? []
     : await reviewMissionPlanExecutionPlacement({
       db,
       companyId,
+      ...(reuseRuntime ? { reuseCopiedSteps: reuseRuntime.copiedSteps } : {}),
       // [슬라이스 Q4/Q5 부분진행] 변경안이 blocked 로 선언한 단위와 별도 범위(permanentChange) 로 선언한
       //   수집 추가 단위는 사전 도구/권한 거절에서 제외한다. 해당 단위의 실제 toolNames 상태는 구조화
       //   결과(차단 진단·별도 범위 요청)가 기록한다.
@@ -1194,6 +1261,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     missionSourceWorkflowRunId: ownershipRow?.sourceWorkflowRunId ?? null,
     selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
     tools: planningTools,
+    // [수정 재사용] 표준 판(암묵적 조상 포함)으로 커버리지/상속을 검증한다 — 원장은 raw decision 을 그대로 보존한다.
+    ...(reuseRuntime ? { canonicalDecision } : {}),
   });
   if (!revisionDeltaValidation.ok) return revisionDeltaValidation.response;
   // Apply one bounded, immutable declared publication-result autofill
@@ -1382,7 +1451,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     units: effectiveDraft.refs.selectedExecutionUnits,
   });
   const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
-    mission => buildPaqoWorkflowSteps(effectiveDraft, mission, { tools: planningTools }));
+    mission => buildRevisionMaterializationSteps(effectiveDraft, mission, planningTools, reuseRuntime));
   const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
   if (revisionErrors.length) {
     await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
@@ -1512,12 +1581,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
           await runOwnerPlanMaterializationStep("ensure_cross_company_delegations", materializationFailureContext, () =>
             ensureCrossCompanyDelegationsForMissionOwnerPlan({ db, companyId, missionId, draft: effectiveDraft, missionPlanArtifactId: activePlan.id, decisionHash }));
           await runOwnerPlanMaterializationStep("ensure_paqo_workflow", materializationFailureContext, () =>
-            ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: effectiveDraft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId }));
+            ensurePaqoWorkflowForMissionOwnerPlan({ db, companyId, missionId, draft: effectiveDraft, missionPlanArtifactId: activePlan.id, decisionHash, triggeredBy: actor.actorId, ...(reuseRuntime ? { reuse: reuseRuntime } : {}) }));
           await runOwnerPlanMaterializationStep("close_plan_qa_issue", materializationFailureContext, () =>
             closePlanQaIssue({ db, companyId, missionId, decisionHash, planQaIssueId }));
           await runOwnerPlanMaterializationStep("update_plan_qa_ref_pass", materializationFailureContext, () =>
             updatePlanQaRef({ db, companyId, missionId, missionPlanArtifactId: activePlan.id, patch: { status: "pass", verdict: "pass", reviewedAt: new Date().toISOString() } }));
-          await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: planQaIssueId } });
+          await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, action: "mission.owner_plan.recorded", entityType: "mission", entityId: missionId, agentId: actor.actorType === "agent" ? actor.actorId : null, details: { missionPlanArtifactId: activePlan.id, revision: activePlan.revision, planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionMakerKind: collected.author.kind, decisionMakerId: collected.author.id, decisionHash, idempotencyKey: `${collected.commentId}:${decisionHash}`, planQaIssueId: planQaIssueId, ...(reuseRuntime ? { revisionReuse: { sourceWorkflowRunId: reuseRuntime.planRecord.sourceWorkflowRunId, roots: reuseRuntime.planRecord.roots, closureUnitIds: reuseRuntime.planRecord.closureUnitIds } } : {}) } });
           const refreshedPlan = await service.getActiveMissionPlan({ companyId, missionId });
           const finalPlan = refreshedPlan ?? activePlan;
           await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "recorded" });
@@ -1596,6 +1665,8 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     decisionHash, revisionDelta: revisionDeltaValidation.delta,
     blockedUnitOutcomes: revisionDeltaValidation.blockedUnitOutcomes,
     separateScopeOutcomes: revisionDeltaValidation.separateScopeOutcomes,
+    // [수정 재사용] 서버 소유 기계 지도(roots/클로저/원본 실행)도 활성 계획 refs 에 보존된다 — 물화/회복이 다시 대조하는 재료일 뿐 권위가 아니다.
+    ...(reuseRuntime ? { reusePlan: reuseRuntime.planRecord } : {}),
   });
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
@@ -1652,10 +1723,13 @@ async function validateSelectedExecutionUnitSourceRefs({
   db,
   companyId,
   selectedExecutionUnits,
+  reuseCopiedSteps,
 }: {
   db: Pick<Db, "select">;
   companyId: string;
   selectedExecutionUnits: Record<string, unknown>[];
+  /** [수정 재사용] 서버가 원본 실행에서 검증한 복사 A 단계(단위 id → 복사본). 지속화·클라이언트 플래그 아니다. */
+  reuseCopiedSteps?: ReadonlyMap<string, import("./workflow/dag-engine.js").WorkflowStep>;
 }): Promise<RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[]> {
   const diagnostics: RecordLatestAuthorizedMissionOwnerPlanDecisionDiagnostic[] = [];
   const nativeWorkflowDefinitionIds = new Set<string>();
@@ -1714,6 +1788,10 @@ async function validateSelectedExecutionUnitSourceRefs({
     }
 
     if (MISSION_PLAN_UNIT_SOURCE_TYPES.has(sourceType)) {
+      // [수정 재사용] 서버가 같은 회사 원본 실행에서 검증한 무이슈 native-tool 복사 A 만 담당자 검사를
+      //   면제한다(허구 담당자 금지). 저작 플래그/type/sourceStepId 만으로는 면제가 되지 않는다.
+      const copiedStep = reuseCopiedSteps?.get(sourceId);
+      if (copiedStep !== undefined && isNativeToolStep(copiedStep)) continue;
       const assigneeAgentId =
         typeof unit.assigneeAgentId === "string"
           ? unit.assigneeAgentId.trim()
@@ -2021,281 +2099,14 @@ function crossCompanyDelegationExternalKey(input: {
   return `owner-plan:${input.missionId}:${input.decisionHash}:${unitKey}`;
 }
 
-function stripIssueGroupPrefix(title: string): string {
-  return title.replace(/^\s*\[(?:plan|action|qa|oversight)\]\s*/iu, "").trim();
-}
-
-type PaqoIssueGroup = "action" | "qa" | "oversight";
-
-function inferPaqoIssueGroup(unit: Record<string, unknown>): PaqoIssueGroup {
-  const role = classifyWorkflowStepRole(unit);
-  return role === "unknown" ? "action" : role;
-}
-
-function readPaqoGraphWorkProductRequired(unit: Record<string, unknown>, group: PaqoIssueGroup): boolean {
-  return readOptionalBooleanMarker(unit.graphWorkProductRequired)
-    ?? readOptionalBooleanMarker(unit.workProductRequired)
-    ?? readOptionalBooleanMarker(unit.requiresWorkProduct)
-    ?? (group === "action");
-}
-
-function shortStableHash(value: unknown): string {
-  return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 10);
-}
 
 function formatPaqoWorkflowName(draft: PlanRevisionDraft, mission: typeof missions.$inferSelect): string {
   const goal = toNonEmptyString(draft.missionGoal) ?? toNonEmptyString(mission.title) ?? mission.id;
   return `PAQO WBS: ${goal}`;
 }
 
-function readStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((entry) => toNonEmptyString(entry)).filter((entry): entry is string => Boolean(entry));
-}
 
-function readSelectedUnitWorkflowToolNames(unit: Record<string, unknown>): string[] {
-  return Array.from(new Set([
-    ...readStringArray(unit.toolNames),
-    ...readStringArray(unit.tools),
-    toNonEmptyString(unit.toolName),
-  ].filter((value): value is string => Boolean(value))));
-}
 
-function readSelectedUnitWorkflowToolArgs(unit: Record<string, unknown>): unknown {
-  if (Object.prototype.hasOwnProperty.call(unit, "toolArgs")) return unit.toolArgs;
-  if (Object.prototype.hasOwnProperty.call(unit, "toolArguments")) return unit.toolArguments;
-  return undefined;
-}
-
-function readSelectedUnitKnowledgeBaseIds(unit: Record<string, unknown>): string[] {
-  return Array.from(new Set([
-    ...readStringArray(unit.knowledgeBaseIds),
-    ...readStringArray(unit.kbIds),
-    ...readStringArray(unit.kbRefs),
-  ]));
-}
-
-function readSelectedUnitSkillRefs(unit: Record<string, unknown>): string[] {
-  return Array.from(new Set([
-    ...readStringArray(unit.skillRefs),
-    ...readStringArray(unit.skillKeys),
-    ...readStringArray(unit.skills),
-  ]));
-}
-
-function buildUnitStepIdMap(
-  selectedUnits: Record<string, unknown>[],
-  steps: WorkflowStep[],
-): Map<string, string> {
-  return new Map(selectedUnits.map((unit, index) => [toNonEmptyString(unit.id)!, steps[index]!.id]));
-}
-
-function applyCanonicalDependencies(
-  selectedUnits: Record<string, unknown>[],
-  steps: WorkflowStep[],
-): WorkflowStep[] {
-  const dependencyStepIds = remapCanonicalDependenciesToStepIds(
-    selectedUnits,
-    steps.map((step) => step.id),
-  );
-  return steps.map((step, index) => ({ ...step, dependencies: dependencyStepIds[index]! }));
-}
-
-/**
- * [machine-check gates] contract.machineChecks 를 선언한 생산자 스텝 뒤에 결정론적
- * 검증 gate 스텝을 물리화한다. gate 는 이슈 없는 structural tool 스텝(예약 toolName,
- * agentId 없음)으로, dag-engine 이 registry 없이 in-process 실행한다.
- *
- * 의존 리와이어링은 항상 가산(additive): P 의 모든 직계 의존자는 P 를 유지하고 gate M 를
- * 추가로 기다린다. 이유 — (1) structural topology 규칙상 gate 에 의존하는 QA-like 스텝은
- * 생산자도 함께 의존해야 하고, (2) 소비자 toolArgs 의 {$steps.P.…} 참조는 P 가 조상으로
- * 남아야 resolveWorkflowToolStepArgs 가 통과한다. M 실패 시 완료되지 않으므로 하류는
- * DAG 의존으로 자연 차단된다.
- */
-function insertStepMachineCheckGates(steps: WorkflowStep[]): WorkflowStep[] {
-  const checksByProducerId = new Map<string, NonNullable<ReturnType<typeof normalizeWorkflowStepMachineChecks>>>();
-  for (const step of steps) {
-    const checks = normalizeWorkflowStepMachineChecks(
-      (step.contract as { machineChecks?: unknown } | undefined)?.machineChecks,
-    );
-    if (checks) checksByProducerId.set(step.id, checks);
-  }
-  if (checksByProducerId.size === 0) return steps;
-
-  const out: WorkflowStep[] = [];
-  for (const step of steps) {
-    out.push(step);
-    const checks = checksByProducerId.get(step.id);
-    if (!checks) continue;
-    out.push({
-      id: `${step.id}-mc`,
-      name: `[GATE] ${step.name} machine checks`,
-      agentId: "",
-      dependencies: [step.id],
-      graphWorkProductRequired: false,
-      type: "tool",
-      qaType: "structural",
-      toolNames: [STEP_MACHINE_CHECKS_TOOL],
-      toolArgs: {
-        producerStepId: step.id,
-        machineChecks: checks,
-      },
-      description: [
-        `Deterministic machine-check gate for producer "${step.name}".`,
-        "Runs the producer's declared machineChecks (file existence / glob / size / sha256) in-process with no LLM.",
-        "A failed predicate fails this gate step (existing retry machinery applies); downstream steps wait on it via DAG dependencies.",
-      ].join("\n"),
-    });
-  }
-
-  const gateIdByProducerId = new Map(Array.from(checksByProducerId.keys(), (id) => [id, `${id}-mc`]));
-  const gateIds = new Set(gateIdByProducerId.values());
-  return out.map((step) => {
-    if (gateIds.has(step.id)) return step;
-    const addedGates = step.dependencies
-      .filter((dependencyId) => gateIdByProducerId.has(dependencyId))
-      .map((dependencyId) => gateIdByProducerId.get(dependencyId)!);
-    return addedGates.length > 0 ? { ...step, dependencies: [...step.dependencies, ...addedGates] } : step;
-  });
-}
-
-export function buildPaqoWorkflowSteps(
-  draft: PlanRevisionDraft,
-  mission: typeof missions.$inferSelect,
-  options: { researchWorkbenchAvailable?: boolean; tools?: readonly PlanningArtifactTool[] } = {},
-): WorkflowStep[] {
-  // [슬라이스 Q4/Q5 부분진행] 변경안이 차단(revisionBlocked) 또는 별도 범위(revisionSeparateScope) 로
-  //   선언한 단위는 실행 그래프에서 제외된다 — 해당 단계가 정의에 물화되지 않으므로 그 도구 실행은
-  //   발생할 수 없다(대체 게시/전체완료·정기 정의 영구 적용 아님). 진행 단위의 제외 단위 참조
-  //   (의존/선택자/실행인자)는 제출 게이트에서 선제 거부된다.
-  const dependencyGraph = normalizeMissionPlanDependencyGraph(
-    draft.refs.selectedExecutionUnits.filter(unit => unit.revisionBlocked !== true && unit.revisionSeparateScope !== true),
-    draft.steps,
-  );
-  if (!dependencyGraph.ok) {
-    throw new Error(`Invalid canonical mission-plan dependency graph: ${dependencyGraph.diagnostics.map((entry) => entry.message).join("; ")}`);
-  }
-  const executableUnits = dependencyGraph.graph.materializedUnits;
-  const selectedSteps = executableUnits.map((unit, index) => {
-    const sourceRef = isPlainObject(unit.sourceRef) ? unit.sourceRef : null;
-    const assigneeAgentId =
-      toNonEmptyString(unit.assigneeAgentId) ??
-      toNonEmptyString(unit.agentId) ??
-      mission.ownerAgentId;
-    const rawTitle =
-      toNonEmptyString(unit.title)
-        ?? toNonEmptyString(unit.name)
-        ?? toNonEmptyString(unit.id)
-        ?? `Execution unit ${index + 1}`;
-    const group = inferPaqoIssueGroup(unit);
-    const title = stripIssueGroupPrefix(rawTitle);
-    const groupLabel = group.toUpperCase();
-    const graphWorkProductRequired = isDeclaredStructuralUnit(unit)
-      ? false
-      : readPaqoGraphWorkProductRequired(unit, group);
-    validateStructuralUnit(unit, title, index);
-    const toolNames = readSelectedUnitWorkflowToolNames(unit);
-    const toolArgs = readSelectedUnitWorkflowToolArgs(unit);
-    const knowledgeBaseIds = readSelectedUnitKnowledgeBaseIds(unit);
-    const skillRefs = readSelectedUnitSkillRefs(unit);
-    const outcomeContractLines = renderMissionPlanUnitContractLines(unit);
-    const stepContract = buildMissionPlanUnitStepContract(unit);
-    // [machine-check gates] 유닛의 구조화 machineChecks 를 계약에 첨부한다.
-    // 실행 권위는 materializer 가 gate 스텝 toolArgs 로 복사한 값에만 있다(규칙 8).
-    const unitMachineChecks = normalizeWorkflowStepMachineChecks(unit.machineChecks);
-    const stepContractWithChecks = (stepContract || unitMachineChecks)
-      ? {
-        ...(stepContract ?? {}),
-        ...(unitMachineChecks ? { machineChecks: unitMachineChecks } : {}),
-      }
-      : undefined;
-    // Issue-less tools retain the assignee only as plan-time grant metadata.
-    const isStructural = isDeclaredStructuralUnit(unit);
-    const stepAgentId = isStructural ? "" : assigneeAgentId;
-    return {
-      id: `${group}-${index + 1}-${shortStableHash({ missionId: mission.id, index, sourceRef, title, group })}`,
-      ...(unit.sourceStepId !== undefined ? { sourceStepId: unit.sourceStepId as string } : {}),
-      name: `[${groupLabel}] ${title}`,
-      agentId: stepAgentId,
-      dependencies: [],
-      graphWorkProductRequired,
-      ...(toolNames.length > 0 ? { toolNames } : {}),
-      ...(toolArgs !== undefined ? { toolArgs } : {}),
-      ...(isPlainObject(unit.interpretedInputs) ? { interpretedInputs: unit.interpretedInputs } : {}),
-      ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
-      ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
-      ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : { type: group }),
-      ...(!isStructural && group === "qa" && typeof unit.qaType === "string" ? { qaType: unit.qaType } : {}),
-      // [생성 설명 계약] 표시용 미션 제목은 실행 지시와 분리된 typed 입력으로만 주입한다(문자열 필터링 아님).
-      ...buildPaqoStepDescription(mission.title, [
-        `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
-        isStructural
-          ? `Materialized as issue-less structural tool gate (no agent heartbeat).`
-          : `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
-        skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
-        toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
-        toNonEmptyString(unit.instructions) ? `Revision delta instructions: ${toNonEmptyString(unit.instructions)}` : null,
-        ...outcomeContractLines,
-        sourceRef ? `Source ref: ${stableStringify(sourceRef)}` : null,
-      ]),
-    } satisfies WorkflowStep;
-  });
-  const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);
-  if (plannedSteps.length === 0) return [];
-  // [machine-check gates] machineChecks 가 있는 생산자 뒤에 structural gate 물리화.
-  const gatedSteps = insertStepMachineCheckGates(plannedSteps);
-  // [Hybrid QA] Structural materialization passes (extracted):
-  //   - toolArgs reference rewriting
-  //   - scoped prompt injection for all QA downstream of structural gates
-  const unitIdToStepId = buildUnitStepIdMap(executableUnits, plannedSteps);
-  applyPaqoArtifactContracts(executableUnits, selectedSteps, gatedSteps, unitIdToStepId);
-  // [실행 가능성 보증] 인자 없는 structural tool 스텝은 실행 시 반드시 실패한다(2026-08-27 gazua-evening 2).
-  // 표준 검증 인자 자동 채움 → 불가능하면 fail-closed 거부.
-  fillStructuralValidatorToolArgs(gatedSteps);
-  validateStructuralTopology(gatedSteps as Parameters<typeof validateStructuralTopology>[0]);
-
-  // [Delivery Verification Gate] PAQO plan 이 publish/deploy 성격이면 qaStep description 에 readback criteria 강화.
-  const isPublishPlan = executableUnits.some(unit => hasPlanArtifactRole(unit, options.tools ?? [], "publication"));
-  const unitOutcomeContractLines = renderMissionPlanQaUnitContractLines(
-    executableUnits.map((unit, index) => ({
-      title: selectedSteps[index]?.name ?? `Execution unit ${index + 1}`,
-      unit,
-    })),
-  );
-
-  const qaStep: WorkflowStep = {
-    id: `qa-${shortStableHash({ missionId: mission.id, actions: plannedSteps.map((step) => step.id), goal: draft.missionGoal })}`,
-    name: "[QA] Verify mission result",
-    type: "qa",
-    agentId: mission.ownerAgentId,
-    dependencies: gatedSteps.map((step) => step.id),
-    graphWorkProductRequired: false,
-    description: [
-      "Mission-level PAQO QA issue. Run independent verification after all ACTION workflow steps complete successfully.",
-      "Mission quality contract / purpose-fitness first: verify the deliverable actually achieves the original mission goal (not merely that it is well-structured, published, or source-backed).",
-      "",
-      buildVerificationBeforeCompletionCriteria(),
-      "",
-      // [Delivery Verification Gate] publish/deploy plan → readback criteria 강화(중복 QA step 無, description 주입).
-      isPublishPlan ? buildDeliveryVerificationCriteria() : null,
-      isPublishPlan ? "" : null,
-      draft.successCriteria.length > 0 ? `Success criteria: ${JSON.stringify(draft.successCriteria)}` : null,
-      draft.steps.length > 0 ? `Planned steps: ${JSON.stringify(draft.steps)}` : null,
-      ...unitOutcomeContractLines,
-    ].filter(Boolean).join("\n"),
-  };
-
-  // [P5 control-flow loop] 미션 QA step 이 산출물 생산자(producer) 로 보내는 bounded rework back-edge 자동 합성.
-  //   QA 가 request_changes 하면 P4 loop-driver 가 producer 를 rework 한다(maxIterations cap). producer 식별은
-  //   resolveProducerStepIdFromDag 에 위임(synthesizeQaReworkBackEdge 내부). forward dependencies[] 는 불변.
-  //   합성 대상은 이 미션 최종 QA(qaStep) 단 하나 — 중간 단계 QA 회복은 runtime supervision 담당.
-  return synthesizeQaReworkBackEdge(
-    [...gatedSteps, qaStep],
-    qaStep.id,
-    undefined,
-    { allowCapAcceptance: true, tools: options.tools },
-  );
-}
 
 async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {
   db: Db;
@@ -2384,6 +2195,8 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   missionPlanArtifactId: string;
   decisionHash: string;
   triggeredBy: string;
+  /** [수정 재사용] 제출 경로가 유도한 복사 런타임. 없고 활성 refs 에 기계 지도가 있으면 원본 실행에서 다시 유도한다(지속화 플래그 비신뢰). */
+  reuse?: RevisionReuseRuntime;
 }): Promise<void> {
   await requireOwnerPlanQaPass(input);
   const dependencyGraph = normalizeMissionPlanDependencyGraph(
@@ -2403,9 +2216,26 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     .then((rows) => rows[0] ?? null);
   if (!mission) return;
 
+  // [수정 재사용] 회복/재시도 경로: 제출 스코프의 런타임이 없으면 활성 계획 refs 의 기계 지도를
+  //   원본 실행과 다시 대조해 유도한다 — 지속화된 값 자체가 권한이 되지는 않는다.
+  let reuse = input.reuse ?? null;
+  if (!reuse) {
+    const serviceEarly = missionPlanArtifactService(input.db);
+    const activePlanEarly = await serviceEarly.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
+    if (activePlanEarly?.id === input.missionPlanArtifactId) {
+      reuse = await loadRevisionReuseSteps(input.db, {
+        companyId: input.companyId, missionId: input.missionId, planRefs: activePlanEarly.refs,
+        selectedExecutionUnits: input.draft.refs.selectedExecutionUnits,
+      });
+    }
+  }
+
   const workflowName = formatPaqoWorkflowName(input.draft, mission);
-  const steps = buildPaqoWorkflowSteps(input.draft, mission, { tools: await listCompanyPlanningArtifactTools(input.db, input.companyId) });
+  const steps = buildRevisionMaterializationSteps(input.draft, mission,
+    await listCompanyPlanningArtifactTools(input.db, input.companyId), reuse);
   if (steps.length === 0) return;
+  // [수정 재사용 §4.13] 물화 직후 복사 A 동등성 검증(JSON 동등 + 실행 해시) — 드리프트는 config_drift 로 거절.
+  if (reuse) assertRevisionReuseUnchanged(reuse.copiedSteps, steps);
   // [Stage 4] Immutable PAQO definition lifecycle: hash-based identity lookup,
   // create-only revisions, race-safe via the partial unique index. Existing
   // definitions (including legacy null-hash rows) are never updated in place.
@@ -2415,8 +2245,17 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
     missionId: input.missionId,
     name: workflowName,
     steps,
+    ...(reuseCopiedStepIds(reuse) ? { copiedStepIds: reuseCopiedStepIds(reuse)! } : {}),
   });
   if (!definition) return;
+  // [수정 재사용 §4.13] 저장된 정의 재독증 — 반복 정규화 멱등성/원문 불변 확인.
+  if (reuse) {
+    const [storedRow] = await input.db.select({ stepsJson: workflowDefinitions.stepsJson })
+      .from(workflowDefinitions)
+      .where(and(eq(workflowDefinitions.companyId, input.companyId), eq(workflowDefinitions.id, definition.id)))
+      .limit(1);
+    if (storedRow) assertRevisionReuseUnchanged(reuse.copiedSteps, storedRow.stepsJson as WorkflowStep[]);
+  }
 
   const workflowRunId = await ensureOwnerPlanWorkflowRun({ ...input, workflowId: definition.id,
     requirePlanQaPass: () => requireOwnerPlanQaPass(input) });

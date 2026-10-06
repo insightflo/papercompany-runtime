@@ -25,6 +25,9 @@ export const QA_REWORK_DEFAULT_MAX_ITERATIONS = 2;
 export type QaReworkBackEdgeOptions = {
   allowCapAcceptance?: boolean;
   tools?: readonly PlanningArtifactTool[];
+  /** [수정 재사용 원문 복사] 서버가 유도한 복사 A 단계 ID — 새로 합성되는 rework back-edge 의
+   *   대상에서만 제외한다(이미 존재하는 A 엣지와 그 외 대상의 정상 합성은 불변). 내부 옵션. */
+  copiedStepIds?: ReadonlySet<string>;
 };
 
 export function resolveProducerStepIdFromDag(qaStepId: string | null, steps: readonly DagStepLike[]): string | null {
@@ -98,7 +101,9 @@ export function synthesizeQaReworkBackEdge<T extends BackEdgeCapableStep>(
   const effectiveMaxIterations = maxIterations >= 1 ? Math.floor(maxIterations) : QA_REWORK_DEFAULT_MAX_ITERATIONS;
   const deliveryReplayIds = resolvePublicationReplayStepIds(qaStepId, steps, options.tools ?? []);
   const producerId = resolveProducerStepIdFromDag(qaStepId, steps);
-  const targetIds = deliveryReplayIds.length > 0 ? deliveryReplayIds : producerId ? [producerId] : [];
+  // [수정 재사용] 복사 A 단계를 새 rework 대상에서만 제외한다 — 원본 A 엣지 보존, 나머지 정상 합성.
+  const resolvedTargetIds = deliveryReplayIds.length > 0 ? deliveryReplayIds : producerId ? [producerId] : [];
+  const targetIds = options.copiedStepIds ? resolvedTargetIds.filter(id => !options.copiedStepIds!.has(id)) : resolvedTargetIds;
   if (targetIds.length === 0) return steps;
   const targetIdSet = new Set(targetIds);
   const backEdge: ConditionalEdge = {

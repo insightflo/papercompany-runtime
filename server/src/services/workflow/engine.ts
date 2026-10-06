@@ -159,6 +159,7 @@ async function findActiveScheduledWorkflowMissionRun(
 
 import { assertWorkflowChildDefinitionCycles } from "./workflow-child-execution.js";
 import { discoverWorkflowChildStart } from "./workflow-child-discovery.js";
+import { createWorkflowDefinitionWithNormalization } from "./create-definition.js";
 import { HttpError } from "../../errors.js";
 
 async function assertWorkflowToolReadiness(
@@ -248,21 +249,8 @@ export const workflowService = {
     db: Db,
     input: CreateWorkflowDefinitionInput,
   ): Promise<WorkflowDefinition> {
-    const steps = normalizeWorkflowSteps(input.steps as unknown[], {
-      executionMode: input.executionMode,
-      tools: await listCompanyPlanningArtifactTools(db, input.companyId),
-    });
-    // Validate DAG structure
-    const validation = validateDag(steps);
-    if (!validation.valid) {
-      throw new Error(`Invalid workflow DAG: ${validation.errors.join(", ")}`);
-    }
-    validateRunInputDeclarations(input.runInputs);
-    await assertWorkflowToolReadiness(db, input.companyId, steps);
-    // [workflow child step] 정의 생성 시 workflow-step 타깃 체인 CYCLE DFS(자기참조 거부, diamond 허용).
-    await assertWorkflowChildDefinitionCycles(db, input.companyId, null, steps);
-
-    return createWorkflowDefinition(db, { ...input, steps });
+    // 생성 경로(정규화·검증·저장)는 create-definition.ts 로 추출 — 여기서는 위임한다.
+    return createWorkflowDefinitionWithNormalization(db, input);
   },
 
   /**
