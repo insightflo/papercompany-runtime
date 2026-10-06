@@ -29,12 +29,12 @@ export { readPlanQaManifestDocument, readPlanQaManifestForIssue, readPinnedPlanQ
 
 type PlanRow = typeof missionPlanArtifacts.$inferSelect;
 
-/** 검토 입력 투영: refs 는 review 입력 키(선택 단위·템플릿·의사결정·계획 보조) 허용 집합만 반영한다.
+/** 검토 입력 투영: refs 는 review 입력 키(선택 단위·템플릿·의사결정·계획 보조·수정 변경안) 허용 집합만 반영한다.
  *  planQa/paqoWorkflow/crossCompanyDelegations/workflowName/oversightIssueId 같은 실행·메타 출력은
  *  세대를 바꾸지 않는다. plan 내용/실행 단위가 바뀌면 hash 가 바뀐다. */
 const PLAN_QA_INPUT_REF_KEYS = [
   "selectedExecutionUnits", "planTemplates", "ownerPlanDecision", "dynamicMissionPlanning",
-  "selfImprovementCandidates", "ruleRefs", "kbRefs",
+  "selfImprovementCandidates", "ruleRefs", "kbRefs", "revisionDelta",
 ] as const;
 export function buildPlanQaInput(plan: PlanRow, decisionHash: string) {
   const refs = (plan.refs && typeof plan.refs === "object" ? plan.refs : {}) as Record<string, unknown>;

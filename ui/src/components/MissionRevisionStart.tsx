@@ -4,7 +4,8 @@ import { api } from "../api/client";
 import { Button } from "./ui/button";
 
 type Options = { workflowDefinitionId: string; sourceMissionId: string; sourceWorkflowRunId: string | null;
-  candidates: { stepId: string; sourceStepId: string; name: string; dependencies: string[] }[] };
+  candidates: { stepId: string; sourceStepId: string; name: string; dependencies: string[] }[];
+  blockedUnits?: { unitId: string; label: string; toolName: string | null; code: string; message: string }[] };
 
 export function MissionRevisionStart({ missionId, onStarted }: { missionId: string; onStarted: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
@@ -21,11 +22,15 @@ export function MissionRevisionStart({ missionId, onStarted }: { missionId: stri
     <h3 className="font-medium">계획 검토 완료 · 실행 승인 대기</h3>
     <p className="text-sm text-muted-foreground">원본 실행 ({options.sourceWorkflowRunId ?? "없음"})의 완료된 결과를 선택하거나 새로 실행하세요.
       서버가 원본 파일과 실행 조건을 다시 검사하며, 이전에 실패한 설정을 그대로 실행할 수는 없습니다.</p>
+    {options.blockedUnits?.map(unit => <p key={unit.unitId} role="status" className="text-sm text-muted-foreground">
+      {unit.label} · 실행 차단({unit.code}) — {unit.message}{unit.toolName ? ` (도구: ${unit.toolName})` : ""}
+      요청한 필수 결과는 이 계획에서 미해결로 남습니다.</p>)}
     {options.candidates.map(c => <label key={c.stepId} className="flex items-center gap-2 text-sm">
       <input type="checkbox" checked={selected.includes(c.stepId)} disabled={start.isPending}
         onChange={e => setSelected(ids => e.target.checked ? [...ids, c.stepId] : ids.filter(id => id !== c.stepId))} />
-      {c.name} · 원본 단계 ({c.sourceStepId})
+      {c.name} · 원본 단계 ({c.sourceStepId}) · 재사용 후보
     </label>)}
+    <p className="text-sm text-muted-foreground">선택하지 않은 단계는 새로 실행(재실행)되며, 차단 단위는 실행되지 않습니다.</p>
     {!closureComplete && <p role="alert">선택한 단계의 선행 단계도 함께 선택해 주세요.</p>}
     {start.error && <p role="alert">실행이 거절되었습니다: {start.error.message}</p>}
     <div className="flex gap-2">

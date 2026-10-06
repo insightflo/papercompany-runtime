@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { buildPaqoWorkflowSteps } from '../services/mission-owner-plan-decisions.js';
 import { getStructuralTopologyErrors } from '../services/workflow/control-flow/structural-topology.js';
+import { readGeneratedExecutionDescriptionSha } from '../services/workflow/revision-generated-description.js';
 import { artifactTools, artifactUnits, paqoDraft, paqoMission } from './helpers/paqo-artifact-tool-fixture.js';
 
 const build = (units = artifactUnits(), tools = artifactTools) => buildPaqoWorkflowSteps(paqoDraft(units), paqoMission, { tools });
@@ -58,12 +59,30 @@ describe('PAQO agent artifact tools', () => {
     expect(getStructuralTopologyErrors(steps)).toEqual([]);
   });
 
-  it('keeps ordinary non-artifact units byte-identical to pre-314', () => {
+  it('keeps ordinary non-artifact legacy fields byte-identical to pre-314 plus validated additive binding', () => {
     const units = [{ id: 'build', title: 'Build', toolNames: ['search'], toolArgs: { query: 'paper' } },
       { id: 'qa', title: 'Review', type: 'qa', qaType: 'action' }];
+    // revisionDescriptionBinding is the single additive key of this revision: project exactly that key
+    // away (shallow copy + delete, key order preserved) so the remaining legacy structure still hashes
+    // to the original pre-314 guard. No other field is hidden, deleted or weakened.
+    type StepMaybeBinding = ReturnType<typeof build>[number] & { revisionDescriptionBinding?: unknown };
+    const legacySteps = (steps: ReturnType<typeof build>) => steps.map((step): StepMaybeBinding => {
+      const legacy: StepMaybeBinding = { ...step };
+      delete legacy.revisionDescriptionBinding;
+      return legacy;
+    });
     const ordinary = build(units, []);
-    expect(createHash('sha256').update(JSON.stringify(ordinary)).digest('hex'))
+    expect(createHash('sha256').update(JSON.stringify(legacySteps(ordinary))).digest('hex'))
       .toBe('441d30b6ed8b1b979de959ec2723dea07e004dc639e42c1ea96c00f886b52880');
     expect(JSON.stringify(build(units))).toBe(JSON.stringify(ordinary));
+    // Generator-produced action/qa steps must carry a binding that validates via the strict reader;
+    // the generator-helper-free mission-final QA step keeps a plain description and is not forced
+    // to carry a binding.
+    const bound = ordinary.filter((step): step is StepMaybeBinding => 'revisionDescriptionBinding' in step);
+    expect(bound.map((step) => step.type)).toEqual(['action', 'qa']);
+    for (const step of bound) expect(readGeneratedExecutionDescriptionSha(step)).not.toBeNull();
+    const unbound = ordinary.filter((step) => !('revisionDescriptionBinding' in step));
+    expect(unbound.map((step) => step.type)).toEqual(['qa']);
+    for (const step of unbound) expect(typeof step.description).toBe('string');
   });
 });

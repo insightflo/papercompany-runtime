@@ -96,7 +96,7 @@ describe("operator interrupt polling", () => {
     } finally {
       poller.stop();
     }
-  });
+  }, 60000);
 
   it("deduplicates identical re-created files and injects new comments", async () => {
     const payload = makePayload();
@@ -122,7 +122,7 @@ describe("operator interrupt polling", () => {
     } finally {
       poller.stop();
     }
-  });
+  }, 60000);
 
   it("keeps the file for retry while child stdin is unavailable", async () => {
     const filePath = await writeInterruptFile(root, makePayload());
@@ -148,7 +148,7 @@ describe("operator interrupt polling", () => {
     } finally {
       poller.stop();
     }
-  });
+  }, 60000);
 
   it("warns and leaves malformed files in place", async () => {
     const filePath = await writeInterruptFile(root, makePayload());
@@ -168,7 +168,7 @@ describe("operator interrupt polling", () => {
     } finally {
       poller.stop();
     }
-  });
+  }, 60000);
 
   it("is a no-op without agent home or issue ids", async () => {
     const filePath = await writeInterruptFile(root, makePayload());

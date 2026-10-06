@@ -14,8 +14,12 @@ import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
+import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
+import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-blocked-outcomes.js";
+import { withoutDeclaredSeparateScopeRevisionUnits } from "./missions/revision-plan-collection-scope.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
+import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
 import { reviewMissionPlanExecutionPlacement } from "./missions/mission-plan-execution-placement.js";
 import {
@@ -1062,7 +1066,7 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   };
 
   const [ownershipRow] = await db
-    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description })
+    .select({ ownerAgentId: missions.ownerAgentId, title: missions.title, description: missions.description, sourceWorkflowRunId: missions.sourceWorkflowRunId })
     .from(missions)
     .where(and(eq(missions.companyId, companyId), eq(missions.id, missionId)))
     .limit(1);
@@ -1152,7 +1156,16 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     : await reviewMissionPlanExecutionPlacement({
       db,
       companyId,
-      selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+      // [슬라이스 Q4/Q5 부분진행] 변경안이 blocked 로 선언한 단위와 별도 범위(permanentChange) 로 선언한
+      //   수집 추가 단위는 사전 도구/권한 거절에서 제외한다. 해당 단위의 실제 toolNames 상태는 구조화
+      //   결과(차단 진단·별도 범위 요청)가 기록한다.
+      selectedExecutionUnits: withoutDeclaredSeparateScopeRevisionUnits(
+        withoutDeclaredBlockedRevisionUnits(
+          draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+          collected.decision,
+        ),
+        collected.decision,
+      ),
     });
   const executionValidationDiagnostics = sourceValidationDiagnostics.length > 0
     ? sourceValidationDiagnostics
@@ -1176,12 +1189,19 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       diagnostics: executionValidationDiagnostics,
     };
   }
+  const revisionDeltaValidation = await validateRevisionPlanDeltaOrRecordRejection({
+    ledgerSubmission, commentId: collected.commentId,
+    missionSourceWorkflowRunId: ownershipRow?.sourceWorkflowRunId ?? null,
+    selectedExecutionUnits: draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits,
+    tools: planningTools,
+  });
+  if (!revisionDeltaValidation.ok) return revisionDeltaValidation.response;
   // Apply one bounded, immutable declared publication-result autofill
   // AFTER source-ref + execution-placement validation succeed, BEFORE PLAN-QA
   // / intent coverage / structural validation / materialization observe the
   // draft. Original collected.decision, decisionHash, and ledgerSubmission
   // are preserved; only the effective draft used downstream is normalized.
-  const autofillResult = autofillPublicationResult(draftAfterQaAssigneeRecovery.refs.selectedExecutionUnits, planningTools);
+  const autofillResult = autofillPublicationResult(revisionDeltaValidation.units, planningTools);
   const draftWithTemplates: PlanRevisionDraft = {
     ...draftAfterQaAssigneeRecovery,
     refs: {
@@ -1571,20 +1591,12 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   // [T7] revision 을 planQa 없이 먼저 확정하고, 이후 binding tx 가 issue 생성·표식·명세 연결·refs.planQa 를
   // 함께 확정한다(도중 실패 시 (c) 경로가 멱등하게 재완수한다). 검토 이슈가 의사결정 이슈인 경우 그 이슈를 재사용한다.
   const decisionIssueReuseId = collected.decisionIssueOriginKind === "mission_plan_qa" ? collected.decisionIssueId : null;
-  const refs = mergeMissionPlanRefs(
-    activePlan?.refs,
-    {
-      ...effectiveDraft.refs,
-      ownerPlanDecision: { ...effectiveDraft.refs.ownerPlanDecision, decisionHash },
-    },
-    { selectedExecutionUnits: "replace" },
-  );
-  // 새 decision 는 이전 decision 의 materialization 결과(paqoWorkflow/crossCompanyDelegations)와 이전 planQa
-  // 게이트 상태를 계승하지 않는다. planQa 는 binding tx 가 현재 decision 기준으로 다시 쓴다.
-  // PASS 시 idempotent branch 에서 새 decision 기준으로 materialize 한다.
-  delete (refs as Record<string, unknown>).paqoWorkflow;
-  delete (refs as Record<string, unknown>).crossCompanyDelegations;
-  delete (refs as Record<string, unknown>).planQa;
+  const refs = buildRevisionDecisionRefs({
+    activePlanRefs: activePlan?.refs, effectiveDraftRefs: effectiveDraft.refs,
+    decisionHash, revisionDelta: revisionDeltaValidation.delta,
+    blockedUnitOutcomes: revisionDeltaValidation.blockedUnitOutcomes,
+    separateScopeOutcomes: revisionDeltaValidation.separateScopeOutcomes,
+  });
   const missionPlanArtifact = await service.createMissionPlanRevision({
     companyId,
     missionId,
@@ -2152,8 +2164,12 @@ export function buildPaqoWorkflowSteps(
   mission: typeof missions.$inferSelect,
   options: { researchWorkbenchAvailable?: boolean; tools?: readonly PlanningArtifactTool[] } = {},
 ): WorkflowStep[] {
+  // [슬라이스 Q4/Q5 부분진행] 변경안이 차단(revisionBlocked) 또는 별도 범위(revisionSeparateScope) 로
+  //   선언한 단위는 실행 그래프에서 제외된다 — 해당 단계가 정의에 물화되지 않으므로 그 도구 실행은
+  //   발생할 수 없다(대체 게시/전체완료·정기 정의 영구 적용 아님). 진행 단위의 제외 단위 참조
+  //   (의존/선택자/실행인자)는 제출 게이트에서 선제 거부된다.
   const dependencyGraph = normalizeMissionPlanDependencyGraph(
-    draft.refs.selectedExecutionUnits,
+    draft.refs.selectedExecutionUnits.filter(unit => unit.revisionBlocked !== true && unit.revisionSeparateScope !== true),
     draft.steps,
   );
   if (!dependencyGraph.ok) {
@@ -2205,22 +2221,23 @@ export function buildPaqoWorkflowSteps(
       graphWorkProductRequired,
       ...(toolNames.length > 0 ? { toolNames } : {}),
       ...(toolArgs !== undefined ? { toolArgs } : {}),
+      ...(isPlainObject(unit.interpretedInputs) ? { interpretedInputs: unit.interpretedInputs } : {}),
       ...(knowledgeBaseIds.length > 0 ? { knowledgeBaseIds } : {}),
       ...(stepContractWithChecks ? { contract: stepContractWithChecks } : {}),
       ...(isStructural ? { type: "tool", qaType: "structural", assigneeAgentId } : { type: group }),
       ...(!isStructural && group === "qa" && typeof unit.qaType === "string" ? { qaType: unit.qaType } : {}),
-      description: [
+      // [생성 설명 계약] 표시용 미션 제목은 실행 지시와 분리된 typed 입력으로만 주입한다(문자열 필터링 아님).
+      ...buildPaqoStepDescription(mission.title, [
         `Mission-level PAQO ${groupLabel} issue materialized from an authorized PLAN decision.`,
-        "",
-        `Mission: ${mission.title}`,
         isStructural
           ? `Materialized as issue-less structural tool gate (no agent heartbeat).`
           : `Assigned by PLAN decision to agentId: ${assigneeAgentId}`,
         skillRefs.length > 0 ? `Skill refs considered by PLAN: ${skillRefs.join(", ")}` : null,
         toNonEmptyString(unit.reason) ? `Reason: ${toNonEmptyString(unit.reason)}` : null,
+        toNonEmptyString(unit.instructions) ? `Revision delta instructions: ${toNonEmptyString(unit.instructions)}` : null,
         ...outcomeContractLines,
-        sourceRef ? `Source ref: ${JSON.stringify(sourceRef)}` : null,
-      ].filter(Boolean).join("\n"),
+        sourceRef ? `Source ref: ${stableStringify(sourceRef)}` : null,
+      ]),
     } satisfies WorkflowStep;
   });
   const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);

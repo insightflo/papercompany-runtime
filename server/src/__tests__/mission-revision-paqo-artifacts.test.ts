@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { createDb, workflowDefinitions, workflowStepRuns, workflowRuns, toolDefinitions } from "@paperclipai/db";
+import { agentToolGrants, createDb, workflowDefinitions, workflowStepRuns, workflowRuns, toolDefinitions } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { seedWorld } from "./helpers/workflow-seed-world.js";
 import { legacyHtmlManualContract, legacyHtmlManualPublicationContract } from "./helpers/legacy-html-manual.js";
@@ -15,14 +15,16 @@ import { buildPaqoWorkflowSteps } from "../services/mission-owner-plan-decisions
 import { ensureWorkflowStepRunRecords } from "../services/workflow/workflow-step-materialization.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
-import { completeWorkflowToolStepFromResult } from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
 import { captureStructuralGateProducerToken } from "../services/workflow/control-flow/structural-semantic-readiness.js";
 import { prepareQaConsumer } from "../services/workflow/qa-artifact-consumer.js";
 
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("paqo-artifacts-"); db = createDb(temp.connectionString);
-  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "paqo-artifacts-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
+  root = await realpath(await mkdtemp(path.join(os.tmpdir(), "paqo-artifacts-")));
+  // [Q7] toolNames 스텝은 executor 설정이 있어야 생성 시점 재검사를 통과한다(실제 실행은 executeCoreWorkflowTool 경로).
+  setWorkflowToolStepExecutor(async () => ({ accepted: true })); }, 60000);
+afterAll(async () => { setWorkflowToolStepExecutor(null); await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
 const draft = (units: Record<string, unknown>[]) => ({ missionGoal: "content", successCriteria: [],
   steps: units.map((u, i) => ({ unitId: u.id, dependencies: i ? [units[i - 1].id] : [] })), refs: { selectedExecutionUnits: units } });
 const writer = { id: "write", title: "Write", graphWorkProductRequired: true };
@@ -47,6 +49,13 @@ it.each(["unit", "source", "reject"])("actual PAQO %s references survive seed �
   expect(steps[1].toolArtifactContract).toMatchObject({ inputStepId: steps[0].id });
   await db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, f.definition.id));
   f.input.seedFromRun.stepIds = [steps[0].id];
+  // [Q7] admission 이전 도구 등록·capability·구조게이트 담당(미션 owner) grant 를 갖춘다(생성 시점 재검사 기준).
+  const script = path.join(root, `${randomUUID()}.mjs`);
+  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
+    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
+  const [qaTool] = await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin",
+    adapterConfig }).returning();
+  await db.insert(agentToolGrants).values({ companyId: f.companyId, agentId: f.agentId, toolId: qaTool!.id, grantedBy: "local-board" });
   const target = await f.admit();
   await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, target.id));
   await ensureWorkflowStepRunRecords(db, { runId: target.id, steps, buildMetadata: () => ({}), syncControls: async (_db, rows) => rows });
@@ -54,9 +63,6 @@ it.each(["unit", "source", "reject"])("actual PAQO %s references survive seed �
   const check = rows.find(s => s.stepId === steps[1].id)!, consumer = rows.find(s => s.stepId === steps[2].id)!;
   const requestId = randomUUID();
   const producerToken = await captureStructuralGateProducerToken({ db, workflowRunId: target.id, gate: steps[1], steps });
-  const script = path.join(root, `${randomUUID()}.mjs`);
-  const adapterConfig = { command: `${process.execPath} ${script} qa`, workingDirectory: root,
-    capabilities: ["structural_validation_v1"], artifactContract: legacyHtmlManualContract(path.basename(script)) };
   await db.update(workflowStepRuns).set({ status: "running", lastDispatchRequestId: requestId,
     metadata: { structuralGateProducerToken: producerToken, artifactExecution: freezeArtifactAttempt({ adapterConfig,
       step: steps[1], executionGeneration: check.executionGeneration, requestId }) } }).where(eq(workflowStepRuns.id, check.id));
@@ -69,8 +75,6 @@ const v=JSON.parse(readFileSync(0,'utf8'));const h=b=>createHash('sha256').updat
 writeFileSync(4,JSON.stringify({schemaVersion:'manual-onboarding.qa.v1',command:'qa',mode:'content',section:null,ok:${references !== "reject"},
 checks:[{id:'fixture',ok:true}],checkedAt:new Date().toISOString(),artifactPath:a.out,
 contentSha256:h(Buffer.from(v.content.base64,'base64')),assetManifest:[]}));`);
-  await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-qa", description: "fixture", adapterType: "builtin",
-    adapterConfig });
   const result = await executeCoreWorkflowTool({ db, companyId: f.companyId, toolName: "local-qa", workflowRunId: target.id,
     stepRunId: check.id, stepId: check.stepId, requestId, parameters });
   if (references === "reject") {

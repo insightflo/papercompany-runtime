@@ -14,7 +14,7 @@ export { isStructuralGateStep };
 
 export const DELEGATE_TO_COMPANY = "delegate_to_company";
 
-const STEP_REF_TOKEN = /\{\$steps\.([^}]+)\.(workProductPath|workProductDir|siblingAssetsDir)\}/g;
+export const STEP_REF_TOKEN = /\{\$steps\.([^}]+)\.(workProductPath|workProductDir|siblingAssetsDir)\}/g;
 
 type PlanUnit = Record<string, unknown>;
 type Step = {

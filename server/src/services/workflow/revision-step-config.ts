@@ -1,4 +1,5 @@
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
+import { GENERATED_DESCRIPTION_BINDING_VERSION, readGeneratedExecutionDescriptionSha } from "./revision-generated-description.js";
 import type { WorkflowStep } from "./dag-engine.js";
 
 export type RevisionStep = WorkflowStep & { sourceStepId?: string };
@@ -6,8 +7,10 @@ export type RevisionStep = WorkflowStep & { sourceStepId?: string };
 export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [], purpose: "seed" | "failure" = "seed",
   coordinates: "source" | "current" = "source") {
   const ids = new Map(steps.map(s => [s.id, coordinates === "source" ? s.sourceStepId ?? s.id : s.id]));
+  // The generated-description binding rides on the step (passthrough) but never hashes as raw config.
   const { id: _id, sourceStepId: _source, name: _name, title: _title, description: _description,
-    agentName: _agentName, ...config } = step;
+    agentName: _agentName, revisionDescriptionBinding: _revisionDescriptionBinding, ...config } =
+    step as WorkflowStep & { revisionDescriptionBinding?: unknown; sourceStepId?: string };
   const remap = (id: string) => ids.get(id) ?? id;
   // Exact native machine tokens/typed step-reference fields only; never inspect prose.
   const normalize = (value: unknown, key?: string): unknown => {
@@ -35,7 +38,21 @@ export function revisionStepHash(step: RevisionStep, steps: RevisionStep[] = [],
   }
   // Legacy agent/untyped and declared action both dispatch the same agent execution.
   (execution as Record<string, unknown>).type = !step.type || step.type === "agent" ? "action" : step.type;
-  return hashStructuredValue({ schemaVersion: "workflow.execution-config.v2", purpose, ...(normalize(execution) as Record<string, unknown>),
+  // Seed admission hashes the raw instruction bytes (description) verbatim; the failure purpose and
+  // id/name/title normalization stay unchanged, and prose is never parsed for control. A fully
+  // verified paqo.generated-description.v1 binding compares its typed execution SHA instead — the
+  // mission title is presentation-only at generation and everything else stays exact bytes. The
+  // description is attached after machine-reference normalization so instruction bytes never rewrite.
+  const normalizedExecution = normalize(execution) as Record<string, unknown>;
+  if (purpose === "seed") {
+    const boundExecutionSha = readGeneratedExecutionDescriptionSha(step);
+    if (boundExecutionSha !== null) {
+      normalizedExecution.description = { schemaVersion: GENERATED_DESCRIPTION_BINDING_VERSION, executionSha256: boundExecutionSha };
+    } else if (typeof step.description === "string" && step.description !== "") {
+      normalizedExecution.description = step.description;
+    }
+  }
+  return hashStructuredValue({ schemaVersion: "workflow.execution-config.v2", purpose, ...normalizedExecution,
     dependencies: step.dependencies.map(remap).sort(),
     ...(purpose === "seed" && step.dependsOn ? { dependsOn: step.dependsOn.map(remap).sort() } : {}),
     // Rework routing is not the producer's execution configuration. Seed admission separately checks topology.

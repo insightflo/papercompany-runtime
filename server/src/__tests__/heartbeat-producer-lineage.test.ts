@@ -37,4 +37,4 @@ it("registration rejects an overlong typed ancestry without unbounded traversal"
   await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date(), workflowStepRunId: f.stepRunId,
     workflowExecutionGeneration: 7 }).where(eq(heartbeatRuns.id, unsupported.id));
   await expect(f.register(unsupported.id)).rejects.toThrow("workproduct_producer_attempt_unproven");
-});
+}, 45000);

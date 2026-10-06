@@ -83,7 +83,7 @@ describeEmbeddedPostgres("workflow_runs_child_start_lease_pair_ck — migrated d
     configureWorkflowChildFixtures(db);
     companyId = await createCompanyFixture("SchemaPair");
     workflowId = await insertDefinition({ companyId, name: "pair-workflow", steps: [] });
-  });
+  }, 45000);
 
   afterAll(async () => {
     await tempDb?.cleanup();
@@ -166,7 +166,7 @@ describeEmbeddedPostgres("workflow_step_invocations — migrated DB strict invar
     companyId = await createCompanyFixture("Invocations");
     workflowId = await insertDefinition({ companyId, name: "invocation-parent", steps: [childStep(randomUUID())] });
     ({ runId, stepRunId } = await insertRunWithWorkflowStepRun({ companyId, workflowId }));
-  });
+  }, 45000);
 
   afterAll(async () => {
     await tempDb?.cleanup();

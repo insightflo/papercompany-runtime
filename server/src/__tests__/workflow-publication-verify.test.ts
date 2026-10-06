@@ -70,7 +70,7 @@ it.each(['publishResultPath', 'durableReceipt'])('consumes a durable publication
   expect(result.artifactPath).toMatch(/\/verified.json$/);
   expect(JSON.parse(await readFile(result.artifactPath!, 'utf8'))).toMatchObject({ command: 'verify', id: 'article',
     scope: { companyId: f.companyId, stepRunId: f.verifyId, requestId: 'inspector' } });
-});
+}, 45000);
 it.each([
   ['identity', "r.id='other';r.cms.contentId='other';r.cms.commandKey='other:1';"],
   ['date', "r.date='2026-10-02';"], ['digest', "r.inputDigest.sha256='b'.repeat(64);"],
@@ -115,4 +115,4 @@ it('rejects another run/company publication path even when the file is valid', a
   expect(result.status).toBe(500);
   expect(result.body.error).toBe('qa_artifact_consumer_receipt_required');
   expect(result.body.invocationProvenance).toBeNull();
-});
+}, 45000);

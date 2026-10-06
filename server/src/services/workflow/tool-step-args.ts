@@ -224,6 +224,17 @@ function renderChecked(value: unknown, runDate: string, runId: string, pathsBySt
   return rendered;
 }
 
+/**
+ * [수정 변경맵 Q11 — 대상층 재렌더] seed 물화 재검증용 순수 렌더: 실행 경로와 동일한 renderChecked
+ * 파이프라인으로 인자를 재렌더하되, 해석 결과값(run 좌표·run metadata·참조 경로 맵)을 호출자가
+ * 명시적으로 공급받는다. DB 조회·핀 기록은 수행하지 않는다(해석 기계의 렌더 단말만 재사용).
+ */
+export function renderWorkflowToolStepArgsWithResolvedValues(input: {
+  args: unknown; runDate: string; runId: string; pathsByStepId: Map<string, string>; runMetadata: Record<string, unknown>;
+}): unknown {
+  return renderChecked(input.args, input.runDate, input.runId, input.pathsByStepId, input.runMetadata);
+}
+
 function collectArtifactReferences(value: unknown, result = new Set<string>()): Set<string> {
   if (typeof value === "string") {
     for (const match of value.matchAll(STEP_ARTIFACT_TOKEN)) {

@@ -143,6 +143,7 @@ import {
   type WorkflowDefinitionExecutionShape,
 } from "./execution-steps.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
+import { readArtifactDigest } from "./artifact-files.js";
 import { verifyArtifactStepCompletion } from "./artifact-step-result.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
 import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
@@ -3179,6 +3180,11 @@ export async function completeWorkflowToolStepFromResult(
     artifactPath: input.artifactPath,
     data: input.data,
   });
+  // [Q3 생산 시점 다이제스트 — 2026-10-04] 영수증 없이 완료되는 내구 toolResult 도 완료 시점
+  //   artifactSha256 를 함께 기록한다: 이후 tool-output seed 검증(workflow-seed-tool-output.ts)이
+  //   승인 시점 bytes 를 생산 시점 값과 비교해 변조를 가리고, 기록에 없으면 재사용이 fail-closed
+  //   로 거절된다. additive — 영수증 분기·기존 소비자 무변경, 안전 읽기 실패 시 필드만 비운다.
+  const producedArtifactSha256 = artifactPath && input.success ? await readArtifactDigest(artifactPath) : null;
   const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
     || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
   const baseToolResult = {
@@ -3187,7 +3193,7 @@ export async function completeWorkflowToolStepFromResult(
     success: input.success,
     stdout: input.stdout ?? null,
     ...(input.data === undefined ? {} : { data: toolArtifactReceipt ? { ...artifactDataRecord, artifactPath: undefined, rawPath: undefined } : input.data }),
-    ...(artifactPath ? { artifactPath } : {}),
+    ...(artifactPath ? { artifactPath, ...(producedArtifactSha256 ? { artifactSha256: producedArtifactSha256 } : {}) } : {}),
     stderr: input.stderr ?? null,
     exitCode: input.exitCode ?? null,
     error: input.error ?? null,
