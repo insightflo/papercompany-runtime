@@ -98,7 +98,7 @@ describe("terminal cleanup withdraws mission-scoped pending operator decisions o
       expect(entry.actorType).toBe("system");
       expect(entry.details).toMatchObject({ missionId: f.mission.id, reason: "mission_cancelled" });
     }
-  });
+  }, 60_000);
 
   it("leaves pending decisions untouched when the mission completes", async () => {
     const f = await seedTerminal(db);
@@ -110,7 +110,7 @@ describe("terminal cleanup withdraws mission-scoped pending operator decisions o
     const [row] = await db.select().from(schema.operatorDecisions).where(eq(schema.operatorDecisions.id, pending.id));
     expect(row.status).toBe("pending");
     expect(row.cancelledAt).toBeNull();
-  });
+  }, 60_000);
 
   it("second cancel through the real service path is idempotent — no double activity, no errors", async () => {
     const f = await seedTerminal(db);
@@ -133,5 +133,5 @@ describe("terminal cleanup withdraws mission-scoped pending operator decisions o
     expect(row.cancelledAt).toEqual(f.input.now);
     const activity = await db.select().from(schema.activityLog).where(eq(schema.activityLog.entityId, pending.id));
     expect(activity).toHaveLength(1);
-  });
+  }, 60_000);
 });

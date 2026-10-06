@@ -117,6 +117,17 @@ export function operatorDecisionWriteService(db: Db) {
     const replay = await loadReplay(companyId, validated.input.requestKey, validated.requestHash);
     if (replay) return replay;
 
+    // [결정 가능성 게이트] 판단 정보 패킷(definition.humanReview)이 없는 카드는 UI 버튼 잠금과
+    // resolve 422(human_review_packet_required)로 결정 불가능한 죽은 카드가 된다(실제 사례:
+    // 2026-10-06 rebind 승인 요청 2건). 생성 단계에서 거부해 요청자가 패킷을 갖춰 다시 만들게 한다.
+    // replay 는 멱등 유지를 위해 게이트 앞에서 반환된다(기존 행은 cancel 경로로 정리).
+    if (!validated.input.definition.humanReview) {
+      throw unprocessable(
+        "판단 주제, 근거 원본 위치, 해석, 영향과 다음 단계(definition.humanReview)가 없는 결정 카드는 만들 수 없습니다. 패킷을 갖춰 다시 요청해 주세요.",
+        { code: "human_review_packet_required" },
+      );
+    }
+
     let id: string;
     try {
       id = await db.transaction(async (tx) => {
