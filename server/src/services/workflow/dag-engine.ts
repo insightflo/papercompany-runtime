@@ -33,6 +33,8 @@ import {
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
+import { lockFailureObservationScope, persistFailedToolDispatch } from "./tool-dispatch-failure.js";
+import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
 import {
   dispatchWorkflowChildStep,
   isWorkflowChildStep,
@@ -133,6 +135,7 @@ import {
 import { isControlNodeGraceWaitBlockingDispatch } from "./control-flow/gate-work-product-grace.js";
 import { markRetryDispatching } from "./retry-dispatch-state.js";
 import { retryIssueLessToolWorkflowStepInternal, type ExpectedToolFailure } from "./retry-issue-less-manual.js";
+import type { QaRebindRecoveryIntent } from "./qa-rebind-recovery-intent.js";
 import { applyWorkflowStepRetryPass } from "./workflow-step-retry-pass.js";
 import { shouldLoadValidationVerdictsForRun } from "./validation-verdict-load-gate.js";
 import { buildCompanyWorkflowExecutionSteps } from './company-execution-steps.js';
@@ -2450,64 +2453,8 @@ async function completeToolStepRunFromCache(input: {
   });
 }
 
-async function failToolStepRunWithDispatchError(input: {
-  db: Db;
-  step: WorkflowStep;
-  stepRun: typeof workflowStepRuns.$inferSelect;
-  now: Date;
-  requestId: string;
-  toolName: string;
-  args: unknown;
-  error: string;
-  provenance?: {
-    run: Pick<typeof workflowRuns.$inferSelect, "id" | "companyId" | "missionId">;
-    source: WorkflowSyncSource;
-  };
-}): Promise<void> {
-  const metadata: Record<string, unknown> = {
-    ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
-    toolInvocation: {
-      requestId: input.requestId,
-      toolName: input.toolName,
-      args: input.args,
-      dispatchedAt: input.now.toISOString(),
-      dispatchError: input.error,
-    },
-  };
-  delete metadata.concurrencyBlocked;
-  if (input.stepRun.lastDispatchRequestId !== input.requestId) delete metadata.artifactExecution;
-
-  // [step-status fencing v1] 스냅샷 status CAS — 폐기 시 전이 기록(provenance)도 함께 생략되어
-  //   낡은 fromStatus 가 ledger 에 남지 않는다.
-  const updated = await setWorkflowStepRunStatus(input.db, {
-    stepRunId: input.stepRun.id,
-    status: "failed",
-    patch: {
-      startedAt: input.stepRun.startedAt ?? input.now,
-      completedAt: input.now,
-      lastDispatchAttemptAt: input.now,
-      lastDispatchErrorAt: input.now,
-      lastDispatchErrorSummary: input.error,
-      lastDispatchRequestId: input.requestId,
-      metadata,
-    },
-    expectedStatuses: [input.stepRun.status],
-  });
-  if (updated && input.provenance) {
-    await recordWorkflowStepStatusTransition(input.db, {
-      companyId: input.provenance.run.companyId,
-      missionId: input.provenance.run.missionId,
-      workflowRunId: input.provenance.run.id,
-      workflowStepRunId: input.stepRun.id,
-      issueId: input.stepRun.issueId,
-      fromStatus: input.stepRun.status,
-      toStatus: "failed",
-      source: input.provenance.source,
-      transitionVersion: updated.statusTransitionVersion > input.stepRun.statusTransitionVersion
-        ? updated.statusTransitionVersion
-        : null,
-    });
-  }
+async function failToolStepRunWithDispatchError(input: Parameters<typeof persistFailedToolDispatch>[0]): Promise<void> {
+  await persistFailedToolDispatch(input, buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata));
 }
 
 async function startIssueLessToolStepRun(input: {
@@ -3270,20 +3217,34 @@ export async function completeWorkflowToolStepFromResult(
   );
   // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 절대 마감하지 않는다 —
   //   자식 정산 권위는 workflow-child-settlement-writers 의 전체 신원 형태뿐이다(위에서 거부됨).
-  const [updatedStepRun] = await db.update(workflowStepRuns).set({
-    status: nextStatus,
-    startedAt: row.stepRun.startedAt ?? now, completedAt: now,
-    dispatchReadyAt: effectiveSuccess && !row.stepRun.dispatchReadyAt ? now : undefined,
-    lastDispatchErrorAt: effectiveSuccess ? null : now,
-    lastDispatchErrorSummary: effectiveSuccess ? null
-      : structuralGateRejected ? "structural_gate_request_changes"
-      : structuralContractFailure ? "structural_gate_contract_failure"
-      : (input.error ?? input.stderr ?? null),
-    metadata: resultMetadata,
-  }).where(and(eq(workflowStepRuns.id, row.stepRun.id), completionCasCondition)).returning({
-    id: workflowStepRuns.id,
-    transitionVersion: workflowStepRuns.statusTransitionVersion,
-  });
+  const observeFailure = nextStatus === "failed" && isQaRebindConsumer(row.stepRun.issueId, stepForGuard, existingMetadata);
+  const writeCompletion = async (writer: Db) => {
+    const [updated] = await writer.update(workflowStepRuns).set({
+      status: nextStatus,
+      startedAt: row.stepRun.startedAt ?? now, completedAt: now,
+      dispatchReadyAt: effectiveSuccess && !row.stepRun.dispatchReadyAt ? now : undefined,
+      lastDispatchErrorAt: effectiveSuccess ? null : now,
+      lastDispatchErrorSummary: effectiveSuccess ? null
+        : structuralGateRejected ? "structural_gate_request_changes"
+        : structuralContractFailure ? "structural_gate_contract_failure"
+        : (input.error ?? input.stderr ?? null),
+      metadata: resultMetadata,
+    }).where(and(eq(workflowStepRuns.id, row.stepRun.id), completionCasCondition)).returning({
+      id: workflowStepRuns.id,
+      transitionVersion: workflowStepRuns.statusTransitionVersion,
+    });
+    if (updated && observeFailure) {
+      await persistQaRebindCandidate(writer, { companyId: row.run.companyId,
+        workflowRunId: row.run.id, consumerStepRunId: updated.id });
+    }
+    return updated;
+  };
+  // Lock order mission → run → step (see lockFailureObservationScope).
+  const updatedStepRun = observeFailure
+    ? await db.transaction(async tx => {
+      await lockFailureObservationScope(tx as unknown as Db, row.run);
+      return writeCompletion(tx as unknown as Db);
+    }) : await writeCompletion(db);
   if (!updatedStepRun) {
     // [Task6c-A] stale resume 결과: 한 건도 쓰지 않고 현재 상태 snapshot 으로 수렴.
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
@@ -3308,7 +3269,7 @@ export async function completeWorkflowToolStepFromResult(
 }
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
-  input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null; expectedFailure?: ExpectedToolFailure; validateIntent?: (tx: Db) => Promise<boolean> },
+  input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null; expectedFailure?: ExpectedToolFailure; validateIntent?: (tx: Db) => Promise<boolean>; qaRebind?: QaRebindRecoveryIntent },
 ): Promise<{ stepRunId: string; result: WorkflowExecutionResult } | null> {
   // [descope D2] workflow-type S 는 수동 issue-less retry 를 명시적으로 거부한다 — schedule/
   //   reset/retry-count 증가 같은 어떤 변이도 일어나기 "전"이다(스케줄러 리셋 제외 포함).

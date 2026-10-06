@@ -1,4 +1,4 @@
-export * from "./artifact-contract.js"; export * from "./qa-config.js"; export * from "./workflow-artifact.js"; export {
+export * from "./workflow-qa-rebind.js"; export * from "./artifact-contract.js"; export * from "./qa-config.js"; export * from "./workflow-artifact.js"; export {
   instanceGeneralSettingsSchema,
   judgmentBaseUrlSchema,
   judgmentModelIdSchema,
