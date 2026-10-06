@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { instanceSettings, type Db } from "@paperclipai/db";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { instanceExperimentalSettingsSchema, patchInstanceExperimentalSettingsSchema } from "@paperclipai/shared";
 
 type Row = Record<string, unknown>;
 
@@ -104,5 +105,48 @@ describe("instance general settings — judgment overrides", () => {
     expect(general.censorUsernameInLogs).toBe(true);
     expect(general.judgmentBaseUrl).toBeUndefined();
     expect(general.judgmentModelId).toBe("alt-model-1");
+  });
+});
+
+describe("instance experimental settings — qa rebind recovery keys", () => {
+  const companyId = "11111111-1111-4111-8111-111111111111";
+
+  it("stored qa rebind keys do not reset other experimental flags", async () => {
+    const { db, tableRows } = makeInstanceSettingsDb();
+    const svc = instanceSettingsService(db);
+    await svc.updateExperimental({ enableKnowledgePatternInjection: true });
+
+    tableRows.get(instanceSettings)![0]!.experimental = {
+      enableKnowledgePatternInjection: true,
+      enableRunReopenGuardV1: true,
+      enableQaRebindRecoveryV1: true,
+      enableQaRebindRecoveryCompanyIdsV1: [companyId],
+    };
+
+    const experimental = await svc.getExperimental();
+    expect(experimental.enableKnowledgePatternInjection).toBe(true);
+    expect(experimental.enableRunReopenGuardV1).toBe(true);
+    expect(experimental.enableQaRebindRecoveryV1).toBe(true);
+    expect(experimental.enableQaRebindRecoveryCompanyIdsV1).toEqual([companyId]);
+  });
+
+  it("patching qa rebind recovery on keeps existing flags and company list", async () => {
+    const { db } = makeInstanceSettingsDb();
+    const svc = instanceSettingsService(db);
+    await svc.updateExperimental({
+      enableKnowledgePatternInjection: true,
+      enableQaRebindRecoveryCompanyIdsV1: [companyId],
+    });
+    await svc.updateExperimental({ enableQaRebindRecoveryV1: true });
+
+    const experimental = await svc.getExperimental();
+    expect(experimental.enableKnowledgePatternInjection).toBe(true);
+    expect(experimental.enableQaRebindRecoveryV1).toBe(true);
+    expect(experimental.enableQaRebindRecoveryCompanyIdsV1).toEqual([companyId]);
+  });
+
+  it("defaults qa rebind recovery off and rejects non-uuid company ids", () => {
+    expect(instanceExperimentalSettingsSchema.parse({}).enableQaRebindRecoveryV1).toBe(false);
+    expect(patchInstanceExperimentalSettingsSchema.safeParse({ enableQaRebindRecoveryCompanyIdsV1: ["x"] }).success).toBe(false);
   });
 });

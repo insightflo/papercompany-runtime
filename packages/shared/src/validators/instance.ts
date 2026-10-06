@@ -58,6 +58,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   // [P2 측정 롤아웃] 사람 큐레이션 패턴 카드의 스텝 디스패치 주입 스위치. 기본 off = 주입 없음(fail-closed).
   //   on이어도 결정론적 그룹 배정(50/50)의 injection 군에만 주입되고 스텝런 메타데이터에 기록된다.
   enableKnowledgePatternInjection: z.boolean().default(false),
+  // [qa-rebind recovery v1] QA 재바인드 자동 복구 — 기본 off(fail-closed). 회사 목록은 부분 롤아웃용.
+  enableQaRebindRecoveryV1: z.boolean().default(false),
+  enableQaRebindRecoveryCompanyIdsV1: z.array(z.string().uuid()).default([]),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();
