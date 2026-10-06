@@ -149,10 +149,10 @@ export function buildPaqoWorkflowSteps(
       ]),
     } satisfies WorkflowStep;
   });
-  const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps);
+  const plannedSteps = applyCanonicalDependencies(executableUnits, selectedSteps, copiedUnitIds);
   if (plannedSteps.length === 0) return [];
-  // [machine-check gates] machineChecks 가 있는 생산자 뒤에 structural gate 물리화.
-  const gatedSteps = insertStepMachineCheckGates(plannedSteps);
+  // [machine-check gates] machineChecks 가 있는 생산자 뒤에 structural gate 물리化 — 재배선은 B 만(A 불변).
+  const gatedSteps = insertStepMachineCheckGates(plannedSteps, copiedUnitIds);
   // [Hybrid QA] Structural materialization passes (extracted):
   //   - toolArgs reference rewriting
   //   - scoped prompt injection for all QA downstream of structural gates

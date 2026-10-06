@@ -92,15 +92,20 @@ export function buildUnitStepIdMap(
   return new Map(selectedUnits.map((unit, index) => [toNonEmptyString(unit.id)!, steps[index]!.id]));
 }
 
+/** [수정 재사용] 복사 A 스텝은 dependencies(및 조건부 성공 연결)를 원문 그대로 보존한다 —
+ *  단위 좌표 재작성은 B 에만 적용한다. 복사 A 의 단위 id 는 스텝 id 와 같으므로 건너뛰어도 안전하다. */
 export function applyCanonicalDependencies(
   selectedUnits: Record<string, unknown>[],
   steps: WorkflowStep[],
+  copiedStepIds?: ReadonlySet<string>,
 ): WorkflowStep[] {
   const dependencyStepIds = remapCanonicalDependenciesToStepIds(
     selectedUnits,
     steps.map((step) => step.id),
   );
-  return steps.map((step, index) => ({ ...step, dependencies: dependencyStepIds[index]! }));
+  return steps.map((step, index) => copiedStepIds?.has(step.id)
+    ? step
+    : { ...step, dependencies: dependencyStepIds[index]! });
 }
 
 /**
@@ -114,7 +119,7 @@ export function applyCanonicalDependencies(
  * 남아야 resolveWorkflowToolStepArgs 가 통과한다. M 실패 시 완료되지 않으므로 하류는
  * DAG 의존으로 자연 차단된다.
  */
-export function insertStepMachineCheckGates(steps: WorkflowStep[]): WorkflowStep[] {
+export function insertStepMachineCheckGates(steps: WorkflowStep[], copiedStepIds?: ReadonlySet<string>): WorkflowStep[] {
   const checksByProducerId = new Map<string, NonNullable<ReturnType<typeof normalizeWorkflowStepMachineChecks>>>();
   for (const step of steps) {
     const checks = normalizeWorkflowStepMachineChecks(
@@ -153,7 +158,8 @@ export function insertStepMachineCheckGates(steps: WorkflowStep[]): WorkflowStep
   const gateIdByProducerId = new Map(Array.from(checksByProducerId.keys(), (id) => [id, `${id}-mc`]));
   const gateIds = new Set(gateIdByProducerId.values());
   return out.map((step) => {
-    if (gateIds.has(step.id)) return step;
+    // [수정 재사용] 게이트 의존 추가 재배선은 B 만 — 복사 A 의 의존성은 원문 그대로 둔다.
+    if (gateIds.has(step.id) || copiedStepIds?.has(step.id)) return step;
     const addedGates = step.dependencies
       .filter((dependencyId) => gateIdByProducerId.has(dependencyId))
       .map((dependencyId) => gateIdByProducerId.get(dependencyId)!);

@@ -64,6 +64,36 @@ export function collectIdentityOnlyViolations(
   return diagnostics;
 }
 
+/**
+ * [변경 B 보호] 서버가 원문 복사로 포함하는 모든 대상(루트+암묵적 조상)을 원문 제출과 대조한다.
+ *   클로저의 일부인데 저작된 계획 항목이나 modify/rerun/add 등의 변경안 항목이 함께 있으면
+ *   충돌이다 — 조용히 투영으로 대체하면 변경한 B 가 원본 재사용으로 바뀐다(같은 원본이라 동일성
+ *   검사도 못 잡는다). 명시 루트는 신원 전용 검사가 이미 적용되므로 제외한다.
+ */
+export function collectClosureConflicts(input: {
+  closureUnitIds: readonly string[];
+  reuseRootUnitIds: ReadonlySet<string>;
+  authoredUnits: readonly Record<string, unknown>[];
+  deltaUnits: ReadonlyArray<{ unitId: string; operation: string }>;
+}): RevisionReuseDiagnostic[] {
+  const diagnostics: RevisionReuseDiagnostic[] = [];
+  for (const id of input.closureUnitIds) {
+    if (input.reuseRootUnitIds.has(id)) continue;
+    const authored = input.authoredUnits.some(unit => unit.id === id);
+    const deltaEntry = input.deltaUnits.find(unit => unit.unitId === id);
+    if (!authored && !deltaEntry) continue;
+    const claims = [authored ? "저작된 계획 항목" : null, deltaEntry ? `변경안 ${deltaEntry.operation} 항목` : null]
+      .filter(Boolean).join(" 과(와) ");
+    diagnostics.push({
+      code: "mission_revision_reuse_dependency_invalid",
+      message: `단계 ${id} 은(는) 재사용 클로저의 일부로 서버가 원본 실행에서 그대로 복사합니다 — `
+        + `${claims}이(가) 이 단계를 다르게 실행하려 합니다. 충돌 항목을 제거하거나 해당 단계를 재사용(reuse) 로 표시하세요.`,
+      severity: "invalid",
+    });
+  }
+  return diagnostics;
+}
+
 /** 구조화 decision.steps 가 A 배선을 덮어쓰지 않는지 확인한다(자유 텍스트는 검사 대상이 아니다). */
 export function collectStepOverrideViolations(
   decisionSteps: unknown,

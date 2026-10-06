@@ -182,3 +182,29 @@ it("[입장 무변] 복사 A 라도 산출물 bytes 변조 후 입장은 여전�
     .where(and(eq(workflowRuns.companyId, w.companyId), eq(workflowRuns.missionId, w.revision.id)));
   expect(newRuns).toEqual([]);
 }, 60000);
+
+it("[변경 B 보호] 암묵적 조상을 modify 로 저작한 제출은 최초 단계에서 거부된다(조용한 원문 복사 없음)", async () => {
+  const w = await verbatimWorld(db, root);
+  // a2 만 reuse 로 표시 → a1 은 클로저로 서버가 복사한다. 그 a1 을 modify 로 저작하면 충돌.
+  const authored = [
+    { id: "a1", title: "Collect sources (changed)", selectionState: "selected", reason: "changed collection",
+      assigneeAgentId: w.agentId, sourceRef: { type: "mission_plan_unit", id: "a1" },
+      sourceStepId: "a1", dependencies: [], instructions: "수집 대상 변경", toolNames: ["rv-collect"] },
+    { id: "a2", sourceStepId: "a2" },
+    ...w.authoredUnits().slice(1),
+  ];
+  const decision = w.decision(authored, {
+    schemaVersion: "mission-revision-delta.v1", sourceWorkflowRunId: w.sourceRun.id,
+    base: { workflowDefinitionId: w.definition.id, snapshotHash: w.snapshotHash },
+    units: [
+      { unitId: "a1", operation: "modify", sourceStepId: "a1", instructions: "수집 대상 변경" },
+      { unitId: "a2", operation: "reuse", sourceStepId: "a2" },
+      ...w.deltaUnits().slice(1),
+    ],
+  });
+  const result = await w.submit(decision);
+  expect(result).toMatchObject({ status: "invalid" });
+  expect(diagnostics(result).some(d => d.code === "mission_revision_reuse_dependency_invalid")).toBe(true);
+  // 거부는 물화를 만들지 않는다 — 변경한 B 가 원본 재사용으로 조용히 바뀌는 경로가 없다.
+  expect(await paqoSteps(w)).toEqual([]);
+}, 60000);

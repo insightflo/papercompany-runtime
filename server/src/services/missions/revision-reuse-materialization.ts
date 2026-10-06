@@ -22,6 +22,7 @@ import { loadMissionRow } from "./revision-plan-validation.js";
 import {
   assignReservedQaStepIds,
   buildCanonicalRevisionDelta,
+  collectClosureConflicts,
   collectIdentityOnlyViolations,
   collectStepOverrideViolations,
   parseRevisionReusePlanRecord,
@@ -212,6 +213,16 @@ export async function prepareRevisionReuse(db: Db, input: {
   });
   if (!built.ok) return built;
   const { runtime } = built;
+
+  // [변경 B 보호] 클로저 전체(루트+암묵적 조상)를 원문 제출과 대조 — 충돌하는 저작/변경안 항목이 있으면
+  //   투영으로 대체하지 않고 거절한다(변경한 B 가 원본 재사용으로 조용히 바뀌는 것을 막는다).
+  const closureConflicts = collectClosureConflicts({
+    closureUnitIds: runtime.planRecord.closureUnitIds,
+    reuseRootUnitIds: reuseUnitIds,
+    authoredUnits,
+    deltaUnits: parsed.data.units.map(unit => ({ unitId: unit.unitId, operation: unit.operation })),
+  });
+  if (closureConflicts.length > 0) return { ok: false, diagnostics: closureConflicts };
 
   const closureSet = new Set(runtime.planRecord.closureUnitIds);
   const closureProjections = runtime.planRecord.closureUnitIds

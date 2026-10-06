@@ -124,3 +124,22 @@ it("[joined chain] 복사 A 는 원문 그대로 물화되고 후보→승인→
     roots: ["a2"], closureUnitIds: ["a1", "a2"],
   });
 }, 120000);
+
+it("[조건부 성공 연결] dependencies 없이 조건부 성공 엣지로만 선행을 참조하는 A 도 원문·해시가 보존된다", async () => {
+  const w = await verbatimWorld(db, root, { a2ConditionalEdge: true });
+
+  const first = await w.submit();
+  expect(first).toMatchObject({ status: "plan_qa_pending" });
+  await w.approve(first);
+  expect(await w.submit()).toMatchObject({ status: "recorded" });
+
+  const { row: paqoRow, steps } = await paqoDefinitionSteps(w);
+  const sourceA2 = w.sourceSnapshot.find(s => s.id === "a2")!;
+  // 원문 보존: 빈 dependencies + 조건부 성공 연결이 그대로 저장되어야 한다(투영 의존성으로 덮지 않는다).
+  expect(steps.find(s => s.id === "a2")).toEqual({ ...sourceA2, sourceStepId: "a2" });
+  expect(steps.find(s => s.id === "a2")!.dependencies).toEqual([]);
+  // 해시 보존: 동일 구성이므로 재사용 후보가 실제로 나온다.
+  const options = await revisionStartOptions(db, w.companyId, w.revision.id);
+  expect(options).not.toBeNull();
+  expect((options!.candidates as Array<{ stepId: string }>).map(c => c.stepId).sort()).toEqual(["a1", "a2"]);
+}, 120000);

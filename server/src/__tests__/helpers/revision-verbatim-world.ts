@@ -39,7 +39,7 @@ async function writeMissionFile(root: string, missionId: string, runId: string, 
   return { target, sha256: sha256(bytes) };
 }
 
-export async function verbatimWorld(db: Db, root: string) {
+export async function verbatimWorld(db: Db, root: string, options: { a2ConditionalEdge?: boolean } = {}) {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Verbatim", issuePrefix: randomUUID(), workProductRoot: root });
   await db.insert(agents).values({ id: agentId, companyId, name: "Writer", role: "operator", adapterType: "process" });
@@ -52,11 +52,17 @@ export async function verbatimWorld(db: Db, root: string) {
   for (const name of ["rv-publish", "rv-verify"]) await grant(name);
 
   // 원본 정의: a1(무이슈 native tool) → a2(에이전트), QA 는 issue-less tool(QA 판정·back-edge 합성 대상).
+  //   a2ConditionalEdge: a2 가 dependencies 없이 조건부 성공 연결(when:"success")로만 a1 을 참조하는 변형.
+  const a2Step: VerbatimStep = options.a2ConditionalEdge === true
+    ? { id: "a2", name: "Write report", type: "agent", agentId, dependencies: [], graphWorkProductRequired: true,
+        conditionalDependencies: [{ stepId: "a1", when: "success" }],
+        toolArgs: { content: "{$steps.a1.workProductPath}" } }
+    : { id: "a2", name: "Write report", type: "agent", agentId, dependencies: ["a1"], graphWorkProductRequired: true,
+        toolArgs: { content: "{$steps.a1.workProductPath}" } };
   const sourceSteps: VerbatimStep[] = [
     { id: "a1", name: "Collect sources", type: "tool", agentId: "", dependencies: [], graphWorkProductRequired: false,
       toolNames: ["rv-collect"], toolArgs: { out: "collected.json" } },
-    { id: "a2", name: "Write report", type: "agent", agentId, dependencies: ["a1"], graphWorkProductRequired: true,
-      toolArgs: { content: "{$steps.a1.workProductPath}" } },
+    a2Step,
     { id: "qa-inter", name: "Intermediate QA", type: "tool", qaType: "content", agentId: "", dependencies: ["a2"],
       graphWorkProductRequired: false, toolNames: ["rv-qa"], toolArgs: { document: "{$steps.a2.workProductPath}" } },
     { id: "qa-final", name: "Final QA", type: "tool", qaType: "content", agentId: "", dependencies: ["qa-inter"],
