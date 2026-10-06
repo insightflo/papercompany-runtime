@@ -9,25 +9,24 @@ import {
   type MissionDecisionStatus,
 } from "../api/missions";
 import { queryKeys } from "../lib/queryKeys";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
+import type { CompanyDefaultLanguage } from "@paperclipai/shared";
 
 interface MissionDecisionLogPanelProps {
   missionId: string;
 }
 
-function formatDecisionDate(value: string | null | undefined) {
+function formatDecisionDate(value: string | null | undefined, lang: CompanyDefaultLanguage) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat(lang === "ko" ? "ko-KR" : "en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
 }
-
-/**
- * [규칙 8] 결정 로그는 맥락 전달용 표시 상태다. board(운영자)는 이 패널에서 결정
- * 기록을 작성/은퇴할 수 있지만, 로그 자체는 어떤 실행 통제 판단의 근거 UI도 아니다.
- */
+// Display-only context; decision logs are not execution-control authority.
 const fieldClass = "mt-1 w-full rounded border border-border bg-background px-2 py-1 text-sm";
 function statusClass(status: MissionDecisionRecord["status"]) {
   switch (status) {
@@ -42,8 +41,8 @@ function statusClass(status: MissionDecisionRecord["status"]) {
   }
 }
 
-function provenanceLabel(record: MissionDecisionRecord) {
-  return record.handoffId ? `via handoff ${record.handoffId}` : "via decision report";
+function provenanceLabel(record: MissionDecisionRecord, lang: CompanyDefaultLanguage) {
+  return record.handoffId ? L(lang, { en: `via handoff ${record.handoffId}`, ko: `핸드오프 ${record.handoffId}로부터` }) : L(lang, { en: "via decision report", ko: "결정 보고서로부터" });
 }
 
 /** 근거 참조 표시용: shortId(8) 로 잘라 `type shortId` 를 쉼표로 연결한다(마크다운 렌더와 동일 규칙). */
@@ -57,6 +56,7 @@ function evidenceRefsFullTitle(refs: MissionDecisionEvidenceRef[]) {
 }
 
 export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelProps) {
+  const lang = useCompanyLanguage();
   const queryClient = useQueryClient();
   const { data: log, isLoading, error } = useQuery({
     queryKey: queryKeys.missions.decisionLog(missionId),
@@ -92,9 +92,9 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
       <section className="rounded-md border border-border p-4" aria-label="Mission Decision Log">
         <div className="flex items-center gap-2">
           <Scale className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium">Mission Decision Log</h3>
+          <h3 className="text-sm font-medium">{L(lang, { en: "Mission Decision Log", ko: "미션 결정 기록" })}</h3>
         </div>
-        <p className="mt-3 text-sm text-muted-foreground">Loading mission decision log…</p>
+        <p className="mt-3 text-sm text-muted-foreground">{L(lang, { en: "Loading mission decision log…", ko: "미션 결정 기록을 불러오는 중…" })}</p>
       </section>
     );
   }
@@ -104,10 +104,10 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
       <section className="rounded-md border border-border p-4" aria-label="Mission Decision Log">
         <div className="flex items-center gap-2">
           <AlertTriangle className="h-4 w-4 text-destructive" />
-          <h3 className="text-sm font-medium">Mission Decision Log</h3>
+          <h3 className="text-sm font-medium">{L(lang, { en: "Mission Decision Log", ko: "미션 결정 기록" })}</h3>
         </div>
         <p className="mt-3 text-sm text-destructive">
-          {error instanceof Error ? error.message : "Failed to load mission decision log."}
+          {error instanceof Error ? error.message : L(lang, { en: "Failed to load mission decision log.", ko: "미션 결정 기록을 불러오지 못했습니다." })}
         </p>
       </section>
     );
@@ -123,28 +123,28 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
         <div className="flex items-center gap-2">
           <Scale className="h-4 w-4 text-muted-foreground" />
           <div>
-            <h3 className="text-sm font-medium">Mission Decision Log</h3>
+            <h3 className="text-sm font-medium">{L(lang, { en: "Mission Decision Log", ko: "미션 결정 기록" })}</h3>
             <p className="text-xs text-muted-foreground">
-              Context handoff state only — not an execution-control authority
+              {L(lang, { en: "Context handoff state only — not an execution-control authority", ko: "맥락 전달 상태만 표시 — 실행을 제어하는 근거가 아닙니다" })}
             </p>
           </div>
         </div>
         <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">
-          board-authorable record
+          {L(lang, { en: "board-authorable record", ko: "운영자가 작성할 수 있는 기록" })}
         </span>
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        <span>rev {log?.revision ?? 0}</span>
-        <span>{decisions.length} decisions</span>
-        <span>{confirmedCount} confirmed</span>
-        <span>{underReviewCount} under review</span>
-        <span>updated {formatDecisionDate(log?.updatedAt)}</span>
+        <span>{L(lang, { en: `rev ${log?.revision ?? 0}`, ko: `개정 ${log?.revision ?? 0}` })}</span>
+        <span>{L(lang, { en: `${decisions.length} decisions`, ko: `결정 ${decisions.length}개` })}</span>
+        <span>{L(lang, { en: `${confirmedCount} confirmed`, ko: `확정 ${confirmedCount}개` })}</span>
+        <span>{L(lang, { en: `${underReviewCount} under review`, ko: `검토 중 ${underReviewCount}개` })}</span>
+        <span>{L(lang, { en: "updated", ko: "갱신" })} {formatDecisionDate(log?.updatedAt, lang)}</span>
       </div>
 
       {decisions.length === 0 ? (
         <p className="rounded border border-border/70 p-3 text-sm text-muted-foreground">
-          No decisions recorded yet. Agents and the board report decisions via POST /api/missions/{missionId}/decision-reports.
+          {L(lang, { en: `No decisions recorded yet. Agents and the board report decisions via POST /api/missions/${missionId}/decision-reports.`, ko: `아직 기록된 결정이 없습니다. 에이전트와 운영자는 POST /api/missions/${missionId}/decision-reports로 결정을 보고합니다.` })}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -155,31 +155,31 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                   <p className="font-medium">
                     {record.id}
                     {record.supersedes ? (
-                      <span className="ml-2 text-xs text-muted-foreground">supersedes {record.supersedes}</span>
+                      <span className="ml-2 text-xs text-muted-foreground">{L(lang, { en: "supersedes", ko: "대체" })} {record.supersedes}</span>
                     ) : null}
                   </p>
                   <p className={`mt-1 ${record.status === "retired" ? "text-muted-foreground" : ""}`}>
                     {record.summary}
                   </p>
                 </div>
-                <span className={`text-xs font-medium ${statusClass(record.status)}`}>{record.status}</span>
+                <span className={`text-xs font-medium ${statusClass(record.status)}`} title={record.status}>{humanLabel(lang, "missionDecisionStatus", record.status).label}</span>
                 {record.demotedByEvidence ? (
                   <span
                     className="rounded-full border border-amber-500/40 px-1.5 text-xs font-medium text-amber-600"
                     title={`Demoted by machine evidence check: ${record.demotedByEvidence.mismatches.map((m) => `${m.type} ${m.id} (${m.current})`).join(", ")}`}
                   >
-                    evidence stale
+                    {L(lang, { en: "evidence stale", ko: "근거가 오래됨" })}
                   </span>
                 ) : null}
                 {record.source === "board" ? <span className="rounded-full border border-border px-1.5 text-xs text-muted-foreground">board</span> : null}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                <span>{formatDecisionDate(record.updatedAt)}</span>
-                <span>{provenanceLabel(record)}</span>
-                {record.lastConflictingProposal ? <span>proposal pending ({record.lastConflictingProposal.from})</span> : null}
+                <span>{formatDecisionDate(record.updatedAt, lang)}</span>
+                <span>{provenanceLabel(record, lang)}</span>
+                {record.lastConflictingProposal ? <span>{L(lang, { en: "proposal pending", ko: "제안 대기 중" })} ({record.lastConflictingProposal.from})</span> : null}
                 {record.evidenceRefs?.length ? (
                   <span title={evidenceRefsFullTitle(record.evidenceRefs)}>
-                    evidence: {evidenceRefsLabel(record.evidenceRefs)}
+                    {L(lang, { en: "evidence:", ko: "근거:" })} {evidenceRefsLabel(record.evidenceRefs)}
                   </span>
                 ) : null}
                 {record.status === "confirmed" || record.status === "under_review" ? (
@@ -191,7 +191,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
                     }
                     className="rounded border border-border px-2 py-0.5 hover:bg-muted disabled:opacity-50"
                   >
-                    Retire
+                    {L(lang, { en: "Retire", ko: "폐기" })}
                   </button>
                 ) : null}
               </div>
@@ -204,12 +204,12 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
         <p className="text-sm text-destructive">
           {retireMutation.error instanceof Error
             ? retireMutation.error.message
-            : "Failed to retire the decision."}
+            : L(lang, { en: "Failed to retire the decision.", ko: "결정을 폐기하지 못했습니다." })}
         </p>
       ) : null}
 
       <section className="rounded border border-border/70 p-3" aria-label="Record a decision">
-        <h4 className="text-sm font-medium">Record a decision</h4>
+        <h4 className="text-sm font-medium">{L(lang, { en: "Record a decision", ko: "결정 기록 추가" })}</h4>
         <form
           className="mt-2 space-y-2"
           onSubmit={(event) => {
@@ -228,7 +228,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
           }}
         >
           <div>
-            <label htmlFor="decision-id-input" className="text-xs font-medium">Decision id</label>
+            <label htmlFor="decision-id-input" className="text-xs font-medium">{L(lang, { en: "Decision id", ko: "결정 ID" })}</label>
             <input
               id="decision-id-input"
               value={decisionId}
@@ -240,7 +240,7 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
             />
           </div>
           <div>
-            <label htmlFor="decision-summary-input" className="text-xs font-medium">Summary</label>
+            <label htmlFor="decision-summary-input" className="text-xs font-medium">{L(lang, { en: "Summary", ko: "요약" })}</label>
             <textarea
               id="decision-summary-input"
               value={summary}
@@ -253,20 +253,18 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
             />
           </div>
           <div>
-            <label htmlFor="decision-status-input" className="text-xs font-medium">Status</label>
+            <label htmlFor="decision-status-input" className="text-xs font-medium">{L(lang, { en: "Status", ko: "상태" })}</label>
             <select
               id="decision-status-input"
               value={status}
               onChange={(event) => setStatus(event.target.value as MissionDecisionStatus)}
               className={fieldClass}
             >
-              <option value="under_review">under_review</option>
-              <option value="confirmed">confirmed</option>
-              <option value="retired">retired</option>
+              {["under_review", "confirmed", "retired"].map((value) => <option key={value} value={value} title={value}>{humanLabel(lang, "missionDecisionStatus", value).label}</option>)}
             </select>
           </div>
           <div>
-            <label htmlFor="decision-supersedes-input" className="text-xs font-medium">Supersedes</label>
+            <label htmlFor="decision-supersedes-input" className="text-xs font-medium">{L(lang, { en: "Supersedes", ko: "대체" })}</label>
             <input
               id="decision-supersedes-input"
               value={supersedes}
@@ -281,14 +279,14 @@ export function MissionDecisionLogPanel({ missionId }: MissionDecisionLogPanelPr
             disabled={reportMutation.isPending}
             className="rounded bg-primary px-3 py-1 text-sm font-medium text-primary-foreground disabled:opacity-50"
           >
-            Record decision
+            {L(lang, { en: "Record decision", ko: "결정 기록" })}
           </button>
         </form>
         {reportMutation.error ? (
           <p className="mt-2 text-sm text-destructive">
             {reportMutation.error instanceof Error
               ? reportMutation.error.message
-              : "Failed to record the decision."}
+              : L(lang, { en: "Failed to record the decision.", ko: "결정을 기록하지 못했습니다." })}
           </p>
         ) : null}
       </section>

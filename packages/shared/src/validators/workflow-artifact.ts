@@ -23,6 +23,59 @@ export const workProductProducerSchema = z.object({
   stepId: z.string().min(1), executionGeneration: count, retryCount: count, iterationIndex: count,
   heartbeatRunId: z.string().uuid(),
 }).strict();
+/**
+ * [producer provenance rebind] 보드 승인으로 “생산 이후 생산자가 변하지 않았음”을 증명한 흔적.
+ * fromGeneration 은 실제 생산 세대(변경 불가 원본 사실)이고, 재바인딩은 이후 어느 세대에서든
+ * 유효하다(회복/재발사가 세대를 진행시켜도 무효화되지 않는다). 소비 시점마다 sha256/byteSize 로
+ * 바이트 동일성이 재검증된다(workproduct-same-run).
+ */
+export const workProductProducerRebindMarkerSchema = z.object({
+  schemaVersion: z.literal("workflow.work-product-producer-rebind.v1"),
+  fromGeneration: count,
+  reboundAtGeneration: count,
+  fromHeartbeatRunId: z.string().uuid(),
+  sha256: hash, byteSize: count,
+  reboundAt: z.string().datetime(),
+  reboundBy: z.object({ actorType: z.string().min(1), actorId: z.string().min(1) }).strict(),
+  reason: z.string().min(1),
+  authorityIdempotencyKey: z.string().min(1),
+}).strict();
+export type WorkProductProducerRebindMarker = z.infer<typeof workProductProducerRebindMarkerSchema>;
+/**
+ * [delegated producer promotion — 2026-10-04 #323] 소유자 언블록(mission_owner_unblock_source)이
+ *   남기는 약한 귀속. 같은 럼 셀렉터가 요구하는 강한 귀속과 스키마가 다르다(세대 없음).
+ */
+export const workProductDelegatedProducerSchema = z.object({
+  schemaVersion: z.literal("workflow.delegated-work-product-producer.v1"),
+  kind: z.literal("mission_owner_unblock_source"),
+  companyId: z.string().uuid(), missionId: z.string().uuid(),
+  sourceIssueId: z.string().uuid(), delegatedFromIssueId: z.string().uuid(),
+  heartbeatRunId: z.string().uuid(),
+  executionGeneration: z.null(),
+}).strict();
+export type WorkProductDelegatedProducer = z.infer<typeof workProductDelegatedProducerSchema>;
+/**
+ * [delegated producer promotion] 보드 승인으로 위임 귀속 산출물을 같은 럼 소비 가능 귀속으로
+ *   승격한 흔적. 승격은 생산 사실을 위조하지 않는다 — 원본 위임 기록은
+ *   metadata.workflowProducerDelegatedOrigin 에 원문 그대로 보존되고, 이 마커는
+ *   “보드 권위 + 매 소비 바이트(sha256/byteSize) 재검증”이 시도증명(producerAttempt)을
+ *   대체한다. fromGeneration 이후 어느 세대에서든 유효하다(회복/재발사의 세대 진행에 강건).
+ */
+export const workProductProducerPromotionMarkerSchema = z.object({
+  schemaVersion: z.literal("workflow.work-product-producer-promotion.v1"),
+  fromGeneration: count,
+  promotedAtGeneration: count,
+  sourceKind: z.literal("mission_owner_unblock_source"),
+  delegatedFromIssueId: z.string().uuid(),
+  delegatedHeartbeatRunId: z.string().uuid(),
+  originalAttemptHeartbeatRunId: z.string().uuid().nullable(),
+  sha256: hash, byteSize: count,
+  promotedAt: z.string().datetime(),
+  promotedBy: z.object({ actorType: z.string().min(1), actorId: z.string().min(1) }).strict(),
+  reason: z.string().min(1),
+  authorityIdempotencyKey: z.string().min(1),
+}).strict();
+export type WorkProductProducerPromotionMarker = z.infer<typeof workProductProducerPromotionMarkerSchema>;
 export const assetDigestSchema = z.object({ fileName: z.string().min(1), sha256: hash, byteSize: count }).strict();
 const check = z.object({ id: z.string().min(1), ok: z.boolean(), detail: z.unknown().optional(), problems: z.array(z.unknown()).optional() }).passthrough();
 const qaBase = { schemaVersion: artifactSchemaVersionSchema, command: z.literal("qa"),

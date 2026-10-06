@@ -33,19 +33,31 @@ it('agent QA stores its verified receipt; agent publication and verification con
   expect(verified.body.data.scope).toMatchObject({ stepRunId: f.verifyId, requestId: (await f.step('inspector')).lastDispatchRequestId });
 });
 
-it.each(['generation', 'retry', 'iteration', 'request', 'producer'])('publication rejects stale QA %s identity', async kind => {
+it.each(['retry', 'iteration', 'request', 'producer'])('publication rejects stale QA %s identity', async kind => {
   const f = await agentArtifactFixture(), qa = await f.call('qa');
   expect(qa.status, JSON.stringify(qa.body)).toBe(200);
   await f.finish('qa');
   if (kind === 'producer') {
     const [producer] = await f.db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, f.runId), eq(workflowStepRuns.stepId, 'write')));
     await f.db.update(workflowStepRuns).set({ executionGeneration: 2 }).where(eq(workflowStepRuns.id, producer.id));
-  } else await f.db.update(workflowStepRuns).set(kind === 'generation' ? { executionGeneration: 3 }
-    : kind === 'retry' ? { retryCount: 1 } : kind === 'iteration' ? { iterationIndex: 1 } : { lastDispatchRequestId: 'reworked' })
+  } else await f.db.update(workflowStepRuns).set(kind === 'retry' ? { retryCount: 1 } : kind === 'iteration' ? { iterationIndex: 1 } : { lastDispatchRequestId: 'reworked' })
     .where(eq(workflowStepRuns.id, f.qaId));
   const published = await f.call('publisher', f.publishArgs(qa.body.data.artifactPath));
   expect(published.status).not.toBe(200);
   expect((await f.step('publisher')).metadata.toolResult).not.toMatchObject({ success: true });
+});
+
+// [2026-10-04 tech-scout 사고 교정] 종결/복구 사이클은 완료 QA 행의 세대를 발사 id · 영수증 · 바이트
+// 변경 없이 올린다. 세대만 올라간 완료 소스는 낡은 것이 아니므로 발행은 이를 소비한다.
+// 진짜 무효화(재발사·재시도·반복·생산자 교체)는 위의 identity 검사가 계속 차단한다.
+it('publication consumes the completed QA source across recovery generation bumps', async () => {
+  const f = await agentArtifactFixture(), qa = await f.call('qa');
+  expect(qa.status, JSON.stringify(qa.body)).toBe(200);
+  await f.finish('qa');
+  await f.db.update(workflowStepRuns).set({ executionGeneration: 3 }).where(eq(workflowStepRuns.id, f.qaId));
+  const published = await f.call('publisher', f.publishArgs(qa.body.data.artifactPath));
+  expect(published.status, JSON.stringify(published.body)).toBe(200);
+  expect((await f.step('publisher')).metadata.toolResult).toMatchObject({ success: true, artifactPath: published.body.data.artifactPath });
 });
 
 it.each(['no-step', 'not-running', 'foreign-company', 'foreign-agent', 'old-heartbeat', 'retry', 'iteration', 'finished-run', 'mission'])

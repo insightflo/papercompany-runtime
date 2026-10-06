@@ -1044,7 +1044,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       try {
         const wakeComment = await issueService(db).addComment(
           sourceIssue.id,
-          buildWorkProductReuseWakeDispatchedComment({
+          buildWorkProductReuseWakeDispatchedComment({ language: supervisionLanguage,
             missionId: mission.id,
             sourceIssueId: sourceIssue.id,
             sourceLabel,
@@ -1191,7 +1191,7 @@ export function createSupervision({ db, deps, ownerActions }: {
               try {
                 const wakeComment = await issueService(db).addComment(
                   issue.id,
-                  buildStaleSourceIssueWakeupDispatchedComment({
+                  buildStaleSourceIssueWakeupDispatchedComment({ language: supervisionLanguage,
                     missionId: mission.id,
                     sourceIssueId: issue.id,
                     sourceLabel: label,
@@ -1574,7 +1574,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: sourcePlanGateReason }));
                   break;
                 }
-                const staleValidationGateRetry = await requeueStaleValidationGateBeforeOwnerRetry({
+                const staleValidationGateRetry = await requeueStaleValidationGateBeforeOwnerRetry({ language: supervisionLanguage,
                   db,
                   mission,
                   ownerActionIssue: issue,
@@ -1736,7 +1736,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                     } else if (deps.onOwnerDecisionRetrySourceIssueApplied) {
                       try {
                         if (requestChangesSummary && !sourceComments.some((comment) => comment.includes("Latest REQUEST_CHANGES summary:") && comment.includes(requestChangesSummary))) {
-                          await issueService(db).addComment(sourceCandidate.id, buildRetrySourceIssueRequestChangesContextComment({
+                          await issueService(db).addComment(sourceCandidate.id, buildRetrySourceIssueRequestChangesContextComment({ language: supervisionLanguage,
                             ownerActionIssueId: issue.id,
                             ownerActionLabel: label,
                             sourceIssueId: sourceCandidate.id,
@@ -1755,7 +1755,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                         wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                         await issueService(db).addComment(
                           sourceCandidate.id,
-                          buildRetrySourceIssueWakeupResultComment({
+                          buildRetrySourceIssueWakeupResultComment({ language: supervisionLanguage,
                             status: wakeupDispatchStatus,
                             missionId: mission.id,
                             ownerActionIssueId: issue.id,
@@ -1869,7 +1869,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                       if (DISPATCHED_RECOVERY_WAKEUP_STATUSES.has(redispatchStatus)) {
                         await issueService(db).addComment(
                           sourceCandidate.id,
-                          buildRetrySourceIssueWakeupResultComment({
+                          buildRetrySourceIssueWakeupResultComment({ language: supervisionLanguage,
                             status: redispatchStatus,
                             missionId: mission.id,
                             ownerActionIssueId: issue.id,
@@ -2029,7 +2029,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                       wakeupDispatchStatus = normalizeMissionOwnerDecisionWakeupDispatchResult(wakeupResult);
                       await issueService(db).addComment(
                         sourceCandidate.id,
-                        buildRetrySourceIssueWakeupResultComment({
+                        buildRetrySourceIssueWakeupResultComment({ language: supervisionLanguage,
                           status: wakeupDispatchStatus,
                           missionId: mission.id,
                           ownerActionIssueId: issue.id,
@@ -2101,7 +2101,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                 const sourcePlanGateReason = sourceIssue
                   ? activePlanRecoveryGateReason(activePlan, sourceIssue, stepRowsByIssueId.get(sourceIssue.id) ?? [])
                   : null;
-                const result = await applyReassignSourceIssueDecision({
+                const result = await applyReassignSourceIssueDecision({ language: supervisionLanguage,
                   db,
                   mission,
                   ownerActionIssue: issue,
@@ -2706,7 +2706,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         planIssue.id,
         planSubmissionMissingCandidate.kind === "rejected"
           ? [
-            "### Mission owner plan submission rejected",
+            "### Mission owner plan submission rejected\nThe plan was rejected for the reason below; execution cannot proceed from this submission. Next action: correct the plan and submit it through the dedicated structured plan-decision API.",
             `<!-- ${markerText} -->`,
             `- Mission: ${mission.title}`,
             `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
@@ -2720,7 +2720,7 @@ export function createSupervision({ db, deps, ownerActions }: {
             "- After the revised decision is posted, the normal Plan QA gate will continue the mission.",
           ].join("\n")
           : [
-            "### Mission owner plan submission required",
+            "### Mission owner plan submission required\nThe run succeeded, but no executable plan submission is recorded. Next action: submit the plan through the dedicated structured plan-decision API; run success does not start Plan QA.",
             `<!-- ${markerText} -->`,
             `- Mission: ${mission.title}`,
             `- Planning issue: ${planIssue.identifier ?? planIssue.id}`,
@@ -2823,7 +2823,7 @@ export function createSupervision({ db, deps, ownerActions }: {
     await issueService(db).addComment(
       oversightIssue.id,
       [
-        "### Mission owner supervision diagnosis",
+        "### Mission owner supervision diagnosis\nThis is a progress observation, not proof that a recommended action ran. Next action: review the findings, then check structured decisions and run records before requesting recovery.",
         `<!-- ${markerText} -->`,
         `- Mission: ${mission.title}`,
         `- Observed at: ${now.toISOString()}`,

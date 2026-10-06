@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql, getTableColumns } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -174,7 +174,7 @@ export function missionDelegationService(db: Db) {
     }
 
     const [sourceMission] = await db
-      .select()
+      .select({ ...getTableColumns(missions), language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${missions.companyId})` })
       .from(missions)
       .where(eq(missions.id, input.sourceMissionId))
       .limit(1);
@@ -254,7 +254,7 @@ export function missionDelegationService(db: Db) {
       companyId: sourceMission.companyId,
       issueId: sourceIssue.id,
       body: [
-        "Cross-company mission delegation created.",
+        sourceMission.language === "ko" ? "다른 회사에 미션을 위임했습니다. 실제 실행은 아직 확인되지 않았습니다. 다음 행동: 아래 대상 미션에서 진행 상황을 확인해 주세요." : "Cross-company mission delegation created; execution is not yet confirmed. Next action: follow the target mission below for progress.",
         `- targetCompany: ${targetCompany.name}`,
         `- targetMissionId: ${targetMission.id}`,
         `- targetMissionTitle: ${targetMission.title}`,
@@ -284,7 +284,7 @@ export function missionDelegationService(db: Db) {
     }
 
     const delegation = await db
-      .select()
+      .select({ ...getTableColumns(missionDelegations), language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${missionDelegations.sourceCompanyId})` })
       .from(missionDelegations)
       .where(eq(missionDelegations.targetMissionId, input.targetMissionId))
       .limit(1)
@@ -322,7 +322,7 @@ export function missionDelegationService(db: Db) {
         companyId: delegation.sourceCompanyId,
         issueId: delegation.sourceIssueId,
         body: [
-          `Delegated mission ${input.targetStatus}.`,
+          delegation.language === "ko" ? `위임 미션 상태: ${input.targetStatus}. 다음 행동: 완료됐으면 복사된 산출물을, 취소됐으면 대상 미션을 확인해 주세요. 이 상태는 산출물 검증 통과를 뜻하지 않습니다.` : `Delegated mission ${input.targetStatus}. Next action: review the copied artifacts below when completed, or inspect the target mission when cancelled. This status does not imply artifact validation.`,
           `- targetMissionId: ${delegation.targetMissionId}`,
           `- copiedWorkProducts: ${copiedWorkProductCount}`,
         ].join("\n"),

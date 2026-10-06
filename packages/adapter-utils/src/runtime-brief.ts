@@ -771,7 +771,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
   const userFacingLanguageLine = userFacingLanguage
     ? `- User-facing language: write issue descriptions, comments, and operator-facing summaries in ${userFacingLanguage}. Keep tool calls, code, identifiers, JSON, and other machine-facing control-plane data in English.`
     : null;
-
+  const commentReadabilityLine = "- Use im-human for new human-facing issue comments and final output; read its bundled SKILL.md and follow company language.";
   const handoffSummary = handoff
     ? joinPromptSections([
         `- Previous session: ${asString(handoff.previousSessionId) ?? "unknown"}`,
@@ -781,7 +781,6 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     : summarizeMarkdownHandoff(asString(context.paperclipSessionHandoffMarkdown))
       ? `- Previous handoff summary: ${summarizeMarkdownHandoff(asString(context.paperclipSessionHandoffMarkdown))}`
       : null;
-
   const brief = joinPromptSections([
     taskKey || issueId || projectId || allowedKeys.length > 0 || handoffSummary
       ? "Paperclip runtime brief:"
@@ -795,7 +794,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     ...buildOperatorDecisionResolutionBriefLines(context.paperclipOperatorDecisionResolution),
     ...noProgressRecoveryLines,
     missionSearchPointer,
-    userFacingLanguageLine,
+    userFacingLanguageLine, commentReadabilityLine,
     taskKey ? `- Task key: ${taskKey}` : null,
     issueId ? `- Issue: ${issueId}` : null,
     projectId ? `- Project: ${projectId}` : null,

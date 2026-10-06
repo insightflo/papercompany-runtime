@@ -146,7 +146,7 @@ function buildMissingPlanQaVerdictGateComment(input: {
   readonly ledger: MissionPlanQaCompletionLedgerResult;
 }) {
   return [
-    "## Completion blocked: plan_qa_verdict_missing",
+    (input.run.contextSnapshot as Record<string, unknown> | null)?.paperclipUserFacingLanguage === "ko" ? "## Completion blocked: plan_qa_verdict_missing\n계획 검토의 공식 검증 결과가 없어 완료를 보류했습니다. 다음 행동: 전용 API로 구조화된 PLAN-QA 검증 결과를 제출해 주세요. 댓글은 이를 대신할 수 없습니다." : "## Completion blocked: plan_qa_verdict_missing\nThe plan review has no official verdict, so completion is on hold. Next action: submit the structured PLAN-QA verdict through its dedicated API; a comment cannot replace it.",
     `- Run: \`${input.run.id}\``,
     "- Reason: this mission_plan_qa issue cannot be marked done until the official mission_plan_qa_verdicts ledger contains the PLAN-QA verdict.",
     input.ledger.decisionHash

@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MissionDecisionLogPanel } from "./MissionDecisionLogPanel";
+import { CompanyLanguageProvider } from "../lib/companyLanguage";
 
 let scenario: "populated" | "empty" | "loading" | "error" = "populated";
 
@@ -149,7 +150,7 @@ describe("MissionDecisionLogPanel", () => {
     expect(html).toContain("Supersedes");
     expect(html).toContain("Record decision");
     // Retire 버튼은 confirmed(D-2), under_review(D-3, D-4)에만 렌더링된다. retired(D-1) 제외.
-    expect(html.split("Retire").length - 1).toBe(3);
+    expect((html.match(/<button[^>]*>\s*Retire\s*<\/button>/g) ?? []).length).toBe(3);
     // 헤더 배지: 읽기 전용 → board 작성 가능 기록.
     expect(html).toContain("board-authorable record");
   });
@@ -166,6 +167,19 @@ describe("MissionDecisionLogPanel", () => {
     expect(html).toContain("board-authorable record");
     // stateMarkdown 이 빈 문자열이면 접기 섹션 자체가 렌더링되지 않는다.
     expect(html).not.toContain("Mission state (markdown)");
+  });
+
+  it("localizes Korean log chrome without changing evidence identities or summaries", () => {
+    scenario = "populated";
+    const html = renderToStaticMarkup(<CompanyLanguageProvider language="ko"><Panel missionId="mission-1" /></CompanyLanguageProvider>);
+    for (const text of ["맥락 전달 상태만 표시", "운영자가 작성할 수 있는 기록", "결정 4개", "확정 1개", "검토 중 2개", "갱신", "대체 D-1", "근거가 오래됨", "제안 대기 중 (agent)", "근거: heartbeat_run 0cf4a1b2, issue 70d8f2a1"]) expect(html).toContain(text);
+    expect(html).toContain("PGlite everywhere");
+    expect(html).toContain('title="heartbeat_run:0cf4a1b2c3d4e5f6a7b8, issue:70d8f2a1-1234-5678"');
+    expect(html).toContain("work_product artifacts/wp.txt (changed)");
+    scenario = "empty";
+    const empty = renderToStaticMarkup(<CompanyLanguageProvider language="ko"><Panel missionId="mission-1" /></CompanyLanguageProvider>);
+    expect(empty).toContain("아직 기록된 결정이 없습니다.");
+    expect(empty).toContain("POST /api/missions/mission-1/decision-reports");
   });
 
   it("renders a loading state", () => {

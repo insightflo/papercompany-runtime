@@ -26,7 +26,8 @@ import { dispatchSourceIssueNativeResume } from "../services/workflow/source-iss
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
-import { notFound, badRequest } from "../errors.js";
+import { notFound, badRequest, conflict } from "../errors.js";
+import { isTerminalMissionStatus } from "../services/missions/shared-types.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
@@ -512,6 +513,16 @@ export function missionRoutes(db: Db) { const router = Router();
       startedAt: startedAt ? new Date(startedAt) : undefined,
       completedAt: completedAt ? new Date(completedAt) : undefined,
     });
+
+    // [계약] 요청한 종단 상태(completed/cancelled)가 읽기경로 정합(reconcile)이나 미결 작업
+    //   재오픈으로 무효화된 경우, 호출자가 200 을 보고 성공으로 오인하지 않도록 409 로 알린다.
+    //   실제 갱신이 아니므로 mission.updated 활동 로그는 남기지 않는다(재오픈 경로는 자체 로그가 있음).
+    if (status !== undefined && isTerminalMissionStatus(status) && updated.status !== status) {
+      throw conflict(
+        `Mission status '${status}' was not applied: the mission is currently '${updated.status}' because execution-record reconciliation or unsettled mission work reopened it. Refresh the mission and check its work status before trying again.`,
+        { requestedStatus: status, currentStatus: updated.status },
+      );
+    }
 
     const actor = getActorInfo(req);
     await logActivity(db, {

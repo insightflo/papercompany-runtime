@@ -57,6 +57,29 @@ it("legacy-html-manual runner verifies byte evidence and consumer scope, ignorin
   await expect(prepareQaConsumer(consumer)).rejects.toThrow();
 });
 
+it('keeps consuming completed QA receipts after terminal/recovery generation bumps (tech-scout incident)', async () => {
+  const db = database(), f = await fixture();
+  const result = await f.invoke(); expect(result.status).toBe(200);
+  const receipt = result.toolArtifactReceipt!;
+  const completion = { companyId: f.companyId, stepRunId: f.qaId, requestId: f.requestId, workflowRunId: f.runId, stepId: "qa", toolName: "local-qa", success: true };
+  await completeWorkflowToolStepFromResult(db, { ...completion, toolArtifactReceipt: receipt, data: result.body.data });
+  const [qa] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.qaId));
+  // 사고 재현: 종결/복구 사이클이 완료 QA 행의 세대를 반복해 올림(0→4 회)
+  await db.update(workflowStepRuns).set({ executionGeneration: qa.executionGeneration + 4 }).where(eq(workflowStepRuns.id, f.qaId));
+  // 하류 발행 단계의 인자 해석은 완료 QA 영수증 경로를 여전히 해석해야 한다.
+  const nativeArgs = await resolveWorkflowToolStepArgs({ db, run: { id: f.runId, companyId: f.companyId },
+    step: { id: "publish", dependencies: ["qa"], toolArgs: { qaResultPath: "{$steps.qa.workProductPath}" } },
+    workflowSteps: [{ id: "qa" }, { id: "publish", dependencies: ["qa"] }] });
+  expect(nativeArgs).toEqual({ qaResultPath: path.join(receipt.outputRoot, receipt.relativePath) });
+  expect((await readQaReceiptBytes(db, { companyId: f.companyId, workflowRunId: f.runId, stepId: "qa" })).receipt).toEqual(receipt);
+  // fail-closed: 재발사(발사 권위 교체) 후에는 낡은 영수증이 거부된다.
+  await db.update(workflowStepRuns).set({ lastDispatchRequestId: "redispatch-9" }).where(eq(workflowStepRuns.id, f.qaId));
+  await expect(readQaReceiptBytes(db, { companyId: f.companyId, workflowRunId: f.runId, stepId: "qa" })).rejects.toThrow();
+  await expect(resolveWorkflowToolStepArgs({ db, run: { id: f.runId, companyId: f.companyId },
+    step: { id: "publish", dependencies: ["qa"], toolArgs: { qaResultPath: "{$steps.qa.workProductPath}" } },
+    workflowSteps: [{ id: "qa" }, { id: "publish", dependencies: ["qa"] }] })).rejects.toThrow();
+});
+
 it('reads historical v1 durable requests and receipts using their declared schema, without live tool config', async () => {
   const f = await fixture(), db = database(), result = await f.invoke();
   expect(result.status).toBe(200);

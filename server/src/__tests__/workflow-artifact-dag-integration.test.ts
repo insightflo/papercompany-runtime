@@ -84,7 +84,7 @@ it.each(['bytes', 'scope'])('publication completion rejects %s tampering without
   expect(row.status).toBe('running'); expect(row.metadata.toolResult).toBeUndefined();
 });
 
-it.each(['running', 'request', 'generation', 'retry', 'iteration', 'bytes'])('publication path rejects %s provenance changes', async scenario => {
+it.each(['running', 'request', 'retry', 'iteration', 'bytes'])('publication path rejects %s provenance changes', async scenario => {
   const f = await artifactDagFixture(), qa = await f.invoke();
   await f.complete('qa', qa);
   const published = await f.execute('publisher');
@@ -94,7 +94,18 @@ it.each(['running', 'request', 'generation', 'retry', 'iteration', 'bytes'])('pu
     await writeFile(published.artifactPath!, '{}');
   } else await f.db.update(workflowStepRuns).set(scenario === 'running' ? { status: 'running' }
     : scenario === 'request' ? { lastDispatchRequestId: 'replacement' } : scenario === 'retry' ? { retryCount: 1 }
-      : scenario === 'iteration' ? { iterationIndex: 1 } : { executionGeneration: 1 })
+      : { iterationIndex: 1 })
     .where(eq(workflowStepRuns.id, f.publishId));
   await expect(f.resolve('inspector')).rejects.toThrow();
+});
+
+// [2026-10-04 tech-scout 사고 교정] 종결/복구는 완료 발행 행의 세대를 발사 id·바이트 변경 없이
+// 올린다 — 검증 소비는 이를 낡은 것으로 보지 않는다. 진짜 권위 교체는 request/retry/iteration 검사가 차단.
+it('publication path survives recovery generation bumps on the completed publisher', async () => {
+  const f = await artifactDagFixture(), qa = await f.invoke();
+  await f.complete('qa', qa);
+  const published = await f.execute('publisher');
+  await f.complete('publisher', published);
+  await f.db.update(workflowStepRuns).set({ executionGeneration: 1 }).where(eq(workflowStepRuns.id, f.publishId));
+  await expect(f.resolve('inspector')).resolves.toBeTruthy();
 });

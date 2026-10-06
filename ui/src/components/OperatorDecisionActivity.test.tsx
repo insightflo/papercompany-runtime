@@ -59,7 +59,7 @@ describe("OperatorDecisionActivity", () => {
       errorCode: "issue_unassigned",
     })} />);
     expect(html).toContain("Continuation blocked");
-    expect(html).toContain("issue unassigned");
+    expect(html).toContain("issue_unassigned");
     expect(html).toContain("Generation 1");
     expect(html).toContain("attempt 2");
   });

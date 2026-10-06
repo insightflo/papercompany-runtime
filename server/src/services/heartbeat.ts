@@ -2843,7 +2843,7 @@ function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelec
   return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
 }
 
-function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelect) {
+const runText = (run: typeof heartbeatRuns.$inferSelect, ko: string, en: string) => parseObject(run.contextSnapshot).paperclipUserFacingLanguage === "ko" ? ko : en; function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelect) {
   const stdout = (run.stdoutExcerpt ?? "").trim();
   const stderr = (run.stderrExcerpt ?? "").trim();
   const output = [stdout, stderr ? `stderr:\n${stderr}` : ""]
@@ -2856,9 +2856,9 @@ function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelec
       : output;
   return [
     "## 자동 캡처: delegated run output",
-    `- 실행 runId: \`${run.id}\``,
-    "- 감지: delegated mission issue run이 succeeded로 종료됐지만 issue lifecycle/comment가 명시적으로 마감되지 않았습니다.",
-    "- 조치: run transcript 산출물을 이 comment로 캡처하고 issue를 done으로 전이합니다.",
+    runText(run, `- 실행 기록(runId): \`${run.id}\``, `- Run record (runId): \`${run.id}\``),
+    runText(run, "- 이유: 위임 업무 실행은 성공(succeeded)으로 종료됐지만 업무 마감 기록이 없었습니다.", "- Reason: the delegated run succeeded, but the issue had no closeout record."),
+    runText(run, "- 처리: 실행 출력 원문을 아래에 보존하고 업무를 완료(done) 상태로 변경합니다. 필요한 근거는 아래 기록에서 확인해 주세요.", "- Action: preserve the raw output below and mark the issue done. Review the captured evidence below."),
     "",
     "### Captured output",
     "```text",
@@ -2933,7 +2933,7 @@ function buildMissingWorkflowValidationVerdictGateComment(input: {
   run: typeof heartbeatRuns.$inferSelect;
 }) {
   return [
-    "## Completion blocked: workflow_validation_verdict_missing",
+    runText(input.run, "## Completion blocked: workflow_validation_verdict_missing\n실행은 끝났지만 공식 검증 결과가 없어 완료를 보류했습니다. 다음 행동: Workflow API로 구조화된 검증 결과를 제출해 주세요. 댓글은 검증 결과를 대신할 수 없습니다.", "## Completion blocked: workflow_validation_verdict_missing\nThe run ended, but an official validation result is missing. Next action: submit the structured verdict through the Workflow API; a comment is not a verdict."),
     `- 실행 runId: \`${input.run.id}\``,
     "- Reason: this workflow QA/validator issue cannot be marked done until the official workflow_validation_verdict ledger contains PASS or REQUEST_CHANGES.",
     "- Required evidence: a workflow_transition_events row with eventType=workflow_validation_verdict for this issue.",
@@ -2949,7 +2949,7 @@ function buildInsufficientEvidenceWorkflowVerdictGateComment(input: {
     ? input.reason.trim().slice(0, 2000)
     : null;
   return [
-    "## Completion blocked: workflow_validation_insufficient_evidence",
+    runText(input.run, "## Completion blocked: workflow_validation_insufficient_evidence\n검증에 필요한 근거가 부족해 완료를 보류했습니다. 재작업 반려는 아닙니다. 다음 행동: 아래 부족한 근거를 제출하고 새 공식 검증 결과를 받아 주세요.", "## Completion blocked: workflow_validation_insufficient_evidence\nThe official review needs more evidence; completion is on hold, not rejected for rework. Next action: provide the missing evidence below and obtain a new official verdict."),
     `- 실행 runId: \`${input.run.id}\``,
     "- Reason: the QA validator submitted an official INSUFFICIENT_EVIDENCE verdict — the current artifacts cannot be judged with the evidence available.",
     "- This is NOT a REQUEST_CHANGES rework verdict: no producer rework iteration or QA cap is consumed by this block.",
@@ -3136,11 +3136,11 @@ function buildSuccessfulIssueRunAutoCompletedComment(run: typeof heartbeatRuns.$
     .trim();
   const planDecisionOutput = extractMissionOwnerPlanDecisionOutput(output);
   return [
-    "## 자동 완료: checked-out run succeeded",
-    `- 실행 runId: \`${run.id}\``,
-    "- 감지: 이 issue에 연결된 heartbeat run이 succeeded로 종료되었습니다.",
-    "- 정책: 일반 issue lifecycle은 successful checked-out run 종료 시 done으로 closeout합니다.",
-    "- 참고: coordination hub로 계속 열어둘 작업은 별도 issue type/status로 분리해야 합니다.",
+    runText(run, "## 업무를 자동 완료했습니다 (checked-out run succeeded)", "## Issue automatically completed (checked-out run succeeded)"),
+    runText(run, `- 실행 기록(runId): \`${run.id}\``, `- Run record (runId): \`${run.id}\``),
+    runText(run, "- 이유: 이 업무를 맡은 에이전트 실행(heartbeat run)이 성공(succeeded)으로 종료됐습니다.", "- Reason: the assigned agent run (heartbeat run) succeeded."),
+    runText(run, "- 처리: 일반 업무는 담당 실행 성공 시 완료(done)로 마감하는 정책을 적용했습니다. 별도 검증 통과를 뜻하지는 않습니다.", "- Action: ordinary issues close as done after the assigned run succeeds. This does not imply independent validation passed."),
+    runText(run, "- 다음 행동: 계속 열린 상태로 협업할 업무는 별도 업무 유형이나 상태로 구분해 주세요.", "- Next action: use a separate issue type or status for work that must remain open for collaboration."),
     planDecisionOutput
       ? [
           "",
@@ -3221,7 +3221,7 @@ function buildNoProgressAutoBlockedComment(input: {
 }) {
   const { run, assessment, advisoryThreshold, autoBlockThreshold } = input;
   return [
-    "## 자동 차단: 연속 무진행 실행 (consecutive no-progress)",
+    runText(run, "## 자동 차단: 연속 무진행 실행 (consecutive no-progress)", "## Automatically blocked: consecutive no-progress runs (연속 무진행 실행)"),
     `- 트리거 runId: \`${run.id}\``,
     `- 연속 무진행 성공 run: ${assessment.count}회 (차단 기준 ${autoBlockThreshold}회, 경고 기준 ${advisoryThreshold}회)`,
     `- 판정 창: ${assessment.windowStart.toISOString()} 이후 (구조화 DB 증거로 재계산)`,
@@ -3240,7 +3240,7 @@ function buildMissionWorkerNoProgressOversightComment(input: {
 }) {
   const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
   return [
-    "## Mission oversight: worker consecutive no-progress observed",
+    runText(input.run, "## Mission oversight: worker consecutive no-progress observed\n실행이 반복됐지만 진행 근거가 없어 담당 업무를 차단했습니다. 다음 행동: 복구 요청 전에 업무 범위, 산출물 요구 사항, 담당자를 확인해 주세요.", "## Mission oversight: worker consecutive no-progress observed\nThe worker is blocked because repeated runs produced no recorded progress. Next action: review scope, artifact requirements, or assignment before requesting recovery."),
     `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
     `- latest succeeded runId: \`${input.run.id}\``,
     `- consecutive no-progress runs: ${input.assessment.count} (auto-block threshold ${input.autoBlockThreshold})`,
@@ -3258,7 +3258,7 @@ function buildFailedIssueRunAutoBlockedComment(input: {
   const reasonExcerpt = rawReason.length > 1200 ? rawReason.slice(0, 1200) : rawReason;
   const recoveryLines = buildRunRecoveryLines(run);
   return [
-    "## 자동 차단: linked run ended with failure",
+    runText(run, "## 실행 실패로 업무를 차단했습니다 (linked run ended with failure)\n다음 행동: 아래 오류와 복구 기록을 확인한 뒤 업무 책임자가 재시도·담당 변경 여부를 결정해 주세요. 이 댓글은 재실행 요청이 아닙니다.", "## Issue blocked after linked run failure\nNext action: review the errors and recovery record below, then let the owner decide whether to retry or reassign. This comment does not request another run."),
     `- 실행 runId: \`${run.id}\``,
     `- run status: \`${run.status}\``,
     `- 분류: \`${classification.reasonCode}\` (${classification.category})`,
@@ -3297,7 +3297,7 @@ function buildMissionWorkerFailureOversightComment(input: {
 }) {
   const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
   return [
-    "## Mission oversight: worker run failure observed",
+    runText(input.run, "## Mission oversight: worker run failure observed\n담당 업무의 실행이 실패했습니다. 다음 행동: 아래 실패 근거를 확인하고 복구 방법을 결정해 주세요. 이 보고는 재시도 실행을 확인한 기록이 아닙니다.", "## Mission oversight: worker run failure observed\nThe worker run failed. Next action: inspect the failure evidence below and decide recovery; no retry is confirmed by this report."),
     `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
     `- failed runId: \`${input.run.id}\``,
     `- run status: \`${input.run.status}\``,
@@ -3316,7 +3316,7 @@ function buildMissionOversightRunFailureComment(input: {
   classification: HeartbeatFailureClassification;
 }) {
   return [
-    "## Mission oversight run failed but the supervisor issue remains open",
+    runText(input.run, "## Mission oversight run failed but the supervisor issue remains open\n감독 실행이 실패했으며 전체 미션 실패를 뜻하지는 않습니다. 감독 업무는 열려 있습니다. 다음 행동: 아래 실패 기록을 검토해 주세요.", "## Mission oversight run failed but the supervisor issue remains open\nThe oversight run failed, not the entire mission. Next action: review the failure below; the supervisor remains available for a later run."),
     `- failed runId: \`${input.run.id}\``,
     `- run status: \`${input.run.status}\``,
     `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
@@ -3330,7 +3330,7 @@ function buildMissionOversightRunFailureComment(input: {
 
 function buildMissionOversightRunSucceededReleaseComment(run: typeof heartbeatRuns.$inferSelect, missionStatus: string) {
   return [
-    "## Mission oversight run succeeded and the supervisor issue remains open",
+    runText(run, "## Mission oversight run succeeded and the supervisor issue remains open\n이번 감독 실행은 성공했지만 전체 미션 완료를 뜻하지는 않습니다. 감독 업무는 열려 있습니다. 다음 행동: 남은 미션 업무를 계속 확인해 주세요.", "## Mission oversight run succeeded and the supervisor issue remains open\nThis supervision cycle ended successfully; the mission is not necessarily complete. Next action: continue monitoring the remaining mission work."),
     `- succeeded runId: \`${run.id}\``,
     `- mission status: \`${missionStatus}\``,
     "- policy: mission oversight stays alive until the mission is completed or cancelled, so this successful cycle releases the issue back to todo instead of closing it.",
@@ -7476,7 +7476,7 @@ export function heartbeatService(db: Db) {
         try {
           await issuesSvc.addComment(
             issueId,
-            buildWorkspaceReadyComment({
+            buildWorkspaceReadyComment({ language: context.paperclipUserFacingLanguage === "ko" ? "ko" : "en",
               workspace: executionWorkspace,
               runtimeServices,
             }),
@@ -7887,7 +7887,7 @@ export function heartbeatService(db: Db) {
           try {
             await issuesSvc.addComment(
               issueId,
-              buildWorkspaceReadyComment({
+              buildWorkspaceReadyComment({ language: context.paperclipUserFacingLanguage === "ko" ? "ko" : "en",
                 workspace: executionWorkspace,
                 runtimeServices: adapterManagedRuntimeServices,
               }),
@@ -8923,7 +8923,7 @@ export function heartbeatService(db: Db) {
             companyId: issue.companyId,
             issueId: issue.id,
             authorAgentId: run.agentId,
-            body: buildMissingWorkProductRegistrationGateComment({
+            body: buildMissingWorkProductRegistrationGateComment({ language: parseObject(run.contextSnapshot).paperclipUserFacingLanguage === "ko" ? "ko" : "en",
               runId: run.id,
               claimedArtifactPaths: [],
               allowedArtifactRoot,
@@ -9187,7 +9187,7 @@ export function heartbeatService(db: Db) {
           companyId: issue.companyId,
           issueId: issue.id,
           authorAgentId: run.agentId,
-          body: "Unblock execution succeeded. Guarded source handback is pending; this owner-action remains blocked until the handback is recorded.",
+          body: runText(run, "복구 실행은 성공했지만 원래 업무에 결과를 돌려준 기록이 없습니다. 복구 업무는 차단 상태를 유지합니다. 다음 행동: 구조화된 결과 인계 기록을 확인해 주세요. 실행 성공만으로 원래 업무의 복구를 확인할 수 없습니다.", "Recovery run succeeded, but the source handback is not yet recorded. This owner-action remains blocked. Next action: check the structured handback record; run success alone does not confirm source recovery."),
         });
         queuePostTransactionUnblockCompletion({ issueId: issue.id, companyId: issue.companyId, agentId: run.agentId });
         return {
@@ -9333,7 +9333,7 @@ export function heartbeatService(db: Db) {
                 companyId: issue.companyId,
                 issueId: issue.id,
                 authorAgentId: run.agentId,
-                body: "실행은 성공적으로 종료됐지만 이번 실행이 등록한 산출물/검증 기록이 없어 자동 완료를 보류합니다 (폴링성 실행 자동완료 차단). 실제 완료 시 워크플로 계약대로 산출물을 등록하고 workflow/complete 를 호출하세요.",
+                body: runText(run, "업무 자동 완료를 보류했습니다. 실행은 성공으로 종료됐지만 이번 실행의 등록 산출물이나 검증 기록이 없습니다. 다음 행동: 작업 흐름 계약에 맞게 산출물을 등록하고 workflow/complete를 호출해 주세요. 실행 성공만으로 업무 완료가 확인되지는 않습니다.", "Automatic completion is on hold. The run succeeded, but this run has no registered work product or validation record. Next action: register artifacts under the workflow contract and call workflow/complete. Run success alone does not confirm issue completion."),
               });
               await tx.insert(activityLog).values({
                 companyId: issue.companyId,

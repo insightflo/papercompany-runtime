@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-10-05 — full gate lifetime must outlive the tool deadline
+- Date: 2026-10-05
+- Task: Operator card readability root verification at 0b9f4ac4.
+- What failed: A combined typecheck/test invocation hit the 1,800s tool deadline; typecheck completed in 274.82s, but the test log ended after about 1,525s without summary/exit and build had not run.
+- Root cause: The outer command deadline bounded the complete gate sequence rather than a test case; the log still showed completed files at interruption. Resource contention is plausible but not proven causal.
+- Category: verification orchestration / command lifetime.
+- Fix: Launch the identical root test command detached from the tool lifetime, persist its actual exit and wall duration, then run build regardless of test exit. Preserve the interrupted log and unrelated processes.
+- Prevention rule: Budget full gate time independently; use durable asynchronous exit recording for long suites. An incomplete log is never full-suite success, and individual failing lines are not proven pre-existing without exact-base same-condition evidence.
+- Reuse trigger: Large multi-project root test suites exceeding a synchronous tool timeout.
+- Evidence: `/tmp/operator-card-gates/test.log` (29,902 lines, no summary), `verification-report.md`, `run-gates.py`, `results.json`.
+
+### 2026-10-04 — fixture fidelity for recovery-advice language-boundary regression
+- Date: 2026-10-04
+- Task: Essential closeout language-boundary regression (issue-comment work).
+- What failed: New fixture omitted the required mission owner agent (setup error misread as product RED); a blocked/no-official-QA fixture wrongly expected a non-null operatorComment.
+- Root cause: Incomplete schema fixture and wrong production-branch expectation before asserting rendered comments.
+- Category: fixture fidelity / test design.
+- Fix: Insert schema-valid owner agent and a current structured PLAN-QA request_changes verdict; assert the actual producer_rework branch.
+- Prevention rule: Keep setup RED separate from product RED; inspect which production branch fires before expecting a rendered comment; keep embedded-PG fixture tests serial (`--maxWorkers=1`).
+- Reuse trigger: Recovery advice / operatorComment boundary tests.
+- Evidence: `/tmp/issue-comment-essential-evidence/boundary-red.log`, `boundary-red-confirmed.log`, `targeted-final.log`.
+
 ### 2026-10-03 — recovery diagnostics need whole-header and non-HTTP URI redaction
 - Date: 2026-10-03
 - Task: Stage 1 review fixes (display only).

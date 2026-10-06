@@ -6,19 +6,19 @@ import { agentsApi } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
-import { StatusBadge } from "../components/StatusBadge";
 import { Identity } from "../components/Identity";
 import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer } from "../components/ApprovalPayload";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { ApprovalComments } from "../components/ApprovalComments";
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import { humanLabel } from "../lib/humanLabels";
 import { CheckCircle2, ChevronRight, Sparkles } from "lucide-react";
-import type { ApprovalComment } from "@paperclipai/shared";
-import { MarkdownBody } from "../components/MarkdownBody";
 import { HumanReviewPacket } from "../components/HumanReviewPacket";
 import { approvalHumanReview } from "../lib/humanReview";
 
 export function ApprovalDetail() {
+  const lang = useCompanyLanguage();
   const { approvalId } = useParams<{ approvalId: string }>();
   const { selectedCompanyId, setSelectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -67,10 +67,10 @@ export function ApprovalDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Approvals", href: "/approvals" },
-      { label: approval?.id?.slice(0, 8) ?? approvalId ?? "Approval" },
+      { label: L(lang, { en: "Approvals", ko: "승인" }), href: "/approvals" },
+      { label: approval?.id?.slice(0, 8) ?? approvalId ?? L(lang, { en: "Approval", ko: "승인 요청" }) },
     ]);
-  }, [setBreadcrumbs, approval, approvalId]);
+  }, [setBreadcrumbs, approval, approvalId, lang]);
 
   const refresh = () => {
     if (!approvalId) return;
@@ -93,7 +93,7 @@ export function ApprovalDetail() {
       refresh();
       navigate(`/approvals/${approvalId}?resolved=approved`, { replace: true });
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Approve failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Failed to approve", ko: "승인하지 못했습니다." })),
   });
 
   const rejectMutation = useMutation({
@@ -102,7 +102,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Reject failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Failed to reject", ko: "거절하지 못했습니다." })),
   });
 
   const revisionMutation = useMutation({
@@ -111,7 +111,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Revision request failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Revision request failed", ko: "수정 요청을 보내지 못했습니다." })),
   });
 
   const resubmitMutation = useMutation({
@@ -120,7 +120,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Resubmit failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Resubmit failed", ko: "재제출하지 못했습니다." })),
   });
 
   const addCommentMutation = useMutation({
@@ -130,7 +130,7 @@ export function ApprovalDetail() {
       setError(null);
       refresh();
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Comment failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Comment failed", ko: "댓글을 게시하지 못했습니다." })),
   });
 
   const deleteAgentMutation = useMutation({
@@ -140,11 +140,11 @@ export function ApprovalDetail() {
       refresh();
       navigate("/approvals");
     },
-    onError: (err) => setError(err instanceof Error ? err.message : "Delete failed"),
+    onError: (err) => setError(err instanceof Error ? err.message : L(lang, { en: "Delete failed", ko: "삭제하지 못했습니다." })),
   });
 
   if (isLoading) return <PageSkeleton variant="detail" />;
-  if (!approval) return <p className="text-sm text-muted-foreground">Approval not found.</p>;
+  if (!approval) return <p className="text-sm text-muted-foreground">{L(lang, { en: "Approval not found.", ko: "승인 요청을 찾을 수 없습니다." })}</p>;
 
   const payload = approval.payload as Record<string, unknown>;
   const reviewPacket = approvalHumanReview(approval);
@@ -159,17 +159,17 @@ export function ApprovalDetail() {
       ? {
           label:
             (linkedIssues?.length ?? 0) > 1
-              ? "Review linked work items"
-              : "Review linked work item",
+              ? L(lang, { en: "Review linked work items", ko: "연관 업무 검토" })
+              : L(lang, { en: "Review linked work item", ko: "연관 업무 검토" }),
           to: `/issues/${primaryLinkedIssue.identifier ?? primaryLinkedIssue.id}`,
         }
       : linkedAgentId
         ? {
-            label: "Open hired agent",
+            label: L(lang, { en: "Open hired agent", ko: "고용된 에이전트 열기" }),
             to: `/agents/${linkedAgentId}`,
           }
         : {
-            label: "Back to approvals",
+            label: L(lang, { en: "Back to approvals", ko: "승인 목록으로" }),
             to: "/approvals",
           };
 
@@ -184,9 +184,9 @@ export function ApprovalDetail() {
                 <Sparkles className="h-3 w-3 text-green-500 dark:text-green-200 absolute -right-2 -top-1 animate-pulse" />
               </div>
               <div>
-                <p className="text-sm text-green-800 dark:text-green-100 font-medium">Approval confirmed</p>
+                <p className="text-sm text-green-800 dark:text-green-100 font-medium">{L(lang, { en: "Approval confirmed", ko: "승인이 확정되었습니다" })}</p>
                 <p className="text-xs text-green-700 dark:text-green-200/90">
-                  {approval.type === "workflow_replacement" ? "교체 요청을 승인했습니다. 실제 생성·실행은 별도 요청과 현재 조건 재검사를 거칩니다." : "Requesting agent was notified to review this approval and linked work items."}
+                  {approval.type === "workflow_replacement" ? L(lang, { en: "Replacement approved. Actual creation and execution require a separate request and rechecking current conditions.", ko: "교체 요청을 승인했습니다. 실제 생성·실행은 별도 요청과 현재 조건 재검사를 거칩니다." }) : L(lang, { en: "Requesting agent was notified to review this approval and linked work items.", ko: "요청한 에이전트에게 승인 결과와 연관 업무를 확인하도록 알렸습니다." })}
                 </p>
               </div>
             </div>
@@ -206,16 +206,16 @@ export function ApprovalDetail() {
           <div className="flex items-center gap-2">
             <TypeIcon className="h-5 w-5 text-muted-foreground shrink-0" />
             <div>
-              <h2 className="text-lg font-semibold">{approvalLabel(approval.type, approval.payload as Record<string, unknown> | null)}</h2>
+              <h2 className="text-lg font-semibold">{approvalLabel(approval.type, approval.payload as Record<string, unknown> | null, lang)}</h2>
               <p className="text-xs text-muted-foreground font-mono">{approval.id}</p>
             </div>
           </div>
-          <StatusBadge status={approval.status} />
+          <span title={approval.status} className="text-xs font-medium">{humanLabel(lang, "approvalStatus", approval.status).label}</span>
         </div>
         <div className="text-sm space-y-1">
           {approval.requestedByAgentId && (
             <div className="flex items-center gap-2">
-              <span className="text-muted-foreground text-xs">Requested by</span>
+              <span className="text-muted-foreground text-xs">{L(lang, { en: "Requested by", ko: "요청:" })}</span>
               <Identity
                 name={agentNameById.get(approval.requestedByAgentId) ?? approval.requestedByAgentId.slice(0, 8)}
                 size="sm"
@@ -230,7 +230,7 @@ export function ApprovalDetail() {
             onClick={() => setShowRawPayload((v) => !v)}
           >
             <ChevronRight className={`h-3 w-3 transition-transform ${showRawPayload ? "rotate-90" : ""}`} />
-            See full request
+            {L(lang, { en: "See full request", ko: "전체 요청 보기" })}
           </button>
           {showRawPayload && (
             <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
@@ -238,13 +238,13 @@ export function ApprovalDetail() {
             </pre>
           )}
           {approval.decisionNote && (
-            <p className="text-xs text-muted-foreground">Decision note: {approval.decisionNote}</p>
+            <p className="text-xs text-muted-foreground">{L(lang, { en: "Decision note:", ko: "결정 메모:" })} {approval.decisionNote}</p>
           )}
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
         {linkedIssues && linkedIssues.length > 0 && (
           <div className="pt-2 border-t border-border/60">
-            <p className="text-xs text-muted-foreground mb-1.5">Linked Work Items</p>
+            <p className="text-xs text-muted-foreground mb-1.5">{L(lang, { en: "Linked Work Items", ko: "연관 업무" })}</p>
             <div className="space-y-1.5">
               {linkedIssues.map((issue) => (
                 <Link
@@ -260,7 +260,7 @@ export function ApprovalDetail() {
               ))}
             </div>
             <p className="text-[11px] text-muted-foreground mt-2">
-              Linked work items remain open until the requesting agent follows up and closes them.
+              {L(lang, { en: "Linked work items remain open until the requesting agent follows up and closes them.", ko: "연관 업무는 요청한 에이전트가 후속 작업을 수행하고 종결할 때까지 열린 상태로 유지됩니다." })}
             </p>
           </div>
         )}
@@ -272,9 +272,9 @@ export function ApprovalDetail() {
                 className="bg-green-700 hover:bg-green-600 text-white"
                 onClick={() => approveMutation.mutate()}
                 disabled={approveMutation.isPending || !reviewPacket || (approval.type === "workflow_replacement" && approval.status !== "pending")}
-                title={!reviewPacket ? "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." : undefined}
+                title={!reviewPacket ? L(lang, { en: "Review information and source locations are required before approval.", ko: "판단 정보와 원본 위치를 보완해야 승인할 수 있습니다." }) : undefined}
               >
-                Approve
+                {L(lang, { en: "Approve", ko: "승인" })}
               </Button>
               <Button
                 variant="destructive"
@@ -282,13 +282,13 @@ export function ApprovalDetail() {
                 onClick={() => rejectMutation.mutate()}
                 disabled={rejectMutation.isPending}
               >
-                Reject
+                {L(lang, { en: "Reject", ko: "거절" })}
               </Button>
             </>
           )}
           {isBudgetApproval && approval.status === "pending" && (
             <p className="text-sm text-muted-foreground">
-              Resolve this budget stop from the budget controls on <Link to="/costs" className="underline underline-offset-2">/costs</Link>.
+              {L(lang, { en: "Resolve this budget stop from the budget controls on", ko: "예산 정지는 다음 페이지의 예산 설정에서 해결하세요:" })} <Link to="/costs" className="underline underline-offset-2">/costs</Link>.
             </p>
           )}
           {approval.status === "pending" && (
@@ -298,7 +298,7 @@ export function ApprovalDetail() {
               onClick={() => revisionMutation.mutate()}
               disabled={revisionMutation.isPending}
             >
-              Request revision
+              {L(lang, { en: "Request revision", ko: "수정 요청" })}
             </Button>
           )}
           {approval.status === "revision_requested" && (
@@ -308,7 +308,7 @@ export function ApprovalDetail() {
               onClick={() => resubmitMutation.mutate()}
               disabled={resubmitMutation.isPending}
             >
-              Mark resubmitted
+              {L(lang, { en: "Mark resubmitted", ko: "재제출로 표시" })}
             </Button>
           )}
           {approval.status === "rejected" && approval.type === "hire_agent" && linkedAgentId && (
@@ -317,57 +317,18 @@ export function ApprovalDetail() {
               variant="outline"
               className="text-destructive border-destructive/40"
               onClick={() => {
-                if (!window.confirm("Delete this disapproved agent? This cannot be undone.")) return;
+                if (!window.confirm(L(lang, { en: "Delete this disapproved agent? This cannot be undone.", ko: "거절된 에이전트를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다." }))) return;
                 deleteAgentMutation.mutate(linkedAgentId);
               }}
               disabled={deleteAgentMutation.isPending}
             >
-              Delete disapproved agent
+              {L(lang, { en: "Delete disapproved agent", ko: "거절된 에이전트 삭제" })}
             </Button>
           )}
         </div>
       </div>
 
-      <div className="border border-border rounded-lg p-4 space-y-3">
-        <h3 className="text-sm font-medium">Comments ({comments?.length ?? 0})</h3>
-        <div className="space-y-2">
-          {(comments ?? []).map((comment: ApprovalComment) => (
-            <div key={comment.id} className="border border-border/60 rounded-md p-3">
-              <div className="flex items-center justify-between mb-1">
-                {comment.authorAgentId ? (
-                  <Link to={`/agents/${comment.authorAgentId}`} className="hover:underline">
-                    <Identity
-                      name={agentNameById.get(comment.authorAgentId) ?? comment.authorAgentId.slice(0, 8)}
-                      size="sm"
-                    />
-                  </Link>
-                ) : (
-                  <Identity name="Board" size="sm" />
-                )}
-                <span className="text-xs text-muted-foreground">
-                  {new Date(comment.createdAt).toLocaleString()}
-                </span>
-              </div>
-              <MarkdownBody className="text-sm">{comment.body}</MarkdownBody>
-            </div>
-          ))}
-        </div>
-        <Textarea
-          value={commentBody}
-          onChange={(e) => setCommentBody(e.target.value)}
-          placeholder="Add a comment..."
-          rows={3}
-        />
-        <div className="flex justify-end">
-          <Button
-            size="sm"
-            onClick={() => addCommentMutation.mutate()}
-            disabled={!commentBody.trim() || addCommentMutation.isPending}
-          >
-            {addCommentMutation.isPending ? "Posting…" : "Post comment"}
-          </Button>
-        </div>
-      </div>
+      <ApprovalComments comments={comments ?? []} agentNameById={agentNameById} commentBody={commentBody} setCommentBody={setCommentBody} isPending={addCommentMutation.isPending} onPost={() => addCommentMutation.mutate()} />
     </div>
   );
 }

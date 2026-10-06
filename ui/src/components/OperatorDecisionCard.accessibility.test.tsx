@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { renderToStaticMarkup } from "react-dom/server";
+import { CompanyLanguageProvider } from "../lib/companyLanguage";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
@@ -100,7 +101,8 @@ describe("OperatorDecisionCard accessibility", () => {
   it("does not render the markdown description when a human review packet exists", () => {
     const html = renderToStaticMarkup(<OperatorDecisionCard decision={decision} onResolve={vi.fn()} />);
     expect(html).not.toContain("Choose safely</p>");
-    expect(html).toContain("무엇을 판단하나요?");
+    const koreanHtml = renderToStaticMarkup(<CompanyLanguageProvider language="ko"><OperatorDecisionCard decision={decision} onResolve={vi.fn()} /></CompanyLanguageProvider>);
+    expect(koreanHtml).toContain("무엇을 판단하나요?");
   });
 
   it("renders external evidence with safe new-window attributes and no HTML injection", () => {

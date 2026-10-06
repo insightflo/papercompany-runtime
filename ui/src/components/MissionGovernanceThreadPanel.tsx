@@ -1,3 +1,4 @@
+import { L, useCompanyLanguage } from "../lib/companyLanguage";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, History, ShieldCheck } from "lucide-react";
 import { missionsApi, type MissionGovernanceThreadEvent } from "../api/missions";
@@ -85,6 +86,7 @@ function EventList({ title, events, emptyText }: { title: string; events: Missio
 }
 
 export function MissionGovernanceThreadPanel({ missionId }: MissionGovernanceThreadPanelProps) {
+  const lang = useCompanyLanguage();
   const { data: thread, isLoading, error } = useQuery({
     queryKey: queryKeys.missions.governanceThread(missionId),
     queryFn: () => missionsApi.getGovernanceThread(missionId),
@@ -129,7 +131,7 @@ export function MissionGovernanceThreadPanel({ missionId }: MissionGovernanceThr
           <ShieldCheck className="h-4 w-4 text-muted-foreground" />
           <div>
             <h3 className="text-sm font-medium">Governance Thread</h3>
-            <p className="text-xs text-muted-foreground">Diagnostic evidence and decision history only</p>
+            <p className="text-xs text-muted-foreground">{L(lang, { en: "Diagnostic evidence and decision history only", ko: "진단 근거와 결정 이력만 표시합니다" })}</p>
           </div>
         </div>
         <span className="rounded-full border border-border px-2 py-1 text-xs text-muted-foreground">read-only</span>
@@ -138,7 +140,7 @@ export function MissionGovernanceThreadPanel({ missionId }: MissionGovernanceThr
       <div className="grid gap-3 md:grid-cols-3">
         <CountCard label="Events" value={totalEventCount} detail={`${totalEventCount} total events`} />
         <CountCard label="Latest" value={latestEvents.length} detail={`${latestEvents.length} latest events`} />
-        <CountCard label="Open decisions" value={openDecisions.length} detail={`${openDecisions.length} open decisions`} />
+        <CountCard label={L(lang, { en: "Open decisions", ko: "미결 결정" })} value={openDecisions.length} detail={`${openDecisions.length} open decisions`} />
       </div>
 
       {!hasEvents ? (

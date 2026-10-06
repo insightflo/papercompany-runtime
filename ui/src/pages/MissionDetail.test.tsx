@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
+import { ToastProvider } from "../context/ToastContext";
 import { MissionDetail } from "./MissionDetail";
 
 vi.mock("@tanstack/react-query", () => ({
@@ -244,7 +245,12 @@ vi.mock("lucide-react", () => ({
 
 describe("MissionDetail", () => {
   it("renders mission work list and embedded issue inspector without leaving the mission screen", () => {
-    const html = renderToStaticMarkup(<MissionDetail />);
+    // [provider] 앱(main.tsx)은 ToastProvider로 전역 감싼다 — updateMission 409 토스트 노출 추가로 필요해짐.
+    const html = renderToStaticMarkup(
+      <ToastProvider>
+        <MissionDetail />
+      </ToastProvider> as ReactNode,
+    );
 
     expect(html).toContain("Launch Mission");
     expect(html).toContain("Mission detail test");

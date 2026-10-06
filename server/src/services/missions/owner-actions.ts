@@ -214,6 +214,21 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         updatedAt: new Date(),
       };
       await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+      // [감사 정직성] 읽기경로 reconcile 의 상태 되돌림 쓰기도 활동 로그에 남긴다.
+      await logActivity(db, {
+        companyId: mission.companyId,
+        actorType: "system",
+        actorId: "mission-owner-supervision",
+        agentId: mission.ownerAgentId,
+        action: "mission.status_reconciled",
+        entityType: "mission",
+        entityId: mission.id,
+        details: {
+          previousStatus: mission.status,
+          nextStatus: "active",
+          reason: "active_workflow_run",
+        },
+      });
       return {
         ...mission,
         ...updates,
@@ -274,7 +289,9 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
 
     if (normalizedStatuses.some((status) => recoverableFailedWorkflowRunStatuses.has(status))) {
       if (mission.status === "planning" && !hasStartedExecutionRun) return mission;
-      if (mission.status === "completed" && !canReconcileTerminalWorkflowMission) return mission;
+      // [1a058177 sibling] 운영자가 명시적으로 종단(completed) 쓴 미션은 recoverable-failed 런
+      //   정합으로 되돌리지 않는다 — active-런 분기와 동일한 종단 쓰기 보존 원칙.
+      if (mission.status === "completed") return mission;
       if (mission.status === "active" && mission.completedAt === null && mission.startedAt !== null) return mission;
       const updates: Partial<MissionRow> = {
         status: "active",
@@ -283,6 +300,21 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
         updatedAt: new Date(),
       };
       await db.update(missions).set(updates).where(eq(missions.id, mission.id));
+      // [감사 정직성] 읽기경로 reconcile 의 상태 되돌림 쓰기도 활동 로그에 남긴다.
+      await logActivity(db, {
+        companyId: mission.companyId,
+        actorType: "system",
+        actorId: "mission-owner-supervision",
+        agentId: mission.ownerAgentId,
+        action: "mission.status_reconciled",
+        entityType: "mission",
+        entityId: mission.id,
+        details: {
+          previousStatus: mission.status,
+          nextStatus: "active",
+          reason: "recoverable_failed_workflow_run",
+        },
+      });
       return {
         ...mission,
         ...updates,
@@ -828,7 +860,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.issue.id,
       [
-        "### Native tool step retry failed",
+        "### Native tool step retry failed\nThe tool retry failed; recovery is still unresolved. Next action: inspect the recorded failure and decide the next structured recovery action.",
         `Workflow run: ${input.runId}`,
         `Step: ${input.stepId}`,
         `Step run: ${input.stepRun.id}`,
@@ -865,7 +897,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.ownerActionIssue.id,
       [
-        "### Mission owner retry unresolved",
+        "### Mission owner retry unresolved\nThe requested recovery has not resolved the source issue. Next action: check the source run and structured recovery record before requesting another retry.",
         `<!-- ${input.marker} -->`,
         "Previous decision: retry_source_issue",
         `Retry target: ${input.retryTargetLabel}`,
@@ -898,7 +930,7 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     await issueService(db).addComment(
       input.issue.id,
       [
-        "### Duplicate native tool step recovery closed",
+        "### Duplicate native tool step recovery closed\nThis duplicate recovery issue was closed, not the original work. Next action: follow the canonical recovery issue below; no new retry is implied.",
         `Canonical recovery issue: ${input.canonicalIssue.identifier ?? input.canonicalIssue.id}`,
         `Workflow run: ${input.runId}`,
         `Step: ${input.stepId}`,

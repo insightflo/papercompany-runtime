@@ -639,6 +639,7 @@ export {
   createWorkflowDefinitionSchema,
   updateWorkflowDefinitionSchema,
   workflowToolGrantSchema,
+  rebindProducerProvenanceSchema,
   triggerWorkflowRunSchema,
   resumeWorkflowRunSchema,
   cancelWorkflowRunSchema,
