@@ -39,6 +39,8 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableRunRecoveryServiceV1: parsed.data.enableRunRecoveryServiceV1 ?? false,
       enableWorkProductBindingV1: parsed.data.enableWorkProductBindingV1 ?? false,
       enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
+      enableQaRebindRecoveryV1: parsed.data.enableQaRebindRecoveryV1 ?? false,
+      enableQaRebindRecoveryCompanyIdsV1: parsed.data.enableQaRebindRecoveryCompanyIdsV1 ?? [],
     };
   }
   return {
@@ -50,6 +52,8 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     enableRunRecoveryServiceV1: false,
     enableWorkProductBindingV1: false,
     enableKnowledgePatternInjection: false,
+    enableQaRebindRecoveryV1: false,
+    enableQaRebindRecoveryCompanyIdsV1: [],
   };
 }
 

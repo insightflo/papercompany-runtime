@@ -25,6 +25,10 @@ export interface InstanceExperimentalSettings {
   enableWorkProductBindingV1: boolean;
   /** [P2 측정 롤아웃] 사람 큐레이션 패턴 카드의 스텝 디스패치 주입 스위치. 기본 off = 주입 없음. */
   enableKnowledgePatternInjection: boolean;
+  /** [qa-rebind recovery v1] QA 재바인드 자동 복구(전체). 기본 off. */
+  enableQaRebindRecoveryV1: boolean;
+  /** [qa-rebind recovery v1] 회사 단위 허용 목록. 기본 빈 목록. */
+  enableQaRebindRecoveryCompanyIdsV1: string[];
 }
 
 export interface InstanceSettings {
