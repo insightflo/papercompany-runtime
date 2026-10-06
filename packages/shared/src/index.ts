@@ -1,4 +1,4 @@
-export * from "./validators/artifact-contract.js"; export * from "./validators/qa-config.js"; export * from "./validators/workflow-artifact.js"; export {
+export * from "./validators/workflow-qa-rebind.js"; export * from "./validators/artifact-contract.js"; export * from "./validators/qa-config.js"; export * from "./validators/workflow-artifact.js"; export {
   COMPANY_STATUSES,
   COMPANY_DEFAULT_LANGUAGES,
   DEFAULT_COMPANY_LANGUAGE,
