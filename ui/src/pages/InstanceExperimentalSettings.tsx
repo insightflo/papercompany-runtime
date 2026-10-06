@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { PatchInstanceExperimentalSettings } from "@paperclipai/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { instanceSettingsApi } from "@/api/instanceSettings";
@@ -14,7 +15,7 @@ export function InstanceExperimentalSettings() {
   useEffect(() => {
     setBreadcrumbs([
       { label: "Instance Settings" },
-      { label: "Experimental" },
+      { label: "실험 기능" },
     ]);
   }, [setBreadcrumbs]);
 
@@ -24,15 +25,7 @@ export function InstanceExperimentalSettings() {
   });
 
   const toggleMutation = useMutation({
-    mutationFn: async (patch: {
-      enableIsolatedWorkspaces?: boolean;
-      autoRestartDevServerWhenIdle?: boolean;
-      enableHeartbeatFinalizationV1?: boolean;
-      enableRunTerminalBoundaryV1?: boolean;
-      enableRunReopenGuardV1?: boolean;
-      enableRunRecoveryServiceV1?: boolean;
-      enableWorkProductBindingV1?: boolean;
-    }) =>
+    mutationFn: async (patch: PatchInstanceExperimentalSettings) =>
       instanceSettingsApi.updateExperimental(patch),
     onSuccess: async () => {
       setActionError(null);
@@ -67,13 +60,15 @@ export function InstanceExperimentalSettings() {
   const enableRunReopenGuardV1 = experimentalQuery.data?.enableRunReopenGuardV1 === true;
   const enableRunRecoveryServiceV1 = experimentalQuery.data?.enableRunRecoveryServiceV1 === true;
   const enableWorkProductBindingV1 = experimentalQuery.data?.enableWorkProductBindingV1 === true;
+  const enableKnowledgePatternInjection = experimentalQuery.data?.enableKnowledgePatternInjection === true;
+  const enableQaRebindRecoveryV1 = experimentalQuery.data?.enableQaRebindRecoveryV1 === true;
 
   return (
     <div className="max-w-4xl space-y-6">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <FlaskConical className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-lg font-semibold">Experimental</h1>
+          <h1 className="text-lg font-semibold">실험 기능</h1>
         </div>
         <p className="text-sm text-muted-foreground">
           Opt into features that are still being evaluated before they become default behavior.
@@ -277,6 +272,63 @@ export function InstanceExperimentalSettings() {
               className={cn(
                 "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
                 enableWorkProductBindingV1 ? "translate-x-4.5" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Knowledge Pattern Injection</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Inject matching company knowledge patterns into agent heartbeat context before each run.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Toggle knowledge pattern injection"
+            aria-pressed={enableKnowledgePatternInjection}
+            disabled={toggleMutation.isPending}
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              enableKnowledgePatternInjection ? "bg-green-600" : "bg-muted",
+            )}
+            onClick={() => toggleMutation.mutate({ enableKnowledgePatternInjection: !enableKnowledgePatternInjection })}
+          >
+            <span
+              className={cn(
+                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                enableKnowledgePatternInjection ? "translate-x-4.5" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </section>
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">QA Rebind Recovery V1</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Automatically recover QA steps whose reviewed work product was regenerated, distinguishing generation-only
+              rebinds from material content changes. Applies to all companies on this instance.
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="Toggle QA rebind recovery v1"
+            aria-pressed={enableQaRebindRecoveryV1}
+            disabled={toggleMutation.isPending}
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              enableQaRebindRecoveryV1 ? "bg-green-600" : "bg-muted",
+            )}
+            onClick={() => toggleMutation.mutate({ enableQaRebindRecoveryV1: !enableQaRebindRecoveryV1 })}
+          >
+            <span
+              className={cn(
+                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                enableQaRebindRecoveryV1 ? "translate-x-4.5" : "translate-x-0.5",
               )}
             />
           </button>

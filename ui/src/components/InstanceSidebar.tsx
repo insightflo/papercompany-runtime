@@ -24,7 +24,7 @@ export function InstanceSidebar() {
         <div className="flex flex-col gap-0.5">
           <SidebarNavItem to="/instance/settings/general" label="General" icon={SlidersHorizontal} end />
           <SidebarNavItem to="/instance/settings/heartbeats" label="Heartbeats" icon={Clock3} end />
-          <SidebarNavItem to="/instance/settings/experimental" label="Experimental" icon={FlaskConical} />
+          <SidebarNavItem to="/instance/settings/experimental" label="실험 기능" icon={FlaskConical} />
           <SidebarNavItem to="/instance/settings/plugins" label="Plugins" icon={Puzzle} />
           {(plugins ?? []).length > 0 ? (
             <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border/70 pl-3">
