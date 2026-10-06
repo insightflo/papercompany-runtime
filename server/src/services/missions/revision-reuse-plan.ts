@@ -192,11 +192,12 @@ export function assignReservedQaStepIds(input: {
 }): { ok: true; qaStepIdByUnitId: Map<string, string>; finalQaStepId: string | null } | { ok: false; diagnostics: RevisionReuseDiagnostic[] } {
   const reserved = new Set(input.reservedQaStepIds);
   const qaStepIdByUnitId = new Map<string, string>();
+  const claimed = new Set<string>();
   for (const unit of input.authoredUnits) {
     const unitId = typeof unit.id === "string" ? unit.id : null;
     const sourceStepId = typeof unit.sourceStepId === "string" ? unit.sourceStepId : null;
     if (!unitId || !sourceStepId || !reserved.has(sourceStepId)) continue;
-    if (qaStepIdByUnitId.has(sourceStepId)) {
+    if (claimed.has(sourceStepId)) {
       return { ok: false, diagnostics: [{
         code: "mission_revision_reuse_id_collision",
         message: `과거 QA 단계 ${sourceStepId} 를 여러 B 단위가 동시에 이어받으려 합니다(${[...qaStepIdByUnitId.values()]}).`,
@@ -211,6 +212,7 @@ export function assignReservedQaStepIds(input: {
       }] };
     }
     qaStepIdByUnitId.set(unitId, sourceStepId);
+    claimed.add(sourceStepId);
   }
   const consumed = new Set(qaStepIdByUnitId.values());
   const remaining = [...reserved].filter(id => !consumed.has(id));
