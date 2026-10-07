@@ -31,6 +31,7 @@ export interface RuntimeBroadScanPaths {
   dependencyDirectories: string[];
   allowedSearchScopes: MissionSearchScope[];
   broadScanRepoAllowed: boolean;
+  broadSearchOverride: "experimental_allow" | null;
 }
 
 export function readRuntimeSearchPaths(value: unknown): RuntimeBroadScanPaths {
@@ -63,6 +64,8 @@ export function readRuntimeSearchPaths(value: unknown): RuntimeBroadScanPaths {
     dependencyDirectories,
     allowedSearchScopes,
     broadScanRepoAllowed,
+    broadSearchOverride: permissions?.version === 1 && permissions?.broadSearchOverride === "experimental_allow"
+      && broadScanRepoAllowed ? "experimental_allow" : null,
   };
 }
 

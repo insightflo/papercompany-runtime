@@ -75,7 +75,8 @@ export async function evaluateRuntimeBroadScanHook(
   const manifest = parseObject(input.context.paperclipStepInputManifest);
   const guardrails = parseObject(manifest?.guardrails);
   const paths = readRuntimeSearchPaths(input.context.paperclipRuntimeSearchPaths);
-  if (guardrails?.broadScanAllowed === true && !paths.declared) {
+  if (paths.broadSearchOverride === "experimental_allow"
+    || (guardrails?.broadScanAllowed === true && !paths.declared)) {
     return { intercepted: false };
   }
 
@@ -248,6 +249,7 @@ function toPermissions(paths: RuntimeBroadScanPaths, workingDirectory: string | 
     dependencyDirectories: paths.dependencyDirectories,
     allowedSearchScopes: paths.allowedSearchScopes,
     broadScanRepoAllowed: paths.broadScanRepoAllowed,
+    broadSearchOverride: paths.broadSearchOverride,
     qaType: null,
     qaInputScope: null,
   };

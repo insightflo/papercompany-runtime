@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createDb,
+  instanceSettings,
   issueExecutionCards,
   issueWorkProducts,
   issues,
@@ -44,6 +45,7 @@ describeEP("runtime search permissions follow the frozen execution definition (T
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(instanceSettings);
     await cleanupFrozenTables(db);
   });
 
@@ -170,6 +172,19 @@ describeEP("runtime search permissions follow the frozen execution definition (T
     expect(after!.dependencyDirectories.sort()).toEqual(
       [`${WORKING_DIRECTORY}/produced`, `${WORKING_DIRECTORY}/tool-artifacts`].sort(),
     );
+  });
+
+  it("fully releases a linked card after collecting frozen dependency paths without altering them", async () => {
+    const seeded = await seedCapturedCardCase();
+    const before = await permissionsFor(seeded.companyId, seeded.issueId);
+    await db.insert(instanceSettings).values({ experimental: { broadSearchAllowedCompanyIdsV1: [seeded.companyId] } });
+    const after = await permissionsFor(seeded.companyId, seeded.issueId);
+    expect(after).toMatchObject({
+      allowedSearchScopes: ["workProduct", "missionOutput", "repo", "logs", "config"],
+      broadScanRepoAllowed: true, broadSearchOverride: "experimental_allow",
+      dependencyFiles: before!.dependencyFiles, dependencyDirectories: before!.dependencyDirectories,
+      outputDirectory: before!.outputDirectory, qaType: "semantic",
+    });
   });
 
   it("rejects with 422 and changes nothing when the expected snapshot is corrupt", async () => {

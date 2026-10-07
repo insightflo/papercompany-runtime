@@ -3,9 +3,10 @@ import type { PatchInstanceExperimentalSettings } from "@paperclipai/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical } from "lucide-react";
 import { instanceSettingsApi } from "@/api/instanceSettings";
+import { BroadSearchAllowlistSettings } from "../components/BroadSearchAllowlistSettings";
+import { InstanceExperimentalToggles } from "../components/InstanceExperimentalToggles";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
-import { cn } from "../lib/utils";
 
 export function InstanceExperimentalSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -53,16 +54,6 @@ export function InstanceExperimentalSettings() {
     );
   }
 
-  const enableIsolatedWorkspaces = experimentalQuery.data?.enableIsolatedWorkspaces === true;
-  const autoRestartDevServerWhenIdle = experimentalQuery.data?.autoRestartDevServerWhenIdle === true;
-  const enableHeartbeatFinalizationV1 = experimentalQuery.data?.enableHeartbeatFinalizationV1 === true;
-  const enableRunTerminalBoundaryV1 = experimentalQuery.data?.enableRunTerminalBoundaryV1 === true;
-  const enableRunReopenGuardV1 = experimentalQuery.data?.enableRunReopenGuardV1 === true;
-  const enableRunRecoveryServiceV1 = experimentalQuery.data?.enableRunRecoveryServiceV1 === true;
-  const enableWorkProductBindingV1 = experimentalQuery.data?.enableWorkProductBindingV1 === true;
-  const enableKnowledgePatternInjection = experimentalQuery.data?.enableKnowledgePatternInjection === true;
-  const enableQaRebindRecoveryV1 = experimentalQuery.data?.enableQaRebindRecoveryV1 === true;
-
   return (
     <div className="max-w-4xl space-y-6">
       <div className="space-y-2">
@@ -81,259 +72,16 @@ export function InstanceExperimentalSettings() {
         </div>
       )}
 
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Enable Isolated Workspaces</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Show execution workspace controls in project configuration and allow isolated workspace behavior for new
-              and existing issue runs.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle isolated workspaces experimental setting"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableIsolatedWorkspaces ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableIsolatedWorkspaces: !enableIsolatedWorkspaces })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableIsolatedWorkspaces ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Auto-Restart Dev Server When Idle</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              In `pnpm dev:once`, wait for all queued and running local agent runs to finish, then restart the server
-              automatically when backend changes or migrations make the current boot stale.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle guarded dev-server auto-restart"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              autoRestartDevServerWhenIdle ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() =>
-              toggleMutation.mutate({ autoRestartDevServerWhenIdle: !autoRestartDevServerWhenIdle })
-            }
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                autoRestartDevServerWhenIdle ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Heartbeat Finalization V1 Shadow Writes</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Record experimental heartbeat authority, generation, lease, and outcome fields without changing runtime behavior.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle heartbeat finalization v1 shadow writes"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableHeartbeatFinalizationV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableHeartbeatFinalizationV1: !enableHeartbeatFinalizationV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableHeartbeatFinalizationV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Run Terminal Boundary V1</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Finalize workflow runs through the terminal boundary: cause-stamped decisions with authority-version CAS,
-              a narrow recovery-channel gate before failure, scoped stop targets, and an effect-intent outbox with
-              periodic reprocessing. Default off keeps the legacy finalization path.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle run terminal boundary v1"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableRunTerminalBoundaryV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableRunTerminalBoundaryV1: !enableRunTerminalBoundaryV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableRunTerminalBoundaryV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Run Reopen Guard V1</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Reopen paths require status CAS + authority version bump; terminal runs cannot be revived by observation.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle run reopen guard v1"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableRunReopenGuardV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableRunReopenGuardV1: !enableRunReopenGuardV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableRunReopenGuardV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Run Recovery Service V1</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Terminal-run recovery goes through one-time authority consumption with decision/version validation (resume, supervision retry, unblock resolution). Requires Run Reopen Guard V1 to be enabled.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle run recovery service v1"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableRunRecoveryServiceV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableRunRecoveryServiceV1: !enableRunRecoveryServiceV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableRunRecoveryServiceV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Work-Product Binding V1</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Tool-step workProduct references pin the producer artifact per execution (run + step) instead of re-resolving the current primary.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle work-product binding v1"
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableWorkProductBindingV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableWorkProductBindingV1: !enableWorkProductBindingV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableWorkProductBindingV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">Knowledge Pattern Injection</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Inject matching company knowledge patterns into agent heartbeat context before each run.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle knowledge pattern injection"
-            aria-pressed={enableKnowledgePatternInjection}
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableKnowledgePatternInjection ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableKnowledgePatternInjection: !enableKnowledgePatternInjection })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableKnowledgePatternInjection ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
-      <section className="rounded-xl border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-semibold">QA Rebind Recovery V1</h2>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Automatically recover QA steps whose reviewed work product was regenerated, distinguishing generation-only
-              rebinds from material content changes. Applies to all companies on this instance.
-            </p>
-          </div>
-          <button
-            type="button"
-            aria-label="Toggle QA rebind recovery v1"
-            aria-pressed={enableQaRebindRecoveryV1}
-            disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableQaRebindRecoveryV1 ? "bg-green-600" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableQaRebindRecoveryV1: !enableQaRebindRecoveryV1 })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableQaRebindRecoveryV1 ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
-        </div>
-      </section>
+      <BroadSearchAllowlistSettings
+        settings={experimentalQuery.data}
+        pending={toggleMutation.isPending}
+        onSave={(patch) => toggleMutation.mutateAsync(patch)}
+      />
+      <InstanceExperimentalToggles
+        settings={experimentalQuery.data}
+        pending={toggleMutation.isPending}
+        onToggle={(patch) => toggleMutation.mutate(patch)}
+      />
     </div>
   );
 }

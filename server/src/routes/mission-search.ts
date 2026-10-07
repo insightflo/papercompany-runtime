@@ -74,6 +74,7 @@ function readPermissionsFromContext(contextSnapshot: unknown): RuntimeSearchPath
     dependencyDirectories: Array.isArray(raw.dependencyDirectories) ? raw.dependencyDirectories.filter((v): v is string => typeof v === "string") : [],
     allowedSearchScopes: Array.isArray(raw.allowedSearchScopes) ? raw.allowedSearchScopes.filter((v): v is string => typeof v === "string") : [],
     broadScanRepoAllowed: typeof raw.broadScanRepoAllowed === "boolean" ? raw.broadScanRepoAllowed : false,
+    broadSearchOverride: raw.broadSearchOverride === "experimental_allow" ? "experimental_allow" : null,
     qaType: readString(raw.qaType) ?? null,
     qaInputScope: readString(raw.qaInputScope) ?? null,
   };
@@ -153,6 +154,7 @@ export function missionSearchRoutes(db: Db): Router {
           db,
           companyId: String(runContext.companyId),
           issueId: run.issueId,
+          agentId: run.agentId,
           workingDirectory,
         });
       }

@@ -34,7 +34,8 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   const manifest = parseObject(input.context.paperclipStepInputManifest);
   const guardrails = parseObject(manifest?.guardrails);
   const runtimeSearchPaths = readRuntimeSearchPaths(input.context.paperclipRuntimeSearchPaths);
-  if (guardrails?.broadScanAllowed === true && !runtimeSearchPaths.declared) {
+  if (runtimeSearchPaths.broadSearchOverride === "experimental_allow"
+    || (guardrails?.broadScanAllowed === true && !runtimeSearchPaths.declared)) {
     return { blocked: false, reason: null, matchedCommand: null };
   }
 
