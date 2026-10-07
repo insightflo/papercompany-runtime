@@ -25,14 +25,20 @@ export function assertSeedActor(input: CreateWorkflowRunInput, actor?: TriggerAc
   if (!parsed.success) throw seedError("request_invalid");
 }
 
-function assertSupported(step: WorkflowStep) {
+/** Seed 스파인이 받아들이는 단계 역할/형태 게이트(회사·도구·증명 검사는 별도).
+ *  [수정 재사용] 재사용 준비(closure 자격 판정)가 입장 POST 재검과 같은 조건을 쓴다 — 표시/준비/입장 불일치 방지. */
+export function isSeedSupportedStep(step: WorkflowStep): boolean {
   const role = classifyWorkflowStepRole(step);
   // Native tool steps (issue-less tool execution) join the seed spine without an agent producer.
   const nativeTool = isNativeToolStep(step);
-  if ((role !== "action" && (role !== "unknown" || (step.type && step.type !== "agent")) && !nativeTool)
+  return !((role !== "action" && (role !== "unknown" || (step.type && step.type !== "agent")) && !nativeTool)
     || (!step.agentId && !nativeTool) || step.qaType || step.dynamicChildren || step.ownerPlanBootstrapOnly
     || step.bootstrapOnly || step.triggerOn === "escalation" || step.executionMode === "dynamic_owner_plan"
-    || resolveEdges(step).some(e => !e.isBackEdge && e.when !== "success")) throw seedError("unsupported_step", { stepId: step.id });
+    || resolveEdges(step).some(e => !e.isBackEdge && e.when !== "success"));
+}
+
+function assertSupported(step: WorkflowStep) {
+  if (!isSeedSupportedStep(step)) throw seedError("unsupported_step", { stepId: step.id });
 }
 
 export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {

@@ -80,12 +80,14 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
   readonly missionSourceWorkflowRunId: string | null;
   readonly selectedExecutionUnits: readonly Record<string, unknown>[];
   readonly tools: readonly PlanningArtifactTool[];
+  /** [수정 재사용] 암묵적 조상/투영이 포함된 표준 판 — 커버리지/상속 검증과 refs 보존에 쓴다(원장은 raw 결정 보존). */
+  readonly canonicalDecision?: Record<string, unknown>;
 }): Promise<RevisionPlanDeltaGate> {
   const validation = await validateRevisionPlanDelta({
     db: input.ledgerSubmission.db,
     companyId: input.ledgerSubmission.companyId,
     missionSourceWorkflowRunId: input.missionSourceWorkflowRunId,
-    decision: input.ledgerSubmission.decision,
+    decision: input.canonicalDecision ?? input.ledgerSubmission.decision,
     selectedExecutionUnits: input.selectedExecutionUnits,
     tools: input.tools,
   });
@@ -223,6 +225,8 @@ export function buildRevisionDecisionRefs(input: {
   readonly revisionDelta: Record<string, unknown> | null;
   readonly blockedUnitOutcomes?: readonly RevisionBlockedUnitOutcome[];
   readonly separateScopeOutcomes?: readonly RevisionSeparateScopeOutcome[];
+  /** [수정 재사용] 서버 소유 기계 지도(roots/클로저/원본 실행) — 물화/회복이 다시 대조하는 재료. */
+  readonly reusePlan?: { schemaVersion: string; sourceWorkflowRunId: string; roots: string[]; closureUnitIds: string[] };
 }): ReturnType<typeof mergeMissionPlanRefs> {
   const refs = mergeMissionPlanRefs(
     input.activePlanRefs,
@@ -231,6 +235,7 @@ export function buildRevisionDecisionRefs(input: {
       ownerPlanDecision: { ...input.effectiveDraftRefs.ownerPlanDecision, decisionHash: input.decisionHash },
       // [슬라이스1] 검증을 통과한 버전 있는 변경안은 활성 계획 refs 에 그대로 보존된다.
       ...(input.revisionDelta ? { revisionDelta: input.revisionDelta } : {}),
+      ...(input.reusePlan ? { revisionReusePlan: input.reusePlan } : {}),
       // [슬라이스 Q4] 차단 단위의 구조화 결과(실제 toolNames 진단 포함)도 활성 계획 refs 에 보존된다.
       ...(input.blockedUnitOutcomes && input.blockedUnitOutcomes.length > 0
         ? { revisionBlockedUnits: input.blockedUnitOutcomes }
@@ -247,6 +252,8 @@ export function buildRevisionDecisionRefs(input: {
   delete (refs as Record<string, unknown>).planQa;
   // 새 decision 이 변경안을 포함하지 않으면 이전 변경안 계약이 활성 계획을 계속 지배하지 않는다.
   if (!input.revisionDelta) delete (refs as Record<string, unknown>).revisionDelta;
+  // [수정 재사용] 이 decision 에 재사용 지도가 없으면 이전 지도가 활성 계획을 지배하지 않는다.
+  if (!input.reusePlan) delete (refs as Record<string, unknown>).revisionReusePlan;
   // 새 decision 에 차단 단위가 없으면 이전 차단 결과가 활성 계획을 계속 지배하지 않는다.
   if (!input.blockedUnitOutcomes || input.blockedUnitOutcomes.length === 0) {
     delete (refs as Record<string, unknown>).revisionBlockedUnits;

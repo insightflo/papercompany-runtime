@@ -59,7 +59,6 @@ async function findPaqoDefinitionByTriple(
     .limit(1);
   return row ?? null;
 }
-
 /**
  * Immutable PAQO definition lifecycle:
  * - exact (company_id, mission_id, definition_hash) match with
@@ -79,6 +78,8 @@ export async function findOrCreateImmutablePaqoWorkflowDefinition(
     missionId: string;
     name: string;
     steps: WorkflowStep[];
+    /** [수정 재사용] 서버 유도 복사 A 단계 ID — 저장 정규화가 A 에 새 rework 엣지를 만들지 않게 한다(내부). */
+    copiedStepIds?: ReadonlySet<string>;
   },
 ): Promise<PaqoWorkflowDefinitionRow | null> {
   const definitionHash = computePaqoDefinitionHash(input.steps);
@@ -94,6 +95,7 @@ export async function findOrCreateImmutablePaqoWorkflowDefinition(
       sourceKind: "paqo",
       missionId: input.missionId,
       definitionHash,
+      ...(input.copiedStepIds ? { copiedStepIds: input.copiedStepIds } : {}),
     });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;

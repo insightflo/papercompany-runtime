@@ -11,7 +11,9 @@ type WorkflowStepLike = WorkflowStep & {
 /** Save-time normalization only: never rebuild an already captured run definition. */
 export function normalizeWorkflowSteps(
   steps: unknown[],
-  options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown; tools?: readonly PlanningArtifactTool[] } = {},
+  options: { executionMode?: unknown; dynamicPlanBootstrapOnly?: unknown; tools?: readonly PlanningArtifactTool[];
+    /** [수정 재사용] 서버 유도 복사 A 단계 ID — 저장 시점 QA rework 합성이 새 엣지를 A 에 추가하지 않는다. 내부 옵션. */
+    copiedStepIds?: ReadonlySet<string> } = {},
 ): WorkflowStep[] {
   validateWorkflowQaConfigs(steps);
   const normalizedSteps = steps.map((rawStep) => {
@@ -35,7 +37,8 @@ export function normalizeWorkflowSteps(
     || options.dynamicPlanBootstrapOnly === "true";
   const stepsWithQaLoops = normalizedSteps
     .filter((step) => isQaLikeStep(step) && step.dependencies.length > 0)
-    .reduce((nextSteps, qaStep) => synthesizeQaReworkBackEdge(nextSteps, qaStep.id, undefined, { tools: options.tools }), normalizedSteps);
+    .reduce((nextSteps, qaStep) => synthesizeQaReworkBackEdge(nextSteps, qaStep.id, undefined,
+      { tools: options.tools, copiedStepIds: options.copiedStepIds }), normalizedSteps);
   if (!dynamicOwnerPlan) return stepsWithQaLoops;
   return stepsWithQaLoops.map((step) => {
     if (step.triggerOn === "escalation" || step.dependencies.length > 0) return step;

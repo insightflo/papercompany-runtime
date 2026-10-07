@@ -64,7 +64,7 @@ it("type2 A+B keeps distinct server targets wired; missing B link and alias merg
       toolArgs: { qaResultPath: "{$steps.publish.workProductPath}" } }),
   ];
   const delta = w.delta([
-    { unitId: "collectA", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "collectA", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "collectB", operation: "clone", templateStepId: "tpl-collect", interpretedInputs: { url: urlB } },
     { unitId: "synth", operation: "add", requiredInputs: [{ fromUnitId: "collectA", selector: reportJson }, { fromUnitId: "collectB", selector: reportJson }] },
     { unitId: "check", operation: "add" },

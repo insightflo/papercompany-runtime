@@ -98,7 +98,7 @@ it("explicit-config control: public submit → PLAN-QA approve → resubmit reco
       toolArgs: { qaResultPath: "{$steps.publish.workProductPath}" } }),
   ];
   const delta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id,
       instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id },
@@ -135,7 +135,7 @@ it("uniquely mapped template config omitted on publish must be inherited from th
   ];
   // 각 delta unit 은 현재 템플릿의 유일한 단계를 가리킨다(templateStepId 는 좌표, 재사용 승인이 아니다).
   const delta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
     { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, templateStepId: "tpl-write",
       instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id, templateStepId: "tpl-check" },
@@ -173,7 +173,7 @@ it("steps.units target keeps only collect explicit so omitted publish still inhe
       toolArgs: { qaResultPath: "{$steps.publish.workProductPath}" } }),
   ];
   const delta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
     { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, templateStepId: "tpl-write",
       instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id, templateStepId: "tpl-check" },
@@ -216,7 +216,7 @@ it("canonical publish id wins over another unit's legacy alias so its omitted de
       toolArgs: { qaResultPath: "{$steps.publish.workProductPath}" } }),
   ];
   const delta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id, templateStepId: "tpl-collect" },
     { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, templateStepId: "tpl-write",
       instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id, templateStepId: "tpl-check" },

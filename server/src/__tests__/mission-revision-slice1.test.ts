@@ -72,7 +72,7 @@ it("type1 typed delta keeps impact sets durable, publish-only keeps body reuse, 
   // 유형1 내용 수정: 지시/해석 입력만 바뀐 write 는 modify, 무관 collect 는 재사용 후보,
   // 필요한 새 QA/publish/readback 은 재실행 대상으로 남는다(계획 기록, seed 승인 아님).
   const contentDelta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "write", operation: "modify", sourceStepId: w.source[1]!.id, instructions: "요약 톤을 간결하게", interpretedInputs: { tone: "concise" } },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id },
     { unitId: "publish", operation: "rerun" },
@@ -97,8 +97,8 @@ it("type1 typed delta keeps impact sets durable, publish-only keeps body reuse, 
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, w.revision.id))).toEqual([]); // 게시 시작은 별도 승인
   // 유형1 게시 조건만 변경: 본문(collect/write)은 재사용 후보로 유지된다.
   const publishOnlyDelta = w.delta([
-    { unitId: "collect", operation: "reuse", sourceStepId: w.source[0]!.id },
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[1]!.id },
+    { unitId: "collect", operation: "rerun", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[1]!.id },
     { unitId: "check", operation: "rerun", sourceStepId: w.source[2]!.id },
     { unitId: "publish", operation: "modify", interpretedInputs: { visibility: "private" } },
     { unitId: "verify", operation: "rerun" },
@@ -144,7 +144,7 @@ it("type3 capability gap: registration alone is never success and an unsatisfied
       toolArgs: { qaResultPath: "{$steps.publishBlog.workProductPath}" } }),
   ];
   const decision = () => slice1Decision(w.revision.id, units, w.delta([
-    { unitId: "write", operation: "reuse", sourceStepId: w.source[0]!.id },
+    { unitId: "write", operation: "rerun", sourceStepId: w.source[0]!.id },
     { unitId: "check", operation: "rerun" },
     { unitId: "publishBlog", operation: "add" },
     { unitId: "verify", operation: "add" },
