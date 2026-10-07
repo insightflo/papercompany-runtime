@@ -1,0 +1,28 @@
+@keyframes graph-connection-spark {
+  0%, 100% { opacity: 1; stroke-dashoffset: 0; }
+  50% { opacity: 0.55; stroke-dashoffset: 7; }
+}
+
+@keyframes graph-connection-ripple {
+  from { r: 8; opacity: 0.9; }
+  to { r: 28; opacity: 0; }
+}
+
+.graph-connection-spark {
+  stroke-dasharray: 18 3;
+  animation: graph-connection-spark 160ms linear infinite;
+}
+
+.graph-connection-ripple {
+  animation: graph-connection-ripple 500ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .graph-connection-spark,
+  .graph-connection-ripple {
+    animation: none;
+  }
+
+  .graph-connection-spark { stroke-dasharray: none; }
+  .graph-connection-ripple { display: none; }
+}
