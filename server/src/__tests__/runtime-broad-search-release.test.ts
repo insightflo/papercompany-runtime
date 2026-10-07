@@ -3,6 +3,7 @@ import { evaluateRuntimeBroadScanHook } from "../services/runtime-broad-scan-hoo
 import { evaluateRuntimeBroadScanToolGuard } from "../services/runtime-broad-scan-tool-guard.js";
 import { evaluateStepInputManifestGuard } from "../services/step-input-manifest-guard.js";
 import { buildStepInputManifest } from "../services/step-input-manifest.js";
+import { readBroadSearchOverride } from "../services/runtime-search-scopes.js";
 
 const paths = {
   version: 1, workingDirectory: "/repo", outputDirectory: null,
@@ -51,5 +52,15 @@ describe("experimental broad search FULL release", () => {
   ])("retains root-target blocking without valid declared experimental permission %j", async (overrides) => {
     expect(evaluateRuntimeBroadScanToolGuard(input("find .", overrides)).blocked).toBe(true);
     expect((await evaluateRuntimeBroadScanHook({} as never, input("find .", overrides))).intercepted).toBe(true);
+  });
+});
+
+describe("readBroadSearchOverride (shared by route, hook and tool guard)", () => {
+  it("honors the marker only for a version-1 snapshot with repo broad scan allowed", () => {
+    expect(readBroadSearchOverride(1, "experimental_allow", true)).toBe("experimental_allow");
+    expect(readBroadSearchOverride(2, "experimental_allow", true)).toBeNull();
+    expect(readBroadSearchOverride(undefined, "experimental_allow", true)).toBeNull();
+    expect(readBroadSearchOverride(1, "experimental_allow", false)).toBeNull();
+    expect(readBroadSearchOverride(1, "allow", true)).toBeNull();
   });
 });

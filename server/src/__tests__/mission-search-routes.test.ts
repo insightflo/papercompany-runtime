@@ -143,6 +143,19 @@ describe("POST /api/agents/me/mission-search", () => {
     expect(res.body.scope).toBe("repo");
   });
 
+  it("ignores a snapshot override marker when repo broad scan is not allowed", async () => {
+    const runRow = makeRunRow(["workProduct"]);
+    const paths = runRow.contextSnapshot.paperclipRuntimeSearchPaths as Record<string, unknown>;
+    paths.broadSearchOverride = "experimental_allow";
+    paths.broadScanRepoAllowed = "true";
+    const res = await request(createApp({ runRow }))
+      .post("/api/agents/me/mission-search")
+      .send({ scope: "repo", query: "TODO", runContext });
+
+    expect(res.status).toBe(403);
+    expect(res.body.allowedScopes).toEqual(["workProduct"]);
+  });
+
   it("returns 403 when the caller is a different agent", async () => {
     const res = await request(
       createApp({

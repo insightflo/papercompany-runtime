@@ -10,6 +10,8 @@ const scopes = [
   { field: "broadSearchAllowedAgentIdsV1", label: "에이전트" },
 ] as const;
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 type AllowlistField = typeof scopes[number]["field"];
 type Allowlists = Pick<InstanceExperimentalSettings, AllowlistField>;
 interface Props {
@@ -28,11 +30,19 @@ interface EditorProps {
 
 function AllowlistEditor({ field, label, ids, pending, onChange }: EditorProps) {
   const [input, setInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const inputId = `broad-search-${field}`;
+  const errorId = `${inputId}-error`;
   function addId() {
-    const id = input.trim();
+    const id = input.trim().toLowerCase();
     if (!id) return;
-    onChange(ids.includes(id) ? ids : [...ids, id]);
+    // Server validates z.string().uuid(); reject early with an inline message instead of a page-level error.
+    if (!UUID_PATTERN.test(id)) {
+      setError(`${label} ID는 UUID 형식이어야 합니다.`);
+      return;
+    }
+    setError(null);
+    onChange(ids.some((value) => value.toLowerCase() === id) ? ids : [...ids, id]);
     setInput("");
   }
   return (
@@ -44,7 +54,9 @@ function AllowlistEditor({ field, label, ids, pending, onChange }: EditorProps) 
           value={input}
           disabled={pending}
           placeholder={`${label} ID를 입력하세요`}
-          onChange={(event) => setInput(event.target.value)}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+          onChange={(event) => { setInput(event.target.value); setError(null); }}
           onKeyDown={(event) => {
             if (event.key === "Enter") { event.preventDefault(); addId(); }
           }}
@@ -52,6 +64,7 @@ function AllowlistEditor({ field, label, ids, pending, onChange }: EditorProps) 
         <Button type="button" variant="outline" size="sm" aria-label={`${label} ID 추가`}
           disabled={pending || !input.trim()} onClick={addId}>추가</Button>
       </div>
+      {error && <p id={errorId} role="alert" className="text-xs text-destructive">{error}</p>}
       <ul aria-label={`${label} 허용 목록`} className="flex flex-wrap gap-2">
         {ids.map((id) => (
           <li key={id} className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted px-2 py-1 text-xs">
@@ -98,7 +111,7 @@ export function BroadSearchAllowlistSettings({ settings, pending, onSave }: Prop
         <AllowlistEditor key={field} field={field} label={label} ids={lists[field]} pending={pending}
           onChange={(ids) => setDraft({ ...lists, [field]: ids })} />
       ))}
-      <Button type="button" size="sm" disabled={pending} onClick={() => void save()}>
+      <Button type="button" size="sm" disabled={pending || draft === null} onClick={() => void save()}>
         {pending ? "저장 중..." : "광역 탐색 허용 목록 저장"}
       </Button>
     </section>

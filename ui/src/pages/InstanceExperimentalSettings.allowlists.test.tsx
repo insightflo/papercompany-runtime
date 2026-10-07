@@ -116,44 +116,61 @@ describe("broad-search allowlist editing through the real settings page", () => 
   });
 
   it.each(scopes)("trims, deduplicates, removes and saves $label IDs without changing other settings", async ({ label, field }) => {
-    saved[field] = ["existing-id"];
+    saved[field] = ["11111111-1111-4111-8111-111111111111"];
     await mount();
-    expect(button(`${label} existing-id 제거`)).toBeDefined();
-    await input(`${label} ID`, "  added-id  ");
+    expect(button(`${label} 11111111-1111-4111-8111-111111111111 제거`)).toBeDefined();
+    await input(`${label} ID`, "  22222222-2222-4222-8222-222222222222  ");
     await click(`${label} ID 추가`);
-    expect(button(`${label} added-id 제거`)).toBeDefined();
-    await input(`${label} ID`, "added-id");
+    expect(button(`${label} 22222222-2222-4222-8222-222222222222 제거`)).toBeDefined();
+    await input(`${label} ID`, "22222222-2222-4222-8222-222222222222");
     await click(`${label} ID 추가`);
     await input(`${label} ID`, "   ");
     expect(button(`${label} ID 추가`).disabled).toBe(true);
     expect(host.querySelector(`ul[aria-label="${label} 허용 목록"]`)?.children.length).toBe(2);
-    await click(`${label} existing-id 제거`);
+    await click(`${label} 11111111-1111-4111-8111-111111111111 제거`);
     expect(host.querySelector(`ul[aria-label="${label} 허용 목록"]`)?.children.length).toBe(1);
     expect(patches).toEqual([]);
     await click("광역 탐색 허용 목록 저장");
     expect(patches).toEqual([{
-      broadSearchAllowedCompanyIdsV1: field === "broadSearchAllowedCompanyIdsV1" ? ["added-id"] : [],
-      broadSearchAllowedMissionIdsV1: field === "broadSearchAllowedMissionIdsV1" ? ["added-id"] : [],
-      broadSearchAllowedAgentIdsV1: field === "broadSearchAllowedAgentIdsV1" ? ["added-id"] : [],
+      broadSearchAllowedCompanyIdsV1: field === "broadSearchAllowedCompanyIdsV1" ? ["22222222-2222-4222-8222-222222222222"] : [],
+      broadSearchAllowedMissionIdsV1: field === "broadSearchAllowedMissionIdsV1" ? ["22222222-2222-4222-8222-222222222222"] : [],
+      broadSearchAllowedAgentIdsV1: field === "broadSearchAllowedAgentIdsV1" ? ["22222222-2222-4222-8222-222222222222"] : [],
     }]);
-    expect(button(`${label} added-id 제거`)).toBeDefined();
-    await click(`${label} added-id 제거`);
+    expect(button(`${label} 22222222-2222-4222-8222-222222222222 제거`)).toBeDefined();
+    await click(`${label} 22222222-2222-4222-8222-222222222222 제거`);
     await click("광역 탐색 허용 목록 저장");
     expect(patches[1]?.[field]).toEqual([]);
   });
 
+  it("rejects non-UUID input inline, dedupes case-insensitively and disables save until edited", async () => {
+    await mount();
+    expect(button("광역 탐색 허용 목록 저장").disabled).toBe(true);
+    await input("회사 ID", "not-a-uuid");
+    await click("회사 ID 추가");
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("UUID 형식");
+    expect(host.querySelector('ul[aria-label="회사 허용 목록"]')?.children.length).toBe(0);
+    await input("회사 ID", "22222222-2222-4222-8222-222222222222");
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    await click("회사 ID 추가");
+    await input("회사 ID", "22222222-2222-4222-8222-222222222222");
+    await click("회사 ID 추가");
+    expect(host.querySelector('ul[aria-label="회사 허용 목록"]')?.children.length).toBe(1);
+    expect(button("광역 탐색 허용 목록 저장").disabled).toBe(false);
+    expect(patches).toEqual([]);
+  });
+
   it("surfaces the server error and preserves the draft for a successful retry", async () => {
     await mount();
-    await input("미션 ID", "mission-retry");
+    await input("미션 ID", "33333333-3333-4333-8333-333333333333");
     await click("미션 ID 추가");
     failSave = true;
     await click("광역 탐색 허용 목록 저장");
     expect(host.textContent).toContain("허용 목록 저장 실패");
-    expect(button("미션 mission-retry 제거")).toBeDefined();
+    expect(button("미션 33333333-3333-4333-8333-333333333333 제거")).toBeDefined();
     failSave = false;
     await click("광역 탐색 허용 목록 저장");
     expect(host.textContent).not.toContain("허용 목록 저장 실패");
-    expect(patches[1]?.broadSearchAllowedMissionIdsV1).toEqual(["mission-retry"]);
+    expect(patches[1]?.broadSearchAllowedMissionIdsV1).toEqual(["33333333-3333-4333-8333-333333333333"]);
   });
 });
 

@@ -67,7 +67,6 @@ interface Props {
 export function InstanceExperimentalToggles({ settings, pending, onToggle }: Props) {
   return toggles.map(({ field, title, description, label }) => {
     const enabled = settings?.[field] === true;
-    const hasPressedState = field === "enableKnowledgePatternInjection" || field === "enableQaRebindRecoveryV1";
     return (
       <section key={field} className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-start justify-between gap-4">
@@ -78,7 +77,7 @@ export function InstanceExperimentalToggles({ settings, pending, onToggle }: Pro
           <button
             type="button"
             aria-label={label}
-            aria-pressed={hasPressedState ? enabled : undefined}
+            aria-pressed={enabled}
             disabled={pending}
             className={cn(
               "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",

@@ -8,6 +8,20 @@ export const MISSION_SEARCH_SCOPES = [
 
 export type MissionSearchScope = (typeof MISSION_SEARCH_SCOPES)[number];
 
+/** Marker written by the permission builder when an experimental broad-search allowlist matched. */
+export const BROAD_SEARCH_OVERRIDE = "experimental_allow" as const;
+export type BroadSearchOverride = typeof BROAD_SEARCH_OVERRIDE | null;
+
+/** Single rule for honoring the marker: version-1 snapshot, marker present, repo scan allowed. */
+export function readBroadSearchOverride(
+  version: unknown,
+  override: unknown,
+  broadScanRepoAllowed: boolean,
+): BroadSearchOverride {
+  const valid = version === 1 && override === BROAD_SEARCH_OVERRIDE && broadScanRepoAllowed;
+  return valid ? BROAD_SEARCH_OVERRIDE : null;
+}
+
 const SCOPE_SET = new Set<string>(MISSION_SEARCH_SCOPES);
 const DEFAULT_SCOPES: readonly MissionSearchScope[] = ["workProduct", "missionOutput"];
 

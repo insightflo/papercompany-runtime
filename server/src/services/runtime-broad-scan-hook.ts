@@ -31,6 +31,7 @@ import {
   containsWorkingDirectoryChange,
   readAllowedFileViewPaths,
   readRuntimeSearchPaths,
+  shouldBypassRuntimeBroadScanGuard,
   type RuntimeBroadScanPaths,
 } from "./runtime-broad-scan-context.js";
 import type { MissionSearchScope } from "./runtime-search-scopes.js";
@@ -75,8 +76,7 @@ export async function evaluateRuntimeBroadScanHook(
   const manifest = parseObject(input.context.paperclipStepInputManifest);
   const guardrails = parseObject(manifest?.guardrails);
   const paths = readRuntimeSearchPaths(input.context.paperclipRuntimeSearchPaths);
-  if (paths.broadSearchOverride === "experimental_allow"
-    || (guardrails?.broadScanAllowed === true && !paths.declared)) {
+  if (shouldBypassRuntimeBroadScanGuard(guardrails, paths)) {
     return { intercepted: false };
   }
 

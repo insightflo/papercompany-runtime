@@ -9,7 +9,7 @@ import {
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { MISSION_SEARCH_SCOPES, defaultMissionSearchScopes, missionSearchScopesAllowRepo, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
+import { BROAD_SEARCH_OVERRIDE, MISSION_SEARCH_SCOPES, defaultMissionSearchScopes, type BroadSearchOverride, missionSearchScopesAllowRepo, normalizeMissionSearchScopes } from "./runtime-search-scopes.js";
 import { isBroadSearchAllowed } from "./runtime-broad-search-flag.js";
 import { resolveWorkProductLocalFilePath } from "./work-products.js";
 import { ensurePlanQaWorkProduct } from "./missions/plan-qa-work-product.js";
@@ -23,7 +23,7 @@ export type RuntimeSearchPathPermissions = {
   dependencyDirectories: string[];
   allowedSearchScopes: string[];
   broadScanRepoAllowed: boolean;
-  broadSearchOverride: "experimental_allow" | null;
+  broadSearchOverride: BroadSearchOverride;
   qaType: string | null;
   qaInputScope: string | null;
 };
@@ -45,12 +45,12 @@ export async function buildRuntimeSearchPathPermissions(input: PermissionInput):
   })) {
     permissions.allowedSearchScopes = [...MISSION_SEARCH_SCOPES];
     permissions.broadScanRepoAllowed = true;
-    permissions.broadSearchOverride = "experimental_allow";
+    permissions.broadSearchOverride = BROAD_SEARCH_OVERRIDE;
   }
   return permissions;
 }
 
-async function buildBasePermissions(input: PermissionInput, noCardIssue: ScopedIssue): Promise<RuntimeSearchPathPermissions | null> {
+async function buildBasePermissions(input: PermissionInput, issueRow: ScopedIssue): Promise<RuntimeSearchPathPermissions | null> {
   const permissions: RuntimeSearchPathPermissions = {
     version: 1,
     workingDirectory: path.resolve(input.workingDirectory),
@@ -76,22 +76,22 @@ async function buildBasePermissions(input: PermissionInput, noCardIssue: ScopedI
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (!card) {
-    if (noCardIssue?.originKind === "mission_main_executor_plan") {
+    if (issueRow?.originKind === "mission_main_executor_plan") {
       // PLAN gets server-side repo discovery, but direct broad scans remain denied by default.
       permissions.allowedSearchScopes = ["repo"];
       permissions.broadScanRepoAllowed = false;
       return permissions;
     }
-    if (noCardIssue?.originKind === "mission_plan_qa") {
+    if (issueRow?.originKind === "mission_plan_qa") {
       // PLAN-QA defaults to declared work products/output, not broad scans.
       // Project/register the accepted plan for this scoped issue; an explicit miss
       // leaves dependencies empty. FS/registration failures still abort preparation.
-      if (noCardIssue.missionId) {
+      if (issueRow.missionId) {
         const planQaWorkProduct = await ensurePlanQaWorkProduct({
           db: input.db,
           companyId: input.companyId,
           planQaIssueId: input.issueId,
-          missionId: noCardIssue.missionId,
+          missionId: issueRow.missionId,
         });
         if (planQaWorkProduct) {
           permissions.dependencyFiles = [planQaWorkProduct.filePath];
@@ -100,7 +100,7 @@ async function buildBasePermissions(input: PermissionInput, noCardIssue: ScopedI
       }
       return permissions;
     }
-    return buildMissionRecoverySearchPermissions(input, permissions, noCardIssue);
+    return buildMissionRecoverySearchPermissions(input, permissions, issueRow);
   }
 
   permissions.qaType = card.cardJson.workflow?.qaType ?? null;
