@@ -27,8 +27,15 @@ export async function registeredProducer(db: Pick<Db, "select">, companyId: stri
     executionGeneration: heartbeat.workflowExecutionGeneration, ...attempt, heartbeatRunId: heartbeat.id };
 }
 
-export function preserveProducerMetadata(metadata: Record<string, unknown> | null | undefined, producer: unknown) {
+export function preserveProducerMetadata(metadata: Record<string, unknown> | null | undefined, producer: unknown,
+  existing?: Record<string, unknown> | null) {
   const clean = { ...(metadata ?? {}) }; delete clean.workflowProducer;
+  // Only dedicated authority writers may supply these keys. A new registration/restamp retires them;
+  // ordinary metadata patches preserve the DB originals, including legacy promotion provenance.
+  for (const key of ["workflowProducerRebind", "workflowProducerPromotion", "workflowProducerDelegatedOrigin"]) {
+    delete clean[key];
+    if (existing && Object.hasOwn(existing, key)) clean[key] = existing[key];
+  }
   if (producer) clean.workflowProducer = producer;
   return clean;
 }

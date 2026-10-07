@@ -8,6 +8,7 @@
 // [authority] 내구 레코드(workflow_runs.child_start_* / workflow_step_runs)만이 권위.
 import { randomUUID } from "node:crypto";
 import { seedInitialRows } from "./workflow-seed-materialization.js";
+import { withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
@@ -67,13 +68,13 @@ export async function ensureWorkflowStepRunRecords(
   input: MaterializationInput,
 ): Promise<MaterializationOutcome> {
   try {
-    return await db.transaction(async (tx): Promise<MaterializationOutcome> => {
+    return await withAutomaticProducerRebind(db, () => db.transaction(async (tx): Promise<MaterializationOutcome> => {
       await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`);
       const txDb = tx as unknown as Db;
       return input.childStartFence
         ? await materializeWithFence(txDb, input)
         : await materializeGeneric(txDb, input);
-    });
+    }));
   } catch (error) {
     // [설계 §3] fence 소실 센티널은 트랜잭션 외부에서만 not-owner 로 변환(내부 catch 는 롤백 파괴).
     // 경합(55P03/40P01/40001)은 busy — 메타 동기화 예외 등 나머지는 전파(롤백 후).

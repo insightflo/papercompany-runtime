@@ -8,6 +8,7 @@ import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js
 import { captureArtifactRoot, readArtifactBytes, digest } from "./artifact-files.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
+import { propagateProducerRebind } from "./automatic-producer-rebind.js";
 import { revisionStepHash } from "./revision-step-config.js";
 import { parseToolSeedEvidence, verifyToolSeedEvidence } from "./workflow-seed-tool-output.js";
 import { verifySeedInterpretedInputs } from "./seed-interpreted-inputs.js";
@@ -89,7 +90,7 @@ export async function verifySeedEvidence(db: Db, seed: typeof workflowRunSeeds.$
       try {
         selected = await selectSameRunWorkProduct(db, { companyId: seed.companyId, workflowRunId: seed.sourceRunId,
           stepId: seed.sourceStepId, selector: { type: saved.type, title: saved.title }, pinnedId: saved.id });
-      } catch { throw seedError("source_attempt_changed"); }
+      } catch (error) { propagateProducerRebind(error); throw seedError("source_attempt_changed"); }
       if (selected.product.status === "archived" || selected.producer.stepRunId !== seed.sourceStepRunId
         || hashStructuredValue(selected.producer) !== hashStructuredValue(saved.producer) || selected.file !== saved.path) throw seedError("provenance_changed");
       const verified = await verifySeedProductBytes(db, selected);

@@ -23,6 +23,7 @@ import { resolveEdges } from "./control-flow/edge-condition.js";
 import { renderWorkflowToolStepArgsWithResolvedValues, resolveWorkflowToolStepArgs, runMonthFromRunDate,
   stringifyWorkflowRunMetadataValue } from "./tool-step-args.js";
 import { selectOfficialWorkProduct } from "./workproduct-selector.js";
+import { propagateProducerRebind } from "./automatic-producer-rebind.js";
 import { seedError } from "./workflow-seed-evidence.js";
 import type { RevisionStep } from "./revision-step-config.js";
 
@@ -116,7 +117,7 @@ export async function bindSeedInterpretedInputs(db: Db, input: {
       input.targetStepId), ...detail }); };
   // 원본 해석 재현 실패 자체가 실제 입력 증명 실패다 — 느슨한 통과가 아니라 구조적 거절로 닫는다.
   const rendered = await renderSourceArgs(db, input.sourceRun, input.sourceStep, input.sourceSteps)
-    .catch((error: unknown) => { refuse({ phase: "admission_render",
+    .catch((error: unknown) => { propagateProducerRebind(error); refuse({ phase: "admission_render",
       cause: error instanceof Error ? error.message : String(error) }); });
   // 실행 시점 실제 소비 기록: 이 소비 스텝런에 핀된 참조별 산출물(workflowStepOutputBindings).
   const pins = refs.size === 0 ? [] : await db.select({ referencedStepId: workflowStepOutputBindings.referencedStepId,
@@ -185,7 +186,7 @@ export async function verifySeedInterpretedInputs(db: Db, input: {
   const mismatch = (detail: Record<string, unknown>): never => { throw seedError("interpreted_input_mismatch", {
     stepId: input.targetStepId, affectedStepIds: [input.targetStepId], ...detail }); };
   const rendered = await renderSourceArgs(db, input.sourceRun, input.sourceStep, input.sourceSteps)
-    .catch((error: unknown) => { mismatch({ phase: "materialization_render",
+    .catch((error: unknown) => { propagateProducerRebind(error); mismatch({ phase: "materialization_render",
       cause: error instanceof Error ? error.message : String(error) }); });
   if (hashStructuredValue(rendered) !== input.binding.argsDigest) mismatch({ phase: "materialization_render" });
   const selectors = workProductSelectorsSchema.parse((input.sourceStep as { workProductSelectors?: unknown }).workProductSelectors ?? {});

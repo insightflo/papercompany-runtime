@@ -8,12 +8,13 @@ import type { CreateWorkflowRunInput } from "./types.js";
 import { assertRevisionBoardStart } from "./revision-run-admission.js";
 import { assertWorkflowToolReadinessForDefinition } from "./admission-tool-readiness.js";
 import { lockMissionPlanQaAuthority } from "../missions/plan-qa-admission-lock.js";
+import { withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
 
 export async function createAdmittedWorkflowRun(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   assertSeedActor(input, actor);
   await assertRevisionBoardStart(db, input, actor);
   if (input.metadata && ("replacementAuthorityId" in input.metadata || "executionDefinitionVersion" in input.metadata)) throw conflict("workflow_reserved_metadata");
-  if (input.missionId) return db.transaction(async tx => {
+  if (input.missionId) return withAutomaticProducerRebind(db, () => db.transaction(async tx => {
     const t = tx as unknown as Db;
     const [mission] = await tx.select().from(missions).where(and(eq(missions.id, input.missionId!), eq(missions.companyId, input.companyId))).for("update");
     if ((actor?.type === "agent" || mission?.sourceMissionId) && (!mission || mission.status === "cancelled")) throw conflict("workflow_mission_cancelled");
@@ -27,7 +28,7 @@ export async function createAdmittedWorkflowRun(db: Db, input: CreateWorkflowRun
     if (input.seedFromRun) return createSeededWorkflowRun(t, input, actor);
     if (actor?.type === "agent") await assertAgentReplacementRequired(t, input, actor);
     return createWorkflowRun(t, input);
-  });
+  }));
   if (input.seedFromRun) return createSeededWorkflowRun(db, input, actor);
   return createWorkflowRun(db, input);
 }

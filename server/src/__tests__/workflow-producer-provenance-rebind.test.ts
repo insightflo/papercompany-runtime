@@ -24,7 +24,7 @@ afterAll(async () => { await temp?.cleanup(); await rm(dir, { recursive: true, f
 
 /**
  * [파일 목적] board producer provenance rebind — 런 회복으로 생산자 세대만 뒤처진 workProduct 를
- *   재귀속하면 (1) 재바인딩 전 셀렉터는 stale_producer 로 거부 (2) 서비스는 fail-closed 조건 통과 시
+ *   재귀속하면 (1) 세대 차이만 있으면 셀렉터가 자동 발급 (2) 서비스는 fail-closed 조건 통과 시
  *   귀속/마커/권한 이벤트를 기록 (3) 셀렉터가 재바인딩 산출물을 수용 (4) 바이트 변조 시 재거부,
  *   그리고 비-세대 불일치·미완료 생산자·활성 런 등은 거부함을 검증한다.
  */
@@ -56,9 +56,12 @@ async function fixture() {
   return { companyId, issueId, runId, stepId, product, select, rebind, readProduct, rebindEvents, file };
 }
 
-it("selector fences the producer product before rebind", async () => {
+it("selector automatically proves generation-only drift before consumption", async () => {
   const f = await fixture();
-  await expect(f.select()).rejects.toThrow("workproduct_selector_stale_producer");
+  await expect(f.select()).resolves.toMatchObject({ product: { id: f.product!.id }, producer: { executionGeneration: 1 } });
+  expect((await f.readProduct()).metadata!.workflowProducerRebind).toMatchObject({
+    reason: "automatic_producer_provenance_rebind", reboundBy: { actorType: "system" },
+  });
 });
 
 it("rebind records a forward-valid marker and an authority transition, preserving production truth", async () => {

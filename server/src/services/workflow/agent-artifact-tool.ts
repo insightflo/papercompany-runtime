@@ -6,6 +6,7 @@ import { HttpError, unprocessable, conflict } from '../../errors.js';
 import { logger } from '../../middleware/logger.js';
 import { producerAttempt } from '../work-products/producer-attempt.js';
 import { lockProducerSelection } from '../work-products/producer-selection-lock.js';
+import { withAutomaticProducerRebind } from './automatic-producer-rebind.js';
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { captureQaDispatch } from './qa-dispatch-guard.js';
 import { loadExecutionDefinition } from './execution-definition.js';
@@ -27,7 +28,7 @@ async function bindAttempt(input: CoreInput) {
     ? eq(workflowStepRuns.id, heartbeat.workflowStepRunId) : eq(workflowStepRuns.issueId, heartbeat.issueId));
   if (candidates.length !== 1) throw bindingRequired();
   const observed = candidates[0];
-  return db.transaction(async tx => {
+  return withAutomaticProducerRebind(db, () => db.transaction(async tx => {
     // Existing producer/engine lock order; no locks are held while the tool runs.
     const locked = await lockProducerSelection(tx, { companyId, workflowRunId: observed.workflowRunId,
       stepRunIds: [observed.id] }, 'update');
@@ -86,7 +87,7 @@ async function bindAttempt(input: CoreInput) {
         workflowSteps: execution.steps, step: { ...step, toolArgs: { input: `{$steps.${contract.inputStepId}.workProductPath}` } } });
     }
     return { scope, run, stepRun, step, dispatch };
-  });
+  }));
 }
 
 async function storeResult(db: Db, binding: Binding, result: Awaited<ReturnType<typeof executeCoreWorkflowTool>>) {

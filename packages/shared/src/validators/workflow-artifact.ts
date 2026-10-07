@@ -22,7 +22,11 @@ export const workProductProducerSchema = z.object({
   missionId: z.string().uuid().nullable(), workflowRunId: z.string().uuid(), stepRunId: z.string().uuid(),
   stepId: z.string().min(1), executionGeneration: count, retryCount: count, iterationIndex: count,
   heartbeatRunId: z.string().uuid(),
-}).strict();
+  // Optional only as a pair: legacy records have neither; new local producers seal exact bytes.
+  sha256: hash.optional(), byteSize: count.optional(),
+}).strict().refine(value => (value.sha256 === undefined) === (value.byteSize === undefined), {
+  message: "Producer sha256 and byteSize must be recorded together",
+});
 /**
  * [producer provenance rebind] 보드 승인으로 “생산 이후 생산자가 변하지 않았음”을 증명한 흔적.
  * fromGeneration 은 실제 생산 세대(변경 불가 원본 사실)이고, 재바인딩은 이후 어느 세대에서든

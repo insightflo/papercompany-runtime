@@ -1,8 +1,9 @@
 import { and, desc, eq, notExists } from "drizzle-orm";
 import { registeredProducer, preserveProducerMetadata } from "./work-products/producer-provenance.js";
+import { metadataPath, resolveWorkProductLocalFilePath, sealedProducerMetadata } from "./work-products/producer-seal.js";
+export { resolveWorkProductLocalFilePath } from "./work-products/producer-seal.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts, workflowStepOutputBindings } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
@@ -43,12 +44,6 @@ function isLocalFileProvider(provider: string) {
   return provider === "local" || provider === "local_file";
 }
 
-function metadataPath(metadata: unknown): string | null {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
-  const value = (metadata as Record<string, unknown>).path;
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
 function isOpenableUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -64,22 +59,6 @@ function isBrowserOpenableUrl(value: string): boolean {
     return url.protocol === "http:" || url.protocol === "https:";
   } catch {
     return false;
-  }
-}
-
-export function resolveWorkProductLocalFilePath(product: Pick<IssueWorkProduct, "metadata" | "url">): string | null {
-  const localPath = metadataPath(product.metadata);
-  if (localPath && path.isAbsolute(localPath)) return localPath;
-
-  const url = product.url?.trim();
-  if (!url) return null;
-
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "file:") return null;
-    return fileURLToPath(parsed);
-  } catch {
-    return null;
   }
 }
 
@@ -147,7 +126,7 @@ export function workProductService(db: Db) {
       const row = await db.transaction(async (tx) => {
         const producer = await registeredProducer(tx, companyId, issueId, data.createdByRunId, delegation);
         data = { ...data, sourceExecutionGeneration: producer?.executionGeneration ?? null,
-          metadata: preserveProducerMetadata(data.metadata, producer) };
+          metadata: await sealedProducerMetadata(data, producer) };
         let isPrimary: boolean | undefined = data.isPrimary;
         if (isPrimary === undefined) {
           const [existingPrimary] = await tx
@@ -239,7 +218,7 @@ export function workProductService(db: Db) {
         if (!existing || existing.issueId !== current.issueId || existing.companyId !== current.companyId) return null;
         return await tx.update(issueWorkProducts).set({ createdByRunId: runId,
           sourceExecutionGeneration: producer?.executionGeneration ?? null,
-          metadata: preserveProducerMetadata({ ...(existing.metadata ?? {}), ...stamp }, producer), updatedAt: new Date() })
+          metadata: await sealedProducerMetadata({ ...existing, metadata: { ...(existing.metadata ?? {}), ...stamp } }, producer), updatedAt: new Date() })
           .where(eq(issueWorkProducts.id, id)).returning().then((rows) => rows[0] ?? null);
       });
       return row ? toIssueWorkProduct(row) : null;
@@ -257,7 +236,7 @@ export function workProductService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (!existing) return null;
         patch = { ...patch, sourceExecutionGeneration: existing.sourceExecutionGeneration, createdByRunId: existing.createdByRunId,
-          ...(patch.metadata !== undefined ? { metadata: preserveProducerMetadata(patch.metadata, existing.metadata?.workflowProducer) } : {}) };
+          ...(patch.metadata !== undefined ? { metadata: preserveProducerMetadata(patch.metadata, existing.metadata?.workflowProducer, existing.metadata) } : {}) };
         const pathBefore = resolveWorkProductLocalFilePath(existing) ?? "";
         const merged = { ...existing, ...patch } as typeof existing;
         const pathAfter = resolveWorkProductLocalFilePath(merged) ?? "";

@@ -318,3 +318,14 @@
 - Reuse trigger: New durable-event reader integration fixtures.
 - Evidence: `/tmp/qag/b-review-planning/red.log`, `/tmp/qag/b-review-planning/red-confirmed.log`, `/tmp/qag/b-review-planning/final.log`.
 
+### 2026-10-07 — invalidate admission proof, not its display lifecycle
+- Date: 2026-10-07
+- Task: Generic generation-only producer rebind regression tests.
+- What failed: A test expected a cancelled wake to invalidate an already admitted producer attempt; the real proof still accepted it.
+- Root cause: `producerAttempt` verifies immutable admission identity and rejects coalesced wakes, not cancelled lifecycle display state.
+- Category: Test-fixture authority assumption.
+- Fix: Change the fixture to a coalesced original wake; verify no marker/event is issued.
+- Prevention rule: Read the actual proof predicate before choosing a negative fixture; do not add runtime status restrictions to satisfy a mistaken test.
+- Reuse trigger: Producer-attempt, stale-generation, heartbeat-admission tests.
+- Evidence: `~/.cache/generic-stale-producer-rebind/auto-green-1.log` (1 failed), `auto-green-2.log` (46 passed).
+

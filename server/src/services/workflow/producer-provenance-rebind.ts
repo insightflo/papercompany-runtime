@@ -2,14 +2,13 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { and, desc, eq } from "drizzle-orm";
 import { heartbeatRuns, issueWorkProducts, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
-import { workProductDelegatedProducerSchema, workProductProducerPromotionMarkerSchema, workProductProducerRebindMarkerSchema, workProductProducerSchema } from "@paperclipai/shared/validators/workflow-artifact";
+import { workProductDelegatedProducerSchema, workProductProducerPromotionMarkerSchema, workProductProducerSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { badRequest, conflict } from "../../errors.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
-import { producerAttempt } from "../work-products/producer-attempt.js";
 import { appendWorkflowAuthorityTransition } from "./authority/transitions.js";
-import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
-import { lockProducerRebindScope } from "./producer-rebind-locks.js";
+import { issueProducerRebind, type ProducerProvenanceRebindResult } from "./producer-rebind-issuance.js";
+export type { ProducerProvenanceRebindResult } from "./producer-rebind-issuance.js";
 
 /**
  * [파일 목적] 보드 승인 생산자 귀속 재바인딩(board producer provenance rebind).
@@ -90,105 +89,12 @@ export async function consumerDependsOnProducer(db: Db, input: {
   return false;
 }
 
-export type ProducerProvenanceRebindResult =
-  | { status: "rebound"; productId: string; producerStepRunId: string; fromGeneration: number; reboundAtGeneration: number; sha256: string; byteSize: number }
-  | { status: "already_rebound"; productId: string; fromGeneration: number };
-
 export async function rebindProducerProvenance(db: Db, input: {
   companyId: string; workflowRunId: string; producerStepId: string; productId: string;
   actor: { actorType: string; actorId: string }; now?: Date;
   expected?: { sha256: string; byteSize: number };
 }): Promise<ProducerProvenanceRebindResult> {
-  const now = input.now ?? new Date();
-  return db.transaction(async (tx) => {
-    // Shared order with strict recovery: mission → run → steps (id order) → product → claim.
-    const { run, rows } = await lockProducerRebindScope(tx as unknown as Db, input.companyId, input.workflowRunId);
-    const step = rows.find(row => row.stepId === input.producerStepId);
-    if (!step) throw badRequest("producer rebind producer step run not found");
-    if (step.status !== "completed" || step.issueId == null) throw conflict("producer_rebind_producer_not_completed");
-    const [product] = await tx.select().from(issueWorkProducts)
-      .where(and(eq(issueWorkProducts.id, input.productId), eq(issueWorkProducts.companyId, input.companyId))).for("update");
-    if (!product || product.companyId !== input.companyId || product.issueId !== step.issueId) {
-      throw badRequest("producer rebind work product not on producer issue");
-    }
-    if (product.status === "archived") throw conflict("producer_rebind_product_archived");
-    const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
-    if (!parsed.success) throw conflict("producer_rebind_provenance_missing");
-    const p = parsed.data;
-    // 멱등: 이 생산 사실에 대해 이미 유효한 마커가 있으면 추가 쓰기 없이 반혼한다(감사 이벤트도 중복하지 않는다).
-    const existingMarker = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
-    if (existingMarker.success && existingMarker.data.fromGeneration === p.executionGeneration
-      && existingMarker.data.fromHeartbeatRunId === p.heartbeatRunId) {
-      if (input.expected && (existingMarker.data.sha256 !== input.expected.sha256
-        || existingMarker.data.byteSize !== input.expected.byteSize)) throw conflict("producer_rebind_bytes_changed");
-      return { status: "already_rebound", productId: product.id, fromGeneration: p.executionGeneration };
-    }
-    const mismatches = workProductProducerMismatches(p, {
-      companyId: input.companyId, workflowRunId: run.id,
-      run: { missionId: run.missionId }, step, product,
-    });
-    const generationOnly = mismatches.length > 0
-      && mismatches.every((field) => field === "executionGeneration" || field === "sourceExecutionGeneration");
-    if (!generationOnly) throw conflict("producer_rebind_not_generation_only");
-    if (p.executionGeneration >= step.executionGeneration) throw conflict("producer_rebind_not_stale");
-    const [heartbeat] = await tx.select().from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.id, p.heartbeatRunId), eq(heartbeatRuns.companyId, input.companyId)));
-    if (!heartbeat || heartbeat.companyId !== p.companyId || heartbeat.issueId !== step.issueId
-      || heartbeat.workflowStepRunId !== step.id) {
-      throw conflict("producer_rebind_heartbeat_unlinked");
-    }
-    if (heartbeat.workflowExecutionGeneration !== p.executionGeneration) {
-      throw conflict("producer_rebind_heartbeat_generation_mismatch");
-    }
-    let attempt: { retryCount: number; iterationIndex: number };
-    try {
-      attempt = await producerAttempt(tx, heartbeat, { ...step, executionGeneration: p.executionGeneration });
-    } catch {
-      throw conflict("producer_rebind_attempt_unproven");
-    }
-    if (attempt.retryCount !== p.retryCount || attempt.iterationIndex !== p.iterationIndex) {
-      throw conflict("producer_rebind_attempt_mismatch");
-    }
-    const file = resolveWorkProductLocalFilePath(product);
-    if (!file || !["local", "local_file"].includes(product.provider)) throw conflict("producer_rebind_product_not_local");
-    let bytes: Buffer;
-    try { bytes = await readFile(file); } catch { throw conflict("producer_rebind_file_unreadable"); }
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    if (input.expected && (sha256 !== input.expected.sha256 || bytes.byteLength !== input.expected.byteSize)) {
-      throw conflict("producer_rebind_bytes_changed");
-    }
-    const marker = {
-      schemaVersion: "workflow.work-product-producer-rebind.v1" as const,
-      fromGeneration: p.executionGeneration,
-      reboundAtGeneration: step.executionGeneration,
-      fromHeartbeatRunId: p.heartbeatRunId,
-      sha256, byteSize: bytes.byteLength,
-      reboundAt: now.toISOString(),
-      reboundBy: { actorType: input.actor.actorType, actorId: input.actor.actorId },
-      reason: "board_producer_provenance_rebind",
-      authorityIdempotencyKey: `producer-provenance-rebind:${product.id}:${p.executionGeneration}`,
-    };
-    const nextMetadata = {
-      ...(product.metadata ?? {}),
-      workflowProducerRebind: marker,
-    };
-    await tx.update(issueWorkProducts)
-      .set({ metadata: nextMetadata, updatedAt: now })
-      .where(and(eq(issueWorkProducts.id, product.id), eq(issueWorkProducts.companyId, input.companyId)));
-    await appendWorkflowAuthorityTransition(tx, {
-      companyId: input.companyId, workflowRunId: run.id, workflowStepRunId: step.id,
-      issueId: step.issueId, heartbeatRunId: p.heartbeatRunId,
-      executionGeneration: step.executionGeneration,
-      reason: marker.reason, idempotencyKey: marker.authorityIdempotencyKey,
-      payload: { version: 1, transition: "producer_provenance_rebound", productId: product.id,
-        producerStepRunId: step.id, fromGeneration: marker.fromGeneration,
-        reboundAtGeneration: marker.reboundAtGeneration,
-        sha256, byteSize: marker.byteSize, reboundBy: marker.reboundBy },
-    });
-    return { status: "rebound", productId: product.id, producerStepRunId: step.id,
-      fromGeneration: marker.fromGeneration, reboundAtGeneration: marker.reboundAtGeneration,
-      sha256, byteSize: marker.byteSize };
-  });
+  return issueProducerRebind(db, input);
 }
 
 export type DelegatedProducerPromotionResult =

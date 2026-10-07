@@ -3,7 +3,7 @@ import { missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/
 import { badRequest, conflict } from "../../errors.js";
 
 /** Global order: mission → run → all step runs (id order) → product → claim. */
-export async function lockProducerRebindScope(db: Db, companyId: string, runId: string) {
+export async function lockProducerRebindScope(db: Db, companyId: string, runId: string, requireFailed = true) {
   const [scope] = await db.select({ missionId: workflowRuns.missionId }).from(workflowRuns)
     .where(and(eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId)));
   if (!scope) throw badRequest("producer rebind workflow run not found");
@@ -15,7 +15,7 @@ export async function lockProducerRebindScope(db: Db, companyId: string, runId: 
   const [run] = await db.select().from(workflowRuns)
     .where(and(eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId))).for("update");
   if (!run || run.missionId !== scope.missionId) throw conflict("producer_rebind_scope_changed");
-  if (run.status !== "failed") throw conflict("producer_rebind_run_not_failed");
+  if (requireFailed && run.status !== "failed") throw conflict("producer_rebind_run_not_failed");
   // workflow_step_runs has no company column; the scoped, locked parent proves tenant ownership.
   const rows = await db.select().from(workflowStepRuns)
     .where(eq(workflowStepRuns.workflowRunId, run.id)).orderBy(workflowStepRuns.id).for("update");
