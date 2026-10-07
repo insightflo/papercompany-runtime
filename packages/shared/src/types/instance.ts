@@ -29,6 +29,10 @@ export interface InstanceExperimentalSettings {
   enableQaRebindRecoveryV1: boolean;
   /** [qa-rebind recovery v1] 회사 단위 허용 목록. 기본 빈 목록. */
   enableQaRebindRecoveryCompanyIdsV1: string[];
+  /** Broad search release by company, mission, or running agent (OR matching). Empty lists deny. */
+  broadSearchAllowedCompanyIdsV1: string[];
+  broadSearchAllowedMissionIdsV1: string[];
+  broadSearchAllowedAgentIdsV1: string[];
 }
 
 export interface InstanceSettings {

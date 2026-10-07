@@ -41,6 +41,9 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
       enableQaRebindRecoveryV1: parsed.data.enableQaRebindRecoveryV1 ?? false,
       enableQaRebindRecoveryCompanyIdsV1: parsed.data.enableQaRebindRecoveryCompanyIdsV1 ?? [],
+      broadSearchAllowedCompanyIdsV1: parsed.data.broadSearchAllowedCompanyIdsV1 ?? [],
+      broadSearchAllowedMissionIdsV1: parsed.data.broadSearchAllowedMissionIdsV1 ?? [],
+      broadSearchAllowedAgentIdsV1: parsed.data.broadSearchAllowedAgentIdsV1 ?? [],
     };
   }
   return {
@@ -54,6 +57,9 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     enableKnowledgePatternInjection: false,
     enableQaRebindRecoveryV1: false,
     enableQaRebindRecoveryCompanyIdsV1: [],
+    broadSearchAllowedCompanyIdsV1: [],
+    broadSearchAllowedMissionIdsV1: [],
+    broadSearchAllowedAgentIdsV1: [],
   };
 }
 

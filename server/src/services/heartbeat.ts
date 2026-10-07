@@ -7103,7 +7103,7 @@ export function heartbeatService(db: Db) {
     }
     if (issueId) {
       const runtimeSearchPaths = await buildRuntimeSearchPathPermissions({
-        db,
+        db, agentId: agent.id,
         companyId: agent.companyId,
         issueId,
         workingDirectory: executionWorkspace.cwd,

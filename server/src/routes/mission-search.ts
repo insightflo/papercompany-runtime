@@ -23,6 +23,7 @@ import { heartbeatRuns } from "@paperclipai/db";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import {
   MISSION_SEARCH_SCOPES,
+  readBroadSearchOverride,
   type MissionSearchScope,
 } from "../services/runtime-search-scopes.js";
 import {
@@ -66,6 +67,7 @@ function readPermissionsFromContext(contextSnapshot: unknown): RuntimeSearchPath
   if (!isRecord(raw) || raw.version !== 1) return null;
   const workingDirectory = readString(raw.workingDirectory);
   if (!workingDirectory) return null;
+  const broadScanRepoAllowed = raw.broadScanRepoAllowed === true;
   return {
     version: 1,
     workingDirectory,
@@ -73,7 +75,8 @@ function readPermissionsFromContext(contextSnapshot: unknown): RuntimeSearchPath
     dependencyFiles: Array.isArray(raw.dependencyFiles) ? raw.dependencyFiles.filter((v): v is string => typeof v === "string") : [],
     dependencyDirectories: Array.isArray(raw.dependencyDirectories) ? raw.dependencyDirectories.filter((v): v is string => typeof v === "string") : [],
     allowedSearchScopes: Array.isArray(raw.allowedSearchScopes) ? raw.allowedSearchScopes.filter((v): v is string => typeof v === "string") : [],
-    broadScanRepoAllowed: typeof raw.broadScanRepoAllowed === "boolean" ? raw.broadScanRepoAllowed : false,
+    broadScanRepoAllowed,
+    broadSearchOverride: readBroadSearchOverride(raw.version, raw.broadSearchOverride, broadScanRepoAllowed),
     qaType: readString(raw.qaType) ?? null,
     qaInputScope: readString(raw.qaInputScope) ?? null,
   };
@@ -153,6 +156,7 @@ export function missionSearchRoutes(db: Db): Router {
           db,
           companyId: String(runContext.companyId),
           issueId: run.issueId,
+          agentId: run.agentId,
           workingDirectory,
         });
       }

@@ -11,6 +11,9 @@
 
 import { parseObject } from "../adapters/utils.js";
 import {
+  BROAD_SEARCH_OVERRIDE,
+  readBroadSearchOverride,
+  type BroadSearchOverride,
   missionSearchScopesAllowRepo,
   normalizeMissionSearchScopes,
   type MissionSearchScope,
@@ -31,6 +34,7 @@ export interface RuntimeBroadScanPaths {
   dependencyDirectories: string[];
   allowedSearchScopes: MissionSearchScope[];
   broadScanRepoAllowed: boolean;
+  broadSearchOverride: BroadSearchOverride;
 }
 
 export function readRuntimeSearchPaths(value: unknown): RuntimeBroadScanPaths {
@@ -63,7 +67,14 @@ export function readRuntimeSearchPaths(value: unknown): RuntimeBroadScanPaths {
     dependencyDirectories,
     allowedSearchScopes,
     broadScanRepoAllowed,
+    broadSearchOverride: readBroadSearchOverride(permissions?.version, permissions?.broadSearchOverride, broadScanRepoAllowed),
   };
+}
+
+/** Shared early-exit for the runtime hook and legacy tool guard so their bypass rules cannot drift. */
+export function shouldBypassRuntimeBroadScanGuard(guardrails: Record<string, unknown> | null, paths: RuntimeBroadScanPaths): boolean {
+  if (paths.broadSearchOverride === BROAD_SEARCH_OVERRIDE) return true;
+  return guardrails?.broadScanAllowed === true && !paths.declared;
 }
 
 export function containsWorkingDirectoryChange(command: string): boolean {

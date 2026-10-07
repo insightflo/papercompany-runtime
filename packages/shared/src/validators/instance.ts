@@ -61,6 +61,10 @@ export const instanceExperimentalSettingsSchema = z.object({
   // [qa-rebind recovery v1] QA 재바인드 자동 복구 — 기본 off(fail-closed). 회사 목록은 부분 롤아웃용.
   enableQaRebindRecoveryV1: z.boolean().default(false),
   enableQaRebindRecoveryCompanyIdsV1: z.array(z.string().uuid()).default([]),
+  // Broad search release: matching company, mission, or running agent grants access; empty lists deny.
+  broadSearchAllowedCompanyIdsV1: z.array(z.string().uuid()).default([]),
+  broadSearchAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
+  broadSearchAllowedAgentIdsV1: z.array(z.string().uuid()).default([]),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

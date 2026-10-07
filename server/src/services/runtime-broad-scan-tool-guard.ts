@@ -9,6 +9,7 @@ import {
   containsWorkingDirectoryChange,
   readAllowedFileViewPaths,
   readRuntimeSearchPaths,
+  shouldBypassRuntimeBroadScanGuard,
 } from "./runtime-broad-scan-context.js";
 
 export interface RuntimeBroadScanToolGuardResult {
@@ -34,7 +35,7 @@ export function evaluateRuntimeBroadScanToolGuard(input: {
   const manifest = parseObject(input.context.paperclipStepInputManifest);
   const guardrails = parseObject(manifest?.guardrails);
   const runtimeSearchPaths = readRuntimeSearchPaths(input.context.paperclipRuntimeSearchPaths);
-  if (guardrails?.broadScanAllowed === true && !runtimeSearchPaths.declared) {
+  if (shouldBypassRuntimeBroadScanGuard(guardrails, runtimeSearchPaths)) {
     return { blocked: false, reason: null, matchedCommand: null };
   }
 
