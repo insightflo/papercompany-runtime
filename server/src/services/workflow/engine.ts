@@ -6,8 +6,8 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { activityLog, companies, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
-import { and, eq } from "drizzle-orm";
+import { activityLog, companies, heartbeatRuns, issueWorkProducts, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { and, desc, eq, gt, lt, ne } from "drizzle-orm";
 import { issueService } from "../issues.js";
 import { validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
 import { admitReplacement, assertAgentReplacementRequired } from "./replacement-admission.js";
@@ -174,6 +174,65 @@ async function assertWorkflowToolReadiness(
 }
 
 /**
+ * [stale-run auto-block guard, 2026-10-07 CMP-328] 이슈를 막은 마지막 기록이 heartbeat 자동 차단
+ * (issue.run_failure_auto_blocked, reason=terminal_run_failure)이고, 그 run 이 (a) 취소됐거나
+ * (b) 차단 전에 같은 이슈의 더 새 run 이 이미 시작돼 소유자가 아니었으며, 스텝 현재 세대의
+ * 산출물이 장부(issue_work_products)에 등록돼 있을 때만 재무장 근거를 돌려준다.
+ * 코멘트·stdout 등 자연어는 읽지 않는다. 산출물 완료/증거 검사는 이후 기존 경로가 그대로 수행한다.
+ */
+async function findStaleRunBlockWithCurrentWorkProduct(
+  db: Db,
+  input: { companyId: string; issueId: string; executionGeneration: number },
+): Promise<{ blockActivityId: string; blockingRunId: string; reason: "cancelled" | "not_owner"; workProductId: string } | null> {
+  const [block] = await db
+    .select({ id: activityLog.id, runId: activityLog.runId, details: activityLog.details, createdAt: activityLog.createdAt })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.entityType, "issue"),
+      eq(activityLog.entityId, input.issueId),
+      eq(activityLog.action, "issue.run_failure_auto_blocked"),
+    ))
+    .orderBy(desc(activityLog.createdAt))
+    .limit(1);
+  if (!block?.runId || (block.details as Record<string, unknown> | null)?.reason !== "terminal_run_failure") return null;
+  const [blockingRun] = await db
+    .select({ id: heartbeatRuns.id, status: heartbeatRuns.status, createdAt: heartbeatRuns.createdAt })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.id, block.runId), eq(heartbeatRuns.companyId, input.companyId)))
+    .limit(1);
+  if (!blockingRun) return null;
+  let reason: "cancelled" | "not_owner" | null = blockingRun.status === "cancelled" ? "cancelled" : null;
+  if (!reason) {
+    const [newerRun] = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.issueId, input.issueId),
+        ne(heartbeatRuns.id, blockingRun.id),
+        gt(heartbeatRuns.createdAt, blockingRun.createdAt),
+        lt(heartbeatRuns.createdAt, block.createdAt),
+      ))
+      .limit(1);
+    if (newerRun) reason = "not_owner";
+  }
+  if (!reason) return null;
+  const [workProduct] = await db
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, input.companyId),
+      eq(issueWorkProducts.issueId, input.issueId),
+      ne(issueWorkProducts.status, "archived"),
+      eq(issueWorkProducts.sourceExecutionGeneration, input.executionGeneration),
+    ))
+    .limit(1);
+  if (!workProduct) return null;
+  return { blockActivityId: block.id, blockingRunId: blockingRun.id, reason, workProductId: workProduct.id };
+}
+
+/**
  * [QA rework re-arm] 공식 resume 에서 "failed 스텝 + blocked 이슈" 조합을 재무장한다.
  *
  * 배경(2026-09-25 락 순환 사고, mission 90605444 run b7728a08): 게이트 반려(request_changes
@@ -192,7 +251,7 @@ export async function rearmBlockedQaIssuesForResume(
   input: { companyId: string; runId: string },
 ): Promise<Array<{ issueId: string; stepRunId: string }>> {
   const failedStepRuns = await db
-    .select({ id: workflowStepRuns.id, issueId: workflowStepRuns.issueId })
+    .select({ id: workflowStepRuns.id, issueId: workflowStepRuns.issueId, executionGeneration: workflowStepRuns.executionGeneration })
     .from(workflowStepRuns)
     .where(and(
       eq(workflowStepRuns.workflowRunId, input.runId),
@@ -216,7 +275,14 @@ export async function rearmBlockedQaIssuesForResume(
         eq(workflowTransitionEvents.verdict, "request_changes"),
       ))
       .limit(1);
-    if (!verdictEvent) continue;
+    const staleRunBlock = verdictEvent
+      ? null
+      : await findStaleRunBlockWithCurrentWorkProduct(db, {
+        companyId: input.companyId,
+        issueId: issue.id,
+        executionGeneration: stepRun.executionGeneration,
+      });
+    if (!verdictEvent && !staleRunBlock) continue;
     await issueService(db).update(issue.id, {
       status: "in_progress",
       workflowSyncSource: "workflow_resume_qa_rearm",
@@ -232,7 +298,8 @@ export async function rearmBlockedQaIssuesForResume(
         schemaVersion: 1,
         workflowRunId: input.runId,
         workflowStepRunId: stepRun.id,
-        verdictEventId: verdictEvent.id,
+        verdictEventId: verdictEvent?.id ?? null,
+        staleRunBlock,
         issueIdentifier: issue.identifier ?? null,
         previousStatus: "blocked",
         nextStatus: "in_progress",
