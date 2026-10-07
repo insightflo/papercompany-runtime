@@ -35,6 +35,19 @@ let failSave: boolean;
 async function flush() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 }
+// Polls until the assertion passes; fixed sleeps flake under loaded CI runners.
+async function waitFor(assertion: () => void, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await flush();
+    }
+  }
+}
 async function mount() {
   host = document.createElement("div");
   document.body.append(host);
@@ -48,6 +61,7 @@ async function mount() {
     );
   });
   await flush();
+  await waitFor(() => expect(host.textContent).toContain("광역 탐색 허용 (실험)"));
 }
 function button(label: string): HTMLButtonElement {
   const found = Array.from(host.querySelectorAll("button")).find(
@@ -68,8 +82,11 @@ function labelled<T extends HTMLElement>(label: string): T {
   return element!;
 }
 async function choose(label: string, value: string) {
+  await waitFor(() => expect(
+    Array.from(labelled<HTMLSelectElement>(label).options).map((option) => option.value),
+    `option ${value} in ${label}`,
+  ).toContain(value));
   const element = labelled<HTMLSelectElement>(label);
-  expect(Array.from(element.options).map((option) => option.value), `option ${value} in ${label}`).toContain(value);
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(element, value);
     element.dispatchEvent(new Event("change", { bubbles: true }));
@@ -182,7 +199,7 @@ describe("broad-search allowlist editing through the real settings page", () => 
 
   it("picks company, agent and mission by name and saves their IDs", async () => {
     await mount();
-    expect(optionTexts("회사 선택")).toEqual(expect.arrayContaining(["알파 회사", "베타 회사"]));
+    await waitFor(() => expect(optionTexts("회사 선택")).toEqual(expect.arrayContaining(["알파 회사", "베타 회사"])));
     expect(button("회사 추가").disabled).toBe(true);
     await choose("회사 선택", COMPANY_A);
     await click("회사 추가");
@@ -191,16 +208,17 @@ describe("broad-search allowlist editing through the real settings page", () => 
 
     expect(button("에이전트 추가").disabled).toBe(true);
     await choose("에이전트 소속 회사", COMPANY_A);
-    expect(optionTexts("에이전트 선택")).toContain("리서처");
+    await waitFor(() => expect(optionTexts("에이전트 선택")).toContain("리서처"));
     expect(optionTexts("에이전트 선택")).not.toContain("퇴사자");
     await choose("에이전트 선택", AGENT_ACTIVE);
     await click("에이전트 추가");
 
     await choose("미션 소속 회사", COMPANY_A);
-    expect(optionTexts("미션 선택")).toContain("주간 리포트");
+    await waitFor(() => expect(optionTexts("미션 선택")).toContain("주간 리포트"));
     await choose("미션 선택", MISSION_A);
     await click("미션 추가");
 
+    await waitFor(() => expect(chips("미션")[0]).toContain("주간 리포트 (알파 회사)"));
     expect(chips("회사")[0]).toContain("알파 회사");
     expect(chips("회사")[0]).toContain("aaaaaaaa");
     expect(chips("에이전트")[0]).toContain("리서처 (알파 회사)");
@@ -219,6 +237,12 @@ describe("broad-search allowlist editing through the real settings page", () => 
     saved.broadSearchAllowedAgentIdsV1 = [AGENT_B, UNKNOWN];
     saved.broadSearchAllowedMissionIdsV1 = [MISSION_OLD, UNKNOWN];
     await mount();
+    await waitFor(() => {
+      expect(chips("회사")[0]).toContain("베타 회사");
+      expect(chips("에이전트")[0]).toContain("작가 (베타 회사)");
+      expect(chips("미션")[0]).toContain("오래된 미션 (베타 회사)");
+      for (const label of scopes) expect(chips(label)[1]).toContain(`알 수 없음 (${UNKNOWN})`);
+    });
     expect(chips("회사")[0]).toContain("베타 회사");
     expect(chips("에이전트")[0]).toContain("작가 (베타 회사)");
     expect(chips("미션")[0]).toContain("오래된 미션 (베타 회사)");
