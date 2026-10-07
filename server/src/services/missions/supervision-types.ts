@@ -5,6 +5,7 @@
 // [외부 연결] consumer: missions.ts(supervision 함수). deps: MissionExecutionSourceRef, MissionOwnerActionExplanation.
 // [수정시 주의] recommendation type 종류가 바뀌면 MissionOwnerSupervisionRecommendationType union과 supervision 분기 동기화.
 import type { OwnerToolRecoveryOutcome } from "./owner-tool-recovery.js";
+import type { MissionPlanConsumerDiagnosticFields } from "@paperclipai/shared/types/mission-plan-consumer";
 import type { MissionExecutionSourceRef } from "./mission-execution-sources.js";
 import { isRecord } from "./utils.js";
 import type { MissionOwnerActionExplanation } from "./mission-owner-recovery-explanations.js";
@@ -74,13 +75,13 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey?: string;
-} | {
+} | (MissionPlanConsumerDiagnosticFields & {
   type: "materialize_plan_decision";
   missionId: string;
   resultStatus: string;
   planningIssueId: string | null;
   workflowRunId?: string;
-} | {
+}) | {
   type: "native_tool_step_retry";
   missionId: string;
   ownerActionIssueId: string;
