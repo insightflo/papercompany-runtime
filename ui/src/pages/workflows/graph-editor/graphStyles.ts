@@ -356,6 +356,9 @@ export const graphNodeOutputHandleStyle = (active: boolean): CSSProperties => ({
 
 export const graphEdgeRemoveButtonStyle: CSSProperties = {
   position: "absolute",
+  // The canvas content tree sets pointerEvents:none; without this override the
+  // button inherits it and clicks pass through to the edge hit-path underneath.
+  pointerEvents: "auto",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
