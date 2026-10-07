@@ -6,6 +6,7 @@ import { workProductProducerPromotionMarkerSchema, workProductProducerRebindMark
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
 import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
+import { ProducerRebindRequired, withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
 
 /**
  * [producer provenance rebind] 보드 승인 재바인딩 표시가 생산 사실과 정합한지 검증.
@@ -43,8 +44,13 @@ function validPromotionMarker(product: typeof issueWorkProducts.$inferSelect, pr
 }
 
 /** Ordinary same-run selector: cross-run approval must never weaken these checks. */
-export async function selectSameRunWorkProduct(db: Db, scope: { companyId: string; workflowRunId: string;
-  stepId: string; selector: WorkProductSelectors[string]; pinnedId?: string }) {
+type SameRunScope = { companyId: string; workflowRunId: string;
+  stepId: string; selector: WorkProductSelectors[string]; pinnedId?: string };
+export function selectSameRunWorkProduct(db: Db, scope: SameRunScope) {
+  return withAutomaticProducerRebind(db, () => readSameRunWorkProduct(db, scope));
+}
+
+async function readSameRunWorkProduct(db: Db, scope: SameRunScope) {
   const [source] = await db.select({ run: workflowRuns, step: workflowStepRuns }).from(workflowRuns)
     .innerJoin(workflowStepRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
     .where(and(eq(workflowRuns.id, scope.workflowRunId), eq(workflowRuns.companyId, scope.companyId), eq(workflowStepRuns.stepId, scope.stepId)));
@@ -61,8 +67,12 @@ export async function selectSameRunWorkProduct(db: Db, scope: { companyId: strin
   const promotion = validPromotionMarker(product, p, s);
   const rebind = promotion ? null : validRebindMarker(product, p, s);
   const toleratedFields = promotion || rebind ? ["executionGeneration", "sourceExecutionGeneration"] : [];
-  if (workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product })
-    .some((field) => !toleratedFields.includes(field))) {
+  const mismatches = workProductProducerMismatches(p, { ...scope, run: source.run, step: s, product });
+  if (mismatches.some(field => !toleratedFields.includes(field))) {
+    if (!promotion && !rebind && mismatches.every(field => ["executionGeneration", "sourceExecutionGeneration"].includes(field))) {
+      throw new ProducerRebindRequired({ companyId: scope.companyId, workflowRunId: scope.workflowRunId,
+        producerStepId: scope.stepId, productId: product.id, selector: scope.selector, pinnedId: scope.pinnedId });
+    }
     throw new Error("workproduct_selector_stale_producer");
   }
   if (promotion) {

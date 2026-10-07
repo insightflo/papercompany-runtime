@@ -8,6 +8,7 @@ import { createWorkflowRun } from "./workflow-store.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { selectSameRunWorkProduct } from "./workproduct-same-run.js";
+import { propagateProducerRebind, withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
 import { readSeededStepProducts, requireSeedSource, seedError, seedStepHash, verifySeedProductBytes } from "./workflow-seed-evidence.js";
 import { bindSeedInterpretedInputs, hasSeedInterpretedInputTokens } from "./seed-interpreted-inputs.js";
 import { isNativeToolStep, readToolStepSeedArtifact } from "./workflow-seed-tool-output.js";
@@ -44,7 +45,7 @@ function assertSupported(step: WorkflowStep) {
 export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   assertSeedActor(input, actor);
   const request = workflowSeedRequestSchema.parse(input.seedFromRun);
-  return db.transaction(async tx => {
+  return withAutomaticProducerRebind(db, () => db.transaction(async tx => {
     const t = tx as unknown as Db;
     if (!input.missionId) throw seedError("linked_mission_required");
     await tx.select().from(missions).where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.companyId))).for("update");
@@ -92,7 +93,7 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
           try {
             selected = await selectSameRunWorkProduct(t, { companyId: input.companyId, workflowRunId: source.id, stepId: sourceId,
               selector: { type: product.type as "document", title: product.title }, pinnedId: product.id });
-          } catch { throw seedError("source_provenance_invalid", { stepId: id }); }
+          } catch (error) { propagateProducerRebind(error); throw seedError("source_provenance_invalid", { stepId: id }); }
           const { sha256 } = await verifySeedProductBytes(t, selected);
           products.push({ id: product.id, type: product.type, title: product.title, sha256, path: selected.file, producer: selected.producer });
         }
@@ -124,5 +125,5 @@ export async function createSeededWorkflowRun(db: Db, input: CreateWorkflowRunIn
       action: "workflow_run.seed_approved", entityType: "workflow_run", entityId: run.id,
       details: { schemaVersion: 1, sourceWorkflowRunId: source.id, stepIds: request.stepIds } });
     return run;
-  });
+  }));
 }

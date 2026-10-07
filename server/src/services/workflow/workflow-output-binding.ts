@@ -3,6 +3,7 @@ import { issueWorkProducts, workflowStepOutputBindings, type Db } from "@papercl
 import { findWorkflowSeed } from "./workflow-seed-evidence.js";
 import { lockProducerSelection } from "../work-products/producer-selection-lock.js";
 import { selectOfficialWorkProduct } from "./workproduct-selector.js";
+import { withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
 import { workProductSelectorsSchema } from "@paperclipai/shared/validators/workflow-artifact";
 
 export interface OutputBindingPinInput {
@@ -20,7 +21,7 @@ export async function pinWorkProductForStep(
 ): Promise<{ kind: "pinned" } | { kind: "already_pinned"; workProductId: string }> {
   const scope = { companyId: input.companyId, workflowRunId: input.workflowRunId, stepId: input.referencedStepId };
   if (!await findWorkflowSeed(db, scope)) return insertPin(db, input);
-  return db.transaction(async tx => {
+  return withAutomaticProducerRebind(db, () => db.transaction(async tx => {
     const locked = await lockProducerSelection(tx, { ...scope, stepIds: [input.referencedStepId],
       stepRunIds: [input.consumerStepRunId] }, "update");
     if (!locked.run || !locked.steps.some(s => s.id === input.consumerStepRunId)) throw new Error("seed_binding_scope_mismatch");
@@ -30,7 +31,7 @@ export async function pinWorkProductForStep(
     const selector = workProductSelectorsSchema.parse({ [scope.stepId]: { type: product.type, title: product.title } })[scope.stepId];
     await selectOfficialWorkProduct(tx as unknown as Db, { ...scope, pinnedId: product.id, selector });
     return insertPin(tx as unknown as Db, input);
-  });
+  }));
 }
 
 async function insertPin(db: Db, input: OutputBindingPinInput): Promise<{ kind: "pinned" } | { kind: "already_pinned"; workProductId: string }> {
