@@ -9440,9 +9440,23 @@ export function heartbeatService(db: Db) {
         }
       }
 
+      // [stale-run auto-block guard, 2026-10-07 CMP-328] 자동 차단은 이슈를 지금 소유한 run 만 할 수 있다.
+      //   다른 run 이 소유 칸을 가진 상태에서 끝난 이전(비소유) run 은 이슈·소유 칸·대기 wake 를
+      //   건드리지 않고 끝난다(새 소유 run 의 잠금을 지우지 않기 위함).
+      const isOwnerRun = issue.executionRunId === run.id || issue.checkoutRunId === run.id;
+      const lockOwnedByOtherRun =
+        (issue.executionRunId != null && issue.executionRunId !== run.id) ||
+        (issue.checkoutRunId != null && issue.checkoutRunId !== run.id);
+      if (run.status !== "succeeded" && !isOwnerRun && lockOwnedByOtherRun) {
+        return { promotedRun: null };
+      }
+      // 통제판이 이미 이슈 blocked 로 절단한 run 은 늦게 끝나도 다시 자동 차단하지 않는다.
+      const cutByIssueBlock = run.status === "cancelled" && run.errorCode === "issue_status_blocked";
+
       if (
         ["failed", "timed_out", "cancelled"].includes(run.status) &&
-        isLinkedToRun &&
+        isOwnerRun &&
+        !cutByIssueBlock &&
         issue.status === "in_progress" &&
         issue.assigneeAgentId === run.agentId
       ) {

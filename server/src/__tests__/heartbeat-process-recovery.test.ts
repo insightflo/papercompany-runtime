@@ -472,6 +472,55 @@ describe("heartbeat orphaned process recovery", () => {
     expect(agent?.status).toBe("idle");
   });
 
+  // [stale-run auto-block guard, 2026-10-07 CMP-328] 이전 run 이 늦게 끝나도 지금 다른 run 이
+  //   소유한 이슈를 blocked 로 만들거나 소유 칸을 지우면 안 된다(소유 run 만 자동 차단).
+  async function seedStaleRunWithNewOwner() {
+    const fixture = await seedRunFixture();
+    const newRunId = randomUUID();
+    await db.update(heartbeatRuns).set({ issueId: fixture.issueId }).where(eq(heartbeatRuns.id, fixture.runId));
+    await db.insert(heartbeatRuns).values({
+      id: newRunId,
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      issueId: fixture.issueId,
+      contextSnapshot: { issueId: fixture.issueId },
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.update(issues)
+      .set({ checkoutRunId: newRunId, executionRunId: newRunId })
+      .where(eq(issues.id, fixture.issueId));
+    return { ...fixture, newRunId };
+  }
+
+  it("does not auto-block or clear the lock when a stale non-owner run of the same issue ends", async () => {
+    const { runId, newRunId, issueId } = await seedStaleRunWithNewOwner();
+
+    await heartbeatService(db).cancelRun(runId);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.checkoutRunId).toBe(newRunId);
+    expect(issue?.executionRunId).toBe(newRunId);
+    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, issueId));
+    expect(activities.some((row) => row.action === "issue.run_failure_auto_blocked")).toBe(false);
+  });
+
+  it("still auto-blocks the issue when the cancelled run is the current owner", async () => {
+    const { runId, issueId } = await seedRunFixture();
+
+    await heartbeatService(db).cancelRun(runId);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("blocked");
+    expect(issue?.checkoutRunId).toBeNull();
+    const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, issueId));
+    expect(activities.some((row) => row.action === "issue.run_failure_auto_blocked")).toBe(true);
+  });
+
   it("queues exactly one retry when the recorded local pid is dead", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       processPid: 999_999_999,
