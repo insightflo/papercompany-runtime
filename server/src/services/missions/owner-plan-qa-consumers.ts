@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { issues, missionPlanArtifacts, type Db } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
-import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-plan-artifacts.js";
+import { missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import type { ValidationVerdict } from "../validation-verdict.js";
 import { readPlanQaVerdict } from "./mission-plan-qa-completion-gate.js";
 
@@ -74,7 +74,7 @@ export async function updatePlanQaRef(input: {
     }
   }
   await input.db.update(missionPlanArtifacts)
-    .set({ refs: mergeMissionPlanRefs(activePlan.refs, { planQa: merged }), updatedAt: new Date() })
+    .set({ refs: { ...activePlan.refs, planQa: merged }, updatedAt: new Date() })
     .where(and(eq(missionPlanArtifacts.companyId, input.companyId), eq(missionPlanArtifacts.id, activePlan.id)));
 }
 

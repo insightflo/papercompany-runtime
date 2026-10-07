@@ -16,6 +16,7 @@ import { conflict, forbidden, notFound, unauthorized, unprocessable } from "../.
 import { assertCompanyAccess, getActorInfo } from "../../routes/authz.js";
 import { issueService } from "../issues.js";
 import { logActivity } from "../activity-log.js";
+import { projectMissionPlanConsumerResult } from "./mission-plan-consumer-diagnostics.js";
 import {
   recordLatestAuthorizedMissionOwnerPlanDecision,
   type PlanQaWakeupHandler,
@@ -141,7 +142,8 @@ export async function submitMissionPlanQaVerdict(input: {
         decisionHash, missionId,
         enqueue: input.enqueuePlanQaResubmissionWakeup ?? null,
       });
-      return { ...gate, decisionHash, planDecisionStatus: "plan_qa_pending" as const, resubmission };
+      return { ...gate, decisionHash, planDecisionStatus: "plan_qa_pending" as const,
+        planDecisionReason: null, planDecisionDiagnostics: [], resubmission };
     }
     const planDecision = await recordLatestAuthorizedMissionOwnerPlanDecision({
       db: input.db, companyId: input.issue.companyId, missionId,
@@ -152,6 +154,7 @@ export async function submitMissionPlanQaVerdict(input: {
     return {
       status: "recorded" as const, planQaIssueId: input.issue.id, decisionHash,
       verdict: gate.status, evidenceRefId: gate.evidenceRefId, planDecisionStatus: planDecision.status,
+      ...projectMissionPlanConsumerResult(planDecision),
     };
   }
 
@@ -174,7 +177,8 @@ export async function submitMissionPlanQaVerdict(input: {
     enqueuePlanQaWakeup: input.enqueuePlanQaWakeup,
     enqueuePlanningIssueWakeup: input.enqueuePlanningIssueWakeup,
   });
-  return { ...recorded, decisionHash, planDecisionStatus: planDecision.status };
+  return { ...recorded, decisionHash, planDecisionStatus: planDecision.status,
+    ...projectMissionPlanConsumerResult(planDecision) };
 }
 
 async function loadIssue(db: Db, issueId: string) {
@@ -240,6 +244,8 @@ export function registerMissionPlanQaAgentRoutes(router: Router, deps: {
           verdict: verdict.status === "recorded" ? verdict.verdict : verdict.status,
           decisionHash: verdict.decisionHash,
           planDecisionStatus: verdict.planDecisionStatus,
+          planDecisionReason: verdict.planDecisionReason,
+          planDecisionDiagnostics: verdict.planDecisionDiagnostics,
         },
       });
       res.json(verdict);

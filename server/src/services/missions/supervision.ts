@@ -27,6 +27,7 @@ import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } fro
 import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
 import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
+import { buildMaterializePlanDecisionAction, formatMissionPlanConsumerDiagnostics } from "./mission-plan-consumer-diagnostics.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
@@ -93,7 +94,7 @@ function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): stri
     case "native_tool_step_recovery_result":
       return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} artifact=${action.artifactPath} result=${action.resultStatus}`;
     case "materialize_plan_decision":
-      return `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}`;
+      return `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}${formatMissionPlanConsumerDiagnostics(action)}`;
     case "workproduct_reuse_wakeup":
       return `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`;
     case "plan_submission_missing":
@@ -2646,13 +2647,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       });
       const refs = asRecord(result.status === "recorded" ? result.missionPlanArtifact.refs : undefined);
       const paqoWorkflow = asRecord(refs.paqoWorkflow);
-      appliedActions.push({
-        type: "materialize_plan_decision",
-        missionId: mission.id,
-        resultStatus: result.status,
-        planningIssueId: result.planningIssueId,
-        ...(trimmedString(paqoWorkflow.workflowRunId) ? { workflowRunId: trimmedString(paqoWorkflow.workflowRunId)! } : {}),
-      });
+      appliedActions.push(buildMaterializePlanDecisionAction(mission.id, result, trimmedString(paqoWorkflow.workflowRunId)));
     }
 
     if (

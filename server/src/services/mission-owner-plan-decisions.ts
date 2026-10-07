@@ -4,7 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
-import { mergeMissionPlanRefs, missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
+import { missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { readPlanQaVerdict } from "./missions/mission-plan-qa-completion-gate.js";
 import { readPlanQaRef, updatePlanQaRef, closePlanQaIssue, requireOwnerPlanQaPass } from "./missions/owner-plan-qa-consumers.js";
 import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
@@ -14,6 +14,7 @@ import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
 import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
+import { recordMissionPlanDependencyRejection } from "./missions/mission-plan-consumer-diagnostics.js";
 import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
 import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-blocked-outcomes.js";
 import { withoutDeclaredSeparateScopeRevisionUnits } from "./missions/revision-plan-collection-scope.js";
@@ -1112,14 +1113,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     reuseDraftBase.steps,
   );
   if (!initialDependencyGraph.ok) {
-    return {
-      status: "invalid",
-      reason: "invalid_dependency_graph",
-      planningIssueId: collected.planningIssueId,
-      commentId: collected.commentId,
-      decisionHash,
-      diagnostics: initialDependencyGraph.diagnostics,
-    };
+    return recordMissionPlanDependencyRejection({ db, companyId, missionId, submissionId: collected.submissionId,
+      planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash,
+      diagnostics: initialDependencyGraph.diagnostics });
   }
   const initialCanonicalDraft: PlanRevisionDraft = {
     ...reuseDraftBase,
@@ -1174,14 +1170,9 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
     initialCanonicalDraft.steps,
   );
   if (!recoveredDependencyGraph.ok) {
-    return {
-      status: "invalid",
-      reason: "invalid_dependency_graph",
-      planningIssueId: collected.planningIssueId,
-      commentId: collected.commentId,
-      decisionHash,
-      diagnostics: recoveredDependencyGraph.diagnostics,
-    };
+    return recordMissionPlanDependencyRejection({ db, companyId, missionId, submissionId: collected.submissionId,
+      planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash,
+      diagnostics: recoveredDependencyGraph.diagnostics });
   }
   const draftAfterQaAssigneeRecovery: PlanRevisionDraft = {
     ...initialCanonicalDraft,
@@ -2178,9 +2169,7 @@ async function ensureCrossCompanyDelegationsForMissionOwnerPlan(input: {
   const service = missionPlanArtifactService(input.db);
   const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
   if (activePlan?.id !== input.missionPlanArtifactId) return;
-  const refs = mergeMissionPlanRefs(activePlan.refs, {
-    crossCompanyDelegations: materializedDelegations,
-  });
+  const refs = { ...activePlan.refs, crossCompanyDelegations: materializedDelegations }; // Output-only; keep reviewed graph intact.
   await input.db
     .update(missionPlanArtifacts)
     .set({ refs, updatedAt: new Date() })
@@ -2265,7 +2254,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
   const service = missionPlanArtifactService(input.db);
   const activePlan = await service.getActiveMissionPlan({ companyId: input.companyId, missionId: input.missionId });
   if (activePlan?.id !== input.missionPlanArtifactId) return;
-  const refs = mergeMissionPlanRefs(activePlan.refs, {
+  const refs = { ...activePlan.refs, // Output-only; do not re-filter the frozen reviewed identities.
     paqoWorkflow: {
       workflowDefinitionId: definition.id,
       workflowRunId,
@@ -2275,7 +2264,7 @@ async function ensurePaqoWorkflowForMissionOwnerPlan(input: {
       decisionHash: input.decisionHash,
       dependencyModel: "workflow_dag_intra_mission",
     },
-  });
+  };
   await input.db
     .update(missionPlanArtifacts)
     .set({ refs, updatedAt: new Date() })
