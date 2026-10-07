@@ -20,6 +20,7 @@ import type { MissionExecutionUnit, MissionExecutionStatus, MissionRuntimeLivene
 import { listMissionExecutionSourceSnapshots, normalizeMissionExecutionStatus } from "./mission-execution-sources.js";
 import { missionOwnerHumanReportEvents } from "./mission-owner-human-report-events.js";
 import { loadMissionOwnerDecisions } from "./mission-owner-recovery-ledger.js";
+import { missionPlanDiagnosticActivitySummary } from "./mission-plan-consumer-diagnostics.js";
 
 export type GovernanceThreadEventType =
   | "status_changed"
@@ -570,7 +571,6 @@ function approvalEvent(row: typeof approvals.$inferSelect, issueId: string, miss
     ...(isOpen ? { suggestedResumeTarget: { action: "request_human_input", issueId } } : {}),
   };
 }
-
 function activityEvent(row: typeof activityLog.$inferSelect, missionId: string, issueIds: Set<string>): GovernanceThreadEvent {
   const details = (row.details ?? {}) as Record<string, unknown>;
   const issueId = row.entityType === "issue" && issueIds.has(row.entityId) ? row.entityId : asString(details.issueId);
@@ -582,7 +582,7 @@ function activityEvent(row: typeof activityLog.$inferSelect, missionId: string, 
     sourceRef: { type: "activity_log", id: row.id, table: "activity_log" },
     eventType: isOwnerDiagnosis ? "owner_diagnosis" : "activity_observed",
     title: isOwnerDiagnosis ? "Owner diagnosis observed" : "Activity observed",
-    summary: row.action,
+    summary: missionPlanDiagnosticActivitySummary(row.action, details),
     timestamp: safeTimestamp(row.createdAt),
     severity: isOwnerDiagnosis ? "attention" : "info",
     actor: actorFromRow({ actorType: row.actorType, actorId: row.actorId, agentId: row.agentId }),

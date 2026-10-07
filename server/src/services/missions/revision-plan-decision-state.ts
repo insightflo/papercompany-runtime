@@ -212,6 +212,8 @@ export async function validateRevisionPlanDeltaOrRecordRejection(input: {
 /** 선택 초안 refs 중 병합에 필요한 최소 구조(PlanRevisionDraft.refs 와 구조적으로 호환된다). */
 type RevisionDecisionDraftRefs = {
   ownerPlanDecision: Record<string, unknown>;
+  /** Already validated canonical identities/dependencies; not generic legacy selection refs. */
+  selectedExecutionUnits: Record<string, unknown>[];
   [key: string]: unknown;
 };
 
@@ -227,7 +229,7 @@ export function buildRevisionDecisionRefs(input: {
   readonly separateScopeOutcomes?: readonly RevisionSeparateScopeOutcome[];
   /** [수정 재사용] 서버 소유 기계 지도(roots/클로저/원본 실행) — 물화/회복이 다시 대조하는 재료. */
   readonly reusePlan?: { schemaVersion: string; sourceWorkflowRunId: string; roots: string[]; closureUnitIds: string[] };
-}): ReturnType<typeof mergeMissionPlanRefs> {
+}) {
   const refs = mergeMissionPlanRefs(
     input.activePlanRefs,
     {
@@ -262,5 +264,7 @@ export function buildRevisionDecisionRefs(input: {
   if (!input.separateScopeOutcomes || input.separateScopeOutcomes.length === 0) {
     delete (refs as Record<string, unknown>).revisionSeparateScopeRequests;
   }
-  return refs;
+  // Only this owner-plan boundary receives the validated canonical graph. Keep generic legacy
+  // filtering intact, but do not filter bare revision identities before freezing the review input.
+  return { ...refs, schemaVersion: 3 as const, selectedExecutionUnits: input.effectiveDraftRefs.selectedExecutionUnits };
 }
