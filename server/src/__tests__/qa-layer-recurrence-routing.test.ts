@@ -136,7 +136,7 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     expect(feedback).not.toContain("(mobile-overflow)");
   });
 
-  it("non-recurrence (id mismatch) → current behavior 100%: reset 1 + card, no promotion, no source-scope tag", async () => {
+  it("non-recurrence (id mismatch) artifact-only → rework only: reset 1, NO card, NO routing event", async () => {
     const seed = await seedQaSourceDefectScenario(
       db,
       [NEW_ARTIFACT],
@@ -150,25 +150,19 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     expect(producer.status).toBe("pending");
     expect(producer.iterationIndex).toBe(1);
 
+    // [2026-10-08 계약] 유효 source_data(선언+재발 승격)가 없으면 오너 카드/라우팅 이벤트 없이
+    //   기존 재작업 경로만 밟는다 — 순수 artifact 결함은 사람 입력 대상이 아니다.
     const routed = await db.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.workflowRunId, seed.runId),
       eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
     ));
-    expect(routed).toHaveLength(1);
-    const routedPayload = routed[0]!.payload as Record<string, unknown>;
-    expect(routedPayload.route).toBe("mixed");
-    expect(routedPayload.promotedFindingIds).toEqual([]);
+    expect(routed).toHaveLength(0);
 
-    const [card] = await db.select().from(operatorDecisions).where(and(
+    const cards = await db.select().from(operatorDecisions).where(and(
       eq(operatorDecisions.companyId, seed.companyId),
       eq(operatorDecisions.requestKey, seed.requestKey),
     ));
-    expect(card).toBeDefined();
-    // 승격 없음 — 마커/재발 팩트 미출현, 선언 계층 그대로 렌더.
-    const rendered = JSON.stringify(card!.definition);
-    expect(rendered).toContain("[artifact] (mobile-overflow)");
-    expect(rendered).not.toContain("[source_data"); // [source_data] / [source_data*] 배지 미출현
-    expect(rendered).not.toContain("recurring finding");
+    expect(cards).toHaveLength(0);
 
     const metadata = (producer.metadata ?? {}) as Record<string, unknown>;
     const contract = metadata.workflowReworkContract as { qaFeedbacks: Array<{ feedback: string | null }> } | undefined;

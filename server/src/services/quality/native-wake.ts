@@ -71,11 +71,15 @@ export function parsePlanQaResubmissionWakeKey(key: string | null | undefined): 
   return { issueId: match[1]!, decisionHash: match[2]!, generation: Number(match[3]), attempt: Number(match[4]) };
 }
 
-/** 병합·coalesce 금지 대상 키: 품질 조치 wake, PLAN-QA 재제출 wake, 연산자 결정 continuation wake. */
+// DAG remediation refires need a new QA execution; an active adapter never rereads merged DB context.
+export const QA_REMEDIATION_REFIRE_WAKE_PREFIX = "qa-remediation-refire:";
+
+/** 병합 금지: 품질 조치, PLAN-QA 재제출, 연산자 결정 continuation, QA remediation 재실행. */
 export function isBoundedExecutionWakeKey(key: string | null | undefined): boolean {
   return isQualityWakeKey(key)
     || (typeof key === "string" && key.startsWith(PLAN_QA_RESUBMIT_WAKE_PREFIX))
-    || (typeof key === "string" && key.startsWith(OPERATOR_DECISION_WAKE_PREFIX));
+    || (typeof key === "string" && key.startsWith(OPERATOR_DECISION_WAKE_PREFIX))
+    || (typeof key === "string" && key.startsWith(QA_REMEDIATION_REFIRE_WAKE_PREFIX));
 }
 
 export type QualityAttemptRow = {
