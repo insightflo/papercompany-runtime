@@ -11,6 +11,33 @@ import { validate } from "../middleware/validate.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { companyWorkProductStorageRoutes } from "./company-work-product-storage.js";
 import { logActivity, secretService } from "../services/index.js";
+import { toolService } from "../services/tools/registry.js";
+
+/**
+ * Maps secretId -> names of this company's tools whose adapterConfig.auth
+ * references that secret. One query for all company tools; adapter_config
+ * auth matching happens in memory.
+ */
+async function loadToolUsageBySecretId(
+  db: Db,
+  companyId: string,
+): Promise<Map<string, string[]>> {
+  const tools = await toolService.listDefinitions(db, { companyId });
+  const usage = new Map<string, string[]>();
+  for (const tool of tools) {
+    const auth = tool.adapterConfig?.auth;
+    if (typeof auth !== "object" || auth === null || Array.isArray(auth)) continue;
+    const secretId = (auth as { secretId?: unknown }).secretId;
+    if (typeof secretId !== "string") continue;
+    const names = usage.get(secretId);
+    if (names) {
+      names.push(tool.name);
+    } else {
+      usage.set(secretId, [tool.name]);
+    }
+  }
+  return usage;
+}
 
 export function secretRoutes(db: Db) {
   const router = Router();
@@ -34,8 +61,16 @@ export function secretRoutes(db: Db) {
     assertBoard(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const secrets = await svc.list(companyId);
-    res.json(secrets);
+    const [secrets, usage] = await Promise.all([
+      svc.list(companyId),
+      loadToolUsageBySecretId(db, companyId),
+    ]);
+    res.json(
+      secrets.map((secret) => ({
+        ...secret,
+        usedByTools: usage.get(secret.id) ?? [],
+      })),
+    );
   });
 
   router.post("/companies/:companyId/secrets", validate(createSecretSchema), async (req, res) => {
@@ -143,6 +178,16 @@ export function secretRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+
+    const usage = await loadToolUsageBySecretId(db, existing.companyId);
+    const usedByTools = usage.get(id) ?? [];
+    if (usedByTools.length > 0) {
+      res.status(409).json({
+        error: `Secret is used by ${usedByTools.length} tool(s): ${usedByTools.join(", ")}`,
+        usedByTools,
+      });
+      return;
+    }
 
     const removed = await svc.remove(id);
     if (!removed) {

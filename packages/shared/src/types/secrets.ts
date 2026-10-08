@@ -34,6 +34,8 @@ export interface CompanySecret {
   createdByUserId: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Names of this company's tools whose adapterConfig.auth.secretId references this secret. */
+  usedByTools?: string[];
 }
 
 export interface SecretProviderDescriptor {
