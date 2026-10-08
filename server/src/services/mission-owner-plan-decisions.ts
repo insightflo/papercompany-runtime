@@ -1468,8 +1468,16 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
 
   // Use the PASS-time builder so references are checked after native ID remapping,
   // including revision copies, without repairing or broadening ancestry.
-  const toolReferenceErrors = missionRow
-    ? findWorkflowToolReferenceErrors(buildRevisionMaterializationSteps(effectiveDraft, missionRow, planningTools, reuseRuntime))
+  let toolReferenceSteps: WorkflowStep[] | null = null;
+  if (missionRow) {
+    try {
+      toolReferenceSteps = buildRevisionMaterializationSteps(effectiveDraft, missionRow, planningTools, reuseRuntime);
+    } catch {
+      // Skip this additive reference check on builder errors; preserve existing PASS-time handling.
+    }
+  }
+  const toolReferenceErrors = toolReferenceSteps
+    ? findWorkflowToolReferenceErrors(toolReferenceSteps)
     : [];
   if (toolReferenceErrors.length > 0) {
     const diagnostics = toolReferenceErrors.map((details) => ({
