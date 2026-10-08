@@ -11,11 +11,8 @@ import {
   pinWorkProductForStep,
 } from "./workflow-output-binding.js";
 import { isWorkProductBindingEnabled } from "./run-reopen-guard-flag.js";
-type WorkflowArgStep = {
-  id: string;
-  dependencies?: string[];
-  dependsOn?: string[];
-  toolArgs?: unknown;
+import { collectAncestorStepIds, collectArtifactReferences, STEP_ARTIFACT_TOKEN, type WorkflowArtifactReferenceStep } from "./step-artifact-references.js";
+type WorkflowArgStep = WorkflowArtifactReferenceStep & {
   workProductSelectors?: unknown;
   toolArtifactContract?: unknown;
 };
@@ -27,7 +24,6 @@ type WorkflowArgRun = {
   metadata?: Record<string, unknown> | null;
 };
 
-const STEP_ARTIFACT_TOKEN = /\{\$steps\.([A-Za-z0-9_-]+)\.(workProductPath|workProductDir|siblingAssetsDir)\}/g;
 const RUN_METADATA_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
 /**
  * [workflow child fix P2-9] 자식 run 입력 토큰 — 부모 workflow 스텝 inputs 가
@@ -233,33 +229,6 @@ export function renderWorkflowToolStepArgsWithResolvedValues(input: {
   args: unknown; runDate: string; runId: string; pathsByStepId: Map<string, string>; runMetadata: Record<string, unknown>;
 }): unknown {
   return renderChecked(input.args, input.runDate, input.runId, input.pathsByStepId, input.runMetadata);
-}
-
-function collectArtifactReferences(value: unknown, result = new Set<string>()): Set<string> {
-  if (typeof value === "string") {
-    for (const match of value.matchAll(STEP_ARTIFACT_TOKEN)) {
-      if (match[1]) result.add(match[1]);
-    }
-  } else if (Array.isArray(value)) {
-    for (const item of value) collectArtifactReferences(item, result);
-  } else if (value && typeof value === "object") {
-    for (const item of Object.values(value as Record<string, unknown>)) collectArtifactReferences(item, result);
-  }
-  return result;
-}
-
-function collectAncestorStepIds(currentStepId: string, steps: WorkflowArgStep[]): Set<string> {
-  const dependencies = new Map(steps.map((step) => [step.id, step.dependencies ?? step.dependsOn ?? []]));
-  const ancestors = new Set<string>();
-  const visit = (stepId: string) => {
-    for (const dependencyId of dependencies.get(stepId) ?? []) {
-      if (ancestors.has(dependencyId)) continue;
-      ancestors.add(dependencyId);
-      visit(dependencyId);
-    }
-  };
-  visit(currentStepId);
-  return ancestors;
 }
 
 /**
