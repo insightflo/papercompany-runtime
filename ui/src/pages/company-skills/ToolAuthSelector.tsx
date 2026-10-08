@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CompanySecret } from "@paperclipai/shared";
-import { KeyRound, Plus } from "lucide-react";
+import { KeyRound, Plus, Settings2 } from "lucide-react";
 import { secretsApi } from "../../api/secrets";
 import { useToast } from "../../context/ToastContext";
 import { queryKeys } from "../../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { readAdapterAuth, writeAdapterAuth } from "./toolAdminModel";
+import { SecretManageDialog } from "./SecretManageDialog";
 
 type ToolAuthSelectorProps = {
   companyId: string;
@@ -34,6 +35,7 @@ export function ToolAuthSelector({
   const queryClient = useQueryClient();
   const { pushToast } = useToast();
   const [showCreate, setShowCreate] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newValue, setNewValue] = useState("");
 
@@ -178,11 +180,19 @@ export function ToolAuthSelector({
           </div>
         </div>
       ) : (
-        <Button size="sm" variant="ghost" onClick={() => setShowCreate(true)} disabled={isDisabled}>
-          <Plus className="mr-1.5 h-3.5 w-3.5" />
-          New secret
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setShowCreate(true)} disabled={isDisabled}>
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+            New secret
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setManageOpen(true)}>
+            <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+            Manage secrets…
+          </Button>
+        </div>
       )}
+
+      <SecretManageDialog companyId={companyId} open={manageOpen} onOpenChange={setManageOpen} />
     </div>
   );
 }
