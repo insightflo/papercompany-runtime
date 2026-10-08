@@ -11,9 +11,14 @@ describe("bounded execution wake keys", () => {
     expect(isBoundedExecutionWakeKey(key)).toBe(true);
   });
 
+  it("preserves QA remediation refire delivery instead of coalescing", () => {
+    expect(isBoundedExecutionWakeKey("qa-remediation-refire:workflow-run:qa-step-run")).toBe(true);
+  });
+
   it("keeps unrelated keys coalescable", () => {
     expect(isBoundedExecutionWakeKey("comment-followup:whatever")).toBe(false);
     expect(isBoundedExecutionWakeKey("operator-decision-wake-something-else")).toBe(false);
+    expect(isBoundedExecutionWakeKey("qa-remediation-refire-something-else")).toBe(false);
     expect(isBoundedExecutionWakeKey(null)).toBe(false);
     expect(isBoundedExecutionWakeKey(undefined)).toBe(false);
   });

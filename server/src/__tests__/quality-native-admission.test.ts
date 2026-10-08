@@ -70,6 +70,35 @@ describeQualityDb("Quality native admission", () => {
     return run!.id;
   }
 
+  it("preserves QA remediation refire while the same agent is still executing the issue", async () => {
+    const db = owned.db;
+    const binding = await ensureCanonicalQualityExecution(db, { companyId: f.companyId, actionId: f.actionId });
+    const activeRunId = await holdIssueWithRun({ issueId: binding.issueId, agentId: f.authorAgentId, agentName: "Quality Fixture Author" });
+    const [before] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, activeRunId));
+    const key = `qa-remediation-refire:${binding.workflowRunId}:${binding.stepRunId}`;
+
+    await heartbeatService(db).wakeup(f.authorAgentId, {
+      source: "assignment", triggerDetail: "system", reason: "workflow_resume", idempotencyKey: key,
+      payload: { issueId: binding.issueId, mutation: "workflow_resume", missionId: binding.missionId, workflowRunId: binding.workflowRunId, workflowStepRunId: binding.stepRunId },
+      contextSnapshot: { issueId: binding.issueId, missionId: binding.missionId, workflowRunId: binding.workflowRunId, workflowStepRunId: binding.stepRunId, forceFreshSession: true },
+    });
+
+    const rows = await db.select().from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, f.companyId), eq(agentWakeupRequests.idempotencyKey, key)));
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.status).not.toBe("coalesced");
+    expect(row.status).toBe("deferred_issue_execution");
+    expect(row.runId).toBeNull();
+    expect(row.finishedAt).toBeNull();
+    expect(row.coalescedCount).toBe(0);
+    expect(row.workflowRunId).toBe(binding.workflowRunId);
+    expect(row.workflowStepRunId).toBe(binding.stepRunId);
+    const [after] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, activeRunId));
+    expect(after!.status).toBe("running");
+    expect(after!.contextSnapshot).toEqual(before!.contextSnapshot);
+  });
+
   it("defers instead of merging when a different agent id holds the issue execution lock", async () => {
     const db = owned.db;
     const seeded = await seedQualityFixture(db);

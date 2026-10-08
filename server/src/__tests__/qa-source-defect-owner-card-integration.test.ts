@@ -133,6 +133,32 @@ describeDb("qa source-defect layer routing + owner card", () => {
     expect(feedback).toContain("source data incomplete");
   });
 
+  it("artifact-only findings: NO owner card or source routing event, normal producer rework", async () => {
+    const seed = await seedScenario(db, [{ id: "mobile-overflow", summary: "report table overflows on mobile", layer: "artifact" }]);
+    const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.runId));
+    const result = await applyBackEdgeReworkPass({
+      db,
+      run: { id: seed.runId, companyId: seed.companyId, status: "running", missionId: seed.missionId },
+      steps: seed.steps as Parameters<typeof applyBackEdgeReworkPass>[0]["steps"],
+      stepRuns,
+      predsByStepId: new Map([["qa-validate", { status: "failed", isQaGate: true, verdict: "request_changes" }]]),
+    });
+    const cards = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId));
+    expect(cards).toHaveLength(0);
+    const routed = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, seed.runId),
+      eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
+    ));
+    expect(routed).toHaveLength(0);
+    expect(result.reworkedCount).toBe(1);
+    expect(result.remediatedCount).toBe(0);
+    const [producer] = await db.select().from(workflowStepRuns)
+      .where(and(eq(workflowStepRuns.workflowRunId, seed.runId), eq(workflowStepRuns.stepId, "produce")));
+    expect(producer!.status).toBe("pending");
+    expect(producer!.iterationIndex).toBe(1);
+    expect(producer!.metadata).toHaveProperty("workflowReworkContract.producerStepId", "produce");
+  });
+
   it("(c) no findings (legacy verdict): producer reset, NO card, NO routing event", async () => {
     const seed = await seedScenario(db, null);
     const stepRuns = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.runId));

@@ -303,7 +303,7 @@ export async function applyBackEdgeReworkPass(
     //       즉시 오너 카드 에스컬레이션.
     //   (b) 유효 계층 혼재 → 기존 재작업 경로(리셋)를 그대로 밟되 오너 카드를 병행 생성하고, 유효
     //       source_data 항목(선언+재발 승격)은 재작업 계약 feedback 에 '생산자 범위 밖' 태그로 병기한다.
-    //   (c) findings 미제출(구버전 판정) → 기존 동작 100% 유지, 카드 없음(fail-closed).
+    //   (c) artifact-only 또는 findings 미제출(구버전 판정) → 카드 없이 기존 경로 유지.
     //   [qa layer feedback loop] 재발 감지는 fresh 반려(filterFreshRejectedQas 통과)에만 적용하고,
     //   세대 경계 가드(직전 판정이 이번 생산자 세대 완료 이전 관측)는 ledger 헬퍼가 담당한다(§4.4).
     const rejectedWithFindings: RejectedQaWithFindings[] = [];
@@ -340,11 +340,11 @@ export async function applyBackEdgeReworkPass(
     }
     const allFindingsPresent = rejectedWithFindings.every((qa) => (qa.findings?.length ?? 0) > 0);
     // 계층 판정은 유효 계층 기준 — 재발 승격 항목도 source_data 로 센다(선언 계층은 payload 에 불변).
+    const hasSourceData = rejectedWithFindings.some((qa) => qa.effectiveFindings?.some((finding) => finding.layer === "source_data"));
     const allSourceData = allFindingsPresent
       && rejectedWithFindings.every((qa) => qa.effectiveFindings!.every((finding) => finding.layer === "source_data"));
-    if (allFindingsPresent) {
-      // 구조화 findings 가 있으면(원천-only 또는 혼합) 오너 카드를 띄운다 — 원천-only 는 리셋을 대체하고,
-      //       혼합은 기존 재작업 경로와 병행한다(운영자가 원천 부분을 조기에 볼 수 있다).
+    if (allFindingsPresent && hasSourceData) {
+      // 원천-only 는 리셋을 대체하고, 진짜 혼합은 기존 재작업과 카드 생성을 병행한다.
       const escalated = await escalateQaSourceDefectToOwner({
         db,
         run,
