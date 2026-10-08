@@ -14,6 +14,7 @@ import type { QualityPolicy, QualityTarget } from "@paperclipai/shared";
 import { conflict, HttpError } from "../../errors.js";
 import { computePaqoDefinitionHash } from "../workflow/paqo-definition-identity.js";
 import { normalizeWorkflowStepsForExecution, type WorkflowStep } from "../workflow/dag-engine.js";
+import { assertWorkflowToolStepReferences } from "../workflow/definition-step-validation.js";
 
 export const QUALITY_DEFINITION_SOURCE_KIND = "quality";
 export const QUALITY_EXECUTE_STEP_ID = "quality-execute";
@@ -100,6 +101,7 @@ export async function findOrCreateImmutableQualityWorkflowDefinition(
   }
   const id = crypto.randomUUID();
   const now = new Date();
+  assertWorkflowToolStepReferences(steps);
   await dbOrTx.insert(workflowDefinitions).values({
     id,
     companyId: input.companyId,

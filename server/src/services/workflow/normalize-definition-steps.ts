@@ -1,6 +1,7 @@
 import type { WorkflowStep } from "./dag-engine.js";
 import { normalizeWorkflowStepsForExecution } from "./execution-steps.js";
 import { validateWorkflowQaConfigs } from "./artifact-config-validation.js";
+import { assertWorkflowToolStepReferences } from "./definition-step-validation.js";
 import { isQaLikeStep, synthesizeQaReworkBackEdge } from "../missions/supervision-helpers.js";
 import type { PlanningArtifactTool } from "../missions/mission-plan-publication-contract.js";
 
@@ -32,6 +33,7 @@ export function normalizeWorkflowSteps(
       ...(toolNames ? { toolNames } : {}),
     };
   });
+  assertWorkflowToolStepReferences(normalizedSteps);
   const dynamicOwnerPlan = options.executionMode === "dynamic_owner_plan"
     || options.dynamicPlanBootstrapOnly === true
     || options.dynamicPlanBootstrapOnly === "true";
