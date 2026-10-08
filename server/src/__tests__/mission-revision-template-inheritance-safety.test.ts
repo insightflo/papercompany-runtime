@@ -117,6 +117,23 @@ it("unknown template toolArgs producer token is rejected before PLAN-QA with led
   expect(diagnostics.some(d => d.message.includes("ghost"))).toBe(true);
 });
 
+it("rejects a non-ancestor tool reference at submission without creating PLAN-QA, a definition or a run", async () => {
+  // Break caught: a structurally invalid tool input reaches PLAN-QA and fails only after PASS.
+  const w = await prepareWorld(agentId => templateSteps(agentId));
+  const result = await w.submit(slice1Decision(w.revision.id,
+    templateUnits(w, { toolArgs: { content: "{$steps.verify.workProductPath}" } }), templateDelta(w)));
+  expect(result).toMatchObject({ status: "invalid", reason: "workflow_tool_reference_invalid",
+    diagnostics: [expect.objectContaining({ code: "workflow_tool_reference_invalid", severity: "invalid",
+      details: { stepId: expect.any(String), referencedStepId: expect.any(String), reason: "not_ancestor" } })] });
+  const [ledger] = await db.select().from(missionPlanDecisionSubmissions)
+    .where(eq(missionPlanDecisionSubmissions.missionId, w.revision.id));
+  expect(ledger).toMatchObject({ status: "rejected", rejectionReason: "workflow_tool_reference_invalid",
+    diagnostics: result.diagnostics });
+  expect(await openPlanQaIssueIds(db, w.revision.id)).toEqual([]);
+  expect(await findPaqoDefinition(db, w.companyId, w.revision.id)).toBeNull();
+  expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, w.revision.id))).toEqual([]);
+});
+
 it("template dependency on an existing but unselected producer step is rejected", async () => {
   const w = await prepareWorld(agentId => templateSteps(agentId, { dependencies: ["tpl-check", "tpl-write", "tpl-notes"] },
     [{ id: "tpl-notes", name: "Notes", type: "agent", agentId, dependencies: ["tpl-collect"] }]));
@@ -184,7 +201,7 @@ it("structured decision.steps dependency declaration overrides template dependen
 it("explicitly empty steps dependency declaration stays empty while omitted wiring is inherited", async () => {
   // 게시 도구가 없는 세계: steps 의 빈 dependsOn 선언(publish dependencies [])이 템플릿 [check, write]
   // 로 채워지지 않고, 생략된 selectors/toolArgs 만 상속되는지 pending refs 로 확인한다(물화 전 단계 증거).
-  const w = await prepareWorld(agentId => templateSteps(agentId), false);
+  const w = await prepareWorld(agentId => templateSteps(agentId, { toolArgs: { content: "/fixture/report-current.md" } }), false);
   const units = [
     slice1Unit(w.agentId, "collect", "Collect sources", { sourceStepId: w.source[0]!.id, dependencies: [] }),
     slice1Unit(w.agentId, "write", "Write report", { sourceStepId: w.source[1]!.id, graphWorkProductRequired: true, dependencies: ["collect"] }),
@@ -198,7 +215,7 @@ it("explicitly empty steps dependency declaration stays empty while omitted wiri
     .find(unit => unit.id === "publish");
   expect(persisted?.dependencies).toEqual([]); // 명시적 빈 선언 보존 — 템플릿 의존성 미상속
   expect(persisted?.workProductSelectors).toEqual({ write: documentSelector("report-current.md") }); // 생략은 상속
-  expect(persisted?.toolArgs).toEqual({ content: "{$steps.write.workProductPath}" });
+  expect(persisted?.toolArgs).toEqual({ content: "/fixture/report-current.md" });
 });
 
 // [Q12 — 선택자 값 동등성] 필수 입력(requiredInputs) 의 selector 값이 실제 결과 선택자 값과 정규형

@@ -60,7 +60,7 @@ export async function revisionPassWorld(db: Db, root: string, strict = false, fr
     { id: REVISION_IDS[0], sourceStepId: REVISION_IDS[0], assigneeAgentId: workerId,
       sourceRef: { type: "mission_plan_unit", id: REVISION_IDS[0] } },
     { id: REVISION_IDS[1], sourceStepId: REVISION_IDS[1], assigneeAgentId: reviewerId,
-      sourceRef: { type: "mission_plan_unit", id: REVISION_IDS[1] } },
+      sourceRef: { type: "mission_plan_unit", id: REVISION_IDS[1] }, dependsOn: ["build-service-report-content"] },
     selected("unit-qa-mechanical", { type: "tool", qaType: "action", sourceStepId: "qa-service-report-content",
       assigneeAgentId: reviewerId, toolNames: ["manual-onboarding-qa"], dependsOn: ["validate-service-report-content"],
       toolArgs: { content: "{$steps.build-service-report-content.workProductPath}", section: "{$runMetadata.section}",

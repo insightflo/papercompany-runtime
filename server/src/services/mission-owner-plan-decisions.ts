@@ -20,6 +20,7 @@ import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-bl
 import { withoutDeclaredSeparateScopeRevisionUnits } from "./missions/revision-plan-collection-scope.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { normalizeWorkflowSteps } from "./workflow/normalize-definition-steps.js";
+import { findWorkflowToolReferenceErrors } from "./workflow/step-artifact-references.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -1463,6 +1464,28 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
       decisionHash,
       diagnostics: allStructuralErrors.map((e) => ({ code: "structural_plan_error", message: e, severity: "invalid" as const })),
     };
+  }
+
+  // Use the PASS-time builder so references are checked after native ID remapping,
+  // including revision copies, without repairing or broadening ancestry.
+  const toolReferenceErrors = missionRow
+    ? findWorkflowToolReferenceErrors(buildRevisionMaterializationSteps(effectiveDraft, missionRow, planningTools, reuseRuntime))
+    : [];
+  if (toolReferenceErrors.length > 0) {
+    const diagnostics = toolReferenceErrors.map((details) => ({
+      code: "workflow_tool_reference_invalid",
+      message: `Step "${details.stepId}" references "${details.referencedStepId}" (${details.reason}). Only known forward ancestor steps may be referenced.`,
+      severity: "invalid" as const,
+      details,
+    }));
+    await upsertMissionPlanDecisionSubmission({
+      ...ledgerSubmission,
+      status: "rejected",
+      rejectionReason: "workflow_tool_reference_invalid",
+      diagnostics,
+    });
+    return { status: "invalid", reason: "workflow_tool_reference_invalid",
+      planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics };
   }
 
   let planRefsMutatedThisCall = false;

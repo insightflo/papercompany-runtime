@@ -40,7 +40,7 @@ describeQualityDb("revision raw -> frozen pending -> dedicated PASS", () => {
     const refs = pending.refs as Record<string, unknown>;
     const units = refs.selectedExecutionUnits as Record<string, unknown>[];
     expect(units.map(u => u.id)).toEqual(REVISION_IDS);
-    expect(units.map(u => u.dependencies)).toEqual([[], [], ["validate-service-report-content"],
+    expect(units.map(u => u.dependencies)).toEqual([[], ["build-service-report-content"], ["validate-service-report-content"],
       ["unit-qa-mechanical"], ["unit-publish"], []]);
     expect(units.slice(0, 2).every(u => !Object.hasOwn(u, "selectionState") && !Object.hasOwn(u, "reason"))).toBe(true);
     const [qaBefore] = await testDb.db.select().from(issues).where(eq(issues.id, w.first.planQaIssueId));
