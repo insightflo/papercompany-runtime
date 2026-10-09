@@ -5,17 +5,15 @@
  * OQ-4 schema: owner_agent_id is the mission main executor; mission_agents carries executor/reviewer/observer roles.
  */
 
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
 import { isUuidLike } from "@paperclipai/shared";
 import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  issueComments,
   issueWorkProducts,
   issues,
   missionAgents,
-  missionSessions,
   missions,
   companies,
   pluginEntities,
@@ -26,12 +24,10 @@ import {
 import { notFound, badRequest } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { issueService } from "./issues.js";
-import { missionPlanArtifactService, summarizeMissionPlanForRuntime, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
+import { missionPlanArtifactService, type MissionPlanRuntimeSummary } from "./mission-plan-artifacts.js";
+import { buildMissionDetail } from "./missions/mission-detail.js";
 import { type MissionSupervisionHeartbeatRun } from "./missions/mission-supervision-context.js";
-import {
-  buildOwnerActionExplanations,
-  type MissionOwnerActionExplanation,
-} from "./missions/mission-owner-recovery-explanations.js";
+import type { MissionOwnerActionExplanation } from "./missions/mission-owner-recovery-explanations.js";
 import { normalizeConditionalEdges, readCapBoostAmount } from "./workflow/control-flow/types.js";
 import { loadMissionWorkflowRunDefinitions } from "./missions/workflow-run-definitions.js";
 import { buildMissionRunFlowmap, readVendoredFlowmapTemplate, renderFlowmapHtml } from "./missions/mission-flowmap-export.js";
@@ -157,76 +153,6 @@ export type {
   MissionOwnerSupervisionResult,
   ActiveMissionOwnerSupervisionResult,
 } from "./missions/supervision-types.js";
-
-async function buildMissionOwnerActionExplanations(db: Db, mission: MissionRow): Promise<MissionOwnerActionExplanation[]> {
-  const ownerActionIssues = await db
-    .select({
-      id: issues.id,
-      identifier: issues.identifier,
-      title: issues.title,
-      status: issues.status,
-      originKind: issues.originKind,
-      originId: issues.originId,
-    })
-    .from(issues)
-    .where(and(
-      eq(issues.companyId, mission.companyId),
-      eq(issues.missionId, mission.id),
-      eq(issues.originKind, "mission_main_executor_unblock"),
-      isNull(issues.hiddenAt),
-    ));
-
-  const commentsByIssueId = new Map<string, string[]>();
-  for (const ownerActionIssue of ownerActionIssues) {
-    const ownerActionCommentRows = await db
-      .select({ body: issueComments.body })
-      .from(issueComments)
-      .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, ownerActionIssue.id)))
-      .orderBy(asc(issueComments.createdAt));
-    commentsByIssueId.set(ownerActionIssue.id, ownerActionCommentRows.map((comment) => comment.body));
-  }
-
-  return buildOwnerActionExplanations({
-    ownerActionIssues,
-    commentsByIssueId,
-    resolveSourceIssue: async (sourceIssueId) => db
-      .select({
-        id: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        status: issues.status,
-        assigneeAgentId: issues.assigneeAgentId,
-      })
-      .from(issues)
-      .where(and(
-        eq(issues.id, sourceIssueId),
-        eq(issues.companyId, mission.companyId),
-        eq(issues.missionId, mission.id),
-        isNull(issues.hiddenAt),
-      ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null),
-    resolveSourceComments: async (sourceIssueId) => db
-      .select({ body: issueComments.body })
-      .from(issueComments)
-      .where(and(eq(issueComments.companyId, mission.companyId), eq(issueComments.issueId, sourceIssueId)))
-      .then((rows) => rows.map((comment) => comment.body)),
-  });
-}
-
-/**
- * [목적] projectId -> 표시용 project 라이트 참조 단건 해석. 상세 헤더/단건 응답용.
- * [입력] db, projectId. [출력] { id, name, color } | null(없거나 삭제된 project).
- * [연결] getById가 호출. projects 테이블에서 id/name/color만 투영한다.
- */
-async function resolveProjectRef(db: Db, projectId: string): Promise<MissionProjectRef | null> {
-  const [row] = await db
-    .select({ id: projects.id, name: projects.name, color: projects.color })
-    .from(projects)
-    .where(eq(projects.id, projectId))
-    .limit(1);
-  return row ? { id: row.id, name: row.name, color: row.color } : null;
-}
 
 /**
  * [목적] 여러 projectId를 한 번에 해석해 Map으로 반환. 리스트 batch enrich용(N+1 방지).
@@ -578,66 +504,22 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return getById(mission.id);
   }
 
-  /**
-   * Get a mission by ID with full detail.
-   */
-  async function getById(id: string): Promise<MissionDetail> {
+  async function readMissionRow(id: string): Promise<MissionRow> {
     assertMissionId(id);
-
-    let [mission] = await db
-      .select()
-      .from(missions)
-      .where(eq(missions.id, id))
-      .limit(1);
-
+    const [mission] = await db.select().from(missions).where(eq(missions.id, id)).limit(1);
     if (!mission) throw notFound(`Mission not found: ${id}`);
-    mission = await ownerActions.reconcileMissionStatusFromWorkflowRuns(mission);
+    return mission;
+  }
 
-    const agentRows = await db
-      .select({
-        row: missionAgents,
-        agentName: agents.name,
-      })
-      .from(missionAgents)
-      .leftJoin(agents, eq(missionAgents.agentId, agents.id))
-      .where(eq(missionAgents.missionId, id));
+  /** Project stored state only; lifecycle reconciliation belongs to explicit writers. */
+  async function getById(id: string): Promise<MissionDetail> {
+    return buildMissionDetail(db, await readMissionRow(id));
+  }
 
-    const [ownerRow] = await db
-      .select({ name: agents.name })
-      .from(agents)
-      .where(eq(agents.id, mission.ownerAgentId))
-      .limit(1);
-    const sessionBindings = await db
-      .select({
-        agentId: missionSessions.agentId,
-        adapterType: missionSessions.adapterType,
-        status: missionSessions.status,
-        lastActiveAt: missionSessions.lastActiveAt,
-        runCount: missionSessions.runCount,
-      })
-      .from(missionSessions)
-      .where(eq(missionSessions.missionId, id))
-      .orderBy(desc(missionSessions.lastActiveAt), asc(missionSessions.agentId));
-
-    const activeMissionPlan = await missionPlanArtifactService(db).getActiveMissionPlan({
-      companyId: mission.companyId,
-      missionId: id,
-    });
-    const ownerActionExplanations = await buildMissionOwnerActionExplanations(db, mission);
-
-    // [목적] mission.projectId -> 표시용 project 참조 해석. 상세 헤더 칩 렌더링용.
-    // [입력] mission.projectId(nullable). [출력] { id, name, color } | null.
-    const project = mission.projectId ? await resolveProjectRef(db, mission.projectId) : null;
-
-    return {
-      ...mission,
-      agents: agentRows.map((r: { row: typeof missionAgents.$inferSelect; agentName: string | null }) => ({ ...r.row, agentName: r.agentName ?? undefined })),
-      ownerAgentName: ownerRow?.name,
-      project,
-      sessionBindings,
-      activeMissionPlan: summarizeMissionPlanForRuntime(activeMissionPlan),
-      ownerActionExplanations,
-    };
+  /** Explicitly reconcile lifecycle state, then project the resulting detail once. */
+  async function reconcileById(id: string): Promise<MissionDetail> {
+    const mission = await ownerActions.reconcileMissionStatusFromWorkflowRuns(await readMissionRow(id));
+    return buildMissionDetail(db, mission);
   }
 
   /**
@@ -713,14 +595,12 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
         .orderBy(...orderClauses);
     }
 
-    const reconciledRows = await Promise.all(rows.map((mission) => ownerActions.reconcileMissionStatusFromWorkflowRuns(mission)));
-    const filteredRows = filter.status ? reconciledRows.filter((mission) => mission.status === filter.status) : reconciledRows;
     // [목적] 리스트 행에 project 참조를 batch 해석해 붙인다(N+1 방지).
     // [주의] projectMap 미스(삭제된 project)면 null로 내려가 뱃지가 숨김 처리된다.
     const projectMap = await resolveProjectRefs(db, [
-      ...new Set(filteredRows.map((mission) => mission.projectId).filter((value): value is string => value !== null)),
+      ...new Set(rows.map((mission) => mission.projectId).filter((value): value is string => value !== null)),
     ]);
-    return filteredRows.map((mission) => ({
+    return rows.map((mission) => ({
       ...mission,
       project: mission.projectId ? (projectMap.get(mission.projectId) ?? null) : null,
     }));
@@ -779,7 +659,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
       await db.update(missions).set(updates).where(eq(missions.id, id));
     }
 
-    return getById(id);
+    return reconcileById(id);
   }
 
   /**
@@ -1284,6 +1164,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   return {
     create,
     getById,
+    reconcileById,
     list,
     update,
     delete: deleteMission,

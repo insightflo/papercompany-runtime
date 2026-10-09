@@ -127,7 +127,7 @@ describeEmbeddedPostgres("mission stale unblock settlement", () => {
       completedAt,
     });
 
-    const detail = await missionService(db).getById(missionId);
+    const detail = await missionService(db).reconcileById(missionId);
     const [source, unblock, oversight] = await Promise.all([
       db.select().from(issues).where(eq(issues.id, sourceIssueId)).then((rows) => rows[0]),
       db.select().from(issues).where(eq(issues.id, unblockIssueId)).then((rows) => rows[0]),

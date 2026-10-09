@@ -14,7 +14,7 @@ import { mergeMissionPlanRefs, missionPlanArtifactService } from "../mission-pla
 import type { MissionRow, MissionStatus } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { buildMissionOwnerUnblockDescription, buildValidatorRetryEvidenceComment, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
-import { runMissionTerminalCleanup } from "./terminal-cleanup-fence.js";
+import { runMissionTerminalCleanup, type MissionTerminalCleanupDb } from "./terminal-cleanup-fence.js";
 import { hasActivePlanBlockedRevisionUnits } from "./mission-revision-blocked-work.js";
 import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
@@ -361,14 +361,14 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     return { ...mission, ...updates };
   }
 
-  async function completeOpenMissionOversightIfSettled(mission: MissionRow, completedAt: Date): Promise<void> {
+  async function completeOpenMissionOversightIfSettled(mission: MissionRow, completedAt: Date, executor: MissionTerminalCleanupDb = db): Promise<void> {
     if (mission.status !== "completed") return;
 
-    const openWork = await findOpenMissionWork(mission.companyId, mission.id);
+    const openWork = await createMissionWorkSettlement(executor as Db)(mission.companyId, mission.id);
     if (openWork) return;
 
     const now = new Date();
-    await db
+    await executor
       .update(issues)
       .set({
         status: "done",

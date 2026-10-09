@@ -165,7 +165,7 @@ export function missionDelegationService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (existing) {
         const sourceIssue = existing.sourceIssueId ? await issueService(db).getById(existing.sourceIssueId) : null;
-        const targetMission = await missionService(db).getById(existing.targetMissionId);
+        const targetMission = await missionService(db).reconcileById(existing.targetMissionId);
         if (!sourceIssue || !targetMission) {
           throw notFound(`Existing mission delegation is missing source issue or target mission: ${existing.id}`);
         }

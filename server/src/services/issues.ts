@@ -266,7 +266,7 @@ type IssueActiveRunRow = {
   finishedAt: Date | null;
   createdAt: Date;
 };
-type IssueWithLabels = IssueRow & { labels: IssueLabelRow[]; labelIds: string[] };
+type IssueWithLabels = IssueRow & { labels: IssueLabelRow[]; labelIds: string[]; issueGroup: ReturnType<typeof classifyIssueGroupPhase> };
 type IssueWithLabelsAndRun = IssueWithLabels & { activeRun: IssueActiveRunRow | null };
 // [approval-waiting marker] 파생 필드 — 저장 없음, 조회 시점 조인 계산(operator-approval-wait.ts).
 type IssueWithApprovalWait = IssueWithLabelsAndRun & {

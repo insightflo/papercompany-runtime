@@ -174,7 +174,7 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
     });
   });
 
-  it("does not activate an unstarted mission when tool readiness rejects execution, even after GET reconciliation", async () => {
+  it("does not activate an unstarted mission when tool readiness rejects execution, even after explicit reconciliation", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const missionId = randomUUID();
@@ -238,11 +238,11 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       .select({ status: workflowRuns.status, startedAt: workflowRuns.startedAt })
       .from(workflowRuns)
       .where(eq(workflowRuns.id, workflowRunId));
-    const [storedMissionBeforeRead] = await db
+    const [storedMissionBeforeReconcile] = await db
       .select({ status: missions.status, startedAt: missions.startedAt })
       .from(missions)
       .where(eq(missions.id, missionId));
-    const missionAfterRead = await missionService(db).getById(missionId);
+    const reconciledMission = await missionService(db).reconcileById(missionId);
     const lifecycleActivities = await db
       .select({ id: activityLog.id })
       .from(activityLog)
@@ -254,8 +254,8 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       ));
 
     expect(storedRun).toEqual({ status: "pending", startedAt: null });
-    expect(storedMissionBeforeRead).toEqual({ status: "planning", startedAt: null });
-    expect({ status: missionAfterRead.status, startedAt: missionAfterRead.startedAt }).toEqual({
+    expect(storedMissionBeforeReconcile).toEqual({ status: "planning", startedAt: null });
+    expect({ status: reconciledMission.status, startedAt: reconciledMission.startedAt }).toEqual({
       status: "planning",
       startedAt: null,
     });
@@ -513,12 +513,12 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       status: "pending",
     });
 
-    const missionAfterRead = await missionService(db).getById(missionId);
+    const reconciledMission = await missionService(db).reconcileById(missionId);
 
-    expect(missionAfterRead.status).toBe("active");
-    expect(missionAfterRead.startedAt).toEqual(failedStartedAt);
+    expect(reconciledMission.status).toBe("active");
+    expect(reconciledMission.startedAt).toEqual(failedStartedAt);
   });
-  it("does not promote a planning mission via a foreign-company run referenced through GET reconciliation", async () => {
+  it("does not promote a planning mission via a foreign-company run during explicit reconciliation", async () => {
     const companyA = randomUUID();
     const companyB = randomUUID();
     const agentId = randomUUID();
@@ -581,9 +581,9 @@ describeEmbeddedPostgres("mission workflow lifecycle", () => {
       startedAt: foreignStartedAt,
     });
 
-    const missionAfterRead = await missionService(db).getById(missionId);
+    const reconciledMission = await missionService(db).reconcileById(missionId);
 
-    expect(missionAfterRead.status).toBe("planning");
-    expect(missionAfterRead.startedAt).toBeNull();
+    expect(reconciledMission.status).toBe("planning");
+    expect(reconciledMission.startedAt).toBeNull();
   });
 });

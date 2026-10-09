@@ -1,5 +1,27 @@
 # Runtime verification lessons
 
+### 2026-10-09 — actual ancestor guides before delegation
+- Date: 2026-10-09
+- Task: Mission query/write separation and same-transaction terminal cleanup.
+- What failed: Task 2 was delegated as one multi-file implementation before checking the actual ancestor guide's five-file stage budget and approval boundary. The child stopped before edits.
+- Root cause: Parent relied on the harness-injected ancestor AGENTS snapshot while reading only the runtime guide from disk; the actual ancestor file contained newer execution constraints.
+- Category: instruction preflight / stage authorization.
+- Fix: Read the actual ancestor guide, preserve the verified three-file Task 1 change, stop Task 2, and request bounded-stage continuation approval. Record the correction in the continual harness.
+- Prevention rule: Before planning or delegating from any nested repository/worktree, read its actual on-disk ancestor AGENTS.md files and list file budgets, stage approvals, and mandatory gates; injected guide text does not replace that check.
+- Reuse trigger: Nested Papercompany repositories, linked worktrees, resumed tasks and multi-file delegation.
+- Evidence: `~/.cache/mission-query-write-separation-20261009/task2-report.md`; `/Users/kwak/Projects/ai/papercompany/AGENTS.md:28-35`.
+
+### 2026-10-09 — observe driver SQL before trace assertions
+- Date: 2026-10-09
+- Task: Same-transaction terminal-cleanup regression test.
+- What failed: First GREEN run reached a test-only assertion expecting exact `begin`; postgres.js emits trailing whitespace and does not emit a savepoint release on success.
+- Root cause: SQL trace expectations were based on assumed driver formatting rather than installed driver behavior; product RED had masked these later assertions.
+- Category: test instrumentation fidelity.
+- Fix: Inspect postgres.js transaction/savepoint implementation, accept BEGIN whitespace, remove the ungrounded release assertion, retain PostgreSQL PID/transaction-ID and rollback evidence.
+- Prevention rule: Use DB-generated PID/transaction ID plus durable state/rollback as transaction proof; inspect the installed driver's emitted SQL before asserting trace formatting or savepoint lifecycle tokens.
+- Reuse trigger: PostgreSQL transaction/savepoint/connection tracing tests.
+- Evidence: `~/.cache/mission-query-write-separation-20261009/task1-green.log`, `task1-green-final.log`, `task1-report.md`.
+
 ### 2026-10-05 — full gate lifetime must outlive the tool deadline
 - Date: 2026-10-05
 - Task: Operator card readability root verification at 0b9f4ac4.
