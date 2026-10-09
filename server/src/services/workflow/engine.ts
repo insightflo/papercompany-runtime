@@ -150,7 +150,7 @@ async function findActiveScheduledWorkflowMissionRun(
     if (typeof run.missionId !== "string" || run.missionId.trim().length === 0) continue;
     if (run.triggerSource !== "schedule" && typeof run.scheduledSlotId !== "string") continue;
 
-    const mission = await missionService(db).getById(run.missionId);
+    const mission = await missionService(db).reconcileById(run.missionId);
     if (mission?.status === "active") return run;
   }
 

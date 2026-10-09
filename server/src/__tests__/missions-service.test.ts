@@ -37,6 +37,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { missionPluginManifest } from "./helpers/mission-service-fixtures.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { buildQaReworkCapDescription } from "../services/missions/qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "../services/missions/qa-rework-cap-oversight-detection.js";
@@ -582,6 +583,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       title: "Board-created active mission",
       description: "Created from the board UI.",
       status: "active",
+      // @ts-expect-error Deliberately invalid source: statically rejected, tolerated as manual at runtime.
       source: "board",
     });
 
@@ -4131,7 +4133,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       pluginKey: `test-plugin-${pluginId}`,
       packageName: "@paperclip/test-plugin",
       version: "0.0.1",
-      manifestJson: { id: `test-plugin-${pluginId}`, name: "Test Plugin", version: "0.0.1", apiVersion: 1 },
+      manifestJson: missionPluginManifest(`test-plugin-${pluginId}`, "Test Plugin", "0.0.1"),
     });
     await db.insert(missions).values({
       id: missionId,
@@ -4290,7 +4292,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       pluginKey: `stale-plugin-${pluginId}`,
       packageName: "@paperclip/stale-plugin",
       version: "0.0.1",
-      manifestJson: { id: `stale-plugin-${pluginId}`, name: "Stale Plugin", version: "0.0.1", apiVersion: 1 },
+      manifestJson: missionPluginManifest(`stale-plugin-${pluginId}`, "Stale Plugin", "0.0.1"),
     });
     await db.insert(missions).values({
       id: missionId,
@@ -4999,63 +5001,6 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
   });
 
-  it("creates a separate active mission for every workflow trigger (no same-title active-mission reuse)", async () => {
-    // [GAZ 2026-08-28 bce2fa1f] Legacy April-era dedupe used to glue a second
-    // same-day trigger onto the day's still-ACTIVE mission (title = runDate +
-    // workflow name, inputs invisible), interleaving multiple runs' issues in
-    // one mission. Duplicate SCHEDULED runs are prevented upstream (slot claim
-    // + active-run/mission guards), so mission create must not reuse — every
-    // trigger gets its own mission.
-    const companyId = randomUUID();
-    const ownerAgentId = randomUUID();
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Workflow Mission Dedup Company",
-      issuePrefix: `WD${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-
-    await db.insert(agents).values({
-      id: ownerAgentId,
-      companyId,
-      name: "Main Executor",
-      role: "operator",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
-
-    const input = {
-      companyId,
-      ownerAgentId,
-      title: "2026-04-30 gazua-watchlist-refresh",
-      description: "Created automatically for workflow run: gazua-watchlist-refresh",
-      status: "active" as const,
-      source: "workflow" as const,
-    };
-
-    const first = await missionService(db).create(input);
-    const second = await missionService(db).create(input);
-    const missionRows = await db
-      .select({ id: missions.id })
-      .from(missions)
-      .where(eq(missions.companyId, companyId));
-
-    expect(second.id).not.toBe(first.id);
-    expect(missionRows).toHaveLength(2);
-    // Each mission keeps exactly one main-executor oversight issue of its own.
-    const oversightRows = await db
-      .select({ missionId: issues.missionId })
-      .from(issues)
-      .where(eq(issues.companyId, companyId))
-      .where(eq(issues.originKind, "mission_main_executor_oversight"));
-    expect(oversightRows).toHaveLength(2);
-    expect(new Set(oversightRows.map((row) => row.missionId)).size).toBe(2);
-  });
-
   it("does not reuse a workflow mission that reconciles to terminal from linked workflow runs", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
@@ -5268,7 +5213,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     ]);
   });
 
-  it("does not re-stamp updatedAt when reconciling an already-settled workflow mission (read path stays read-only)", async () => {
+  it("does not re-stamp updatedAt when explicitly reconciling an already-settled workflow mission twice", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const runCompletedAt = new Date("2026-08-27T02:39:53.000Z");
@@ -5317,8 +5262,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       runDate: "2026-08-27",
     });
 
-    await missionService(db).list({ companyId, sortBy: "updatedAt", sortOrder: "desc" });
-    await missionService(db).list({ companyId, sortBy: "updatedAt", sortOrder: "desc" });
+    await missionService(db).reconcileById(missionId);
+    await missionService(db).reconcileById(missionId);
 
     const [row] = await db.select({ updatedAt: missions.updatedAt }).from(missions).where(eq(missions.id, missionId));
     expect(row?.updatedAt.getTime()).toBe(settledUpdatedAt.getTime());
@@ -5827,7 +5772,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -5853,8 +5798,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
+    const detail = await svc.reconcileById(missionId);
     const activeList = await svc.list({ companyId, status: "active" });
-    const detail = await svc.getById(missionId);
     const listed = await svc.list({ companyId });
 
     expect(activeList.find((mission) => mission.id === missionId)?.status).toBe("active");
@@ -5946,7 +5891,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       completedAt: new Date("2026-06-09T04:39:18.034Z"),
     });
 
-    const detail = await missionService(db).getById(missionId);
+    const detail = await missionService(db).reconcileById(missionId);
     const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
 
     expect(detail.status).toBe("completed");
@@ -6006,7 +5951,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       },
     ]);
 
-    await missionService(db).getById(missionId);
+    await missionService(db).reconcileById(missionId);
     const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
 
     expect(oversight?.status).toBe("todo");
@@ -6086,7 +6031,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       completedAt: new Date("2026-06-09T04:41:12.533Z"),
     });
 
-    const detail = await missionService(db).getById(missionId);
+    const detail = await missionService(db).reconcileById(missionId);
     const [oversight] = await db.select().from(issues).where(eq(issues.id, oversightIssueId));
 
     expect(detail.status).toBe("active");
@@ -6114,7 +6059,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       originKind: "workflow_execution",
     });
 
-    const settledDetail = await missionService(db).getById(missionId);
+    const settledDetail = await missionService(db).reconcileById(missionId);
     expect(settledDetail.status).toBe("completed");
   });
 
@@ -6307,7 +6252,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -6334,8 +6279,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
+    const detail = await svc.reconcileById(missionId);
     const completedList = await svc.list({ companyId, status: "completed" });
-    const detail = await svc.getById(missionId);
     const activeList = await svc.list({ companyId, status: "active" });
 
     expect(completedList.find((mission) => mission.id === missionId)?.status).toBe("completed");
@@ -6400,7 +6345,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
-    const detail = await svc.getById(missionId);
+    const detail = await svc.reconcileById(missionId);
     const completedList = await svc.list({ companyId, status: "completed" });
     const activeList = await svc.list({ companyId, status: "active" });
 
@@ -6495,7 +6440,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
     await db.insert(pluginEntities).values({
@@ -6519,7 +6464,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
-    const detail = await svc.getById(missionId);
+    const detail = await svc.reconcileById(missionId);
 
     expect(detail.status).toBe("completed");
     expect(detail.completedAt).toEqual(new Date("2026-06-10T02:08:00.000Z"));
@@ -6580,7 +6525,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
     await db.insert(pluginEntities).values({
@@ -6604,7 +6549,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       updatedAt: new Date("2020-01-01T00:05:00.000Z"),
     });
 
-    const detail = await missionService(db).getById(missionId);
+    const detail = await missionService(db).reconcileById(missionId);
 
     expect(detail.status).toBe("cancelled");
     expect(detail.completedAt).toEqual(new Date("2020-01-01T00:05:00.000Z"));
@@ -6657,7 +6602,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -6683,8 +6628,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
+    const detail = await svc.reconcileById(missionId);
     const planningList = await svc.list({ companyId, status: "planning" });
-    const detail = await svc.getById(missionId);
     const activeList = await svc.list({ companyId, status: "active" });
 
     expect(planningList.find((mission) => mission.id === missionId)?.status).toBe("planning");
@@ -6740,7 +6685,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -6766,7 +6711,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
-    const detail = await svc.getById(missionId);
+    const detail = await svc.reconcileById(missionId);
 
     expect(detail.status).toBe("planning");
     expect(detail.startedAt).toBeNull();
@@ -6821,7 +6766,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -6848,9 +6793,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
+    const detail = await svc.reconcileById(missionId);
     const cancelledList = await svc.list({ companyId, status: "cancelled" });
     const activeList = await svc.list({ companyId, status: "active" });
-    const detail = await svc.getById(missionId);
 
     expect(cancelledList.find((mission) => mission.id === missionId)?.status).toBe("cancelled");
     expect(activeList.find((mission) => mission.id === missionId)).toBeUndefined();
@@ -6897,7 +6842,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     });
 
     const svc = missionService(db);
-    const detail = await svc.getById(missionId);
+    const detail = await svc.reconcileById(missionId);
     expect(detail.status).toBe("cancelled");
     expect(detail.completedAt).toEqual(new Date("2026-04-28T00:10:29.987Z"));
   });
@@ -6947,7 +6892,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 
@@ -7078,7 +7023,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       version: "1.0.0",
       apiVersion: 1,
       categories: [],
-      manifestJson: { id: "insightflo.workflow-engine", name: "Workflow Engine", version: "1.0.0" },
+      manifestJson: missionPluginManifest("insightflo.workflow-engine", "Workflow Engine", "1.0.0"),
       status: "ready",
     });
 

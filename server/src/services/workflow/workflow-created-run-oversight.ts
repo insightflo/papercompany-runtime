@@ -11,7 +11,7 @@ import type { WorkflowRun } from "./types.js";
  *   캡처 provenance.workflowName + execution.steps 로 oversight 를 구성해 정의가 나중에
  *   바뀌어도 post-create oversight 가 캡처 그래프와 일치하게 한다. legacy_current 만
  *   workflowDefinitions 직접 SELECT 로 현재 이름을 쓴다(기존 동작 정확 유지).
- * [계약] missionService(db).getById/ensureMainExecutorOversightIssue 실제 의미론을 우회하지
+ * [계약] missionService(db).reconcileById/ensureMainExecutorOversightIssue 실제 의미론을 우회하지
  *   않는다. loader->dag 런타임 cycle 을 만들지 않도록 이 모듈은 projection 모듈을 import 하지
  *   않고, snapshot 이름은 로더 계약(null provenance 불가)을 강제하는 동일한 null guard 로 읽는다.
  */
@@ -34,7 +34,7 @@ export async function ensureCreatedRunOversight(db: Db, run: WorkflowRun): Promi
     if (!definition) throw notFound(`Workflow definition not found: ${run.workflowId}`);
     workflowName = definition.name;
   }
-  const mission = await missionService(db).getById(run.missionId);
+  const mission = await missionService(db).reconcileById(run.missionId);
   if (mission) {
     await missionService(db).ensureMainExecutorOversightIssue(mission, workflowName, {
       sourceRunId: run.id,

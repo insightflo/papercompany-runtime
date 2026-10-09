@@ -10,9 +10,10 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { missionRoutes } from "../routes/missions.js";
+import { missionService } from "../services/missions.js";
 
 /**
- * [파일 목적] PATCH /missions/:id {status:"completed"} 후 읽기경로 reconcile 이 미션을
+ * [파일 목적] PATCH /missions/:id {status:"completed"} 후 기존 읽기경로 reconcile 이 미션을
  *   'active' 로 조용히 되돌리던 결함(A1 fd88ca7b 관찰)의 수정을 고정한다.
  * [수정 내용] owner-actions.ts recoverableFailedWorkflowRunStatuses 분기의 completed 가드가
  *   1a058177(active-런 분기)와 같은 모양으로 운영자 명시 종단 쓰기를 보존하고, 종단 PATCH 가
@@ -126,7 +127,7 @@ describeEP("mission completed PATCH silent revert", () => {
 
     // 판별 증거 1: terminal 트랜잭션은 실제로 commit 했다 (같은 트랜잭션에서 닫힌 plan artifact).
     expect(planArtifact.status).toBe("completed");
-    // 판별 증거 2: 응답 조립(getById→reconcile) 후에도 미션 행은 completed 로 유지된다.
+    // 판별 증거 2: 명시적 reconcile 후 응답을 조립해도 미션 행은 completed 로 유지된다.
     expect(after.status).toBe("completed");
     expect(after.completedAt).not.toBeNull();
     expect(after.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
@@ -150,8 +151,9 @@ describeEP("mission completed PATCH silent revert", () => {
     expect(after.status).toBe("cancelled");
   });
 
-  it("list() 읽기경로에서도 completed 되돌림이 일어나지 않는다 — workflow-created + failed 런", async () => {
+  it("명시적 reconcile이 completed를 보존하고 list()에 표시된다 — workflow-created + failed 런", async () => {
     const { companyId, missionId } = await seed({ workflowCreated: true, missionStatus: "completed" });
+    expect((await missionService(db).reconcileById(missionId)).status).toBe("completed");
 
     const resAll = await request(boardApp()).get(`/api/companies/${companyId}/missions`);
     expect(resAll.status).toBe(200);
@@ -195,6 +197,8 @@ describeEP("mission completed PATCH silent revert", () => {
       runStartedAt: new Date("2026-01-01T00:01:00Z"),
     });
 
+    const reconciledMission = await missionService(db).reconcileById(missionId);
+    expect(reconciledMission.status).toBe("active");
     const res = await request(boardApp()).get(`/api/missions/${missionId}`);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("active");

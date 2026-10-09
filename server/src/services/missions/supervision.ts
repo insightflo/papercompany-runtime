@@ -31,6 +31,7 @@ import { buildMaterializePlanDecisionAction, formatMissionPlanConsumerDiagnostic
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
+import { prepareSupervisionMissions, reconcileSupervisionMission } from "./supervision-lifecycle.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { applyOwnerToolRecovery, type OwnerToolRecoveryOutcome } from "./owner-tool-recovery.js";
 import { loadCompanySystemLanguage } from "./system-language.js";
@@ -366,14 +367,18 @@ export function createSupervision({ db, deps, ownerActions }: {
     dispatchOwnerDecisionWakeups?: boolean;
     dispatchStalledOwnerActionWakeups?: boolean;
     dispatchStaleSourceIssueWakeups?: boolean;
-  }): Promise<MissionOwnerSupervisionResult> {
+  }, promotedFromPlanning = false): Promise<MissionOwnerSupervisionResult> {
     const missionScope = await db
-      .select({ companyId: missions.companyId })
+      .select()
       .from(missions)
       .where(eq(missions.id, input.missionId))
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (missionScope) {
+      if (input.applySafeActions === true) {
+        const { terminal } = await reconcileSupervisionMission(db, ownerActions, missionScope);
+        if (terminal) return terminal;
+      }
       await settleResolvedOwnerActionsAndFindOpenWork(missionScope.companyId, input.missionId);
     }
     const context = await buildMissionSupervisionContext(db, { missionId: input.missionId });
@@ -392,40 +397,6 @@ export function createSupervision({ db, deps, ownerActions }: {
       activePlan,
     } = context;
     const supervisionLanguage = await loadCompanySystemLanguage(db, mission.companyId);
-    // [settlement-pending mission] 실행 단위가 전부 terminal-good(활성 없음 + 최소 1개 completed)하고
-    //   열린 소유 work(oversight 제외)가 없으면 mission 을 여기서 정리(settle)한다. monitor 스윕은
-    //   svc.getById 를 거치지 않아 lazy reconcile 이 안 돌기 때문에 run completed 후 mission 이
-    //   active 로 orphan 되었다(2026-08-15 GAZ ef12d027: 수동 supervision/run 호출로만 정리됨).
-    //   oversight/plan 이슈 생성보다 먼저 판정해 정리 상황에서 부작용 이슈를 만들지 않는다.
-    const settlementUnits = executionSnapshot.units;
-    const settlementPending = mission.status === "active"
-      && input.applySafeActions === true
-      && settlementUnits.length > 0
-      && settlementUnits.some((unit) => unit.status === "completed")
-      && settlementUnits.every((unit) => !ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status))
-      && liveWakeupIssueIds.size === 0
-      && !missionIssues.some((row) =>
-        row.hiddenAt == null
-        && row.status !== "done" && row.status !== "cancelled"
-        && row.originKind !== "mission_main_executor_oversight");
-    if (settlementPending) {
-      const reconciled = await ownerActions.reconcileMissionStatusFromWorkflowRuns(mission);
-      if (isTerminalMissionStatus(reconciled.status)) {
-        return {
-          missionId: mission.id,
-          oversightIssueId: null,
-          findings: [`mission_settled_from_workflow_runs: mission=${mission.id} run terminal-good, no open owner work — reconciled to ${reconciled.status}`],
-          recommendations: [],
-          appliedActions: [{
-            type: "mission_settled_from_workflow_runs",
-            missionId: mission.id,
-            resultStatus: reconciled.status,
-          }],
-          ownerActionExplanations: [],
-          commented: false,
-        };
-      }
-    }
     const governanceReasonSuffix = governanceThreadReasonSuffix(governanceThread?.summary);
     const governanceEvidenceLines = formatGovernanceThreadEvidenceLines(governanceThread?.summary);
     const enrichRecommendationReason = (reason: string): string => governanceReasonSuffix
@@ -781,7 +752,8 @@ export function createSupervision({ db, deps, ownerActions }: {
       candidateRosterLines: string[];
       retryAllowed: boolean;
     } | null> => {
-      if (mission.status !== "planning") return null;
+      if (mission.status !== "planning" && !(input.applySafeActions === true && mission.status === "active"
+        && (missionScope?.status === "planning" || promotedFromPlanning))) return null;
 
       const planIssue = missionIssues.find((issue) => (
         issue.originKind === "mission_main_executor_plan" &&
@@ -2869,15 +2841,7 @@ export function createSupervision({ db, deps, ownerActions }: {
     dispatchOwnerDecisionWakeups?: boolean;
     dispatchStaleSourceIssueWakeups?: boolean;
   } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
-    const filters = [inArray(missions.status, ["active", "planning"])];
-    if (input.companyId) filters.push(eq(missions.companyId, input.companyId));
-    if (input.missionIds && input.missionIds.length > 0) filters.push(inArray(missions.id, input.missionIds));
-
-    const missionRows = await db
-      .select({ id: missions.id, companyId: missions.companyId, createdAt: missions.createdAt })
-      .from(missions)
-      .where(and(...filters))
-      .orderBy(asc(missions.createdAt), asc(missions.id));
+    const { missionRows, terminalResults, promotedPlanningMissionIds } = await prepareSupervisionMissions(db, ownerActions, input);
 
     const missionIds: string[] = [];
     const missionRowsByCompanyId = new Map<string, typeof missionRows>();
@@ -3189,7 +3153,7 @@ export function createSupervision({ db, deps, ownerActions }: {
       }
     }
 
-    const results: MissionOwnerSupervisionResult[] = [];
+    const results: MissionOwnerSupervisionResult[] = [...terminalResults];
     for (const missionId of missionIds) {
       results.push(await runMainExecutorSupervision({
         missionId,
@@ -3200,10 +3164,10 @@ export function createSupervision({ db, deps, ownerActions }: {
         dispatchOwnerDecisionWakeups: input.dispatchOwnerDecisionWakeups,
         dispatchStalledOwnerActionWakeups: true,
         dispatchStaleSourceIssueWakeups: input.dispatchStaleSourceIssueWakeups,
-      }));
+      }, promotedPlanningMissionIds.has(missionId)));
     }
 
-    return { companyId: input.companyId, missionIds, missions: results };
+    return { companyId: input.companyId, missionIds: [...terminalResults.map((result) => result.missionId), ...missionIds], missions: results };
   }
 
   return {

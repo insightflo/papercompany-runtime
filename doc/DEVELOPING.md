@@ -543,3 +543,33 @@ pnpm test:shorts-external
 The external suite (`tests/external/*.external.ts` via `vitest.external.config.ts`) is
 deliberately outside default test discovery and fails loudly when configuration is
 missing; it never skips silently.
+
+## Mission Reads and Lifecycle Reconciliation
+
+Mission detail/list GETs and the service's `getById`/`list` return stored state using
+read-only queries. Opening or refreshing a page never repairs lifecycle state,
+closes oversight issues, cancels heartbeats, stops runtimes, or enqueues wakeups.
+List status filters and pagination apply to the stored mission rows.
+
+Lifecycle reconciliation remains in the explicit `reconcileById`/mission update
+paths, existing workflow mutation hooks, and company-scoped supervision with safe
+actions enabled. These paths retain the canonical lifecycle rules and termination
+cleanup order: resource/run/reference cleanup, then oversight/owner-action
+settlement on the same transaction connection. Read-only supervision does not
+perform that cleanup.
+
+A completed workflow can therefore still appear under an active mission until an
+existing mutation or safe-action supervision path reconciles it. GET is not a
+completion trigger or a freshness guarantee; no new timer or completion deadline
+is introduced.
+
+Run the isolated PostgreSQL service/HTTP read-only and held-row-lock regression
+from the repository root:
+
+```sh
+pnpm exec vitest run server/src/__tests__/mission-query-readonly.test.ts --maxWorkers=1
+```
+
+This test checks successful authorized responses before the writer releases its
+locks, repeated unchanged durable state, SELECT-only query traces, and existing
+company/filter/detail contracts. It is not a production latency benchmark.
