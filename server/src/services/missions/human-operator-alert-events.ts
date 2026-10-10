@@ -62,7 +62,8 @@ export function buildHumanOperatorRequestPayload(
   input: HumanOperatorRequestInput,
 ): HumanOperatorRequestPayload | null {
   if (!input.issue.missionId) return null;
-  if (input.issue.originKind !== "mission_main_executor_unblock") return null;
+  if (input.issue.originKind !== "mission_main_executor_unblock"
+    && input.issue.originKind !== "mission_main_executor_oversight") return null;
 
   const record = input.record;
   const decision = input.decision ?? record?.decision;
@@ -75,7 +76,9 @@ export function buildHumanOperatorRequestPayload(
   return {
     missionId: input.issue.missionId,
     issueId: input.issue.id,
-    ...(input.issue.originId ? { sourceIssueId: input.issue.originId } : {}),
+    ...(input.issue.originKind !== "mission_main_executor_oversight" && input.issue.originId
+      ? { sourceIssueId: input.issue.originId }
+      : {}),
     ...(commentId ? { commentId } : {}),
     ...(decisionEventId ? { decisionEventId } : {}),
     decision: decision.decision,

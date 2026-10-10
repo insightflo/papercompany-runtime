@@ -2,7 +2,7 @@
 //
 // [목적] mission-owner recovery 결정의 구조적 제출 API 핸들러. 자연어 comment 가 아닌
 //   POST /issues/:id/owner-recovery/decision 만 결정을 workflow_transition_events 에 영속화한다.
-// [권한] 오직 mission_main_executor_unblock owner-action issue 의 체크아웃된 agent run 만 제출 가능.
+// [권한] 체크아웃된 unblock 또는 제한된 oversight issue의 agent run 만 제출 가능.
 import type { Db } from "@paperclipai/db";
 import type { MissionOwnerDecisionSubmit } from "@paperclipai/shared";
 import { heartbeatRuns, issues, missions } from "@paperclipai/db";
@@ -11,7 +11,7 @@ import { badRequest, conflict, forbidden, unauthorized } from "../../errors.js";
 import { issueService } from "../issues.js";
 import { assertOwnerRecoveryTarget } from "./owner-recovery-target.js";
 import { ownerDecisionRequestsHuman } from "./owner-tool-recovery-eligibility.js";
-import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryIdentityMatches } from "./owner-recovery-submission-guards.js";
+import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryIdentityMatches, ownerRecoveryOversightDecisionFailure, ownerRecoveryOversightRunIsActive } from "./owner-recovery-submission-guards.js";
 import {
   recordMissionOwnerDecision,
   type MissionOwnerDecisionSubmission,
@@ -32,7 +32,7 @@ export type OwnerRecoveryApiActor = {
   readonly runId: string | null;
 };
 
-function toSubmission(data: MissionOwnerDecisionSubmit): MissionOwnerDecisionSubmission {
+function toSubmission(data: MissionOwnerDecisionSubmit, oversight = false): MissionOwnerDecisionSubmission {
   const trimmed = (value: string | null | undefined): string | undefined => {
     const normalized = typeof value === "string" ? value.trim() : "";
     return normalized ? normalized : undefined;
@@ -44,10 +44,10 @@ function toSubmission(data: MissionOwnerDecisionSubmit): MissionOwnerDecisionSub
   return {
     decision: data.decision,
     ...(data.recoveryTarget ? { recoveryTarget: data.recoveryTarget } : {}),
-    ...(trimmed(data.sourceIssueRef) ? { sourceIssueRef: trimmed(data.sourceIssueRef) } : {}),
-    ...(trimmed(data.reworkTargetRef) ? { reworkTargetRef: trimmed(data.reworkTargetRef) } : {}),
+    ...(!oversight && trimmed(data.sourceIssueRef) ? { sourceIssueRef: trimmed(data.sourceIssueRef) } : {}),
+    ...(!oversight && trimmed(data.reworkTargetRef) ? { reworkTargetRef: trimmed(data.reworkTargetRef) } : {}),
     // Structured reassignment authority only — free-text nextAction/reason never supplies the assignee.
-    ...(targetAgentId ? { targetAgentId } : {}),
+    ...(!oversight && targetAgentId ? { targetAgentId } : {}),
     ...(trimmed(data.reason) ? { reason: trimmed(data.reason) } : {}),
     ...(trimmed(data.nextAction) ? { nextAction: trimmed(data.nextAction) } : {}),
     ...(trimmed(data.evidence) ? { evidence: trimmed(data.evidence) } : {}),
@@ -55,7 +55,7 @@ function toSubmission(data: MissionOwnerDecisionSubmit): MissionOwnerDecisionSub
 }
 
 export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: OwnerRecoveryApiActor,
-  recoveryTarget?: MissionOwnerDecisionSubmit["recoveryTarget"]) {
+  data: MissionOwnerDecisionSubmit) {
   const actorFailure = ownerRecoveryActorFailure(actor);
   if (actorFailure === "agent_required") throw forbidden("Agent authentication required");
   if (actorFailure === "run_required" || !actor.runId) throw unauthorized("Agent run id required");
@@ -73,38 +73,57 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     description: issues.description,
   }).from(issues).where(eq(issues.id, issueId)).limit(1);
   if (!issue) return null;
-  if (ownerRecoveryIssueFailure(issue) === "unblock_required") {
+  const isOversight = issue.originKind === "mission_main_executor_oversight";
+  const issueFailure = ownerRecoveryIssueFailure(issue);
+  if (issueFailure === "unblock_required" && !isOversight) {
     throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
+  }
+  if (issueFailure === "mission_required") {
+    throw conflict("Owner-recovery decision API requires a mission-scoped owner-action issue");
+  }
+  // Validate decisions and oversight restrictions in this transaction before any checkout adoption.
+  toSubmission(data, isOversight);
+  const decisionFailure = ownerRecoveryOversightDecisionFailure(issue, data.decision, data.recoveryTarget);
+  if (decisionFailure === "decision_not_allowed") {
+    throw conflict("Oversight submissions may only request human input or escalate");
+  }
+  if (decisionFailure === "recovery_target_not_allowed") {
+    throw conflict("Oversight submissions cannot include a recovery target");
   }
   // [fail closed] owner-action issue 는 반드시 mission scope 를 가져야 한다. missionId 가 없거나
   //   matching mission row 가 없으면 결정을 영속화하지 않는다(null-mission decision 금지).
   if (!issue.missionId) {
     throw conflict("Owner-recovery decision API requires a mission-scoped owner-action issue");
   }
-  const [mission] = await db.select({ ownerAgentId: missions.ownerAgentId })
+  const [mission] = await db.select({ ownerAgentId: missions.ownerAgentId, status: missions.status })
     .from(missions)
     .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
     .limit(1).for("update");
+  if (isOversight && (mission?.status === "completed" || mission?.status === "cancelled")) {
+    throw conflict("Completed or cancelled missions cannot accept oversight submissions");
+  }
   if (!ownerRecoveryOwnerMatches(mission, actor.agentId)) {
     throw forbidden("Only the mission owner agent may submit owner-recovery decisions");
   }
-  const sourceIssueId = issue.originId;
-  if (!sourceIssueId) {
-    throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
-  }
-  const [sourceIssue] = await db.select({
-    missionId: issues.missionId,
-    originKind: issues.originKind,
-  })
-    .from(issues)
-    .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
-    .limit(1).for("share");
-  if (!ownerRecoverySourceMatches(sourceIssue, issue.missionId)) {
-    throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
+  let sourceIssueId: string | null = null;
+  let sourceIssueOriginKind: string | null = null;
+  if (!isOversight) {
+    sourceIssueId = issue.originId;
+    if (!sourceIssueId) {
+      throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
+    }
+    const [sourceIssue] = await db.select({ missionId: issues.missionId, originKind: issues.originKind })
+      .from(issues)
+      .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
+      .limit(1).for("share");
+    if (!ownerRecoverySourceMatches(sourceIssue, issue.missionId)) {
+      throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
+    }
+    sourceIssueOriginKind = sourceIssue.originKind;
   }
   // The issuing heartbeat belongs to this owner-action issue, NOT the recovery target.
   // Check before assertCheckoutOwner: it can adopt or repair a stale checkout lock.
-  await assertOwnerRecoveryTarget(db, issue.companyId, issue.missionId, recoveryTarget);
+  await assertOwnerRecoveryTarget(db, issue.companyId, issue.missionId, data.recoveryTarget);
   const [heartbeat] = await db.select().from(heartbeatRuns)
     .where(eq(heartbeatRuns.id, actor.runId)).limit(1).for("share");
   const [currentIssue] = await db.select().from(issues)
@@ -114,12 +133,16 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
       reason: "owner_recovery_submission_identity_mismatch",
     });
   }
+  if (isOversight && !ownerRecoveryOversightRunIsActive(heartbeat)) {
+    throw conflict("Oversight submissions require the current running heartbeat");
+  }
   await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
   return {
     issue,
     ownerAgentId: mission.ownerAgentId,
     sourceIssueId,
-    sourceIssueOriginKind: sourceIssue.originKind,
+    sourceIssueOriginKind,
+    isOversight,
   };
 }
 
@@ -131,10 +154,10 @@ export async function submitMissionOwnerDecision(input: {
 }): Promise<RecordedMissionOwnerDecision> {
   // Authorization, checkout adoption and decision insertion must roll back together.
   const committed = await input.db.transaction(async (tx) => {
-    const auth = await authorizeOwnerRecoveryApi(tx as unknown as Db, input.issueId, input.actor, input.data.recoveryTarget);
+    const auth = await authorizeOwnerRecoveryApi(tx as unknown as Db, input.issueId, input.actor, input.data);
     if (!auth) throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
-    const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind } = auth;
-    const submission = toSubmission(input.data);
+    const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind, isOversight } = auth;
+    const submission = toSubmission(input.data, isOversight);
     // Existing QA-cap producer resolution is unchanged by this tool-target slice.
     let effectiveSubmission = submission;
     if (submission.decision === "retry_source_issue" && isQaReworkCapOversightIssue(issue.description)) {
