@@ -46,6 +46,7 @@ import { applyWorkflowIssueCreatedSideEffects as applyIssueCreatedSideEffects, w
 import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
 import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
+import { admitOwnerLinkedStepWake, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
@@ -1838,6 +1839,9 @@ export async function wakeExistingWorkflowStepIssue(input: {
   priorFindings?: readonly WorkflowVerdictFinding[];
   /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
   idempotencyKey?: string | null;
+  /** [owner admission] owner-linked 실행의 typed 승인 정보 — 생략해도 저장 영수증 맥락에서
+   *  동일 검사가 적용된다(인자 생략으로 우회 불가). */
+  ownerExecution?: OwnerExecutionAdmission;
 }): Promise<boolean> {
   // [Task5a2a] external recovery paths 는 live steps/definition 을 넘길 수 있다. 진입 시 1회 로드해 snapshot 이면
   //   caller 입력을 캡처 정의/저장 step 으로 대체하고(구조게이트·QA-cap 배열 소비자 모두 캡처 배열), 저장 step 이
@@ -1956,6 +1960,11 @@ export async function wakeExistingWorkflowStepIssue(input: {
     ? { paperclipQaCapAcceptanceContract: qaCapAcceptanceContract }
     : {};
 
+  // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재
+  //   intent/권한버전/세대를 재확인한다(무연결 run은 무변화 통과). 검사와 wake 사이에 다른 await 없음.
+  if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
+    workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
+    ownerExecution: input.ownerExecution ?? null }))) return false;
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
     issue: wakeIssue,

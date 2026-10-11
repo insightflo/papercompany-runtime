@@ -21,6 +21,8 @@ import { normalizeCommandParts, parametersToCliArgs, readObject } from "./core-t
 import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
 import { executeAgentJudgmentTool } from "../judgment/agent-judgment-tool-executor.js";
+import { executeMissionOwnerAction, OwnerActionRefusalError, withCurrentOwnerToolAttempt } from "../missions/mission-owner-execute.js";
+import { missionOwnerExecuteSchema } from "@paperclipai/shared/validators/mission-owner-authority";
 import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
 import { secretService } from "../secrets.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
@@ -78,6 +80,24 @@ export async function executeCoreWorkflowTool(input: {
       eq(agentToolGrants.companyId, input.companyId), eq(agentToolGrants.agentId, agentId), eq(agentToolGrants.toolId, tool.id),
     )).limit(1);
     if (!grant) return { status: 403, body: { error: `Agent is not granted workflow tool "${input.toolName}"` } };
+  }
+  if (tool.adapterType === "builtin" && adapterConfig.kind === "mission-owner-execute") {
+    // Actor/heartbeat come from the authenticated server route, never tool parameters.
+    const parsed = missionOwnerExecuteSchema.safeParse(input.parameters);
+    if (!parsed.success) return { status: 422, body: { error: "invalid_mission_owner_execute_request", tool: input.toolName, source: "core" } };
+    if (!input.agentId?.trim() || !input.heartbeatRunId?.trim()) {
+      return { status: 403, body: { error: "owner_identity_required", tool: input.toolName, source: "core" } };
+    }
+    try {
+      const result = await executeMissionOwnerAction({ db: input.db, companyId: input.companyId,
+        agentId: input.agentId.trim(), heartbeatRunId: input.heartbeatRunId.trim() }, parsed.data);
+      return { status: 200, body: { content: JSON.stringify(result), data: result, tool: input.toolName, source: "core" } };
+    } catch (error) {
+      if (error instanceof OwnerActionRefusalError) {
+        return { status: error.status, body: { error: error.reasonCode, tool: input.toolName, source: "core" } };
+      }
+      throw error;
+    }
   }
   if (input.heartbeatRunId && adapterConfig.artifactContract !== undefined) {
     return executeAgentArtifactTool(input, executeCoreWorkflowTool);
@@ -183,12 +203,17 @@ export async function executeCoreWorkflowTool(input: {
     invocationProvenance = await captureToolCallProvenance({ ...input, toolId: tool.id, commandParts, cwd, env, deploymentFiles });
     if (invocationProvenance?.executable.sha256) executable = invocationProvenance.executable.path;
     await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
-    const invocation = () => policy
+    // Fence owner-execute-linked attempts right before the real child process launch;
+    // unrelated tools pass through with existing behavior.
+    const invocation = () => withCurrentOwnerToolAttempt<{ stdout: string; stderr: string; qaResultBytes?: Buffer }>(
+      { db: input.db, companyId: input.companyId, requestId: input.requestId,
+        workflowRunId: input.workflowRunId ?? null, stepRunId: input.stepRunId ?? null },
+      () => policy
       ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
         policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot) })
       : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), timeoutMs })
-      : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs });
+      : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }));
     const result = await (dispatch && !policy ? (await dispatch.launch(invocation)).result : invocation());
     await recordToolCallProvenance(input.db, invocationProvenance, "returned");
     const { stdout, stderr } = result;

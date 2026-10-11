@@ -78,6 +78,19 @@ export type SourceIssueNativeResumeOutcome =
       stepId: string | null;
     };
 
+export type AutomaticSourceRecovery = {
+  actionId: string; missionId: string; workflowRunId: string; stepRunId: string;
+  expectedAuthorityVersion: number; expectedExecutionGeneration: number;
+  failedDispatchRequestId: string | null;
+  validateIntent: (tx: Db) => Promise<boolean>;
+};
+// 자동(owner-execute) 호출 전용 입력 — 특권 ownerAction/cap_override 분기에 타입으로 봉쇄된다.
+export type AutomaticSourceResumeInput = {
+  companyId: string; issueId: string; allowBlockedIssue?: boolean; agentId?: string | null;
+  wakeFn?: typeof wakeExistingWorkflowStepIssue;
+  ownerExecution: AutomaticSourceRecovery; ownerAction?: never;
+};
+
 // [입력] companyId(스코프 가드) · issueId(source) · allowBlockedIssue(blocked source 허용, 기본 true).
 //   agentId 를 주면 findExistingWorkflowResumeWake 로 중복 native wake 를 먼저 단락한다.
 // [출력] dispatched | already_in_flight | report_only. caller 가 각각 dispatchKind/return shape 로 매핑.
@@ -95,13 +108,15 @@ export async function dispatchSourceIssueNativeResume(
     /** [test isolation] optional wake dependency — production omits (uses real wakeExistingWorkflowStepIssue).
      *  tests inject a no-spawn wake that still creates the exact-key agentWakeupRequests row (contract preserved). */
     wakeFn?: typeof wakeExistingWorkflowStepIssue;
+    /** [owner automatic] typed strict 입력 — ownerAction 과 배타적(cap-override 분기 미접근). */
+    ownerExecution?: AutomaticSourceRecovery;
   },
 ): Promise<SourceIssueNativeResumeOutcome> {
   // 1. source issue 의 최신 step run. startedAt/completedAt desc 로 "가장 진행된" run 을 잡는다.
   // [BLOCKER1] durable crash-window recovery FIRST: a prior cap-override forward may have committed
   //   (run=running/step=pending/issue=todo/audit=pending) and crashed before wake. resolve any existing
   //   audit for this decision before the failed/completed gate. returns null when no audit → fresh/normal path.
-  if (input.ownerAction) {
+  if (input.ownerAction && !input.ownerExecution) {
     const recovered = await recoverOwnerCapOverride(db, { companyId: input.companyId, issueId: input.issueId, allowBlockedIssue: input.allowBlockedIssue, ownerAction: input.ownerAction, wakeFn: input.wakeFn });
     if (recovered) return recovered;
   }
@@ -139,7 +154,8 @@ export async function dispatchSourceIssueNativeResume(
   }
 
   // [cap-override] failed run + completed producer(at/beyond cap) + owner action → cap 초과 1회 retry.
-  if (run.status === "failed" && stepRun.status === "completed" && input.ownerAction) {
+  //   자동(ownerExecution) 입력은 특권 분기에 닿지 않는다 — blocked 로 끝난다.
+  if (run.status === "failed" && stepRun.status === "completed" && input.ownerAction && !input.ownerExecution) {
     return applyOwnerCapOverrideRetry(db, {
       companyId: input.companyId,
       issueId: input.issueId,
@@ -273,6 +289,13 @@ export async function dispatchSourceIssueNativeResume(
     if (!revivedFailedRun || handledByRecoveryService) return;
     await restoreFailedSourceIssueWorkflowState(db, run, stepRun);
   };
+  // [owner admission] typed strict 경로의 wake 승인값 — 실패 시도(v,g) 기준 입력을 복구 후 상태로
+  //   치환한다. run 이 이미 running 이면(전달 복구) 호출자가 준 현재값 그대로 검증한다.
+  let ownerWakeAdmission = input.ownerExecution ? {
+    schemaVersion: 1 as const, actionId: input.ownerExecution.actionId,
+    expectedAuthorityVersion: input.ownerExecution.expectedAuthorityVersion,
+    expectedExecutionGeneration: input.ownerExecution.expectedExecutionGeneration,
+  } : undefined;
   if (revivedFailedRun) {
     if (stepRun.status !== "failed") {
       return {
@@ -283,10 +306,14 @@ export async function dispatchSourceIssueNativeResume(
         stepId: step.id,
       };
     }
-    const accepted = await acceptSourceIssueRecovery(db, { run, stepRunId: stepRun.id, issueId: input.issueId });
+    const accepted = await acceptSourceIssueRecovery(db, { run, stepRunId: stepRun.id, issueId: input.issueId,
+      ...(input.ownerExecution ? { ownerExecution: input.ownerExecution } : {}) });
     if (!accepted) return { kind: "report_only", reason: "wake_rejected", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: step.id };
     wakeRun = accepted.run;
     handledByRecoveryService = accepted.official;
+    if (input.ownerExecution) ownerWakeAdmission = { ...ownerWakeAdmission!,
+      expectedAuthorityVersion: wakeRun.dispatchAuthorityVersion,
+      expectedExecutionGeneration: input.ownerExecution.expectedExecutionGeneration + 1 };
   }
 
   // 6. 검증 완료 — wakeExistingWorkflowStepIssue 가 workflow_step_runnable/workflow_resume 계약으로
@@ -302,6 +329,7 @@ export async function dispatchSourceIssueNativeResume(
       stepRunMetadata: stepRun.metadata,
       issueId: input.issueId,
       allowBlockedIssue: input.allowBlockedIssue ?? true,
+      ...(ownerWakeAdmission ? { ownerExecution: ownerWakeAdmission } : {}),
     });
   } catch {
     await restoreFailedState();

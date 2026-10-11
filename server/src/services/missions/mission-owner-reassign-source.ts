@@ -1,13 +1,10 @@
-import { agents, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, issues, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import type { AutomaticSourceRecovery } from "../workflow/source-issue-native-resume.js";
 import { issueService } from "../issues.js";
 import type { MissionRow, MissionServiceDeps } from "../missions.js";
-import {
-  describeMissionExecutionLiaisonBoundary,
-  isMissionExecutionLiaisonAgent,
-  isRunnableMissionExecutionAssigneeStatus,
-} from "./agent-role-boundaries.js";
+import { describeMissionExecutionLiaisonBoundary, isMissionExecutionLiaisonAgent, isRunnableMissionExecutionAssigneeStatus } from "./agent-role-boundaries.js";
 import {
   buildMissionOwnerDecisionAppliedMarker,
   buildMissionOwnerDecisionWakeupDispatchedMarker,
@@ -239,4 +236,65 @@ function notApplied(input: {
     reason,
     decision: "reassign_source_issue",
   });
+}
+
+/** [Stage 8 자동 경로] owner_execute intent(actionId) 를 권위로 하는 guarded 재배정. 기존 human 경로의
+ *  안전 검사(스코프·상태·live 신호·대상 agent 자격)와 이슈 갱신 계약을 그대로 재사용하되, 멱원 key 를
+ *  actionId 에서 파생해 legacy human marker/idempotency 가 새 자동 action 을 억제하지 않게 분리한다.
+ *  반환은 구조적 결과뿐 — findings/comment 자연어를 파싱하지 않는다. 실제 깨움은 호출자가 stage3 strict
+ *  native 전달로 소유한다. */
+export async function applyAutomaticReassignSourceIssue(input: {
+  readonly db: Db; readonly companyId: string; readonly missionId: string; readonly issueId: string;
+  readonly targetAgentId: string; readonly ownerExecution: AutomaticSourceRecovery;
+}): Promise<{ readonly kind: "applied" | "not_applied"; readonly reasonCode: string | null;
+  readonly sourceIssueId: string; readonly targetAgentId: string }> {
+  const fail = (reasonCode: string) => ({ kind: "not_applied" as const, reasonCode,
+    sourceIssueId: input.issueId, targetAgentId: input.targetAgentId });
+  const [issue] = await input.db.select().from(issues).where(and(eq(issues.companyId, input.companyId),
+    eq(issues.id, input.issueId))).limit(1);
+  if (!issue) return fail("source_issue_not_found");
+  if (issue.missionId !== input.missionId) return fail("source_issue_mission_mismatch");
+  if (issue.hiddenAt) return fail("source_issue_hidden");
+  if (issue.status === "done" || issue.status === "cancelled") return fail("source_issue_terminal");
+  const [liveSignal] = await input.db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)
+    .where(and(eq(agentWakeupRequests.companyId, input.companyId), eq(agentWakeupRequests.issueId, input.issueId),
+      inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]))).limit(1);
+  const [liveHeartbeat] = await input.db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.issueId, input.issueId),
+      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+  if (liveSignal || liveHeartbeat) return fail("reassign_target_in_flight"); // 같은 업무 병렬 시작 금지 — 정확한 대기
+  const [targetAgent] = await input.db.select({ id: agents.id, name: agents.name, status: agents.status,
+    adapterType: agents.adapterType, runtimeConfig: agents.runtimeConfig, metadata: agents.metadata })
+    .from(agents).where(and(eq(agents.companyId, input.companyId), eq(agents.id, input.targetAgentId))).limit(1);
+  if (!targetAgent) return fail("target_agent_not_found");
+  if (!isRunnableMissionExecutionAssigneeStatus(targetAgent.status)) return fail("target_agent_not_runnable");
+  if (isMissionExecutionLiaisonAgent(targetAgent)) return fail("target_agent_liaison");
+  if (!(await input.ownerExecution.validateIntent(input.db))) return fail("stale_intent");
+  const idempotencyKey = `owner-execute-reassign:v1:${input.companyId}:${input.ownerExecution.actionId}`;
+  const existingRows = await input.db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+    .where(and(eq(workflowTransitionEvents.companyId, input.companyId),
+      eq(workflowTransitionEvents.idempotencyKey, idempotencyKey))).limit(1);
+  if (existingRows.length === 0) {
+    const committed = await input.db.transaction(async (tx) => {
+      const updated = await tx.update(issues).set({ assigneeAgentId: input.targetAgentId, assigneeUserId: null,
+        status: "todo", checkoutRunId: null, executionRunId: null, executionAgentNameKey: null,
+        executionLockedAt: null, completedAt: null, cancelledAt: null, updatedAt: new Date() }).where(and(
+        eq(issues.id, issue.id), eq(issues.companyId, input.companyId), eq(issues.status, issue.status),
+        inArray(issues.status, ["todo", "backlog", "blocked"]), isNull(issues.hiddenAt))).returning();
+      if (updated.length === 0) return null;
+      const event = await tx.insert(workflowTransitionEvents).values({ companyId: input.companyId,
+        missionId: input.missionId, issueId: issue.id, eventType: "owner_execute_reassign_v1",
+        layer: "mission_owner_authority", fromStatus: issue.status, toStatus: "todo", decision: "reassign",
+        reason: "mission_owner_execute", reasonCode: "mission_owner_execute",
+        correlationId: input.ownerExecution.actionId, idempotencyKey,
+        payload: { schemaVersion: 1, kind: "owner_execute_reassign_v1", actionId: input.ownerExecution.actionId,
+          sourceIssueId: issue.id, previousAgentId: issue.assigneeAgentId, targetAgentId: input.targetAgentId,
+          workflowRunId: input.ownerExecution.workflowRunId, stepRunId: input.ownerExecution.stepRunId } })
+        .onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
+      if (event.length === 0) throw new Error("mission-owner-reassign: durable action already recorded");
+      return updated[0]!;
+    }).catch(() => null);
+    if (!committed) return fail("reassign_status_not_safe");
+  }
+  return { kind: "applied", reasonCode: null, sourceIssueId: input.issueId, targetAgentId: input.targetAgentId };
 }
