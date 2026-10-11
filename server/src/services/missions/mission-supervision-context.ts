@@ -14,6 +14,7 @@ import {
 import { notFound } from "../../errors.js";
 import { listMissionExecutionSourceSnapshots, type MissionExecutionSourceSnapshot } from "./mission-execution-sources.js";
 import { listMissionGovernanceThread, type MissionGovernanceThread } from "./governance-thread.js";
+import { buildTerminalAlertLiveWakeupIssueIds } from "./terminal-alert-wakeup-liveness.js";
 import { loadExecutionDefinition } from "../workflow/execution-definition.js";
 import { projectExecutionDefinition } from "../workflow/execution-definition-view.js";
 import { loadMissionRuntimeSnapshot, type MissionRuntimeSnapshot } from "./mission-runtime-snapshot.js";
@@ -40,6 +41,8 @@ export type MissionSupervisionContext = {
   // issueId 들의 "live wakeup"(queued/claimed/deferred_issue_execution/coalesced) 보유 집합.
   // stopped-execution 판정 전 per-issue live 배제에 쓴다(heartbeat run 과 OR 로 묶어 판정).
   liveWakeupIssueIds: Set<string>;
+  // terminal human-operator alert 전용 live 집합. 원래 stopped-execution 집합을 대체하지 않는다.
+  terminalAlertLiveWakeupIssueIds: Set<string>;
   stepRows: MissionSupervisionWorkflowStepRow[];
   stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
   executionSnapshot: MissionExecutionSourceSnapshot;
@@ -111,7 +114,14 @@ export async function buildMissionSupervisionContext(
   // wakeup 을 가진 issue 만 담는다(terminal/skipped 는 live 가 아님).
   const liveWakeupRows = missionIssueIds.length > 0
     ? await db
-      .select({ issueId: agentWakeupRequests.issueId })
+      .select({
+        issueId: agentWakeupRequests.issueId,
+        status: agentWakeupRequests.status,
+        runId: agentWakeupRequests.runId,
+        createdAt: agentWakeupRequests.createdAt,
+        requestedAt: agentWakeupRequests.requestedAt,
+        updatedAt: agentWakeupRequests.updatedAt,
+      })
       .from(agentWakeupRequests)
       .where(and(
         eq(agentWakeupRequests.companyId, mission.companyId),
@@ -123,6 +133,11 @@ export async function buildMissionSupervisionContext(
   for (const row of liveWakeupRows) {
     if (row.issueId) liveWakeupIssueIds.add(row.issueId);
   }
+  const terminalAlertLiveWakeupIssueIds = buildTerminalAlertLiveWakeupIssueIds({
+    wakeups: liveWakeupRows,
+    missionIssueById,
+    heartbeatRunsByIssueId,
+  });
 
   const rawStepRows = await db
     .select({
@@ -189,6 +204,7 @@ export async function buildMissionSupervisionContext(
     heartbeatCountByIssueId,
     heartbeatRunsByIssueId,
     liveWakeupIssueIds,
+    terminalAlertLiveWakeupIssueIds,
     stepRows,
     stepRowsByIssueId,
     executionSnapshot,

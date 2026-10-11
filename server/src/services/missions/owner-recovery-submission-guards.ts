@@ -12,6 +12,15 @@ export function ownerRecoveryIssueFailure(issue: { originKind: string | null; mi
   if (!issue.missionId) return "mission_required";
   return null;
 }
+export function ownerRecoveryOversightDecisionFailure(issue: { originKind: string | null }, decision: string, recoveryTarget: unknown) {
+  if (issue.originKind !== "mission_main_executor_oversight") return null;
+  if (decision !== "request_input" && decision !== "escalate") return "decision_not_allowed";
+  if (recoveryTarget) return "recovery_target_not_allowed";
+  return null;
+}
+export function ownerRecoveryOversightRunIsActive(run: { status: string } | undefined) {
+  return run?.status === "running";
+}
 export function ownerRecoveryOwnerMatches(mission: { ownerAgentId: string | null } | undefined, agentId: string | null) {
   return Boolean(mission && mission.ownerAgentId === agentId);
 }

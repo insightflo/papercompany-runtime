@@ -563,7 +563,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         missionStatus: mission.status,
         missionHasActiveHeartbeat,
         missionIssueIds: missionIssues.map((missionIssue) => missionIssue.id),
-        liveWakeupIssueIds,
+        liveWakeupIssueIds: context.terminalAlertLiveWakeupIssueIds,
         openOwnerActionRecoveryExists,
         workflowStepRows: input.group.workflowStepRows,
         validationVerdictsByIssueId: terminalVerdicts,

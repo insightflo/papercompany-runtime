@@ -34,6 +34,7 @@ import type { MissionServiceDeps } from "../missions.js";
 import type { MissionOwnerDecisionWakeupDispatchStatus } from "./supervision-types.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { loadCompanySystemLanguage } from "./system-language.js";
+import { appendOrRefreshMissionOwnerHumanInputInstructions, buildMainExecutorOversightDescription } from "./oversight-human-input-instructions.js";
 export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceDeps }) {
 
   const activeWorkflowRunStatuses = new Set(["pending", "queued", "running", "in_progress"]);
@@ -763,25 +764,20 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
           .where(eq(issues.id, existing.id));
         existing.title = nextTitle;
       }
+      if (!isTerminalMissionStatus(mission.status) && !isTerminalIssueStatus(existing.status)) {
+        const description = appendOrRefreshMissionOwnerHumanInputInstructions(existing.description ?? "");
+        if (description !== existing.description) {
+          await db.update(issues).set({ description, updatedAt: new Date() }).where(eq(issues.id, existing.id));
+          existing.description = description;
+        }
+      }
       await ensureWorkflowMissionPlanArtifact(mission, existing, workflowName, metadata);
       return existing;
     }
 
     const oversightIssue = await issueService(db).create(mission.companyId, {
       assigneeAgentId: mission.ownerAgentId,
-      description: [
-        "Monitor this mission and keep execution moving.",
-        "",
-        `Mission: ${mission.title}`,
-        `Scope: ${workflowName}`,
-        "",
-        "Main executor duties:",
-        "- Watch step progress and comments.",
-        "- Comment on failed, stale, undispatched, or blocked steps with the current judgement.",
-        "- Retry failed workflow steps when retry is safe and within the retry limit.",
-        "- Recover/replan toward completion, or escalate/report impossible states with evidence.",
-        "- When every non-oversight issue of the mission is done, verify the work products and complete this oversight issue — completing it closes the mission. If completion evidence is missing, wake the responsible step agent instead of waiting silently.",
-      ].join("\n"),
+      description: buildMainExecutorOversightDescription({ missionTitle: mission.title, workflowName }),
       missionId: mission.id,
       originKind: "mission_main_executor_oversight",
       priority: "medium",
