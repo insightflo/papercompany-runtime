@@ -7,7 +7,7 @@
 //   무관한 ordinary plan 에는 새로운 보편 승인을 추가하지 않는다. 새 run context(actionId·plan hash)
 //   를 run metadata 에 저장해 후속 admission 이 읽을 수 있게 한다.
 import { and, desc, eq } from "drizzle-orm";
-import { missions, workflowRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { missions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { createWorkflowRun } from "./workflow-store.js";
 import { executeWorkflowRun } from "./dag-engine.js";
 import { latestIntentEventId } from "../missions/mission-owner-execution-state.js";
@@ -18,8 +18,9 @@ export type OwnerPlanRunFence = { actionId: string; decisionHash: string;
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-/** [저장 파생 owner 연결] 이 미션의 최신 오너 실행 intent 들 중 지금 materialize 되는 decisionHash
- *  를 가진 것을 찾아 시작 경계 펜스를 만든다. hash 가 다른 제출은 이 시작의 소유가 아니다.
+/** [저장 파생 owner 연결] 이 미션의 오너 실행 intent 들을 최신순 전수 스캔(창 없음 — 더 최신
+ *  비계획 intent 들이 matching intent 를 창 밖으로 밀어내지 않는다)해 지금 materialize 되는
+ *  decisionHash 를 가진 것을 찾아 시작 경계 펜스를 만든다. hash 가 다른 제출은 이 시작의 소유가 아니다.
  *  [Stage 7 일반화] revise_plan 뿐 아니라 계획을 수반한 모든 오너 operation(recollect changed_collection,
  *  delegate_fix 의 plan/collection.plan 경로)의 intent 가 시작을 소유할 수 있다 — 일반 미션의 재수집/
  *  수정위임 계획도 QA-시작 사이 의도 변경에 대해 같은 펜스로 재확인된다. */
@@ -30,7 +31,7 @@ async function deriveOwnerPlanRunFence(db: Db, companyId: string, missionId: str
     eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.missionId, missionId),
     eq(workflowTransitionEvents.eventType, "owner_execute_intent_v1"),
     eq(workflowTransitionEvents.layer, "mission_owner_authority")))
-    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id)).limit(10);
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
   for (const intent of intents) {
     const payload = record(intent.payload), action = record(payload.action);
     const decision = [record(record(action.plan).decision), record(record(record(action.collection).plan).decision)]
@@ -55,7 +56,26 @@ export async function ensureOwnerPlanWorkflowRun(input: { db: Db; companyId: str
   ownerExecution?: OwnerPlanRunFence }): Promise<string | null> {
   const [existing] = await input.db.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, input.companyId),
     eq(workflowRuns.workflowId, input.workflowId), eq(workflowRuns.missionId, input.missionId))).limit(1);
-  if (existing) return existing.id;
+  if (existing) {
+    // [fresh request native start] 두 번째 시작 확인 실패 등으로 남은 미시작 pending 을 현재 유효한
+    //   동일계획 요청이 다시 만나면 실제 native 시작으로 연결한다 — 펜스가 지금 유효하고 run 이
+    //   순수 시작 자격(미시작·스텝 행 없음)일 때만. 펜스가 무효(여전히 stale)하거나 ordinary 계획의
+    //   멱등 재요청은 기존 조기 반환 그대로다.
+    if (input.decisionHash && existing.status === "pending" && existing.startedAt === null) {
+      const fence = await deriveOwnerPlanRunFence(input.db, input.companyId, input.missionId, input.decisionHash);
+      if (fence && (await fence.validateIntent(input.db))) {
+        const [step] = await input.db.select({ id: workflowStepRuns.id }).from(workflowStepRuns)
+          .where(eq(workflowStepRuns.workflowRunId, existing.id)).limit(1);
+        if (!step) {
+          await input.db.update(workflowRuns).set({ metadata: { ...record(existing.metadata),
+            ownerPlanExecution: { actionId: fence.actionId, decisionHash: fence.decisionHash } } })
+            .where(eq(workflowRuns.id, existing.id));
+          await executeWorkflowRun(input.db, existing.id);
+        }
+      }
+    }
+    return existing.id;
+  }
   const [mission] = await input.db.select().from(missions).where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.companyId)));
   if (mission?.sourceMissionId) return null;
   const fence = input.ownerExecution ?? (input.decisionHash

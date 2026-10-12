@@ -46,7 +46,7 @@ import { applyWorkflowIssueCreatedSideEffects as applyIssueCreatedSideEffects, w
 import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
 import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
-import { admitOwnerLinkedStepWake, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
+import { admitOwnerLinkedStepWake, ownerPlanExecutionIntentCurrent, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
@@ -2771,6 +2771,8 @@ export async function processQueuedWorkflowToolStepRuns(
       result.skippedCount += 1;
       continue;
     }
+    // [owner plan admission] 오래된 owner 계획 intent 소유 run 의 실제 실행 admission 은 연기한다(스텝은 queued 유지).
+    if (!(await ownerPlanExecutionIntentCurrent(db, row.run.companyId, { runMetadata: row.run.metadata, stepMetadata: row.stepRun.metadata }))) { result.skippedCount += 1; continue; }
 
     const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
     const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);

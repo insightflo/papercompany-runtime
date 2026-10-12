@@ -12,6 +12,7 @@ import { missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import { submitMissionOwnerPlanDecision } from "./mission-plan-decision-agent-api.js";
 import { hashOwnerPlanDecision } from "../mission-owner-plan-decisions.js";
 import type { OwnerActionResult } from "./mission-owner-execution-state.js";
+import { ownerPlanExecutionIntentCurrent } from "./mission-owner-execution-state.js";
 import { OwnerActionRefusalError, type OwnerExecutionContext } from "./mission-owner-execute.js";
 
 export type OwnerPlanInput = Extract<MissionOwnerAction, { operation: "revise_plan" }>["plan"];
@@ -52,7 +53,8 @@ export async function projectOwnerPlanActionResult(db: Db, companyId: string, mi
       ({ kind: "dispatch" as const, recordId: step.lastDispatchRequestId ?? "", workflowRunId: runId,
         stepRunId: step.id, executionGeneration: step.executionGeneration, requestId: step.lastDispatchRequestId }));
     const evidence = [planEvidence(planHash, runId), ...dispatches];
-    const [run] = await db.select({ status: workflowRuns.status }).from(workflowRuns)
+    const [run] = await db.select({ status: workflowRuns.status, startedAt: workflowRuns.startedAt,
+      metadata: workflowRuns.metadata }).from(workflowRuns)
       .where(and(eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId))).limit(1);
     if (!run) return { ...base, state: "needs_evidence", reasonCode: "plan_run_missing", evidence,
       requiredAction: { kind: "wait_active_execution", targetId: runId, reasonCode: "plan_run_missing" } };
@@ -62,6 +64,12 @@ export async function projectOwnerPlanActionResult(db: Db, companyId: string, mi
       return { ...base, state: "blocked", reasonCode: "plan_step_failed", evidence };
     if (run.status === "running" || steps.some((step) => step.status === "running"))
       return { ...base, state: "executing", reasonCode: null, evidence };
+    // [PR367 R3] 미시작 pending run 이 이 계획을 가리키는데 소유 intent 가 더 이상 현재가 아니면,
+    //   새 요청은 조용한 delivery_pending 이 아니라 정확한 구조 거부를 받는다(현재면 ensure 경로가
+    //   이미 native 시작했다). 무연결 run 은 기존 투영 그대로다.
+    if (run.status === "pending" && run.startedAt == null
+      && !(await ownerPlanExecutionIntentCurrent(db, companyId, { runMetadata: run.metadata })))
+      return { ...base, state: "blocked", reasonCode: "owner_plan_start_intent_stale", evidence };
     return { ...base, state: "delivery_pending", reasonCode: null, evidence };
   }
   if (paqo.awaitingBoardStart === true && (activeHash === planHash || paqo.decisionHash === planHash))

@@ -122,6 +122,25 @@ export async function projectOwnerActionResult(db: Db, companyId: string, missio
   if (row.stepRun.status === "running") return { ...base, state: "executing", reasonCode: null, evidence };
   return { ...base, state: "blocked", reasonCode: "attempt_inactive", evidence };
 }
+/** [owner plan admission fence] run metadata 에 저장된 owner 계획 연결(ownerPlanExecution.actionId)
+ *  이 아직 현재 소유 intent 인지 재확인한다 — 미션 활성·오너 일치·이슈-국소 최신 intent.
+ *  무연결 run(ordinary 계획 포함)과 ownerToolRetry 영수증이 지배하는 스텝은 항상 현재다
+ *  (receipt/authority 검사가 그 admission 을 소유한다). 실제 실행 admission(tools 큐·도구 발사·
+ *  wake)은 이 펜스에서 연기·거부된다 — 오래된 소유 intent 아래 실행을 승인하지 않는다. */
+export async function ownerPlanExecutionIntentCurrent(db: Db, companyId: string,
+  input: { runMetadata: unknown; stepMetadata?: unknown }): Promise<boolean> {
+  if (typeof record(record(input.stepMetadata).ownerToolRetry).authorityId === "string") return true;
+  const stored = record(record(input.runMetadata).ownerPlanExecution);
+  const actionId = typeof stored.actionId === "string" ? stored.actionId : null;
+  if (!actionId) return true;
+  const intent = await loadIntentEvent(db, companyId, actionId);
+  if (!intent) return false;
+  const [mission] = await db.select({ status: missions.status, ownerAgentId: missions.ownerAgentId })
+    .from(missions).where(and(eq(missions.id, intent.missionId), eq(missions.companyId, companyId))).limit(1);
+  if (!mission || mission.status !== "active" || typeof intent.agentId !== "string"
+    || mission.ownerAgentId !== intent.agentId) return false;
+  return await latestIntentEventId(db, companyId, intent.issueId) === actionId;
+}
 /** [invocation fence] owner-execute 연결 시도만 임계구간에서 현재 intent/권한버전/세대를 재확인한다. */
 export async function withCurrentOwnerToolAttempt<T>(input: { db: Db; companyId: string; requestId?: string | null;
   workflowRunId?: string | null; stepRunId?: string | null; }, launch: () => Promise<T>): Promise<T> {
@@ -131,7 +150,13 @@ export async function withCurrentOwnerToolAttempt<T>(input: { db: Db; companyId:
     .where(and(eq(workflowStepRuns.id, input.stepRunId), eq(workflowRuns.companyId, input.companyId))).limit(1);
   const receipt = record(row?.stepRun.metadata).ownerToolRetry;
   const authorityId = record(receipt).authorityId;
-  if (!row || typeof authorityId !== "string") return launch();
+  if (!row || typeof authorityId !== "string") {
+    // [owner plan admission] ownerToolRetry 영수증이 없는 도구 발사는 저장된 계획 연결의 현재성을
+    //   재확인한다 — 오래된 소유 intent 아래 첫 실제 실행은 거부한다(무연결 도구는 무변화 통과).
+    if (row && !(await ownerPlanExecutionIntentCurrent(input.db, input.companyId,
+      { runMetadata: row.run.metadata, stepMetadata: row.stepRun.metadata }))) throw new Error("owner_plan_execution_stale");
+    return launch();
+  }
   const [authority] = await input.db.select({ requestReference: workflowRecoveryAuthorities.requestReference })
     .from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.id, authorityId),
       eq(workflowRecoveryAuthorities.companyId, input.companyId))).limit(1);
@@ -210,7 +235,15 @@ export async function admitOwnerLinkedStepWake(db: Db, input: {
       eq(workflowRecoveryAuthorities.recoveryKind, "supervision_tool_retry")));
   const linked = authorities.filter((authority): authority is { id: string; requestReference: string } =>
     typeof authority.requestReference === "string" && authority.requestReference.startsWith(REFERENCE_PREFIX));
-  if (linked.length === 0) return true; // unrelated workflows keep existing behavior
+  if (linked.length === 0) {
+    // [owner plan admission] 복구 권한이 지배하지 않는 run 은 저장된 계획 연결(metadata.ownerPlanExecution)
+    //   이 wake 승인을 소유한다 — 오래된 소유 intent 의 wake 는 연기한다(무연결 run 은 무변화 통과).
+    const [planRun] = await db.select({ metadata: workflowRuns.metadata }).from(workflowRuns)
+      .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.companyId))).limit(1);
+    if (planRun && !(await ownerPlanExecutionIntentCurrent(db, input.companyId,
+      { runMetadata: planRun.metadata }))) return false;
+    return true; // unrelated workflows keep existing behavior
+  }
   const [run] = await db.select({ dispatchAuthorityVersion: workflowRuns.dispatchAuthorityVersion })
     .from(workflowRuns).where(and(eq(workflowRuns.id, input.workflowRunId),
       eq(workflowRuns.companyId, input.companyId)));
