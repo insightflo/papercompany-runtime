@@ -18,6 +18,7 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { captureExecutionDefinition, type TransactionDb } from "../services/workflow/execution-definition.js";
 import { getMissionOwnerActionResult } from "../services/missions/mission-owner-execute.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 const TOOL_COMMAND = `node -e "console.log(JSON.stringify({status:'success',attempt:'owner-execute-stage2-admission'}))"`;
 const ACCEPTED_WAKE = ["queued", "claimed", "deferred_issue_execution"];
@@ -35,7 +36,9 @@ describe("mission owner admission intent (real DB + real wake path)", () => {
     db = createDb(temp.connectionString);
   }, 60_000);
   afterAll(async () => {
+    if (db) await waitForHeartbeatExecutionsToDrain(db);
     setWorkflowToolStepExecutor(null);
+    if (db) await db.$client.end({ timeout: 5 });
     await temp?.cleanup();
     for (const root of roots) rmSync(root, { recursive: true, force: true });
   });
