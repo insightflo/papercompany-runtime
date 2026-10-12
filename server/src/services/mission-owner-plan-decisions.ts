@@ -13,14 +13,14 @@ import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-def
 import { type WorkflowStep } from "./workflow/dag-engine.js";
 import { synthesizeQaReworkBackEdge } from "./missions/supervision-helpers.js";
 import { ensureOwnerPlanWorkflowRun } from "./workflow/owner-plan-workflow-run.js";
-import { loadMissionRow, revisionPlanDiagnostics } from "./missions/revision-plan-validation.js";
+import { loadMissionRow } from "./missions/revision-plan-validation.js";
+import { missionPlanMaterializationPreflight } from "./missions/mission-plan-materialization-preflight.js";
 import { recordMissionPlanDependencyRejection } from "./missions/mission-plan-consumer-diagnostics.js";
 import { buildRevisionDecisionRefs, validateRevisionPlanDeltaOrRecordRejection } from "./missions/revision-plan-decision-state.js";
 import { withoutDeclaredBlockedRevisionUnits } from "./missions/revision-plan-blocked-outcomes.js";
 import { withoutDeclaredSeparateScopeRevisionUnits } from "./missions/revision-plan-collection-scope.js";
 import { normalizeWorkflowStepMachineChecks } from "./workflow/step-contract.js";
 import { normalizeWorkflowSteps } from "./workflow/normalize-definition-steps.js";
-import { findWorkflowToolReferenceErrors } from "./workflow/step-artifact-references.js";
 import { STEP_MACHINE_CHECKS_TOOL } from "./workflow/step-machine-checks.js";
 import { buildPaqoStepDescription } from "./workflow/revision-generated-description.js";
 import { extractMissionIntent } from "./missions/mission-intent.js";
@@ -41,11 +41,9 @@ import {
   isDeclaredStructuralUnit,
   validateStructuralUnit,
   validateStructuralTopology,
-  validateDeclaredStructuralPlan,
 } from "./missions/structural-materialization.js";
 import { applyPaqoArtifactContracts } from "./missions/paqo-artifact-contracts.js";
 import { fillStructuralValidatorToolArgs } from "./missions/structural-materialization.js";
-import { validateDeclaredStructuralPlanReadiness } from "./workflow/control-flow/structural-gate-readiness.js";
 import { issueService } from "./issues.js";
 import { classifyWorkflowStepRole } from "./workflow-step-role.js";
 import { listCompanyPlanningArtifactTools, hasPlanArtifactRole, type PlanningArtifactTool } from "./missions/mission-plan-publication-contract.js";
@@ -1430,70 +1428,15 @@ export async function recordLatestAuthorizedMissionOwnerPlanDecision({
   const missionTitle = missionRow?.title ?? missionId;
   const missionDescription = missionRow?.description ?? null;
 
-  // Validate declared structural topology and capability before *any* branch
-  // can create/wake PLAN-QA or materialize a plan. Invalid topology is a plan
-  // error, not something materialization is allowed to repair silently.
-  const structuralPlanErrors = validateDeclaredStructuralPlan(
-    effectiveDraft.refs.selectedExecutionUnits,
-    effectiveDraft.steps as Record<string, unknown>[],
-  );
-  const structuralReadinessErrors = await validateDeclaredStructuralPlanReadiness({
-    db,
-    companyId,
-    units: effectiveDraft.refs.selectedExecutionUnits,
+  const preflightRejection = await missionPlanMaterializationPreflight({
+    db, companyId, missionId, mission: missionRow, draft: effectiveDraft,
+    buildSteps: mission => buildRevisionMaterializationSteps(effectiveDraft, mission, planningTools, reuseRuntime),
   });
-  const revisionErrors = await revisionPlanDiagnostics(db, companyId, missionId, effectiveDraft.refs.selectedExecutionUnits,
-    mission => buildRevisionMaterializationSteps(effectiveDraft, mission, planningTools, reuseRuntime));
-  const allStructuralErrors = [...structuralPlanErrors, ...structuralReadinessErrors];
-  if (revisionErrors.length) {
-    await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected", rejectionReason: "mission_revision_invalid", diagnostics: revisionErrors });
-    return { status: "invalid", reason: "mission_revision_invalid", planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics: revisionErrors };
-  }
-  if (allStructuralErrors.length > 0) {
-    await upsertMissionPlanDecisionSubmission({
-      ...ledgerSubmission,
-      status: "rejected",
-      rejectionReason: "structural_plan_validation_failed",
-      diagnostics: allStructuralErrors.map((message) => ({ code: "structural_plan_error", message, severity: "invalid" as const })),
-    });
-    return {
-      status: "invalid",
-      reason: "structural_plan_validation_failed",
-      planningIssueId: collected.planningIssueId,
-      commentId: collected.commentId,
-      decisionHash,
-      diagnostics: allStructuralErrors.map((e) => ({ code: "structural_plan_error", message: e, severity: "invalid" as const })),
-    };
-  }
-
-  // Use the PASS-time builder so references are checked after native ID remapping,
-  // including revision copies, without repairing or broadening ancestry.
-  let toolReferenceSteps: WorkflowStep[] | null = null;
-  if (missionRow) {
-    try {
-      toolReferenceSteps = buildRevisionMaterializationSteps(effectiveDraft, missionRow, planningTools, reuseRuntime);
-    } catch {
-      // Skip this additive reference check on builder errors; preserve existing PASS-time handling.
-    }
-  }
-  const toolReferenceErrors = toolReferenceSteps
-    ? findWorkflowToolReferenceErrors(toolReferenceSteps)
-    : [];
-  if (toolReferenceErrors.length > 0) {
-    const diagnostics = toolReferenceErrors.map((details) => ({
-      code: "workflow_tool_reference_invalid",
-      message: `Step "${details.stepId}" references "${details.referencedStepId}" (${details.reason}). Only known forward ancestor steps may be referenced.`,
-      severity: "invalid" as const,
-      details,
-    }));
-    await upsertMissionPlanDecisionSubmission({
-      ...ledgerSubmission,
-      status: "rejected",
-      rejectionReason: "workflow_tool_reference_invalid",
-      diagnostics,
-    });
-    return { status: "invalid", reason: "workflow_tool_reference_invalid",
-      planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash, diagnostics };
+  if (preflightRejection) {
+    await upsertMissionPlanDecisionSubmission({ ...ledgerSubmission, status: "rejected",
+      rejectionReason: preflightRejection.reason, diagnostics: preflightRejection.diagnostics });
+    return { status: "invalid", ...preflightRejection,
+      planningIssueId: collected.planningIssueId, commentId: collected.commentId, decisionHash };
   }
 
   let planRefsMutatedThisCall = false;

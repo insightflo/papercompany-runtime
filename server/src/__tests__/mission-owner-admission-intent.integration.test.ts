@@ -6,7 +6,7 @@ import { rmSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
-  agentToolGrants, agentWakeupRequests, createDb, heartbeatRuns, issues, missions,
+  agentToolGrants, agentWakeupRequests, agents, createDb, heartbeatRuns, issues, missions,
   toolDefinitions, workflowDefinitions, workflowRecoveryAuthorities, workflowRuns,
   workflowStepRuns, workflowTerminalDecisions, workflowTransitionEvents,
 } from "@paperclipai/db";
@@ -48,6 +48,11 @@ describe("mission owner admission intent (real DB + real wake path)", () => {
   async function seed(withAssignee: boolean): Promise<Scenario> {
     const s = await seedToolRecoveryScenario({ db, artifactExists: true });
     roots.push(s.tempRoot);
+    // [테스트 밀봉] 이 테스트는 깨어난 하위 실행의 어댑터 결과를 단언하지 않는다. 기본 codex_local
+    // 설정(adapterConfig:{})은 실제 codex CLI 자식을 띄워 afterAll 드레인이 vitest 기본
+    // hookTimeout(10s)을 넘긴다. 즉시 종료되는 명령으로만 덮어써 부수 실행을 빠르게 확정 수렴시킨다.
+    await db.update(agents).set({ adapterConfig: { command: "false" } })
+      .where(eq(agents.id, s.ownerAgentId));
     const tools = await db.insert(toolDefinitions).values([
       { companyId: s.companyId, name: "mission_owner_execute", adapterType: "builtin", adapterConfig: { kind: "mission-owner-execute" } },
       { companyId: s.companyId, name: "collect-us-stockflow", adapterType: "builtin", adapterConfig: { command: TOOL_COMMAND } },
