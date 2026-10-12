@@ -130,7 +130,11 @@ describeEP("hybrid QA — pre-PLAN structural rejection (PLAN-QA side-effect gua
   const gateUnit = (ownerAgentId: string, toolName: string) => ({
     id: "unit-gate-1", kind: "mission_plan_unit", type: "tool", qaType: "structural",
     title: "[QA] Structural gate", assigneeAgentId: ownerAgentId, selectionState: "selected",
-    toolNames: [toolName], sourceRef: { type: "mission_plan_unit", id: "unit-gate-1" },
+    toolNames: [toolName],
+    // [실행 가능성 보증] structural gate 는 생성기가 요구하는 toolArgs 를 플랜 유닛에 명시해야 한다.
+    // 생산 유닛의 산출물 경로 참조는 유닛 ID 기준으로 선언하고 물화 시 스텝 ID 로 재작성된다.
+    toolArgs: { artifactPath: "{$steps.unit-source-1.workProductPath}" },
+    sourceRef: { type: "mission_plan_unit", id: "unit-gate-1" },
     dependsOn: ["unit-source-1"],
   });
 

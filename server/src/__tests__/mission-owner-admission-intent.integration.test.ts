@@ -6,7 +6,7 @@ import { rmSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
-  agentToolGrants, agentWakeupRequests, createDb, heartbeatRuns, issues, missions,
+  agentToolGrants, agentWakeupRequests, agents, createDb, heartbeatRuns, issues, missions,
   toolDefinitions, workflowDefinitions, workflowRecoveryAuthorities, workflowRuns,
   workflowStepRuns, workflowTerminalDecisions, workflowTransitionEvents,
 } from "@paperclipai/db";
@@ -21,6 +21,12 @@ import { getMissionOwnerActionResult } from "../services/missions/mission-owner-
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 const TOOL_COMMAND = `node -e "console.log(JSON.stringify({status:'success',attempt:'owner-execute-stage2-admission'}))"`;
+// 즉사 명령(false)은 자식이 먼저 죽어 프로세스 어댑터의 선제 stdin 쓰기가 닫힌 파이프에
+// 부딪혀 처리 안 된 EPIPE를 낸다(CI 리눅스에서 재현, PR #368 verify-tests). 공백 포함 문자열은
+// 실행 파일로 조회되지 않아 잡힌 채로 즉시 실패한다(= main CI의 codex 부재 ENOENT와 동일 경로,
+// 자식이 없으니 EPIPE도 없다). 조회 방식이 나중에 문자열 분할로 바뀌어도 500ms 생존 후 종료하는
+// 안전한 자식으로 대체될 뿐이다.
+const SEAL_COMMAND = `node -e "setTimeout(()=>process.exit(0),500)"`;
 const ACCEPTED_WAKE = ["queued", "claimed", "deferred_issue_execution"];
 type Db = ReturnType<typeof createDb>;
 type Scenario = Awaited<ReturnType<typeof seedToolRecoveryScenario>> & {
@@ -48,6 +54,11 @@ describe("mission owner admission intent (real DB + real wake path)", () => {
   async function seed(withAssignee: boolean): Promise<Scenario> {
     const s = await seedToolRecoveryScenario({ db, artifactExists: true });
     roots.push(s.tempRoot);
+    // [테스트 밀봉] 이 테스트는 깨어난 하위 실행의 어댑터 결과를 단언하지 않는다. 기본 codex_local
+    // 설정(adapterConfig:{})은 실제 codex CLI 자식을 띄워 afterAll 드레인이 vitest 기본
+    // hookTimeout(10s)을 넘긴다. 빠르게 확정 수렴하는 SEAL_COMMAND로 덮어 쓴다.
+    await db.update(agents).set({ adapterConfig: { command: SEAL_COMMAND } })
+      .where(eq(agents.id, s.ownerAgentId));
     const tools = await db.insert(toolDefinitions).values([
       { companyId: s.companyId, name: "mission_owner_execute", adapterType: "builtin", adapterConfig: { kind: "mission-owner-execute" } },
       { companyId: s.companyId, name: "collect-us-stockflow", adapterType: "builtin", adapterConfig: { command: TOOL_COMMAND } },
