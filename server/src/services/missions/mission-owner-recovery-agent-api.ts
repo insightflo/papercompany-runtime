@@ -5,12 +5,13 @@
 // [권한] 체크아웃된 unblock 또는 제한된 oversight issue의 agent run 만 제출 가능.
 import type { Db } from "@paperclipai/db";
 import type { MissionOwnerDecisionSubmit } from "@paperclipai/shared";
-import { heartbeatRuns, issues, missions } from "@paperclipai/db";
+import { heartbeatRuns, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { badRequest, conflict, forbidden, unauthorized } from "../../errors.js";
 import { issueService } from "../issues.js";
 import { assertOwnerRecoveryTarget } from "./owner-recovery-target.js";
-import { ownerDecisionRequestsHuman } from "./owner-tool-recovery-eligibility.js";
+import { ownerDecisionRequestsHuman, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
 import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryIdentityMatches, ownerRecoveryOversightDecisionFailure, ownerRecoveryOversightRunIsActive } from "./owner-recovery-submission-guards.js";
 import {
   recordMissionOwnerDecision,
@@ -31,6 +32,11 @@ export type OwnerRecoveryApiActor = {
   readonly agentId: string | null;
   readonly runId: string | null;
 };
+
+const toolRecoveryCardSchema = z.object({
+  schemaVersion: z.literal(1), kind: z.literal("tool_step"),
+  workflowRunId: z.string().uuid(), stepRunId: z.string().uuid(),
+}).strict();
 
 function toSubmission(data: MissionOwnerDecisionSubmit, oversight = false): MissionOwnerDecisionSubmission {
   const trimmed = (value: string | null | undefined): string | undefined => {
@@ -120,6 +126,23 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
       throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
     }
     sourceIssueOriginKind = sourceIssue.originKind;
+  }
+  // Only a versioned durable tool card requires a tool target; human and legacy cards stay optional.
+  if (!isOversight && toolRecoveryDecisionEffect(data.decision) !== "no_tool_action"
+    && data.recoveryTarget?.kind !== "tool_step") {
+    const links = await db.select({ payload: workflowTransitionEvents.payload,
+      workflowRunId: workflowTransitionEvents.workflowRunId, stepRunId: workflowTransitionEvents.workflowStepRunId,
+    }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, issue.companyId), eq(workflowTransitionEvents.missionId, issue.missionId),
+      eq(workflowTransitionEvents.issueId, issue.id), eq(workflowTransitionEvents.layer, "mission_owner_recovery"),
+      eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1")));
+    const toolCard = links.some((link) => {
+      const parsed = toolRecoveryCardSchema.safeParse(link.payload);
+      return parsed.success && parsed.data.workflowRunId === link.workflowRunId && parsed.data.stepRunId === link.stepRunId;
+    });
+    if (toolCard) throw conflict("Tool recovery decisions require an exact tool-step recovery target", {
+      reason: "owner_recovery_tool_target_required",
+    });
   }
   // The issuing heartbeat belongs to this owner-action issue, NOT the recovery target.
   // Check before assertCheckoutOwner: it can adopt or repair a stale checkout lock.
