@@ -47,7 +47,8 @@ describe("exact tool recovery selection (real DB, no prose authority)", () => {
     await recordMissionOwnerDecision({ db,
       issue: { id: s.issue.id, companyId: s.companyId, missionId: s.issue.missionId },
       heartbeatRunId: s.heartbeatRunId, sourceIssueId: s.issue.originId,
-      submission: missionOwnerDecisionSubmitSchema.parse({ decision: "retry_source_issue", recoveryTarget }),
+      submission: { decision: "retry_source_issue",
+        recoveryTarget: missionOwnerDecisionSubmitSchema.parse({ decision: "retry_source_issue", recoveryTarget }).recoveryTarget },
     });
   }
   async function supervise(s: Awaited<ReturnType<typeof seed>>) {
