@@ -1,5 +1,3 @@
-// server/src/services/missions/mission-owner-execute.ts
-//
 // [목적] 미션 오너의 구조적 실행 요청(mission_owner_execute tool)을 기존 native 경로에 연결한다.
 //   intent 는 workflow_transition_events 의 machine contract(owner_execute_intent_v1/applied_v1)로 기록하고(상태
 //   계약은 mission-owner-execution-state.ts), 실제 reset·전달은 retryIssueLessToolWorkflowStep(tool_step, strict)와
@@ -20,6 +18,7 @@ import { executeOwnerPlanAction, projectOwnerPlanActionResult } from "./mission-
 import { executeOwnerRecollect, preflightOwnerRecollect, projectOwnerRecollectResult } from "./mission-owner-recollect.js";
 import { executeOwnerDelegateFix, preflightOwnerDelegateFix, projectOwnerDelegateFixResult } from "./mission-owner-delegate-fix.js";
 import { executeOwnerReassign, preflightOwnerReassign, projectOwnerReassignResult } from "./mission-owner-reassign.js";
+import { executeOwnerUnblockPromotion } from "./mission-owner-promote-unblock.js";
 
 export type OwnerExecutionContext = { db: Db; companyId: string; agentId: string; heartbeatRunId: string };
 export type { OwnerActionResult, OwnerExecutionAdmission } from "./mission-owner-execution-state.js";
@@ -131,11 +130,10 @@ export async function projectIssueActionResult(db: Db, companyId: string, missio
 export async function executeMissionOwnerAction(context: OwnerExecutionContext,
   request: MissionOwnerExecuteRequest): Promise<OwnerActionResult> {
   const action = request.action;
-  if (action.operation !== "retry_step" && action.operation !== "resume_run" && action.operation !== "revise_plan" && action.operation !== "recollect" && action.operation !== "delegate_fix" && action.operation !== "reassign") throw new OwnerActionRefusalError(422, "operation_not_available");
+  if (action.operation !== "retry_step" && action.operation !== "resume_run" && action.operation !== "revise_plan" && action.operation !== "recollect" && action.operation !== "delegate_fix" && action.operation !== "reassign" && action.operation !== "promote_unblock_product") throw new OwnerActionRefusalError(422, "operation_not_available");
   await authenticate(context, request);
   // [Stage 5] revise_plan 은 target 이 없다: intent 기록 전에 planning issue 실재를 확인한다(부작용 0).
-  // [Stage 6/7/8] recollect·delegate_fix·reassign 은 각 preflight 모듈이 구성·plan·verdict/finding/back-edge·
-  // 대상 agent/고정 실행자/계획 unit 배정을 intent 기록 전에 검증한다(부작용 0).
+  // recollect·delegate_fix·reassign preflight is read-only; promotion revalidates atomically with strict retry.
   if (action.operation === "revise_plan") {
     const [planning] = await context.db.select({ id: issues.id }).from(issues).where(and(eq(issues.id, action.plan.planningIssueId),
       eq(issues.companyId, context.companyId), eq(issues.missionId, request.missionId), eq(issues.originKind, "mission_main_executor_plan"))).limit(1);
@@ -198,6 +196,7 @@ export async function executeMissionOwnerAction(context: OwnerExecutionContext,
     await recoverDeliveryIfNeeded(context, request, resolvedActionId, validateIntent);
     const projected = await project();
     if (projected.reasonCode === "action_not_applied") {
+      if (action.operation === "promote_unblock_product") return executeOwnerUnblockPromotion(context, request, resolvedActionId, validateIntent);
       if (action.operation === "resume_run") return { ...projected, reasonCode: (await previewOwnerNativeRunResume(context, request)).reasonCode };
       if (action.operation === "revise_plan" || action.operation === "reassign" || (action.operation === "recollect" && action.mode === "changed_collection")) return projected; // 계획/재배정 투영은 intent+refs 기반이라 이 상태가 없다
       return { ...projected, reasonCode: await diagnoseRefusal(context, target!) };
@@ -205,13 +204,13 @@ export async function executeMissionOwnerAction(context: OwnerExecutionContext,
     if (action.operation === "resume_run") return finalizeOwnerResumeProjection(context.db, context.companyId,
       target!.workflowRunId, target!.stepRunId, projected);
     return projected;
-  }  // [Stage 4~7] 각 operation 은 전용 모듈에 위임한다(resume→exact 복구, revise/recollect/delegate_fix→각 체인).
-  // retry_step 과 recollect same_configuration 은 같은 exact native 재시도 경로(dispatchOwnerExactRetry — stage 1/3)를 공유한다.
+  } // Operations share native exact recovery; promotion + retry is one atomic application.
   if (action.operation === "resume_run") return executeOwnerRunResume(context, request, resolvedActionId);
   if (action.operation === "revise_plan") return executeOwnerPlanAction(context, action.plan, resolvedActionId);
   if (action.operation === "recollect") return executeOwnerRecollect(context, request, resolvedActionId, validateIntent);
   if (action.operation === "delegate_fix") return executeOwnerDelegateFix(context, request, resolvedActionId, validateIntent);
   if (action.operation === "reassign") return executeOwnerReassign(context, request, resolvedActionId, validateIntent);
+  if (action.operation === "promote_unblock_product") return executeOwnerUnblockPromotion(context, request, resolvedActionId, validateIntent);
   if (target === null) throw new OwnerActionRefusalError(422, "target_kind_not_supported"); // 타입 펜스: 위 분기가 revise_plan/recollect 을 이미 반환했다
   return dispatchOwnerExactRetry(context, request, target, resolvedActionId, validateIntent);
 }

@@ -44,6 +44,8 @@ export function buildToolStepRecoveryDescription(input: {
     "Mission owner decision authority:",
     prose("- Submit the recovery decision through `POST /api/issues/{this owner-action issue id}/owner-recovery/decision`; a comment cannot authorize recovery.",
       "- `POST /api/issues/{this owner-action issue id}/owner-recovery/decision`으로 결정을 제출하세요. 댓글은 복구를 승인할 수 없습니다."),
+    prose("- For recorded `workproduct_selector_provenance_missing`, use `mission_owner_execute` operation `promote_unblock_product` with productId, producerStepId and the exact tool_step recoveryTarget above. Only your own prior mission_owner_unblock_source product in this mission is eligible. Promotion and native retry commit together; a refused retry rolls promotion back. Existing six operations, board promotion and QA remain unchanged. Producer IDs are in the structured system facts; this guidance is not authority.",
+      "- 기록된 workproduct_selector_provenance_missing 복구에는 mission_owner_execute의 promote_unblock_product를 사용하세요. productId, producerStepId와 위의 정확한 tool_step recoveryTarget이 필요합니다. 이 미션에서 본인이 수행한 기존 mission_owner_unblock_source 산출물만 가능합니다. 승격과 기존 재시도가 함께 적용되고, 재시도 거부 시 승격도 취소됩니다. 기존 여섯 작업·보드 승격·QA는 유지됩니다. 생산자 ID는 구조화된 사실에 있으며, 이 안내 자체는 실행 권한이 아닙니다."),
     prose("- `request_input` and `escalate` submitted through that API create the Human Operator handoff.",
       "- 이 API에 제출한 request_input/escalate는 운영자 요청을 생성하며 도구를 재시도하지 않습니다."),
     ...(ko ? ["댓글은 표시용입니다. 결정 코드는 위 목록에서 선택하고 구조화된 API에 제출하세요."] : [buildMissionOwnerDecisionFormat()]),
