@@ -52,7 +52,10 @@ describe("tool step recovery description", () => {
 
     expect(description).toContain("If the producer work-product file bytes were modified directly");
     expect(description).toContain("producer_rebind_bytes_changed");
-    expect(description).toContain("Rerun the producer step, or register a corrected revision through the official producer registration path");
+    expect(description).toContain("adopt_producer_edits");
+    expect(description).toContain("attestation {sha256, byteSize}");
+    expect(description).toContain("Adoption and the exact retry commit together; a refused retry rolls the adoption back");
+    expect(description).toContain("rerun the producer step, or register a corrected revision through the official producer registration path");
     expect(description).toContain("submit `request_input` or `escalate`");
   });
 
