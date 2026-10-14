@@ -2,6 +2,7 @@ import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
+import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
@@ -74,6 +75,13 @@ export function createMissionOwnerSupervisionMonitor(
       logger.warn({ err }, "Mission owner supervision monitor sweep failed");
     } finally {
       running = false;
+    }
+    // Observe only AFTER the unchanged sweep, outside its in-flight guard.
+    // Failure/latency in shadow must never gate an existing supervision tick.
+    try {
+      await recordActiveMissionCadenceShadow(db, new Date());
+    } catch (err) {
+      logger.warn({ err }, "Mission oversight cadence shadow observation failed");
     }
   }
 
