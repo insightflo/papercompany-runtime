@@ -32,6 +32,30 @@ describe("tool step recovery description", () => {
     expect(description).toContain("ordinary issue comments are display-only evidence");
   });
 
+  it("states the changed-bytes rule for producer work products", () => {
+    const description = buildToolStepRecoveryDescription({
+      marker: "tool-step-recovery:run-1:qa-gate",
+      missionTitle: "Daily dashboard",
+      workflowName: "gazua-morning",
+      workflowRunId: "run-1",
+      stepId: "qa-gate",
+      displayStepName: "QA gate",
+      toolNames: ["gazua.qa"],
+      classification: {
+        className: "side_effect_risk",
+        retryPolicy: "manual_owner_decision_required",
+        rationale: "External side effect risk.",
+        requiredAction: "Owner must decide whether retry is safe.",
+        evidence: [],
+      },
+    });
+
+    expect(description).toContain("If the producer work-product file bytes were modified directly");
+    expect(description).toContain("producer_rebind_bytes_changed");
+    expect(description).toContain("Rerun the producer step, or register a corrected revision through the official producer registration path");
+    expect(description).toContain("submit `request_input` or `escalate`");
+  });
+
   it("keeps toolInvocationArgs evidence visible (empty-args definition defects) with secrets redacted", () => {
     const build = (evidence: string[]) => buildToolStepRecoveryDescription({
       marker: "m", missionTitle: "t", workflowName: "w", workflowRunId: "run-1", stepId: "s",

@@ -61,6 +61,41 @@ import { summarizeProvider403LadderForMission } from "../heartbeat-provider403-l
 import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
 export { selectTerminalWorkflowAuthoritySource };
 
+// [issue-less tool recovery card liveness] 실패한 이슈 없는 도구 단계의 복구 권한은 링크된
+// owner_tool_recovery_target_v1 카드에 있다. 카드가 열려 있거나 아직 없으면(첫 감시 패스에서
+// 생성 예정) 억제를 유지한다. 모든 링크 카드가 종료(done/cancelled)면 복구 권한은 소진된
+// 것이므로 터미널 Human Operator 보고 경로로 넘어간다(2026-10-14 a6d16f90 사고).
+async function hasOpenOrMissingIssueLessToolRecoveryCard(db: Db, input: {
+  companyId: string; missionId: string; workflowStepRows: MissionSupervisionWorkflowStepRow[];
+}): Promise<boolean> {
+  const stepRunIds = input.workflowStepRows
+    .filter((row) => issueLessToolRecoveryOwnsFailure(row))
+    .map((row) => row.stepRun.id);
+  if (stepRunIds.length === 0) return false;
+  const linked = await db
+    .select({ workflowStepRunId: workflowTransitionEvents.workflowStepRunId, status: issues.status })
+    .from(workflowTransitionEvents)
+    .innerJoin(issues, eq(issues.id, workflowTransitionEvents.issueId))
+    .where(and(
+      eq(workflowTransitionEvents.companyId, input.companyId),
+      eq(workflowTransitionEvents.missionId, input.missionId),
+      eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1"),
+      inArray(workflowTransitionEvents.workflowStepRunId, stepRunIds),
+    ));
+  const statusesByStepRunId = new Map<string, string[]>();
+  for (const row of linked) {
+    if (!row.workflowStepRunId) continue;
+    const list = statusesByStepRunId.get(row.workflowStepRunId) ?? [];
+    list.push(row.status);
+    statusesByStepRunId.set(row.workflowStepRunId, list);
+  }
+  return stepRunIds.some((stepRunId) => {
+    const statuses = statusesByStepRunId.get(stepRunId) ?? [];
+    if (statuses.length === 0) return true;
+    return statuses.some((status) => !isTerminalIssueStatus(status));
+  });
+}
+
 /** [observability] wakeup callback 결과(report_only 등)에서 fail-closed 사유 문자열만 안전 추출. */
 function readWakeupResultDetailReason(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
@@ -2250,9 +2285,17 @@ export function createSupervision({ db, deps, ownerActions }: {
     for (const [workflowRunId, workflowStepRows] of [...failedWorkflowRowsByRunId.entries()].sort(([left], [right]) => left.localeCompare(right))) {
       if (hasMissionLevelRecoveryReport || workflowRunIdsAlreadyReportedByRecovery.has(workflowRunId)) continue;
       if (qaCapPendingWorkflowRunIds.has(workflowRunId) && !qaCapOwnerActionByWorkflowRunId.has(workflowRunId)) continue;
-      if (workflowStepRows.some(issueLessToolRecoveryOwnsFailure)) {
+      if (workflowStepRows.some(issueLessToolRecoveryOwnsFailure)
+        && await hasOpenOrMissingIssueLessToolRecoveryCard(db, {
+          companyId: mission.companyId,
+          missionId: mission.id,
+          workflowStepRows,
+        })) {
         findings.push(`terminal_mission_human_operator_request_suppressed: workflow run=${workflowRunId}; issue-less tool recovery authority remains with manual recovery owner action`);
         continue;
+      }
+      if (workflowStepRows.some(issueLessToolRecoveryOwnsFailure)) {
+        findings.push(`terminal_mission_tool_recovery_authority_consumed: workflow run=${workflowRunId}; every linked issue-less tool recovery card is terminal — continuing to terminal human operator reporting`);
       }
 
       const sourceIssue = selectTerminalWorkflowAuthoritySource({
