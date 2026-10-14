@@ -24,6 +24,9 @@ const planInput = z.object({
 }).strict();
 const action = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("retry_step"), target: stepTarget }).strict(),
+  z.object({ operation: z.literal("promote_unblock_product"),
+    target: exactFailure.extend({ kind: z.literal("tool_step") }),
+    productId: uuid, producerStepId: z.string().min(1) }).strict(),
   z.object({ operation: z.literal("resume_run"), target: stepTarget,
     terminalDecisionId: uuid,
     previewPolicy: z.enum(["native_failed_anchor_v1", "signed_unexecuted_tail"]) }).strict(),
