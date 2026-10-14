@@ -27,6 +27,13 @@ const action = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("promote_unblock_product"),
     target: exactFailure.extend({ kind: z.literal("tool_step") }),
     productId: uuid, producerStepId: z.string().min(1) }).strict(),
+  // [owner adopt producer edits] 오너가 직접 수정한 생산자 바이트(bytes-changed 펜스)를 증명과 함께
+  //   공식 채택하고 동일 트랜잭션에서 정확한 재시도까지 실행한다. expected 해시는 서버가 디스크로 재검증.
+  z.object({ operation: z.literal("adopt_producer_edits"),
+    target: exactFailure.extend({ kind: z.literal("tool_step") }),
+    productId: uuid, producerStepId: z.string().min(1),
+    attestation: z.object({ sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      byteSize: z.number().int().positive() }).strict() }).strict(),
   z.object({ operation: z.literal("resume_run"), target: stepTarget,
     terminalDecisionId: uuid,
     previewPolicy: z.enum(["native_failed_anchor_v1", "signed_unexecuted_tail"]) }).strict(),
