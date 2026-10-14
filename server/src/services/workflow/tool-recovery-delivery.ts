@@ -1,4 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, is } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { issueAutomaticProducerRebind, ProducerRebindIssuanceFailed } from "./automatic-producer-rebind.js";
+import { DeferredProducerRebindDispatch } from "./tool-dispatch-failure.js";
 import { missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import type { WorkflowExecutionResult } from "./types.js";
 import { assertRunNotReplaced } from "./run-replacement-guard.js";
@@ -8,6 +11,34 @@ import { recordAcceptedToolRecoveryOutcome } from "./tool-recovery-outcome.js";
 /** Delivery of one accepted reset, never a new authorization or reset. */
 export async function deliverAcceptedToolRecovery(db: Db, stepRunId: string,
   sync: (db: Db, runId: string) => Promise<WorkflowExecutionResult>): Promise<WorkflowExecutionResult | null> {
+  try { return await deliverOnce(db, stepRunId, sync); }
+  catch (request) {
+    if (!(request instanceof DeferredProducerRebindDispatch) || request.stepRunId !== stepRunId
+      || is(db, PgTransaction)) throw request;
+    // The failed delivery has rolled back; the re-arm/authority receipt remains committed.
+    let issuanceFailure: ProducerRebindIssuanceFailed | undefined;
+    try { await issueAutomaticProducerRebind(db, request); }
+    catch (error) {
+      if (!(error instanceof ProducerRebindIssuanceFailed)) throw error;
+      issuanceFailure = error;
+    }
+    // Exactly one new delivery transaction, with the same receipt and all original guards.
+    return deliverOnce(db, stepRunId, async (tx, runId) => {
+      if (issuanceFailure) await request.persist(tx, issuanceFailure);
+      try { return await sync(tx, runId); }
+      catch (error) {
+        if (!(error instanceof DeferredProducerRebindDispatch) || error.stepRunId !== stepRunId) throw error;
+        // No second issuance: a new/still-stale input fails visibly under the existing dispatch contract.
+        await error.persist(tx, error);
+        return sync(tx, runId);
+      }
+    }, request);
+  }
+}
+
+async function deliverOnce(db: Db, stepRunId: string,
+  sync: (db: Db, runId: string) => Promise<WorkflowExecutionResult>,
+  expectedDispatch?: DeferredProducerRebindDispatch): Promise<WorkflowExecutionResult | null> {
   const [scope] = await db.select({ run: workflowRuns }).from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId)).where(eq(workflowStepRuns.id, stepRunId));
   if (!scope) return null;
@@ -34,7 +65,7 @@ export async function deliverAcceptedToolRecovery(db: Db, stepRunId: string,
       eq(workflowRecoveryAuthorities.workflowRunId, run.id), eq(workflowRecoveryAuthorities.status, "consumed"),
       eq(workflowRecoveryAuthorities.recoveryKind, "supervision_tool_retry"),
       eq(workflowRecoveryAuthorities.resultingAuthorityVersion, run.dispatchAuthorityVersion)));
-    if (!authority) return null;
+    if (!authority || (expectedDispatch && !expectedDispatch.matchesStep(step))) return null;
     // Native queue write and cancellation serialize on the same mission/run locks.
     // The executor is not called here: sync materializes the durable toolInvocation/toolQueue.
     const result = await sync(tx as unknown as Db, run.id);

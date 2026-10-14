@@ -2502,7 +2502,7 @@ async function startIssueLessToolStepRun(input: {
       requestId,
       toolName,
       args: step.toolArgs ?? {},
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
     return false;
   }
