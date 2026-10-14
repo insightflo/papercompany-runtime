@@ -19,6 +19,7 @@ import { executeOwnerRecollect, preflightOwnerRecollect, projectOwnerRecollectRe
 import { executeOwnerDelegateFix, preflightOwnerDelegateFix, projectOwnerDelegateFixResult } from "./mission-owner-delegate-fix.js";
 import { executeOwnerReassign, preflightOwnerReassign, projectOwnerReassignResult } from "./mission-owner-reassign.js";
 import { executeOwnerUnblockPromotion } from "./mission-owner-promote-unblock.js";
+import { executeOwnerAdoptProducerEdits } from "./mission-owner-adopt-producer-edits.js";
 
 export type OwnerExecutionContext = { db: Db; companyId: string; agentId: string; heartbeatRunId: string };
 export type { OwnerActionResult, OwnerExecutionAdmission } from "./mission-owner-execution-state.js";
@@ -130,7 +131,7 @@ export async function projectIssueActionResult(db: Db, companyId: string, missio
 export async function executeMissionOwnerAction(context: OwnerExecutionContext,
   request: MissionOwnerExecuteRequest): Promise<OwnerActionResult> {
   const action = request.action;
-  if (action.operation !== "retry_step" && action.operation !== "resume_run" && action.operation !== "revise_plan" && action.operation !== "recollect" && action.operation !== "delegate_fix" && action.operation !== "reassign" && action.operation !== "promote_unblock_product") throw new OwnerActionRefusalError(422, "operation_not_available");
+  if (action.operation !== "retry_step" && action.operation !== "resume_run" && action.operation !== "revise_plan" && action.operation !== "recollect" && action.operation !== "delegate_fix" && action.operation !== "reassign" && action.operation !== "promote_unblock_product" && action.operation !== "adopt_producer_edits") throw new OwnerActionRefusalError(422, "operation_not_available");
   await authenticate(context, request);
   // [Stage 5] revise_plan 은 target 이 없다: intent 기록 전에 planning issue 실재를 확인한다(부작용 0).
   // recollect·delegate_fix·reassign preflight is read-only; promotion revalidates atomically with strict retry.
@@ -197,6 +198,7 @@ export async function executeMissionOwnerAction(context: OwnerExecutionContext,
     const projected = await project();
     if (projected.reasonCode === "action_not_applied") {
       if (action.operation === "promote_unblock_product") return executeOwnerUnblockPromotion(context, request, resolvedActionId, validateIntent);
+      if (action.operation === "adopt_producer_edits") return executeOwnerAdoptProducerEdits(context, request, resolvedActionId, validateIntent);
       if (action.operation === "resume_run") return { ...projected, reasonCode: (await previewOwnerNativeRunResume(context, request)).reasonCode };
       if (action.operation === "revise_plan" || action.operation === "reassign" || (action.operation === "recollect" && action.mode === "changed_collection")) return projected; // 계획/재배정 투영은 intent+refs 기반이라 이 상태가 없다
       return { ...projected, reasonCode: await diagnoseRefusal(context, target!) };
@@ -211,6 +213,7 @@ export async function executeMissionOwnerAction(context: OwnerExecutionContext,
   if (action.operation === "delegate_fix") return executeOwnerDelegateFix(context, request, resolvedActionId, validateIntent);
   if (action.operation === "reassign") return executeOwnerReassign(context, request, resolvedActionId, validateIntent);
   if (action.operation === "promote_unblock_product") return executeOwnerUnblockPromotion(context, request, resolvedActionId, validateIntent);
+  if (action.operation === "adopt_producer_edits") return executeOwnerAdoptProducerEdits(context, request, resolvedActionId, validateIntent);
   if (target === null) throw new OwnerActionRefusalError(422, "target_kind_not_supported"); // 타입 펜스: 위 분기가 revise_plan/recollect 을 이미 반환했다
   return dispatchOwnerExactRetry(context, request, target, resolvedActionId, validateIntent);
 }

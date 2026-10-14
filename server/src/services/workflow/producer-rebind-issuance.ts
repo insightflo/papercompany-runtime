@@ -17,6 +17,8 @@ export type ProducerProvenanceRebindResult =
 export type ProducerRebindInput = {
   companyId: string; workflowRunId: string; producerStepId: string; productId: string;
   actor: { actorType: string; actorId: string }; now?: Date; expected?: { sha256: string; byteSize: number };
+  /** Marker reason override for owner-attested adoption; default preserves the automatic/board split. */
+  reason?: string;
 };
 export type AutomaticRebindSelection = { selector: WorkProductSelectors[string]; pinnedId?: string };
 
@@ -81,7 +83,7 @@ export async function issueProducerRebind(db: Db, input: ProducerRebindInput,
       schemaVersion: "workflow.work-product-producer-rebind.v1" as const,
       fromGeneration: p.executionGeneration, reboundAtGeneration: step.executionGeneration, fromHeartbeatRunId: p.heartbeatRunId,
       sha256, byteSize: bytes.byteLength, reboundAt: now.toISOString(), reboundBy: input.actor,
-      reason: automatic ? "automatic_producer_provenance_rebind" : "board_producer_provenance_rebind",
+      reason: input.reason ?? (automatic ? "automatic_producer_provenance_rebind" : "board_producer_provenance_rebind"),
       authorityIdempotencyKey: `producer-provenance-rebind:${product.id}:${p.executionGeneration}`,
     };
     await tx.update(issueWorkProducts).set({ metadata: { ...(product.metadata ?? {}), workflowProducerRebind: marker }, updatedAt: now })
