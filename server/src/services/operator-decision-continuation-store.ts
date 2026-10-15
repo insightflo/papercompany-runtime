@@ -160,7 +160,7 @@ export function operatorDecisionContinuationStore(db: Db) {
   async function block(
     continuationId: string,
     workerId: string,
-    errorCode: "issue_missing" | "issue_unassigned" | "issue_terminal",
+    errorCode: "issue_missing" | "issue_unassigned" | "issue_terminal" | "requester_unavailable",
     now = new Date(),
   ) {
     return db.transaction(async (tx) => {

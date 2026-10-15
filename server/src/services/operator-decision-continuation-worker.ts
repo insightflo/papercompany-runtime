@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues } from "@paperclipai/db";
+import { issues, agents } from "@paperclipai/db";
 import { operatorDecisionContinuationStore } from "./operator-decision-continuation-store.js";
 
 // [delivery bridge] fresh-run 전달용 해결 요약. definition.options × selectedOptionIds 를
@@ -90,12 +90,31 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       await store.block(continuation.id, workerId, "issue_missing", now);
       return;
     }
-    if (!issue.assigneeAgentId) {
-      await store.block(continuation.id, workerId, "issue_unassigned", now);
-      return;
-    }
     if (["done", "cancelled"].includes(issue.status)) {
       await store.block(continuation.id, workerId, "issue_terminal", now);
+      return;
+    }
+    // [requester delivery] 전달 대상은 카드 생성 시점의 원 요청자다. 요청자 에이전트가 있으면
+    //   그 에이전트(행 존재·같은 회사 검증)에게, 사용자 생성 카드는 기존 계약대로 현재 담당자에게,
+    //   둘 다 없는 레거시는 임의 대리 전달 없이 차단한다(attention 처리).
+    let targetAgentId: string;
+    if (decision.requestedByAgentId) {
+      const requester = await db.select({ id: agents.id, companyId: agents.companyId })
+        .from(agents).where(eq(agents.id, decision.requestedByAgentId))
+        .then((rows) => rows[0] ?? null);
+      if (!requester || requester.companyId !== continuation.companyId) {
+        await store.block(continuation.id, workerId, "requester_unavailable", now);
+        return;
+      }
+      targetAgentId = requester.id;
+    } else if (decision.requestedByUserId) {
+      if (!issue.assigneeAgentId) {
+        await store.block(continuation.id, workerId, "issue_unassigned", now);
+        return;
+      }
+      targetAgentId = issue.assigneeAgentId;
+    } else {
+      await store.block(continuation.id, workerId, "requester_unavailable", now);
       return;
     }
     const idempotencyKey = continuation.idempotencyKey;
@@ -103,7 +122,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       await store.failDispatch(continuation.id, workerId, now);
       return;
     }
-    const targeted = await store.setTarget(continuation.id, workerId, issue.assigneeAgentId);
+    const targeted = await store.setTarget(continuation.id, workerId, targetAgentId);
     if (!targeted) return;
     const resolutionSummary = buildOperatorDecisionResolutionSummary(decision);
     const wakeupOptions: WakeupOptions = {
@@ -129,7 +148,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       idempotencyKey,
     };
     try {
-      await options.wakeup(issue.assigneeAgentId, wakeupOptions);
+      await options.wakeup(targetAgentId, wakeupOptions);
     } catch {
       // Durable proof, not the call result, determines acceptance.
     } finally {

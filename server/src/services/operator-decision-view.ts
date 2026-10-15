@@ -7,7 +7,7 @@ import {
   issues,
   missions,
   operatorDecisionContinuations,
-  type operatorDecisions,
+  operatorDecisions,
 } from "@paperclipai/db";
 import type {
   OperatorDecisionContinuationView,
@@ -21,6 +21,8 @@ export interface ContinuationStatusInput {
   run: typeof heartbeatRuns.$inferSelect | null;
   issue: Pick<typeof issues.$inferSelect, "id" | "status" | "assigneeAgentId"> | null;
   targetAgent: Pick<typeof agents.$inferSelect, "id" | "status"> | null;
+  /** 카드 원 요청자 에이전트 — 있으면 전달 대상이 요청자로 고정된 카드다. */
+  requestedByAgentId?: string | null;
   now: Date;
 }
 
@@ -64,6 +66,9 @@ function buildContinuationRetryHint(
   }
   if (errorCode === "issue_terminal") {
     return "연결 이슈가 완료/취소로 종결되어 후속 실행이 불가합니다. 새 카드 또는 이슈 재오픈이 필요합니다.";
+  }
+  if (errorCode === "requester_unavailable") {
+    return "카드를 요청한 에이전트(요청자)를 확인할 수 없어 후속 실행이 차단되었습니다. 요청자 에이전트 확인 후 재시도하세요.";
   }
   if (effectiveStatus === "exhausted") {
     return "자동 후속 실행이 시도 한도를 소진했습니다. 재시도는 수동으로 한 번 더 깨웁니다.";
@@ -141,11 +146,17 @@ function deriveContinuationStatusInternal(
   }
   if (["queued", "deferred_issue_execution"].includes(wakeup.status)) {
     if (!issue) return { effectiveStatus: "blocked", errorCode: "issue_missing", attention: true };
-    if (!issue.assigneeAgentId) return { effectiveStatus: "blocked", errorCode: "issue_unassigned", attention: true };
+    // [requester delivery] 요청자 전달 카드는 대상이 요청자로 고정된다 — 담당자 유무/변경은
+    //   전달 유효성과 무관하므로 issue_unassigned/assignee_changed 오경보를 내지 않는다.
+    //   요청자 불능은 targetAgent paused/terminated/pending_approval 검사가 담당한다.
+    const requesterTargeted = Boolean(input.requestedByAgentId);
+    if (!requesterTargeted && !issue.assigneeAgentId) {
+      return { effectiveStatus: "blocked", errorCode: "issue_unassigned", attention: true };
+    }
     if (["done", "cancelled"].includes(issue.status)) {
       return { effectiveStatus: "issue_terminal", errorCode: "issue_terminal", attention: true };
     }
-    if (issue.assigneeAgentId !== continuation.targetAgentId) {
+    if (!requesterTargeted && issue.assigneeAgentId !== continuation.targetAgentId) {
       return { effectiveStatus: "assignee_changed", errorCode: "assignee_changed", attention: true };
     }
     if (!targetAgent || ["paused", "terminated", "pending_approval"].includes(targetAgent.status)) {
@@ -169,6 +180,10 @@ async function loadContinuationProjection(
     .where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId))
     .then((rows) => rows[0] ?? null);
   if (!continuation) return null;
+  // [requester delivery] 요청자 전달 카드 판별용 — continuation 은 원 요청자를 모른다.
+  const decisionRequester = await db.select({ requestedByAgentId: operatorDecisions.requestedByAgentId })
+    .from(operatorDecisions).where(eq(operatorDecisions.id, decisionId))
+    .then((rows) => rows[0] ?? null);
   const wakeup = continuation.wakeupRequestId
     ? await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, continuation.wakeupRequestId)).then((rows) => rows[0] ?? null)
     : null;
@@ -187,7 +202,11 @@ async function loadContinuationProjection(
     ? await db.select({ id: agents.id, status: agents.status }).from(agents)
       .where(eq(agents.id, continuation.targetAgentId)).then((rows) => rows[0] ?? null)
     : null;
-  const status = deriveOperatorDecisionContinuationStatus({ continuation, wakeup, run, issue, targetAgent, now });
+  const status = deriveOperatorDecisionContinuationStatus({
+    continuation, wakeup, run, issue, targetAgent,
+    requestedByAgentId: decisionRequester?.requestedByAgentId ?? null,
+    now,
+  });
   return {
     view: {
       id: continuation.id,

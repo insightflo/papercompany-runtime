@@ -13,6 +13,7 @@ import {
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { operatorDecisionContinuationWorker } from "../services/operator-decision-continuation-worker.js";
+import { loadOperatorDecisionProjection } from "../services/operator-decision-view.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -33,6 +34,27 @@ describeDb("operator decision continuation worker", () => {
   let agentId: string;
   let issueId: string;
   let decisionId: string;
+
+  // [requester delivery] 카드 원 요청자 픽스처 — requestedByAgentId 전달 경로 테스트 공용.
+  async function insertRequesterAgent(agentCompanyId = companyId) {
+    const requesterId = randomUUID();
+    await db.insert(agents).values({ id: requesterId, companyId: agentCompanyId, name: "Requester" });
+    return requesterId;
+  }
+
+  // [requester delivery] queued wakeup 행을 실제로 insert 하는 mock — 전달 증거(findProof) 경로 포함.
+  function queuedWakeupMock() {
+    return vi.fn(async (targetAgentId: string, options: Record<string, unknown>) => {
+      await db.insert(agentWakeupRequests).values({
+        companyId, agentId: targetAgentId, source: "automation", status: "queued",
+        triggerDetail: "system", reason: "operator_decision_resolved",
+        payload: options.payload as Record<string, unknown>,
+        requestedByActorType: "user", requestedByActorId: "board",
+        idempotencyKey: options.idempotencyKey as string,
+        issueId,
+      });
+    });
+  }
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decision-worker-");
@@ -60,6 +82,7 @@ describeDb("operator decision continuation worker", () => {
       sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
       issueId, definition, result: { actionId: "choose", outcome: "submit", selectedOptionIds: ["one"], comment: null },
       resolvedByUserId: "board", resolvedAt: fixtureTime, continuationMode: "issue_current_assignee",
+      requestedByUserId: "board",
     });
     await db.insert(operatorDecisionContinuations).values({
       companyId, operatorDecisionId: decisionId, issueId, nextAttemptAt: fixtureTime,
@@ -178,5 +201,90 @@ describeDb("operator decision continuation worker", () => {
       `operator-decision-wake:${decisionId}:g1:a1`,
       `operator-decision-wake:${decisionId}:g1:a2`,
     ]);
+  });
+
+  // [requester delivery] resolve 결과는 카드 생성 시점의 원 요청자 에이전트에게 전달된다.
+  //   현재 담당자 전달은 사용자 생성 카드(requestedByUserId만 있음) 기존 계약으로 남는다.
+  it("delivers to the card requester instead of the current assignee", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t1" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup.mock.calls[0]?.[0]).toBe(requesterId);
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "accepted", targetAgentId: requesterId, attemptCount: 1,
+    });
+  });
+
+  it("keeps requester delivery when the issue becomes unassigned", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, issueId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t2" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup.mock.calls[0]?.[0]).toBe(requesterId);
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "accepted", targetAgentId: requesterId,
+    });
+  });
+
+  it("blocks when the requester is unknown instead of proxying to the assignee", async () => {
+    await db.update(operatorDecisions).set({ requestedByUserId: null }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t3" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "requester_unavailable",
+    });
+  });
+
+  it("blocks when the requester belongs to another company", async () => {
+    const otherCompanyId = randomUUID();
+    await db.insert(companies).values({ id: otherCompanyId, name: "Other", issuePrefix: `O${otherCompanyId.slice(0, 4)}` });
+    const requesterId = await insertRequesterAgent(otherCompanyId);
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t4" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "requester_unavailable",
+    });
+  });
+
+  it("still blocks requester delivery when the issue is terminal", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t5" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "issue_terminal",
+    });
+  });
+
+  it("projects requester delivery as queued, not assignee_changed", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t6" }).pollOnce(fixtureTime)).toBe(1);
+    const [decisionRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, decisionId));
+    const projection = await loadOperatorDecisionProjection(db, decisionRow, fixtureTime);
+    expect(projection?.view.continuation).toMatchObject({
+      effectiveStatus: "queued", errorCode: null, targetAgentId: requesterId,
+    });
+  });
+
+  it("projects requester_unavailable as blocked with an operator hint", async () => {
+    await db.update(operatorDecisions).set({ requestedByUserId: null }).where(eq(operatorDecisions.id, decisionId));
+    expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "requester-t7" }).pollOnce(fixtureTime)).toBe(1);
+    const [decisionRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, decisionId));
+    const projection = await loadOperatorDecisionProjection(db, decisionRow, fixtureTime);
+    expect(projection?.view.continuation).toMatchObject({
+      effectiveStatus: "blocked", errorCode: "requester_unavailable",
+    });
+    expect(projection?.view.continuation?.retryHint).toContain("요청자");
   });
 });
