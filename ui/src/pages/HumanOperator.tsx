@@ -15,7 +15,10 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { L, useCompanyLanguage } from "../lib/companyLanguage";
-import { humanLabel } from "../lib/humanLabels";
+import {
+  operatorDecisionStageLabel,
+  requesterOutcomeStatusLabel,
+} from "../components/OperatorDecisionActivity";
 
 function formatRequestTime(value: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -110,7 +113,9 @@ function ContinuationAttention({
             <p className="mt-0.5 text-xs text-muted-foreground">{continuation.retryHint}</p>
           )}
           <p className="mt-1 text-xs text-muted-foreground">
-            <span title={continuation.effectiveStatus}>{humanLabel(lang, "continuationStatus", continuation.effectiveStatus).label}</span> · {L(lang, { en: `Generation ${continuation.generation}`, ko: `재시도 회차 ${continuation.generation}` })} · {L(lang, { en: `Attempt ${continuation.attemptCount}`, ko: `시도 ${continuation.attemptCount}회` })}
+            {/* [4b-2] 요청자 회신 outcome 이 대표 상태(우선), continuation 단계는 보조로 함께 노출한다. */}
+            {decision.requesterOutcome ? <>{L(lang, { en: "Requester outcome", ko: "요청자 결과" })} <span title={decision.requesterOutcome.status}>{requesterOutcomeStatusLabel(lang, decision.requesterOutcome.status)}</span> · </> : null}
+            <span title={continuation.effectiveStatus}>{operatorDecisionStageLabel(lang, continuation.effectiveStatus)}</span> · {L(lang, { en: `Generation ${continuation.generation}`, ko: `재시도 회차 ${continuation.generation}` })} · {L(lang, { en: `Attempt ${continuation.attemptCount}`, ko: `시도 ${continuation.attemptCount}회` })}
           </p>
         </div>
         <div className="space-y-1">

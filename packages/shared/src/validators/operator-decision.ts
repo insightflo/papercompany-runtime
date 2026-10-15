@@ -143,6 +143,20 @@ export const operatorDecisionDefinitionSchema = z.object({
   }
 });
 
+// [currentness gate] 생성 시점 대상 상태 스냅샷의 형태만 선언한다(미선언 키가 strict 거부/strip 되지
+//   않게). 식별자(issueId/workflowRunId/stepRunId) 최소 1개 규칙은 비즈니스 422로 서비스 계층이 강제한다.
+const targetSnapshotIdentifier = normalized(1, 128).nullable().optional();
+const targetSnapshotStatus = normalized(1, 200).nullable().optional();
+const operatorDecisionTargetSnapshotSchema = z.object({
+  issueId: targetSnapshotIdentifier,
+  issueStatus: targetSnapshotStatus,
+  workflowRunId: targetSnapshotIdentifier,
+  workflowRunStatus: targetSnapshotStatus,
+  stepRunId: targetSnapshotIdentifier,
+  stepRunStatus: targetSnapshotStatus,
+  executionGeneration: boundedInteger(0, 2_147_483_647).nullable().optional(),
+}).strict();
+
 export const operatorDecisionSourceContextSchema = z.object({
   missionId: nullableNormalized(1, 128),
   workflowId: nullableNormalized(1, 128),
@@ -154,6 +168,7 @@ export const operatorDecisionSourceContextSchema = z.object({
       "Expected an application path, HTTP(S), or artifact URI",
     ),
   }).strict()).max(20),
+  targetSnapshot: operatorDecisionTargetSnapshotSchema.nullable().optional(),
 }).strict();
 
 const createShape = z.object({
@@ -198,6 +213,14 @@ export const operatorDecisionResolveInputSchema = z.object({
     z.null(),
     z.string().transform((value) => value.normalize("NFC").replace(/^\s+|\s+$/g, "")).pipe(z.string().max(2_000)),
   ]),
+}).strict();
+
+// [4c outcome] 요청자 에이전트의 결과 회신 입력 — status(enum)만 권위 값이고 reason/detail 은 표시용.
+//   pending/cancelled 카드 회신 거부 등 상태 계약은 서비스 계층(409)이 강제한다.
+export const operatorDecisionOutcomeInputSchema = z.object({
+  status: z.enum(["acknowledged", "in_progress", "completed", "failed", "not_applied"]),
+  reason: z.string().max(2_000).nullable().optional(),
+  detail: z.string().max(4_000).nullable().optional(),
 }).strict();
 export const cancelOperatorDecisionSchema = strictEmptyObject;
 export const retryOperatorDecisionContinuationSchema = strictEmptyObject;
@@ -256,4 +279,5 @@ export function deriveOperatorDecisionResult(
 
 export type CreateOperatorDecision = z.infer<typeof createOperatorDecisionSchema>;
 export type ResolveOperatorDecisionInput = z.infer<typeof operatorDecisionResolveInputSchema>;
+export type OperatorDecisionOutcomeInput = z.infer<typeof operatorDecisionOutcomeInputSchema>;
 export type OperatorDecisionListQuery = z.infer<typeof operatorDecisionListQuerySchema>;

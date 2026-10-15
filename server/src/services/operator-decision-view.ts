@@ -1,17 +1,19 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   heartbeatRuns,
   issues,
   missions,
   operatorDecisionContinuations,
-  type operatorDecisions,
+  operatorDecisions,
 } from "@paperclipai/db";
 import type {
   OperatorDecisionContinuationView,
   OperatorDecisionEffectiveStatus,
+  OperatorDecisionRequesterOutcomeView,
   OperatorDecisionView,
 } from "@paperclipai/shared/types/operator-decision";
 
@@ -21,6 +23,8 @@ export interface ContinuationStatusInput {
   run: typeof heartbeatRuns.$inferSelect | null;
   issue: Pick<typeof issues.$inferSelect, "id" | "status" | "assigneeAgentId"> | null;
   targetAgent: Pick<typeof agents.$inferSelect, "id" | "status"> | null;
+  /** 카드 원 요청자 에이전트 — 있으면 전달 대상이 요청자로 고정된 카드다. */
+  requestedByAgentId?: string | null;
   now: Date;
 }
 
@@ -64,6 +68,9 @@ function buildContinuationRetryHint(
   }
   if (errorCode === "issue_terminal") {
     return "연결 이슈가 완료/취소로 종결되어 후속 실행이 불가합니다. 새 카드 또는 이슈 재오픈이 필요합니다.";
+  }
+  if (errorCode === "requester_unavailable") {
+    return "카드를 요청한 에이전트(요청자)를 확인할 수 없어 후속 실행이 차단되었습니다. 요청자 에이전트 확인 후 재시도하세요.";
   }
   if (effectiveStatus === "exhausted") {
     return "자동 후속 실행이 시도 한도를 소진했습니다. 재시도는 수동으로 한 번 더 깨웁니다.";
@@ -141,11 +148,17 @@ function deriveContinuationStatusInternal(
   }
   if (["queued", "deferred_issue_execution"].includes(wakeup.status)) {
     if (!issue) return { effectiveStatus: "blocked", errorCode: "issue_missing", attention: true };
-    if (!issue.assigneeAgentId) return { effectiveStatus: "blocked", errorCode: "issue_unassigned", attention: true };
+    // [requester delivery] 요청자 전달 카드는 대상이 요청자로 고정된다 — 담당자 유무/변경은
+    //   전달 유효성과 무관하므로 issue_unassigned/assignee_changed 오경보를 내지 않는다.
+    //   요청자 불능은 targetAgent paused/terminated/pending_approval 검사가 담당한다.
+    const requesterTargeted = Boolean(input.requestedByAgentId);
+    if (!requesterTargeted && !issue.assigneeAgentId) {
+      return { effectiveStatus: "blocked", errorCode: "issue_unassigned", attention: true };
+    }
     if (["done", "cancelled"].includes(issue.status)) {
       return { effectiveStatus: "issue_terminal", errorCode: "issue_terminal", attention: true };
     }
-    if (issue.assigneeAgentId !== continuation.targetAgentId) {
+    if (!requesterTargeted && issue.assigneeAgentId !== continuation.targetAgentId) {
       return { effectiveStatus: "assignee_changed", errorCode: "assignee_changed", attention: true };
     }
     if (!targetAgent || ["paused", "terminated", "pending_approval"].includes(targetAgent.status)) {
@@ -169,6 +182,10 @@ async function loadContinuationProjection(
     .where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId))
     .then((rows) => rows[0] ?? null);
   if (!continuation) return null;
+  // [requester delivery] 요청자 전달 카드 판별용 — continuation 은 원 요청자를 모른다.
+  const decisionRequester = await db.select({ requestedByAgentId: operatorDecisions.requestedByAgentId })
+    .from(operatorDecisions).where(eq(operatorDecisions.id, decisionId))
+    .then((rows) => rows[0] ?? null);
   const wakeup = continuation.wakeupRequestId
     ? await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, continuation.wakeupRequestId)).then((rows) => rows[0] ?? null)
     : null;
@@ -187,7 +204,11 @@ async function loadContinuationProjection(
     ? await db.select({ id: agents.id, status: agents.status }).from(agents)
       .where(eq(agents.id, continuation.targetAgentId)).then((rows) => rows[0] ?? null)
     : null;
-  const status = deriveOperatorDecisionContinuationStatus({ continuation, wakeup, run, issue, targetAgent, now });
+  const status = deriveOperatorDecisionContinuationStatus({
+    continuation, wakeup, run, issue, targetAgent,
+    requestedByAgentId: decisionRequester?.requestedByAgentId ?? null,
+    now,
+  });
   return {
     view: {
       id: continuation.id,
@@ -216,6 +237,42 @@ async function loadContinuationProjection(
   };
 }
 
+// [4b-1 투영] 카드 상태별 activity 최신 1건으로 요청자 outcome·취소 사유를 만든다.
+//   resolved → 최신 outcome_reported, cancelled → 최신 cancelled 의 reason, pending → 쿼리 없이 모두 null.
+//   목록(list) 경로가 같은 투영을 재사용하므로 카드당 최대 1쿼리로 유지한다.
+async function loadOutcomeCancellationProjection(
+  db: Db,
+  row: typeof operatorDecisions.$inferSelect,
+): Promise<{ requesterOutcome: OperatorDecisionRequesterOutcomeView | null; cancellationReason: string | null }> {
+  if (row.status === "pending") return { requesterOutcome: null, cancellationReason: null };
+  const action = row.status === "resolved" ? "operator_decision.outcome_reported" : "operator_decision.cancelled";
+  const [latest] = await db.select({ details: activityLog.details })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.entityType, "operator_decision"),
+      eq(activityLog.entityId, row.id),
+      eq(activityLog.action, action),
+    ))
+    .orderBy(desc(activityLog.createdAt))
+    .limit(1);
+  const details = latest?.details;
+  if (row.status === "cancelled") {
+    return { requesterOutcome: null, cancellationReason: typeof details?.reason === "string" ? details.reason : null };
+  }
+  if (!details || typeof details.status !== "string" || typeof details.reportedAt !== "string") {
+    return { requesterOutcome: null, cancellationReason: null };
+  }
+  return {
+    requesterOutcome: {
+      status: details.status as OperatorDecisionRequesterOutcomeView["status"],
+      reason: typeof details.reason === "string" ? details.reason : null,
+      detail: typeof details.detail === "string" ? details.detail : null,
+      reportedAt: details.reportedAt,
+    },
+    cancellationReason: null,
+  };
+}
+
 export async function loadOperatorDecisionProjection(
   db: Db,
   row: typeof operatorDecisions.$inferSelect,
@@ -236,6 +293,7 @@ export async function loadOperatorDecisionProjection(
     : row.requestedByUserId
       ? { type: "user" as const, id: row.requestedByUserId }
       : null;
+  const outcomeCancellation = await loadOutcomeCancellationProjection(db, row);
   return {
     view: {
       id: row.id,
@@ -261,6 +319,8 @@ export async function loadOperatorDecisionProjection(
       resolvedByUserId: row.resolvedByUserId,
       resolvedAt: row.resolvedAt?.toISOString() ?? null,
       cancelledAt: row.cancelledAt?.toISOString() ?? null,
+      requesterOutcome: outcomeCancellation.requesterOutcome,
+      cancellationReason: outcomeCancellation.cancellationReason,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       continuation: continuation?.view ?? null,

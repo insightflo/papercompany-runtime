@@ -13,6 +13,8 @@ import {
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { operatorDecisionContinuationWorker } from "../services/operator-decision-continuation-worker.js";
+import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
+import { loadOperatorDecisionProjection } from "../services/operator-decision-view.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -33,6 +35,27 @@ describeDb("operator decision continuation worker", () => {
   let agentId: string;
   let issueId: string;
   let decisionId: string;
+
+  // [requester delivery] 카드 원 요청자 픽스처 — requestedByAgentId 전달 경로 테스트 공용.
+  async function insertRequesterAgent(agentCompanyId = companyId) {
+    const requesterId = randomUUID();
+    await db.insert(agents).values({ id: requesterId, companyId: agentCompanyId, name: "Requester" });
+    return requesterId;
+  }
+
+  // [requester delivery] queued wakeup 행을 실제로 insert 하는 mock — 전달 증거(findProof) 경로 포함.
+  function queuedWakeupMock() {
+    return vi.fn(async (targetAgentId: string, options: Record<string, unknown>) => {
+      await db.insert(agentWakeupRequests).values({
+        companyId, agentId: targetAgentId, source: "automation", status: "queued",
+        triggerDetail: "system", reason: "operator_decision_resolved",
+        payload: options.payload as Record<string, unknown>,
+        requestedByActorType: "user", requestedByActorId: "board",
+        idempotencyKey: options.idempotencyKey as string,
+        issueId,
+      });
+    });
+  }
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decision-worker-");
@@ -60,6 +83,7 @@ describeDb("operator decision continuation worker", () => {
       sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
       issueId, definition, result: { actionId: "choose", outcome: "submit", selectedOptionIds: ["one"], comment: null },
       resolvedByUserId: "board", resolvedAt: fixtureTime, continuationMode: "issue_current_assignee",
+      requestedByUserId: "board",
     });
     await db.insert(operatorDecisionContinuations).values({
       companyId, operatorDecisionId: decisionId, issueId, nextAttemptAt: fixtureTime,
@@ -178,5 +202,178 @@ describeDb("operator decision continuation worker", () => {
       `operator-decision-wake:${decisionId}:g1:a1`,
       `operator-decision-wake:${decisionId}:g1:a2`,
     ]);
+  });
+
+  // [requester delivery] resolve 결과는 카드 생성 시점의 원 요청자 에이전트에게 전달된다.
+  //   현재 담당자 전달은 사용자 생성 카드(requestedByUserId만 있음) 기존 계약으로 남는다.
+  it("delivers to the card requester instead of the current assignee", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t1" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup.mock.calls[0]?.[0]).toBe(requesterId);
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "accepted", targetAgentId: requesterId, attemptCount: 1,
+    });
+  });
+
+  it("keeps requester delivery when the issue becomes unassigned", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, issueId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t2" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup.mock.calls[0]?.[0]).toBe(requesterId);
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "accepted", targetAgentId: requesterId,
+    });
+  });
+
+  it("blocks when the requester is unknown instead of proxying to the assignee", async () => {
+    await db.update(operatorDecisions).set({ requestedByUserId: null }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t3" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "requester_unavailable",
+    });
+  });
+
+  it("blocks when the requester belongs to another company", async () => {
+    const otherCompanyId = randomUUID();
+    await db.insert(companies).values({ id: otherCompanyId, name: "Other", issuePrefix: `O${otherCompanyId.slice(0, 4)}` });
+    const requesterId = await insertRequesterAgent(otherCompanyId);
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t4" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "requester_unavailable",
+    });
+  });
+
+  it("still blocks requester delivery when the issue is terminal", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+    const wakeup = vi.fn();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t5" }).pollOnce(fixtureTime)).toBe(1);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(operatorDecisionContinuations))[0]).toMatchObject({
+      state: "blocked", errorCode: "issue_terminal",
+    });
+  });
+
+  it("projects requester delivery as queued, not assignee_changed", async () => {
+    const requesterId = await insertRequesterAgent();
+    await db.update(operatorDecisions).set({ requestedByAgentId: requesterId }).where(eq(operatorDecisions.id, decisionId));
+    const wakeup = queuedWakeupMock();
+    expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "requester-t6" }).pollOnce(fixtureTime)).toBe(1);
+    const [decisionRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, decisionId));
+    const projection = await loadOperatorDecisionProjection(db, decisionRow, fixtureTime);
+    expect(projection?.view.continuation).toMatchObject({
+      effectiveStatus: "queued", errorCode: null, targetAgentId: requesterId,
+    });
+  });
+
+  it("projects requester_unavailable as blocked with an operator hint", async () => {
+    await db.update(operatorDecisions).set({ requestedByUserId: null }).where(eq(operatorDecisions.id, decisionId));
+    expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "requester-t7" }).pollOnce(fixtureTime)).toBe(1);
+    const [decisionRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, decisionId));
+    const projection = await loadOperatorDecisionProjection(db, decisionRow, fixtureTime);
+    expect(projection?.view.continuation).toMatchObject({
+      effectiveStatus: "blocked", errorCode: "requester_unavailable",
+    });
+    expect(projection?.view.continuation?.retryHint).toContain("요청자");
+  });
+
+  // [stale-card sweep 4a] 선택 전 상태 변경 → 카드 자동 취소 정책(2026-10-15). pollOnce 뒷단에서
+  //   스냅샷 불일치 pending 카드만 cancelled 로 만들고, 일치/스냅샷 없음/이미 종결 카드는 쓰지 않는다.
+  //   스윕이 wakeup 이나 continuation 을 만들지 않는다.
+  describe("stale pending card sweep", () => {
+    async function insertSweepCard(options: {
+      status?: "pending" | "resolved";
+      targetSnapshot?: Record<string, unknown>;
+    } = {}) {
+      const cardId = randomUUID();
+      const status = options.status ?? "pending";
+      await db.insert(operatorDecisions).values({
+        id: cardId, companyId, requestKey: randomUUID(), requestHash: "hash", status,
+        interactionType: "single_select", title: "Sweep", sourceType: "workflow_step", sourceId: "step",
+        sourceContext: {
+          missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [],
+          ...(options.targetSnapshot ? { targetSnapshot: options.targetSnapshot } : {}),
+        },
+        issueId, definition, continuationMode: "none",
+        requestedByAgentId: agentId,
+        ...(status === "resolved" ? {
+          result: { actionId: "choose", outcome: "submit", selectedOptionIds: ["one"], comment: null },
+          resolvedByUserId: "board", resolvedAt: fixtureTime,
+        } : {}),
+      });
+      return cardId;
+    }
+
+    async function cardRow(id: string) {
+      return db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id)).then((rows) => rows[0] ?? null);
+    }
+
+    async function cardActivities(id: string) {
+      return db.select().from(activityLog).where(eq(activityLog.entityId, id));
+    }
+
+    it("S1: cancels a drifted pending card with a sweep-authored cancel activity and no wakeup", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      const wakeup = vi.fn();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "sweep-s1" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
+      const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
+      expect(cancelActivity).toMatchObject({ actorType: "user", actorId: "system:operator-decision-stale-sweep" });
+      expect(cancelActivity?.details).toMatchObject({
+        cancelledByActorType: "user",
+        cancelledByActorId: "system:operator-decision-stale-sweep",
+        reason: "target_changed",
+        mismatch: ["issueStatus"],
+      });
+      expect(wakeup).not.toHaveBeenCalled();
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
+
+      // 직접 호출 집계 계약: {checked, cancelled} — 불일치 카드 1건만 남아 있다(첫 카드는 이미 cancelled).
+      const secondCardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      await expect(operatorDecisionWriteService(db).sweepStalePendingCards(fixtureTime))
+        .resolves.toEqual({ checked: 1, cancelled: 1 });
+      expect(await cardRow(secondCardId)).toMatchObject({ status: "cancelled" });
+    });
+
+    it("S2: keeps a pending card whose snapshot still matches", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      const wakeup = vi.fn();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "sweep-s2" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
+      expect((await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled")).toHaveLength(0);
+      expect(wakeup).not.toHaveBeenCalled();
+    });
+
+    it("S3: leaves a drifted resolved card untouched", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ status: "resolved", targetSnapshot: { issueId, issueStatus: "todo" } });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-s3" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "resolved" });
+      expect((await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled")).toHaveLength(0);
+    });
+
+    it("S4: leaves a pending card without a snapshot untouched", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-s4" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
+      expect(await cardActivities(cardId)).toHaveLength(0);
+    });
   });
 });

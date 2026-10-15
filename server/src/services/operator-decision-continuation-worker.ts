@@ -1,7 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues } from "@paperclipai/db";
+import { issues, agents } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 import { operatorDecisionContinuationStore } from "./operator-decision-continuation-store.js";
+import { operatorDecisionWriteService } from "./operator-decisions-write.js";
 
 // [delivery bridge] fresh-run 전달용 해결 요약. definition.options × selectedOptionIds 를
 //   한국어 라벨+영어 식별자로 해석해 wake payload 와 contextSnapshot 양쪽에 탑재한다.
@@ -90,12 +92,31 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       await store.block(continuation.id, workerId, "issue_missing", now);
       return;
     }
-    if (!issue.assigneeAgentId) {
-      await store.block(continuation.id, workerId, "issue_unassigned", now);
-      return;
-    }
     if (["done", "cancelled"].includes(issue.status)) {
       await store.block(continuation.id, workerId, "issue_terminal", now);
+      return;
+    }
+    // [requester delivery] 전달 대상은 카드 생성 시점의 원 요청자다. 요청자 에이전트가 있으면
+    //   그 에이전트(행 존재·같은 회사 검증)에게, 사용자 생성 카드는 기존 계약대로 현재 담당자에게,
+    //   둘 다 없는 레거시는 임의 대리 전달 없이 차단한다(attention 처리).
+    let targetAgentId: string;
+    if (decision.requestedByAgentId) {
+      const requester = await db.select({ id: agents.id, companyId: agents.companyId })
+        .from(agents).where(eq(agents.id, decision.requestedByAgentId))
+        .then((rows) => rows[0] ?? null);
+      if (!requester || requester.companyId !== continuation.companyId) {
+        await store.block(continuation.id, workerId, "requester_unavailable", now);
+        return;
+      }
+      targetAgentId = requester.id;
+    } else if (decision.requestedByUserId) {
+      if (!issue.assigneeAgentId) {
+        await store.block(continuation.id, workerId, "issue_unassigned", now);
+        return;
+      }
+      targetAgentId = issue.assigneeAgentId;
+    } else {
+      await store.block(continuation.id, workerId, "requester_unavailable", now);
       return;
     }
     const idempotencyKey = continuation.idempotencyKey;
@@ -103,7 +124,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       await store.failDispatch(continuation.id, workerId, now);
       return;
     }
-    const targeted = await store.setTarget(continuation.id, workerId, issue.assigneeAgentId);
+    const targeted = await store.setTarget(continuation.id, workerId, targetAgentId);
     if (!targeted) return;
     const resolutionSummary = buildOperatorDecisionResolutionSummary(decision);
     const wakeupOptions: WakeupOptions = {
@@ -129,7 +150,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       idempotencyKey,
     };
     try {
-      await options.wakeup(issue.assigneeAgentId, wakeupOptions);
+      await options.wakeup(targetAgentId, wakeupOptions);
     } catch {
       // Durable proof, not the call result, determines acceptance.
     } finally {
@@ -145,6 +166,17 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
   async function pollOnce(now = new Date()) {
     const claimed = await store.claimBatch(workerId, now);
     for (const continuation of claimed) await dispatch(continuation.id, now);
+    // [stale-card sweep 4a] 전달(dispatch) 뒤에서 오래된 pending 카드를 자동 취소한다. 스윕 실패가
+    //   continuation 전달에 영향 주지 않도록 try/catch 로 격리하고 반환값(claimed 수)은 그대로 둔다.
+    try {
+      await operatorDecisionWriteService(db).sweepStalePendingCards(now);
+    } catch (error) {
+      logger.warn({
+        msg: "Operator decision stale-card sweep failed",
+        workerId,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    }
     return claimed.length;
   }
 

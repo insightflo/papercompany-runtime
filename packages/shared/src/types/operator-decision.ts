@@ -79,11 +79,24 @@ export interface OperatorDecisionResult {
   comment: string | null;
 }
 
+export interface OperatorDecisionTargetSnapshot {
+  issueId?: string | null;
+  issueStatus?: string | null;
+  workflowRunId?: string | null;
+  workflowRunStatus?: string | null;
+  stepRunId?: string | null;
+  stepRunStatus?: string | null;
+  executionGeneration?: number | null;
+}
+
 export interface OperatorDecisionSourceContext {
   missionId: string | null;
   workflowId: string | null;
   workflowRunId: string | null;
   artifactRefs: { label: string; uri: string }[];
+  /** [currentness gate] 생성 시점 대상 상태 스냅샷 — resolve 시점에 서버가 같은 트랜잭션에서
+   *  재검증해 늦은 선택을 409 target_changed 로 거부한다. 없으면 기존 동작(옵트인). */
+  targetSnapshot?: OperatorDecisionTargetSnapshot | null;
 }
 
 export interface OperatorDecisionContinuationView {
@@ -112,6 +125,20 @@ export interface OperatorDecisionContinuationView {
   retryHint: string | null;
 }
 
+export type OperatorDecisionRequesterOutcomeStatus =
+  | "acknowledged"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "not_applied";
+
+export interface OperatorDecisionRequesterOutcomeView {
+  status: OperatorDecisionRequesterOutcomeStatus;
+  reason: string | null;
+  detail: string | null;
+  reportedAt: string;
+}
+
 export interface OperatorDecisionView {
   id: string;
   companyId: string;
@@ -137,6 +164,10 @@ export interface OperatorDecisionView {
   resolvedByUserId: string | null;
   resolvedAt: string | null;
   cancelledAt: string | null;
+  /** [4b-1] 요청자 회신 결과 투영 — resolved 카드의 최신 outcome activity 1건(pending/cancelled 는 null). */
+  requesterOutcome?: OperatorDecisionRequesterOutcomeView | null;
+  /** [4b-1] 취소 사유 투영 — cancelled 카드의 최신 cancel activity details.reason(예: target_changed). */
+  cancellationReason?: string | null;
   createdAt: string;
   updatedAt: string;
   continuation: OperatorDecisionContinuationView | null;
