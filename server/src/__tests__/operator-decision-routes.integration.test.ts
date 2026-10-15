@@ -7,6 +7,7 @@ import { activityLog, agentRuntimeState, agentTaskSessions, agentWakeupRequests,
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { operatorDecisionRoutes } from "../routes/operator-decisions.js";
+import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -472,5 +473,83 @@ describeDb("operator decision routes", () => {
     } finally {
       await waitForWakeupToSettle(decisionId);
     }
+  });
+
+  // [4b-1 투영] 카드 뷰에 요청자 outcome·취소 사유 투영 — V1~V4. GET 상세 응답의
+  //   requesterOutcome(최신 1건)·cancellationReason 이 상태별로 정확히 노출되는지 검증한다.
+  it("V1: resolved card view projects the latest requester outcome", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("projection-v1"));
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const decisionId = created.body.data.id;
+    try {
+      await resolveViaBoard(decisionId);
+      const first = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "in_progress", detail: "실행 시작" });
+      expect(first.status, JSON.stringify(first.body)).toBe(200);
+      // 최신 1건 판정이 createdAt 내림차순 정렬에 의존한다 — 타이 스탬프 타이 방지 대기.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const second = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "completed", detail: "실행 완료" });
+      expect(second.status, JSON.stringify(second.body)).toBe(200);
+      const detail = await request(app()).get(`/api/operator-decisions/${decisionId}`);
+      expect(detail.status, JSON.stringify(detail.body)).toBe(200);
+      expect(detail.body.data.requesterOutcome).toMatchObject({
+        status: "completed",
+        reason: null,
+        detail: "실행 완료",
+        reportedAt: expect.any(String),
+      });
+      expect(detail.body.data.cancellationReason).toBeNull();
+    } finally {
+      await waitForWakeupToSettle(decisionId);
+    }
+  });
+
+  it("V2: resolved card without outcomes projects null requester outcome", async () => {
+    // 요청자 회신이 없는 resolved 카드 — 보드 생성(issue 없음)은 즉시 웨이크업도 만들지
+    // 않는다(FIXME 클린업 경합 회피). 투영은 요청자 유형과 무관하게 null 이어야 한다.
+    const created = await request(app())
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("projection-v2"));
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const decisionId = created.body.data.id;
+    await resolveViaBoard(decisionId);
+    const detail = await request(app()).get(`/api/operator-decisions/${decisionId}`);
+    expect(detail.status, JSON.stringify(detail.body)).toBe(200);
+    expect(detail.body.data.requesterOutcome).toBeNull();
+    expect(detail.body.data.cancellationReason).toBeNull();
+  });
+
+  it("V3: cancelled card view projects the cancellation reason", async () => {
+    // 취소 사유 activity 원본은 4a 스윕과 같은 writer(write.cancel 의 reason)가 남긴다.
+    const created = await request(app())
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("projection-v3"));
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const decisionId = created.body.data.id;
+    const cancelled = await operatorDecisionWriteService(db)
+      .cancel(decisionId, { type: "user", id: "board-user" }, "target_changed");
+    expect(cancelled.applied).toBe(true);
+    const detail = await request(app()).get(`/api/operator-decisions/${decisionId}`);
+    expect(detail.status, JSON.stringify(detail.body)).toBe(200);
+    expect(detail.body.data.status).toBe("cancelled");
+    expect(detail.body.data.cancellationReason).toBe("target_changed");
+    expect(detail.body.data.requesterOutcome).toBeNull();
+  });
+
+  it("V4: pending card view projects null outcome and cancellation reason", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("projection-v4"));
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const detail = await request(app("agent")).get(`/api/operator-decisions/${created.body.data.id}`);
+    expect(detail.status, JSON.stringify(detail.body)).toBe(200);
+    expect(detail.body.data.status).toBe("pending");
+    expect(detail.body.data.requesterOutcome).toBeNull();
+    expect(detail.body.data.cancellationReason).toBeNull();
   });
 });

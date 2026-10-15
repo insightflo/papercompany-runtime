@@ -1,6 +1,7 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   heartbeatRuns,
@@ -12,6 +13,7 @@ import {
 import type {
   OperatorDecisionContinuationView,
   OperatorDecisionEffectiveStatus,
+  OperatorDecisionRequesterOutcomeView,
   OperatorDecisionView,
 } from "@paperclipai/shared/types/operator-decision";
 
@@ -235,6 +237,42 @@ async function loadContinuationProjection(
   };
 }
 
+// [4b-1 투영] 카드 상태별 activity 최신 1건으로 요청자 outcome·취소 사유를 만든다.
+//   resolved → 최신 outcome_reported, cancelled → 최신 cancelled 의 reason, pending → 쿼리 없이 모두 null.
+//   목록(list) 경로가 같은 투영을 재사용하므로 카드당 최대 1쿼리로 유지한다.
+async function loadOutcomeCancellationProjection(
+  db: Db,
+  row: typeof operatorDecisions.$inferSelect,
+): Promise<{ requesterOutcome: OperatorDecisionRequesterOutcomeView | null; cancellationReason: string | null }> {
+  if (row.status === "pending") return { requesterOutcome: null, cancellationReason: null };
+  const action = row.status === "resolved" ? "operator_decision.outcome_reported" : "operator_decision.cancelled";
+  const [latest] = await db.select({ details: activityLog.details })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.entityType, "operator_decision"),
+      eq(activityLog.entityId, row.id),
+      eq(activityLog.action, action),
+    ))
+    .orderBy(desc(activityLog.createdAt))
+    .limit(1);
+  const details = latest?.details;
+  if (row.status === "cancelled") {
+    return { requesterOutcome: null, cancellationReason: typeof details?.reason === "string" ? details.reason : null };
+  }
+  if (!details || typeof details.status !== "string" || typeof details.reportedAt !== "string") {
+    return { requesterOutcome: null, cancellationReason: null };
+  }
+  return {
+    requesterOutcome: {
+      status: details.status as OperatorDecisionRequesterOutcomeView["status"],
+      reason: typeof details.reason === "string" ? details.reason : null,
+      detail: typeof details.detail === "string" ? details.detail : null,
+      reportedAt: details.reportedAt,
+    },
+    cancellationReason: null,
+  };
+}
+
 export async function loadOperatorDecisionProjection(
   db: Db,
   row: typeof operatorDecisions.$inferSelect,
@@ -255,6 +293,7 @@ export async function loadOperatorDecisionProjection(
     : row.requestedByUserId
       ? { type: "user" as const, id: row.requestedByUserId }
       : null;
+  const outcomeCancellation = await loadOutcomeCancellationProjection(db, row);
   return {
     view: {
       id: row.id,
@@ -280,6 +319,8 @@ export async function loadOperatorDecisionProjection(
       resolvedByUserId: row.resolvedByUserId,
       resolvedAt: row.resolvedAt?.toISOString() ?? null,
       cancelledAt: row.cancelledAt?.toISOString() ?? null,
+      requesterOutcome: outcomeCancellation.requesterOutcome,
+      cancellationReason: outcomeCancellation.cancellationReason,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       continuation: continuation?.view ?? null,
