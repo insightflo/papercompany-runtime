@@ -351,3 +351,13 @@
 - Reuse trigger: Producer-attempt, stale-generation, heartbeat-admission tests.
 - Evidence: `~/.cache/generic-stale-producer-rebind/auto-green-1.log` (1 failed), `auto-green-2.log` (46 passed).
 
+
+### 2026-10-14 — hand-transcribed uuid broke live recovery commands
+- Date: 2026-10-14
+- Task: Live board rebind + native rerun for mission a6d16f90 run 148e8046 (papercompany-runtime).
+- What failed: Every POST /api/workflow-step-runs/:id/rebind-producer-provenance returned 404 "Workflow step run not found" despite the row, run, company access, and deployed code all verified present.
+- Root cause: I hand-retyped the stepRun uuid into URLs (b8561da0-57c1-49**51**… typed as 49**11**). Branch1 row-not-found; visual near-identical digits. Hours of tunnel/proxy/schema theories before a server-side equality check exposed it.
+- Category: operator error / transcription
+- Fix: Extract ids server-side (API GET + jq) into shell vars and interpolate; never manually copy uuids into live mutation commands. Cross-check with `SELECT count(*) WHERE id='<uuid>'` before concluding infra faults.
+- Prevention rule: For any live mutation URL, id values must come from programmatic extraction in the same script, not from agent memory or chat transcripts.
+- Reuse trigger: Any live API mutation keyed by uuid/id; any "not found" on a row that read paths can see.
