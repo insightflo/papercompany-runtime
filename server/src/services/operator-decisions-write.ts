@@ -11,6 +11,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput, OperatorDecisionTargetSnapshot } from "@paperclipai/shared/types/operator-decision";
+import { operatorDecisionOutcomeInputSchema } from "@paperclipai/shared/validators/operator-decision";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -383,6 +384,46 @@ export function operatorDecisionWriteService(db: Db) {
     return { decision: await read.getRequired(id), applied: true };
   }
 
+  // [4c outcome] 요청자 에이전트의 결과 회신 — resolved 카드에 대해 원 요청자만 status 를 구조화돼
+  //   되돌린다. 카드 행·continuation 은 불변이고 회신은 activity 투영만 남긴다(append-only:
+  //   in_progress 갱신·최종 상태 뒤 재보고까지 차단 없이 모두 기록). 보드 사용자·다른 에이전트의
+  //   대리 보고는 금지(403) — 권위 값은 status(enum)뿐이고 reason/detail 은 표시용이다.
+  async function reportOutcome(id: string, actor: OperatorDecisionActor, rawInput: unknown, now = new Date()) {
+    const input = operatorDecisionOutcomeInputSchema.parse(rawInput);
+    if (actor.type !== "agent") throw forbidden("Only the card requester agent may report the outcome");
+    // 회사 스코프 로드 — 요청자 에이전트가 속한 회사의 카드만 보인다(다른 회사·알 수 없는 에이전트는 404).
+    const agent = await db.select({ companyId: agents.companyId }).from(agents)
+      .where(eq(agents.id, actor.id)).then((rows) => rows[0] ?? null);
+    const row = agent
+      ? await db.select().from(operatorDecisions).where(and(
+          eq(operatorDecisions.id, id),
+          eq(operatorDecisions.companyId, agent.companyId),
+        )).then((rows) => rows[0] ?? null)
+      : null;
+    if (!row) throw notFound("Operator decision not found");
+    if (actor.id !== row.requestedByAgentId) throw forbidden("Only the card requester agent may report the outcome");
+    if (row.status !== "resolved") throw conflictFor(id, row.status, "Operator decision outcome requires a resolved card");
+    await db.insert(activityLog).values({
+      companyId: row.companyId,
+      actorType: "agent",
+      actorId: actor.id,
+      agentId: actor.id,
+      action: "operator_decision.outcome_reported",
+      entityType: "operator_decision",
+      entityId: id,
+      details: {
+        schemaVersion: 1,
+        operatorDecisionId: id,
+        requesterAgentId: actor.id,
+        status: input.status,
+        ...(input.reason != null ? { reason: input.reason } : {}),
+        ...(input.detail != null ? { detail: input.detail } : {}),
+        reportedAt: now.toISOString(),
+      },
+    });
+    return { applied: true, decision: await read.getRequired(id) };
+  }
+
   // [stale-card sweep 4a] 선택 전 상태 변경 → 카드 자동 취소(2026-10-15 정책). 스냅샷 있는 pending 카드 중
   //   현재 상태와 불일치하는 카드를 시스템 주체로 cancelled 처리한다. 불일치 판정은 2단계
   //   assertTargetSnapshotCurrent(409 target_changed)를 그대로 재사용하고, 취소는 pending CAS 로만
@@ -446,5 +487,5 @@ export function operatorDecisionWriteService(db: Db) {
     return { checked, cancelled };
   }
 
-  return { create, resolve, cancel, retryContinuation: retry.retryContinuation, sweepStalePendingCards };
+  return { create, resolve, cancel, reportOutcome, retryContinuation: retry.retryContinuation, sweepStalePendingCards };
 }

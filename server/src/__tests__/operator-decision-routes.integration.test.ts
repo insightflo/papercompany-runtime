@@ -89,14 +89,14 @@ describeDb("operator decision routes", () => {
     await db.insert(issues).values({ id: issueId, companyId, title: "Task", assigneeAgentId: agentId, identifier: `${companyId.slice(0, 4).toUpperCase()}-1`, issueNumber: 1 });
   });
 
-  function app(actor: "board" | "agent" | "none" = "board") {
+  function app(actor: "board" | "agent" | "none" = "board", actorAgentId: string = agentId) {
     const server = express();
     server.use(express.json());
     server.use((req, _res, next) => {
       req.actor = actor === "board"
         ? { type: "board", userId: "board-user", companyIds: [], source: "local_implicit", isInstanceAdmin: true }
         : actor === "agent"
-          ? { type: "agent", agentId, companyId, runId: null }
+          ? { type: "agent", agentId: actorAgentId, companyId, runId: null }
           : { type: "none" };
       next();
     });
@@ -318,5 +318,159 @@ describeDb("operator decision routes", () => {
     });
     expect(String(row?.continuation?.issueIdentifier ?? "")).toMatch(/-1$/);
     expect(row?.continuation?.retryHint).toContain("담당자");
+  });
+
+  // [4c outcome] 요청자 결과 회신 API — O1~O5. 회신은 activity 투영뿐이고 카드 행·
+  //   continuation 은 불변이며 append-only(중복 보고 허용)다.
+  async function outcomeActivities(decisionId: string) {
+    return db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, decisionId),
+      eq(activityLog.action, "operator_decision.outcome_reported"),
+    ));
+  }
+
+  async function cardSnapshot(decisionId: string) {
+    return db.select({
+      status: operatorDecisions.status,
+      result: operatorDecisions.result,
+      resolvedAt: operatorDecisions.resolvedAt,
+      updatedAt: operatorDecisions.updatedAt,
+    }).from(operatorDecisions).where(eq(operatorDecisions.id, decisionId));
+  }
+
+  async function resolveViaBoard(decisionId: string) {
+    const resolved = await request(app()).post(`/api/operator-decisions/${decisionId}/resolve`)
+      .send({ actionId: "hold", selectedOptionIds: [], comment: null });
+    expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
+  }
+
+  it("O1: requester agent reports completed on a resolved card and only an activity is appended", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("outcome-o1"));
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const decisionId = created.body.data.id;
+    try {
+      await resolveViaBoard(decisionId);
+      const before = await cardSnapshot(decisionId);
+      const outcome = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "completed", reason: "배치 완료", detail: "변경 3건 적용" });
+      expect(outcome.status, JSON.stringify(outcome.body)).toBe(200);
+      expect(outcome.body.data).toMatchObject({ applied: true, decision: { id: decisionId, status: "resolved" } });
+      const activities = await outcomeActivities(decisionId);
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({
+        companyId,
+        actorType: "agent",
+        actorId: agentId,
+        agentId,
+        entityType: "operator_decision",
+        entityId: decisionId,
+      });
+      expect(activities[0].details).toMatchObject({
+        schemaVersion: 1,
+        operatorDecisionId: decisionId,
+        requesterAgentId: agentId,
+        status: "completed",
+        reason: "배치 완료",
+        detail: "변경 3건 적용",
+        reportedAt: expect.any(String),
+      });
+      // 카드 행 불변 + continuation 미생성(회신은 activity 투영만).
+      expect(await cardSnapshot(decisionId)).toEqual(before);
+      expect(await db.select().from(operatorDecisionContinuations)
+        .where(eq(operatorDecisionContinuations.operatorDecisionId, decisionId))).toHaveLength(0);
+    } finally {
+      await waitForWakeupToSettle(decisionId);
+    }
+  });
+
+  it("O2: other agents and board users cannot report the outcome", async () => {
+    const otherAgentId = randomUUID();
+    await db.insert(agents).values({ id: otherAgentId, companyId, name: "Other" });
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("outcome-o2"));
+    const decisionId = created.body.data.id;
+    try {
+      await resolveViaBoard(decisionId);
+      const other = await request(app("agent", otherAgentId))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "completed" });
+      expect(other.status, JSON.stringify(other.body)).toBe(403);
+      expect(other.body).toMatchObject({ error: "Only the card requester agent may report the outcome" });
+      const board = await request(app())
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "completed" });
+      expect(board.status, JSON.stringify(board.body)).toBe(403);
+      expect(board.body).toMatchObject({ error: "Only the card requester agent may report the outcome" });
+      expect(await outcomeActivities(decisionId)).toHaveLength(0);
+    } finally {
+      await waitForWakeupToSettle(decisionId);
+    }
+  });
+
+  it("O3: outcome on a pending card conflicts", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("outcome-o3"));
+    const decisionId = created.body.data.id;
+    const pending = await request(app("agent"))
+      .post(`/api/operator-decisions/${decisionId}/outcome`)
+      .send({ status: "in_progress" });
+    expect(pending.status, JSON.stringify(pending.body)).toBe(409);
+    expect(await outcomeActivities(decisionId)).toHaveLength(0);
+  });
+
+  it("O4: invalid status values are rejected with 422", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("outcome-o4"));
+    const decisionId = created.body.data.id;
+    try {
+      await resolveViaBoard(decisionId);
+      const invalid = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "done" });
+      expect(invalid.status, JSON.stringify(invalid.body)).toBe(422);
+      expect(invalid.body).toMatchObject({ error: "Validation error" });
+      expect(await outcomeActivities(decisionId)).toHaveLength(0);
+    } finally {
+      await waitForWakeupToSettle(decisionId);
+    }
+  });
+
+  it("O5: consecutive reports are all appended (in_progress then completed)", async () => {
+    const created = await request(app("agent"))
+      .post(`/api/companies/${companyId}/operator-decisions`)
+      .send(body("outcome-o5"));
+    const decisionId = created.body.data.id;
+    try {
+      await resolveViaBoard(decisionId);
+      const first = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "in_progress", detail: "실행 시작" });
+      expect(first.status, JSON.stringify(first.body)).toBe(200);
+      const second = await request(app("agent"))
+        .post(`/api/operator-decisions/${decisionId}/outcome`)
+        .send({ status: "completed", detail: "실행 완료" });
+      expect(second.status, JSON.stringify(second.body)).toBe(200);
+      const activities = await outcomeActivities(decisionId);
+      expect(activities).toHaveLength(2);
+      // createdAt 동일 타임스탬프 가능성이 있어 순서 무관 집합 검증으로 2건 모두를 증명한다.
+      expect(activities.map((row) => (row.details as { status: string }).status).sort())
+        .toEqual(["completed", "in_progress"]);
+      for (const row of activities) {
+        expect(row.details).toMatchObject({
+          schemaVersion: 1,
+          operatorDecisionId: decisionId,
+          requesterAgentId: agentId,
+          reportedAt: expect.any(String),
+        });
+      }
+    } finally {
+      await waitForWakeupToSettle(decisionId);
+    }
   });
 });

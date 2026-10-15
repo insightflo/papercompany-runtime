@@ -214,6 +214,14 @@ export const operatorDecisionResolveInputSchema = z.object({
     z.string().transform((value) => value.normalize("NFC").replace(/^\s+|\s+$/g, "")).pipe(z.string().max(2_000)),
   ]),
 }).strict();
+
+// [4c outcome] 요청자 에이전트의 결과 회신 입력 — status(enum)만 권위 값이고 reason/detail 은 표시용.
+//   pending/cancelled 카드 회신 거부 등 상태 계약은 서비스 계층(409)이 강제한다.
+export const operatorDecisionOutcomeInputSchema = z.object({
+  status: z.enum(["acknowledged", "in_progress", "completed", "failed", "not_applied"]),
+  reason: z.string().max(2_000).nullable().optional(),
+  detail: z.string().max(4_000).nullable().optional(),
+}).strict();
 export const cancelOperatorDecisionSchema = strictEmptyObject;
 export const retryOperatorDecisionContinuationSchema = strictEmptyObject;
 
@@ -271,4 +279,5 @@ export function deriveOperatorDecisionResult(
 
 export type CreateOperatorDecision = z.infer<typeof createOperatorDecisionSchema>;
 export type ResolveOperatorDecisionInput = z.infer<typeof operatorDecisionResolveInputSchema>;
+export type OperatorDecisionOutcomeInput = z.infer<typeof operatorDecisionOutcomeInputSchema>;
 export type OperatorDecisionListQuery = z.infer<typeof operatorDecisionListQuerySchema>;

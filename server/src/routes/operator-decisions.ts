@@ -6,6 +6,7 @@ import {
   cancelOperatorDecisionSchema,
   createOperatorDecisionSchema,
   operatorDecisionListQuerySchema,
+  operatorDecisionOutcomeInputSchema,
   operatorDecisionResolveInputSchema,
   retryOperatorDecisionContinuationSchema,
 } from "@paperclipai/shared/validators/operator-decision";
@@ -184,6 +185,18 @@ export function operatorDecisionRoutes(db: Db) {
       const decision = await read.getRequired(req.params.id as string);
       assertCompanyAccess(req, decision.companyId);
       res.json({ data: await write.cancel(decision.id, requestActor(req)) });
+    },
+  );
+
+  // [4c outcome] 요청자 에이전트 전용 결과 회신 — 무효 status 는 형식 오류(422)로 구분해 요청자가
+  //   재시도 without body surgery 할 수 있게 한다(resolve/cancel 의 400 과 달리 감독 루프 해석용).
+  router.post(
+    "/operator-decisions/:id/outcome",
+    validate(operatorDecisionOutcomeInputSchema, 422),
+    async (req, res) => {
+      const decision = await read.getRequired(req.params.id as string);
+      assertCompanyAccess(req, decision.companyId);
+      res.json({ data: await write.reportOutcome(decision.id, requestActor(req), req.body) });
     },
   );
 
