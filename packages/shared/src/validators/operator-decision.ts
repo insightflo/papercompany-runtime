@@ -143,6 +143,20 @@ export const operatorDecisionDefinitionSchema = z.object({
   }
 });
 
+// [currentness gate] 생성 시점 대상 상태 스냅샷의 형태만 선언한다(미선언 키가 strict 거부/strip 되지
+//   않게). 식별자(issueId/workflowRunId/stepRunId) 최소 1개 규칙은 비즈니스 422로 서비스 계층이 강제한다.
+const targetSnapshotIdentifier = normalized(1, 128).nullable().optional();
+const targetSnapshotStatus = normalized(1, 200).nullable().optional();
+const operatorDecisionTargetSnapshotSchema = z.object({
+  issueId: targetSnapshotIdentifier,
+  issueStatus: targetSnapshotStatus,
+  workflowRunId: targetSnapshotIdentifier,
+  workflowRunStatus: targetSnapshotStatus,
+  stepRunId: targetSnapshotIdentifier,
+  stepRunStatus: targetSnapshotStatus,
+  executionGeneration: boundedInteger(0, 2_147_483_647).nullable().optional(),
+}).strict();
+
 export const operatorDecisionSourceContextSchema = z.object({
   missionId: nullableNormalized(1, 128),
   workflowId: nullableNormalized(1, 128),
@@ -154,6 +168,7 @@ export const operatorDecisionSourceContextSchema = z.object({
       "Expected an application path, HTTP(S), or artifact URI",
     ),
   }).strict()).max(20),
+  targetSnapshot: operatorDecisionTargetSnapshotSchema.nullable().optional(),
 }).strict();
 
 const createShape = z.object({

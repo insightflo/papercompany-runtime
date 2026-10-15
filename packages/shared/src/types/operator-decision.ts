@@ -79,11 +79,24 @@ export interface OperatorDecisionResult {
   comment: string | null;
 }
 
+export interface OperatorDecisionTargetSnapshot {
+  issueId?: string | null;
+  issueStatus?: string | null;
+  workflowRunId?: string | null;
+  workflowRunStatus?: string | null;
+  stepRunId?: string | null;
+  stepRunStatus?: string | null;
+  executionGeneration?: number | null;
+}
+
 export interface OperatorDecisionSourceContext {
   missionId: string | null;
   workflowId: string | null;
   workflowRunId: string | null;
   artifactRefs: { label: string; uri: string }[];
+  /** [currentness gate] 생성 시점 대상 상태 스냅샷 — resolve 시점에 서버가 같은 트랜잭션에서
+   *  재검증해 늦은 선택을 409 target_changed 로 거부한다. 없으면 기존 동작(옵트인). */
+  targetSnapshot?: OperatorDecisionTargetSnapshot | null;
 }
 
 export interface OperatorDecisionContinuationView {

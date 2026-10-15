@@ -9,6 +9,9 @@ import {
   issues,
   operatorDecisionContinuations,
   operatorDecisions,
+  workflowDefinitions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -77,6 +80,10 @@ describeDb("operator decision write service", () => {
     await db.delete(operatorDecisions);
     // [delivery bridge] resolve 가 시스템 코멘트를 남기므로 issues 삭제 전에 정리한다(FK 순서).
     await db.delete(issueComments);
+    // [currentness gate] 스냅샷 재검증 픽스처 — step→run→definition 순서로 정리한다(FK 연쇄).
+    await db.delete(workflowStepRuns);
+    await db.delete(workflowRuns);
+    await db.delete(workflowDefinitions);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -202,5 +209,112 @@ describeDb("operator decision write service", () => {
     }, "board");
     expect(resolved.decision.issueId).toBeNull();
     expect(resolved.continuation).toMatchObject({ state: "pending" });
+  });
+
+  // [currentness gate 2단계] 늦은 선택 보호 — 생성 시점 대상 스냅샷(targetSnapshot)과 resolve 시점
+  //   현재 상태가 다르면 409 target_changed 로 거부하고, 상태가 원복되면 같은 카드로 다시 결정된다.
+  describe("target snapshot currentness", () => {
+    const resolveBody = { actionId: "choose", selectedOptionIds: ["one"], comment: null };
+
+    function snapshotCard(requestKey: string, targetSnapshot: Record<string, unknown>) {
+      const base = input(requestKey, issueId);
+      return { ...base, sourceContext: { ...base.sourceContext, targetSnapshot } };
+    }
+
+    async function seedWorkflowFixture() {
+      const workflowDefinitionId = randomUUID();
+      const workflowRunId = randomUUID();
+      const stepRunId = randomUUID();
+      await db.insert(workflowDefinitions).values({ id: workflowDefinitionId, companyId, name: "Currentness fixture" });
+      await db.insert(workflowRuns).values({
+        id: workflowRunId, workflowId: workflowDefinitionId, companyId, triggeredBy: "test", status: "running",
+      });
+      await db.insert(workflowStepRuns).values({
+        id: stepRunId, workflowRunId, stepId: "step-1", status: "running", executionGeneration: 3,
+      });
+      return { workflowRunId, stepRunId };
+    }
+
+    async function decisionRow(id: string) {
+      return db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id))
+        .then((rows) => rows[0] ?? null);
+    }
+
+    it("T1: resolves with one continuation when the full snapshot still matches", async () => {
+      const service = operatorDecisionWriteService(db);
+      const { workflowRunId, stepRunId } = await seedWorkflowFixture();
+      const created = await service.create(companyId, snapshotCard("snap-current", {
+        issueId, issueStatus: "todo",
+        workflowRunId, workflowRunStatus: "running",
+        stepRunId, stepRunStatus: "running", executionGeneration: 3,
+      }), { type: "user", id: "board" });
+      const resolved = await service.resolve(created.decision.id, resolveBody, "board");
+      expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
+    });
+
+    it("T2: rejects a drifted issue status with 409 target_changed and keeps the card pending", async () => {
+      const service = operatorDecisionWriteService(db);
+      const created = await service.create(companyId, snapshotCard("snap-issue-drift", {
+        issueId, issueStatus: "todo",
+      }), { type: "agent", id: agentId });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      await expect(service.resolve(created.decision.id, resolveBody, "board"))
+        .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["issueStatus"] } });
+      // 거부는 트랜잭션에서 일어난다 — 결과·continuation·resolved 활동 로그·이슈 코멘트 모두 없다.
+      expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending", result: null });
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
+      const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, created.decision.id));
+      expect(activities.map((row) => row.action)).toEqual(["operator_decision.created"]);
+      expect(await db.select().from(issueComments)).toHaveLength(0);
+    });
+
+    it("T3: rejects when the snapshotted workflow run no longer exists", async () => {
+      const service = operatorDecisionWriteService(db);
+      const { workflowRunId } = await seedWorkflowFixture();
+      const created = await service.create(companyId, snapshotCard("snap-run-deleted", {
+        workflowRunId, workflowRunStatus: "running",
+      }), { type: "user", id: "board" });
+      await db.delete(workflowRuns).where(eq(workflowRuns.id, workflowRunId));
+      await expect(service.resolve(created.decision.id, resolveBody, "board"))
+        .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["workflowRunId"] } });
+      expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending" });
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
+    });
+
+    it("T4: rejects a drifted step run execution generation", async () => {
+      const service = operatorDecisionWriteService(db);
+      const { stepRunId } = await seedWorkflowFixture();
+      const created = await service.create(companyId, snapshotCard("snap-generation-drift", {
+        stepRunId, stepRunStatus: "running", executionGeneration: 3,
+      }), { type: "user", id: "board" });
+      await db.update(workflowStepRuns).set({ executionGeneration: 4 }).where(eq(workflowStepRuns.id, stepRunId));
+      await expect(service.resolve(created.decision.id, resolveBody, "board"))
+        .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["executionGeneration"] } });
+      expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending" });
+    });
+
+    it("T5: rejects snapshot creation without an identifier field (422)", async () => {
+      const service = operatorDecisionWriteService(db);
+      await expect(service.create(companyId, snapshotCard("snap-empty", {}), { type: "user", id: "board" }))
+        .rejects.toMatchObject({ status: 422, details: { code: "target_snapshot_identifier_required" } });
+      await expect(service.create(companyId, snapshotCard("snap-no-identifier", { issueStatus: "todo" }), { type: "user", id: "board" }))
+        .rejects.toMatchObject({ status: 422, details: { code: "target_snapshot_identifier_required" } });
+      expect(await db.select().from(operatorDecisions)).toHaveLength(0);
+    });
+
+    it("T6: the same card resolves after the drifted state is restored", async () => {
+      const service = operatorDecisionWriteService(db);
+      const created = await service.create(companyId, snapshotCard("snap-restore", {
+        issueId, issueStatus: "todo",
+      }), { type: "agent", id: agentId });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      await expect(service.resolve(created.decision.id, resolveBody, "board"))
+        .rejects.toMatchObject({ status: 409, details: { code: "target_changed" } });
+      await db.update(issues).set({ status: "todo" }).where(eq(issues.id, issueId));
+      const resolved = await service.resolve(created.decision.id, resolveBody, "board");
+      expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
+    });
   });
 });

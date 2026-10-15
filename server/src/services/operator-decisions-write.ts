@@ -7,8 +7,10 @@ import {
   issues,
   operatorDecisionContinuations,
   operatorDecisions,
+  workflowRuns,
+  workflowStepRuns,
 } from "@paperclipai/db";
-import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
+import type { CreateOperatorDecisionInput, OperatorDecisionTargetSnapshot } from "@paperclipai/shared/types/operator-decision";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -25,6 +27,63 @@ export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
 function conflictFor(id: string, status: string, message = "Operator decision conflict") {
   return conflict(message, { operatorDecisionId: id, status });
+}
+
+// [currentness gate] 저장된 sourceContext 에서 대상 스냅샷을 안전하게 꺼낸다. 스냅샷은 create 시점에
+//   zod 검증을 통과해 저장되며, 이전 규약 행(스냅샷 키 없음)은 null 을 반환해 기존 동작을 그대로 둔다.
+function readTargetSnapshot(sourceContext: unknown): OperatorDecisionTargetSnapshot | null {
+  if (sourceContext === null || typeof sourceContext !== "object") return null;
+  const candidate = (sourceContext as Record<string, unknown>).targetSnapshot;
+  if (candidate === null || typeof candidate !== "object") return null;
+  return candidate as OperatorDecisionTargetSnapshot;
+}
+
+// [currentness gate] 늦은 선택 보호 — 생성 시점 스냅샷과 현재 DB 상태를 CAS 트랜잭션 안에서 같은 tx로
+//   재검증한다(검사-저장 창 최소화). 회사 스코프에서 행이 사라졌거나 지정한 상태·generation이 다르면
+//   409 target_changed. throw 로 트랜잭션이 롤백되므로 결과 저장·continuation 생성이 모두 취소되고
+//   카드는 pending 유지 — 상태가 원복되면 같은 카드로 다시 resolve 할 수 있다(거부는 영구적이지 않음).
+async function assertTargetSnapshotCurrent(
+  tx: Pick<Db, "select">,
+  operatorDecisionId: string,
+  companyId: string,
+  snapshot: OperatorDecisionTargetSnapshot,
+): Promise<void> {
+  const mismatch: string[] = [];
+  if (snapshot.issueId != null) {
+    const issue = await tx.select({ companyId: issues.companyId, status: issues.status }).from(issues)
+      .where(eq(issues.id, snapshot.issueId)).then((rows) => rows[0] ?? null);
+    if (!issue || issue.companyId !== companyId) mismatch.push("issueId");
+    else if (snapshot.issueStatus != null && issue.status !== snapshot.issueStatus) mismatch.push("issueStatus");
+  }
+  if (snapshot.workflowRunId != null) {
+    const run = await tx.select({ companyId: workflowRuns.companyId, status: workflowRuns.status }).from(workflowRuns)
+      .where(eq(workflowRuns.id, snapshot.workflowRunId)).then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== companyId) mismatch.push("workflowRunId");
+    else if (snapshot.workflowRunStatus != null && run.status !== snapshot.workflowRunStatus) mismatch.push("workflowRunStatus");
+  }
+  if (snapshot.stepRunId != null) {
+    const stepRun = await tx.select({
+      status: workflowStepRuns.status,
+      executionGeneration: workflowStepRuns.executionGeneration,
+      runCompanyId: workflowRuns.companyId,
+    }).from(workflowStepRuns)
+      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+      .where(eq(workflowStepRuns.id, snapshot.stepRunId)).then((rows) => rows[0] ?? null);
+    if (!stepRun || stepRun.runCompanyId !== companyId) mismatch.push("stepRunId");
+    else {
+      if (snapshot.stepRunStatus != null && stepRun.status !== snapshot.stepRunStatus) mismatch.push("stepRunStatus");
+      if (snapshot.executionGeneration != null && stepRun.executionGeneration !== snapshot.executionGeneration) {
+        mismatch.push("executionGeneration");
+      }
+    }
+  }
+  if (mismatch.length > 0) {
+    throw conflict("Operator decision target changed since card creation", {
+      code: "target_changed",
+      mismatch,
+      operatorDecisionId,
+    });
+  }
 }
 
 // [delivery bridge] definition.options × result.selectedOptionIds 를 한국어 라벨+영어 식별자로 해석한다.
@@ -128,6 +187,16 @@ export function operatorDecisionWriteService(db: Db) {
       );
     }
 
+    // [currentness gate] 스냅샷이 있으면 서버가 재검증할 식별자(issueId/workflowRunId/stepRunId)가
+    //   최소 1개 필요하다 — 없으면 재검증 불가능한 죽은 스냅샷이 되므로 생성 단계에서 거부한다.
+    const targetSnapshot = readTargetSnapshot(validated.input.sourceContext);
+    if (targetSnapshot && targetSnapshot.issueId == null && targetSnapshot.workflowRunId == null && targetSnapshot.stepRunId == null) {
+      throw unprocessable(
+        "targetSnapshot 은 issueId, workflowRunId, stepRunId 중 최소 하나를 지정해야 합니다.",
+        { code: "target_snapshot_identifier_required" },
+      );
+    }
+
     let id: string;
     try {
       id = await db.transaction(async (tx) => {
@@ -220,6 +289,12 @@ export function operatorDecisionWriteService(db: Db) {
           .then((rows) => rows[0] ?? null);
         if (current?.status === "resolved" && sameOperatorDecisionResult(current.result, result)) return false;
         throw conflictFor(id, current?.status ?? "missing");
+      }
+      // [currentness gate] CAS 성공(첫 적용) 경로에서만 재검증한다 — 이미 확정된 결정의 멱등 replay
+      //   (applied=false)는 스냅샷과 무관하게 그대로 둔다. throw 시 트랜잭션이 롤백되어 카드는 pending 유지.
+      const targetSnapshot = readTargetSnapshot(updated.sourceContext);
+      if (targetSnapshot) {
+        await assertTargetSnapshotCurrent(tx, id, updated.companyId, targetSnapshot);
       }
       let continuationId: string | null = null;
       if (updated.continuationMode === "issue_current_assignee") {
