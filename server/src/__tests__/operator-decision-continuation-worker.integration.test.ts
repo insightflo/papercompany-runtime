@@ -13,6 +13,7 @@ import {
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { operatorDecisionContinuationWorker } from "../services/operator-decision-continuation-worker.js";
+import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 import { loadOperatorDecisionProjection } from "../services/operator-decision-view.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -286,5 +287,93 @@ describeDb("operator decision continuation worker", () => {
       effectiveStatus: "blocked", errorCode: "requester_unavailable",
     });
     expect(projection?.view.continuation?.retryHint).toContain("요청자");
+  });
+
+  // [stale-card sweep 4a] 선택 전 상태 변경 → 카드 자동 취소 정책(2026-10-15). pollOnce 뒷단에서
+  //   스냅샷 불일치 pending 카드만 cancelled 로 만들고, 일치/스냅샷 없음/이미 종결 카드는 쓰지 않는다.
+  //   스윕이 wakeup 이나 continuation 을 만들지 않는다.
+  describe("stale pending card sweep", () => {
+    async function insertSweepCard(options: {
+      status?: "pending" | "resolved";
+      targetSnapshot?: Record<string, unknown>;
+    } = {}) {
+      const cardId = randomUUID();
+      const status = options.status ?? "pending";
+      await db.insert(operatorDecisions).values({
+        id: cardId, companyId, requestKey: randomUUID(), requestHash: "hash", status,
+        interactionType: "single_select", title: "Sweep", sourceType: "workflow_step", sourceId: "step",
+        sourceContext: {
+          missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [],
+          ...(options.targetSnapshot ? { targetSnapshot: options.targetSnapshot } : {}),
+        },
+        issueId, definition, continuationMode: "none",
+        requestedByAgentId: agentId,
+        ...(status === "resolved" ? {
+          result: { actionId: "choose", outcome: "submit", selectedOptionIds: ["one"], comment: null },
+          resolvedByUserId: "board", resolvedAt: fixtureTime,
+        } : {}),
+      });
+      return cardId;
+    }
+
+    async function cardRow(id: string) {
+      return db.select().from(operatorDecisions).where(eq(operatorDecisions.id, id)).then((rows) => rows[0] ?? null);
+    }
+
+    async function cardActivities(id: string) {
+      return db.select().from(activityLog).where(eq(activityLog.entityId, id));
+    }
+
+    it("S1: cancels a drifted pending card with a sweep-authored cancel activity and no wakeup", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      const wakeup = vi.fn();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "sweep-s1" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
+      const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
+      expect(cancelActivity).toMatchObject({ actorType: "user", actorId: "system:operator-decision-stale-sweep" });
+      expect(cancelActivity?.details).toMatchObject({
+        cancelledByActorType: "user",
+        cancelledByActorId: "system:operator-decision-stale-sweep",
+        reason: "target_changed",
+        mismatch: ["issueStatus"],
+      });
+      expect(wakeup).not.toHaveBeenCalled();
+      expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
+
+      // 직접 호출 집계 계약: {checked, cancelled} — 불일치 카드 1건만 남아 있다(첫 카드는 이미 cancelled).
+      const secondCardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      await expect(operatorDecisionWriteService(db).sweepStalePendingCards(fixtureTime))
+        .resolves.toEqual({ checked: 1, cancelled: 1 });
+      expect(await cardRow(secondCardId)).toMatchObject({ status: "cancelled" });
+    });
+
+    it("S2: keeps a pending card whose snapshot still matches", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      const wakeup = vi.fn();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "sweep-s2" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
+      expect((await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled")).toHaveLength(0);
+      expect(wakeup).not.toHaveBeenCalled();
+    });
+
+    it("S3: leaves a drifted resolved card untouched", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ status: "resolved", targetSnapshot: { issueId, issueStatus: "todo" } });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-s3" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "resolved" });
+      expect((await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled")).toHaveLength(0);
+    });
+
+    it("S4: leaves a pending card without a snapshot untouched", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-s4" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
+      expect(await cardActivities(cardId)).toHaveLength(0);
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, sql } from "drizzle-orm"; import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-language.js";
+import { and, eq, getTableColumns, isNull, sql } from "drizzle-orm"; import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-language.js";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog, companies,
@@ -11,7 +11,7 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput, OperatorDecisionTargetSnapshot } from "@paperclipai/shared/types/operator-decision";
-import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { guardQualityWrite } from "./quality/write-guard.js";
@@ -24,6 +24,12 @@ import { operatorDecisionContinuationRetryService } from "./operator-decision-co
 import { operatorDecisionReadService } from "./operator-decisions-read.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
+
+// [stale-card sweep 4a] 시스템 스윕 주체 식별자 — activity 감사(activityLog.actorId)와 카드 취소
+//   세부(details.cancelledByActorId) 양쪽에 같은 값을 쓴다. 사람 취소·요청자 취소와 감사 구조를 공유한다.
+const STALE_SWEEP_ACTOR_ID = "system:operator-decision-stale-sweep";
+// [stale-card sweep 4a] 한 번의 pollOnce 스윕이 검사하는 후보 상한 — 대량 테이블 스캔·장기 점유 방지.
+const STALE_SWEEP_BATCH_LIMIT = 50;
 
 function conflictFor(id: string, status: string, message = "Operator decision conflict") {
   return conflict(message, { operatorDecisionId: id, status });
@@ -377,5 +383,68 @@ export function operatorDecisionWriteService(db: Db) {
     return { decision: await read.getRequired(id), applied: true };
   }
 
-  return { create, resolve, cancel, retryContinuation: retry.retryContinuation };
+  // [stale-card sweep 4a] 선택 전 상태 변경 → 카드 자동 취소(2026-10-15 정책). 스냅샷 있는 pending 카드 중
+  //   현재 상태와 불일치하는 카드를 시스템 주체로 cancelled 처리한다. 불일치 판정은 2단계
+  //   assertTargetSnapshotCurrent(409 target_changed)를 그대로 재사용하고, 취소는 pending CAS 로만
+  //   적용해 동시 resolve 승리 시 조용히 건너뛴다. 취소는 continuation/wakeup 을 만들지 않는다.
+  //   Quality 연결 카드(qualityActionId)는 T5 전용 경로 계약대로 후보에서 제외한다.
+  async function sweepStalePendingCards(now = new Date()) {
+    const candidates = await db.select({
+      id: operatorDecisions.id,
+      companyId: operatorDecisions.companyId,
+      sourceContext: operatorDecisions.sourceContext,
+    }).from(operatorDecisions).where(and(
+      eq(operatorDecisions.status, "pending"),
+      isNull(operatorDecisions.qualityActionId),
+      sql`coalesce(${operatorDecisions.sourceContext}, '{}'::jsonb) ? 'targetSnapshot'`,
+    )).limit(STALE_SWEEP_BATCH_LIMIT);
+
+    let checked = 0;
+    let cancelled = 0;
+    for (const candidate of candidates) {
+      const snapshot = readTargetSnapshot(candidate.sourceContext);
+      // 재검증 식별자(issueId/workflowRunId/stepRunId) 없는 스냅샷은 판정 불가 — 쓰지 않고 건너뛴다.
+      if (!snapshot || (snapshot.issueId == null && snapshot.workflowRunId == null && snapshot.stepRunId == null)) continue;
+      checked += 1;
+      let mismatch: string[];
+      try {
+        await assertTargetSnapshotCurrent(db, candidate.id, candidate.companyId, snapshot);
+        continue; // 여전히 일치 — 아무 것도 쓰지 않는다.
+      } catch (error) {
+        const details = error instanceof HttpError ? error.details as { code?: string; mismatch?: string[] } | undefined : undefined;
+        if (!(error instanceof HttpError) || error.status !== 409 || details?.code !== "target_changed") throw error;
+        mismatch = details.mismatch ?? [];
+      }
+      const cancelledNow = await db.transaction(async (tx) => {
+        const updated = await tx.update(operatorDecisions).set({
+          status: "cancelled", cancelledAt: now, updatedAt: now,
+        }).where(and(eq(operatorDecisions.id, candidate.id), eq(operatorDecisions.status, "pending")))
+          .returning({ id: operatorDecisions.id });
+        if (updated.length !== 1) return false; // 동시 resolve/cancel 승리 — 조용히 skip
+        await tx.insert(activityLog).values({
+          companyId: candidate.companyId,
+          actorType: "user",
+          actorId: STALE_SWEEP_ACTOR_ID,
+          agentId: null,
+          action: "operator_decision.cancelled",
+          entityType: "operator_decision",
+          entityId: candidate.id,
+          details: {
+            schemaVersion: 1,
+            operatorDecisionId: candidate.id,
+            cancelledByActorType: "user",
+            cancelledByActorId: STALE_SWEEP_ACTOR_ID,
+            cancelledAt: now.toISOString(),
+            reason: "target_changed",
+            mismatch,
+          },
+        });
+        return true;
+      });
+      if (cancelledNow) cancelled += 1;
+    }
+    return { checked, cancelled };
+  }
+
+  return { create, resolve, cancel, retryContinuation: retry.retryContinuation, sweepStalePendingCards };
 }

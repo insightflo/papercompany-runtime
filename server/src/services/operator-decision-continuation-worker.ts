@@ -1,7 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, agents } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 import { operatorDecisionContinuationStore } from "./operator-decision-continuation-store.js";
+import { operatorDecisionWriteService } from "./operator-decisions-write.js";
 
 // [delivery bridge] fresh-run 전달용 해결 요약. definition.options × selectedOptionIds 를
 //   한국어 라벨+영어 식별자로 해석해 wake payload 와 contextSnapshot 양쪽에 탑재한다.
@@ -164,6 +166,17 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
   async function pollOnce(now = new Date()) {
     const claimed = await store.claimBatch(workerId, now);
     for (const continuation of claimed) await dispatch(continuation.id, now);
+    // [stale-card sweep 4a] 전달(dispatch) 뒤에서 오래된 pending 카드를 자동 취소한다. 스윕 실패가
+    //   continuation 전달에 영향 주지 않도록 try/catch 로 격리하고 반환값(claimed 수)은 그대로 둔다.
+    try {
+      await operatorDecisionWriteService(db).sweepStalePendingCards(now);
+    } catch (error) {
+      logger.warn({
+        msg: "Operator decision stale-card sweep failed",
+        workerId,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    }
     return claimed.length;
   }
 
