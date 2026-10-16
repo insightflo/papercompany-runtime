@@ -22,6 +22,53 @@ const event = (id: string, minute: number, type: string, layer = "workflow_sync"
   ({ id, at: at(minute), type, layer, fromStatus, toStatus });
 
 describe("mission oversight shadow policy", () => {
+  it("failureEntities list exactly the current failing entities in deterministic order", () => {
+    const s = running();
+    s.runs = ["z", "a", "old"].map((id) => ({ ...s.runs[0], id, status: "failed", current: id !== "old" }));
+    s.steps = ["failed", "timed_out", "recovery_pending", "blocked", "waiting", "old", "completed"].map((status, i) => ({
+      id: `step-${i}`, status: ["waiting", "old"].includes(status) ? "blocked" : status, version: i + 2,
+      generation: 3, retryCount: 0, iterationIndex: 0, current: status !== "old", waiting: status === "waiting",
+      startedAt: at(0), completedAt: at(1), readySince: null }));
+    s.heartbeats = ["z", "a", "old", "live"].map((id) => ({ ...s.heartbeats[0], id,
+      status: id === "live" ? "running" : "timed_out", current: id !== "old" }));
+    const expected = [
+      { kind: "heartbeat", id: "a", status: "timed_out", version: null },
+      { kind: "heartbeat", id: "z", status: "timed_out", version: null },
+      { kind: "run", id: "a", status: "failed", version: 4 },
+      { kind: "run", id: "z", status: "failed", version: 4 },
+      ...["failed", "timed_out", "recovery_pending", "blocked"].map((status, i) =>
+        ({ kind: "step", id: `step-${i}`, status, version: i + 2 })),
+    ];
+    const before = structuredClone(s);
+    expect(evaluateMissionOversightCadence(s, at(26)).failureEntities).toEqual(expected);
+    expect(s).toEqual(before);
+    expect(evaluateMissionOversightCadence({ ...s, runs: [...s.runs].reverse(), steps: [...s.steps].reverse(),
+      heartbeats: [...s.heartbeats].reverse() }, at(26)).failureEntities).toEqual(expected);
+  });
+
+  it("failureEntities version tracks step retry transition version for coalescing", () => {
+    const s = snapshot();
+    s.steps.push({ id: "step", status: "failed", version: 2, generation: 3, retryCount: 0, iterationIndex: 0,
+      startedAt: at(0), completedAt: at(1), readySince: null, current: true });
+    expect(evaluateMissionOversightCadence(s, at(2)).failureEntities).toEqual([
+      { kind: "step", id: "step", status: "failed", version: 2 }]);
+    s.steps[0] = { ...s.steps[0], version: 4, retryCount: 1, generation: 5 };
+    expect(evaluateMissionOversightCadence(s, at(3)).failureEntities).toEqual([
+      { kind: "step", id: "step", status: "failed", version: 4 }]);
+  });
+
+  it("non-failure verdicts carry no failureEntities", () => {
+    const ready = snapshot(), waiting = snapshot();
+    ready.heartbeats = [{ ...running().heartbeats[0], status: "queued" }];
+    waiting.waits = [{ id: "approval", kind: "approval", until: null, satisfiedAt: null }];
+    for (const [s, state] of [[running(), "RUNNING"], [ready, "READY_NOT_STARTED"],
+      [waiting, "WAITING_EXPLICIT"], [snapshot(), "IDLE_QUIET"]] as const) {
+      const verdict = evaluateMissionOversightCadence(s, at(26));
+      expect(verdict.state).toBe(state);
+      expect(verdict).not.toHaveProperty("failureEntities");
+    }
+  });
+
   it("C1a: a 26-minute normal build with a fresh heartbeat remains RUNNING without oversight", () => {
     const verdict = evaluateMissionOversightCadence(running(), at(26));
     expect(verdict).toMatchObject({ state: "RUNNING", wouldTrigger: false, triggerKind: "none" });

@@ -40,6 +40,56 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     return db.select().from(activityLog).where(and(eq(activityLog.companyId, f.company.id), eq(activityLog.action, shadow.OVERSIGHT_SHADOW_ACTION)));
   }
 
+  // Reproduce assignment admission before the step starts: heartbeat keeps generation 0.
+  async function assignmentHeartbeat(generation = 0, observedAt = at(25)) {
+    const f = await world(), w = await workflow(f, "running");
+    await db.update(workflowStepRuns).set({ executionGeneration: 3 }).where(eq(workflowStepRuns.id, w.step.id));
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.company.id, agentId: f.agent.id,
+      missionId: f.mission.id, source: "assignment", reason: "issue_assigned", status: "claimed",
+      workflowStepRunId: w.step.id, workflowExecutionGeneration: generation, requestedAt: at(0) }).returning();
+    const [hb] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: f.agent.id,
+      invocationSource: "assignment", wakeupRequestId: wake.id, workflowStepRunId: w.step.id,
+      workflowExecutionGeneration: generation, status: "running", createdAt: at(0), startedAt: at(0), updatedAt: observedAt }).returning();
+    return { f, w, hb };
+  }
+
+  it("assignment-path gen-0 heartbeat on a generation-3 step is current live evidence, not a ghost", async () => {
+    const { f, hb } = await assignmentHeartbeat();
+    const s = (await read(f))!;
+    expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: true }));
+    expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "none", wouldTrigger: false });
+  });
+
+  it("a stale gen-0 heartbeat beyond its allowed interval is still a liveness ghost", async () => {
+    const { f, hb } = await assignmentHeartbeat(0, at(0));
+    const s = (await read(f))!;
+    expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: true, allowedIntervalMs: 1800_000 }));
+    expect(evaluateMissionOversightCadence(s, at(29)).triggerKind).toBe("none");
+    for (const minute of [30, 31]) expect(evaluateMissionOversightCadence(s, at(minute))).toMatchObject({
+      state: "RUNNING", triggerKind: "liveness_ghost", wouldTrigger: true });
+  });
+
+  it("a mismatched non-zero generation heartbeat stays excluded as superseded", async () => {
+    const { f, hb } = await assignmentHeartbeat(2);
+    const s = (await read(f))!;
+    expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: false }));
+    expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "liveness_ghost",
+      computedTimestamps: { oldest_running_heartbeat_at: null } });
+  });
+
+  it("evaluateMissionOversightForMission returns scoped verdict or null", async () => {
+    const f = await world(), planning = await world("planning"), paused = await world("paused");
+    await workflow(f, "failed");
+    const before = await read(f), audit = await db.select().from(activityLog);
+    expect(await shadow.evaluateMissionOversightForMission(db, f.company.id, f.mission.id, at(10)))
+      .toEqual(evaluateMissionOversightCadence(before!, at(10)));
+    expect(await shadow.evaluateMissionOversightForMission(db, planning.company.id, planning.mission.id, at(10))).not.toBeNull();
+    for (const [companyId, missionId] of [[planning.company.id, f.mission.id], [paused.company.id, paused.mission.id],
+      [f.company.id, randomUUID()]]) expect(await shadow.evaluateMissionOversightForMission(db, companyId, missionId, at(10))).toBeNull();
+    expect(await read(f)).toEqual(before);
+    expect(await db.select().from(activityLog)).toEqual(audit);
+  });
+
   it("stores queryable immutable JSON; concurrent same tick/generation dedupes, later ticks and generations survive", async () => {
     const f = await world(), w = await workflow(f);
     const before = await read(f);
@@ -200,7 +250,8 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     const beforeMissions = await db.select().from(missions), beforeSteps = await db.select().from(workflowStepRuns);
     await shadow.recordActiveMissionCadenceShadow(db, at(10));
     expect(await rows(f)).toHaveLength(1);
-    expect((await rows(f))[0].details).toMatchObject({ triggerKind: "immediate_failure" });
+    expect((await rows(f))[0].details).toMatchObject({ schemaVersion: 1, triggerKind: "immediate_failure",
+      failureEntities: evaluateMissionOversightCadence((await read(f))!, at(10)).failureEntities });
     expect(await rows(planning)).toHaveLength(1);
     expect(await rows(paused)).toHaveLength(0);
     expect(await db.select().from(workflowTransitionEvents)).toEqual(before);
