@@ -3,12 +3,15 @@ import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
+import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
 
 export interface MissionOwnerSupervisionMonitorOptions {
   intervalMs?: number;
+  failureLaneIntervalMs?: number;
+  onMissionOversightFailureWakeRequested?: MissionOversightFailureWakeRequestedHandler;
   staleAfterMinutes?: number;
   runImmediately?: boolean;
   applySafeActions?: boolean;
@@ -34,6 +37,10 @@ export function createMissionOwnerSupervisionMonitor(
   const applySafeActions = options.applySafeActions ?? true;
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
+  const failureLane = options.onMissionOversightFailureWakeRequested ? createMissionOversightFailureLane(db, {
+    failureLaneIntervalMs: options.failureLaneIntervalMs,
+    onMissionOversightFailureWakeRequested: options.onMissionOversightFailureWakeRequested,
+  }) : null;
 
   async function run(): Promise<void> {
     if (running) return;
@@ -89,9 +96,11 @@ export function createMissionOwnerSupervisionMonitor(
     start() {
       if (timer) return;
       timer = setInterval(() => void run(), intervalMs);
+      failureLane?.start();
       if (runImmediately) void run();
     },
     stop() {
+      failureLane?.stop();
       if (!timer) return;
       clearInterval(timer);
       timer = null;
