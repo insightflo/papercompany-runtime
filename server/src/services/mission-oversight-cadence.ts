@@ -27,6 +27,7 @@ export interface CadenceVerdict {
   wouldTrigger: boolean;
   triggerKind: CadenceTrigger;
   reasonCode: string;
+  failureEntities?: Array<{ kind: "run" | "step" | "heartbeat"; id: string; status: string; version: number | null }>;
   computedTimestamps: { last_event_at: string | null; last_progress_at: string | null;
     last_observed_at: string | null; oldest_running_heartbeat_at: string | null };
   inputGeneration: { schemaVersion: 1; fingerprint: string; runs: Array<{ id: string; version: number }>;
@@ -81,10 +82,18 @@ export function evaluateMissionOversightCadence(s: CadenceSnapshot, now: Date): 
   const verdict = (state: CadenceState, triggerKind: CadenceTrigger, reasonCode: string): CadenceVerdict =>
     ({ schemaVersion: 1, state, wouldTrigger: triggerKind !== "none", triggerKind, reasonCode,
       computedTimestamps: timestamps, inputGeneration });
-  if (s.runs.some((r) => r.current && FAILURE.has(r.status))
-    || s.steps.some((step) => step.current && (FAILURE.has(step.status) || (step.status === "blocked" && !step.waiting)))
-    || s.heartbeats.some((hb) => hb.current && FAILURE.has(hb.status))) {
-    return verdict("FAILURE_OR_RECOVERY_NEEDED", "immediate_failure", "failure_event_present");
+  // The same current-failure predicates drive both classification and future coalescing evidence.
+  const failureEntities: NonNullable<CadenceVerdict["failureEntities"]> = [
+    ...s.runs.filter((r) => r.current && FAILURE.has(r.status))
+      .map(({ id, status, version }) => ({ kind: "run" as const, id, status, version })),
+    ...s.steps.filter((step) => step.current && (FAILURE.has(step.status) || (step.status === "blocked" && !step.waiting)))
+      .map(({ id, status, version }) => ({ kind: "step" as const, id, status, version })),
+    ...s.heartbeats.filter((hb) => hb.current && FAILURE.has(hb.status))
+      .map(({ id, status }) => ({ kind: "heartbeat" as const, id, status, version: null })),
+  ];
+  if (failureEntities.length) {
+    failureEntities.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+    return { ...verdict("FAILURE_OR_RECOVERY_NEEDED", "immediate_failure", "failure_event_present"), failureEntities };
   }
   if (live.length || runningSteps.length) {
     const ghost = live.some((hb) => !(hb.allowedIntervalMs > 0) || now.getTime() - hb.observedAt.getTime() >= hb.allowedIntervalMs)

@@ -139,9 +139,10 @@ export async function readMissionCadenceSnapshot(db: Db, companyId: string, miss
       }
       const step = stepRows.find((sr) => sr.id === hb.stepId || (!hb.stepId && hb.issueId !== null && sr.issueId === hb.issueId && currentRuns.has(sr.workflowRunId)));
       const issue = workIssues.find((i) => i.id === hb.issueId);
+      // Assignment-path heartbeats retain pre-start generation 0; only non-zero mismatches prove supersession.
       const current = (!hb.stepId || Boolean(step)) && (["queued", "running"].includes(hb.status) || latestHb.get(group(hb)) === hb.id)
         && !["done", "cancelled"].includes(issue?.status ?? "")
-        && (!step || (currentRuns.has(step.workflowRunId) && (hb.generation === null || hb.generation === step.executionGeneration)
+        && (!step || (currentRuns.has(step.workflowRunId) && (hb.generation === null || hb.generation === 0 || hb.generation === step.executionGeneration)
           && (step.startedAt === null || hb.createdAt >= step.startedAt) && readWorkflowRetryMetadata(step.metadata.workflowRetry)?.state !== "waiting"));
       s.heartbeats.push({ id: hb.id, status: hb.status, current, stepId: step?.id ?? null,
         observedAt: hb.status === "queued" ? hb.createdAt : hb.observedAt, startedAt: hb.startedAt, finishedAt: hb.finishedAt,
@@ -186,6 +187,15 @@ export async function readMissionCadenceSnapshot(db: Db, companyId: string, miss
     }
     return s;
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
+}
+
+/** [목적] 한 회사의 대상 미션을 기록 없이 평가한다. [입력] DB, 회사/미션 ID, 평가 시각.
+ * [출력] 판정 또는 비대상/범위 밖이면 null. [연결] 읽기 전용 스냅숏과 순수 분류기.
+ * [주의] 쓰기·기록·깨우기 없음. [수정시 영향] 관찰용 호출자만 해당하며 기록 경로와 분리한다.
+ */
+export async function evaluateMissionOversightForMission(db: Db, companyId: string, missionId: string, now: Date): Promise<CadenceVerdict | null> {
+  const snapshot = await readMissionCadenceSnapshot(db, companyId, missionId);
+  return snapshot ? evaluateMissionOversightCadence(snapshot, now) : null;
 }
 
 /** Existing structured audit stream, isolated entity type (not mission/issue), no
