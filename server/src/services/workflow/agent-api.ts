@@ -64,6 +64,15 @@ function isPreviewUrlRegister(data: WorkflowArtifactRegister): data is WorkflowP
   return data.type === "preview_url";
 }
 
+// [하드닝 2단계 2b] 문서(type=document) 자리에 이미지가 앉는 것을 막는 확장자 블랙리스트.
+//   판별은 path 확장자 기반만(대소문자 무시) — MIME 스니핑 없이 단순·결정적으로.
+const DOCUMENT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "heic"]);
+
+function documentImageExtensionOf(artifactPath: string): string | null {
+  const ext = path.extname(artifactPath).slice(1).toLowerCase();
+  return ext && DOCUMENT_IMAGE_EXTENSIONS.has(ext) ? ext : null;
+}
+
 function isLocalArtifactRegister(data: WorkflowArtifactRegister): data is WorkflowLocalArtifactRegister {
   return "path" in data;
 }
@@ -220,6 +229,14 @@ export async function registerWorkflowArtifact(input: {
       : existing;
     if (!restamped) throw conflict("workproduct_restamp_target_missing", { workProductId: existing.id });
     return reconcileExistingLocalArtifactTitle(input.db, restamped, artifactPath);
+  }
+
+  // [하드닝 2단계 2b] 신규 등록만 대상 — 같은 경로 restamp(위 분기)는 기존 산출물 재봉인이므로 차단하지 않는다.
+  if (input.data.type === "document") {
+    const imageExt = documentImageExtensionOf(artifactPath);
+    if (imageExt) {
+      throw unprocessable("workproduct_document_image_extension_rejected", { path: artifactPath, extension: imageExt });
+    }
   }
 
   const product = await workProductService(input.db).createForIssue(input.issue.id, input.issue.companyId, {

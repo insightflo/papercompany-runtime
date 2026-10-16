@@ -685,6 +685,111 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     })).rejects.toThrow("inside this mission");
   });
 
+  // [하드닝 2단계 2b] 이미지 확장자 파일을 type=document 로 신규 등록하는 것을 거부한다.
+  //   문서 자리에 이미지가 앉는 소비 혼동 방지. same-path restamp(기존 산출물 재봉인)은 차단하지 않는다.
+  it("rejects new document registrations whose path has an image extension", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-image-doc-"));
+    tempDirs.add(dir);
+    const pngPath = path.join(dir, "figure.png");
+    await writeFile(pngPath, "png-bytes", "utf8");
+
+    await expect(registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: pngPath, type: "document", isPrimary: true },
+    })).rejects.toMatchObject({
+      status: 422,
+      message: "workproduct_document_image_extension_rejected",
+      details: { path: pngPath, extension: "png" },
+    });
+
+    // 대소문자 무시 — .PNG 도 동일하게 거부되며 extension 은 정규화된 소문자로 보고한다.
+    const upperPath = path.join(dir, "figure.PNG");
+    await writeFile(upperPath, "png-bytes", "utf8");
+    await expect(registerWorkflowArtifact({
+      db,
+      issue,
+      actor,
+      data: { path: upperPath, type: "document" },
+    })).rejects.toMatchObject({
+      status: 422,
+      message: "workproduct_document_image_extension_rejected",
+      details: { path: upperPath, extension: "png" },
+    });
+
+    // 거부된 등록은 워크프로덕트를 남기지 않는다.
+    const rows = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issue.id));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("still allows artifact-typed images, non-image documents, and extensionless document paths", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-image-allow-"));
+    tempDirs.add(dir);
+    const imagePath = path.join(dir, "og-image.png");
+    const jsonPath = path.join(dir, "dataset.json");
+    const extensionlessPath = path.join(dir, "report");
+    await writeFile(imagePath, "png-bytes", "utf8");
+    await writeFile(jsonPath, "{}", "utf8");
+    await writeFile(extensionlessPath, "no extension", "utf8");
+
+    // 자산(type=artifact) 은 이미지가 정상이다.
+    const asset = await registerWorkflowArtifact({
+      db, issue, actor, data: { path: imagePath, type: "artifact" },
+    });
+    expect(asset).toMatchObject({ type: "artifact", externalId: imagePath });
+
+    // 문서 + 비이미지 확장자 통과.
+    const document = await registerWorkflowArtifact({
+      db, issue, actor, data: { path: jsonPath, type: "document" },
+    });
+    expect(document).toMatchObject({ type: "document", externalId: jsonPath });
+
+    // 확장자가 없으면 이미지로 단정할 수 없으므로 통과.
+    const extensionless = await registerWorkflowArtifact({
+      db, issue, actor, data: { path: extensionlessPath, type: "document" },
+    });
+    expect(extensionless).toMatchObject({ type: "document", externalId: extensionlessPath });
+  });
+
+  it("does not block same-path restamp of an already-registered image document", async () => {
+    const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
+    const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-image-restamp-"));
+    tempDirs.add(dir);
+    const imagePath = path.join(dir, "legacy-figure.png");
+    await writeFile(imagePath, "png-bytes", "utf8");
+
+    // 이전(hardening 이전)에 document+이미지로 등록된 기존 산출물 — 워크플로우 API 우회 시드.
+    const legacy = await workProductService(db).createForIssue(issue.id, issue.companyId, {
+      projectId: null,
+      executionWorkspaceId: null,
+      runtimeServiceId: null,
+      type: "document",
+      provider: "local_file",
+      externalId: imagePath,
+      title: "legacy-figure.png",
+      url: null,
+      status: "active",
+      reviewState: "none",
+      isPrimary: true,
+      healthStatus: "unknown",
+      summary: null,
+      metadata: { path: imagePath },
+      createdByRunId: null,
+    });
+    expect(legacy).not.toBeNull();
+
+    // 같은 경로 재등록은 restamp/재조정 분기로 처리되고 거부되지 않는다.
+    const restamped = await registerWorkflowArtifact({
+      db, issue, actor, data: { path: imagePath, type: "document" },
+    });
+    expect(restamped.id).toBe(legacy?.id);
+    const rows = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, issue.id));
+    expect(rows).toHaveLength(1);
+  });
+
   it("routes agent artifact registration through the workflow API", async () => {
     const { issue, agentId, runId } = await seedAssignedWorkflowIssue();
     const dir = await mkdtemp(path.join(tmpdir(), "paperclip-workflow-route-artifact-"));
