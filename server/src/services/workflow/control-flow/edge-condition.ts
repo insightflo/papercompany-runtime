@@ -23,6 +23,7 @@
  */
 
 import type { ConditionalEdge, ConditionalEdgeWhen } from "./types.js";
+import { isQaLikeStep, type WorkflowStepRoleInput } from "../../workflow-step-role.js";
 
 /** 대상 step 이 의존하는 선행 step 의 실행 상태(엔진 stepRun.status 와 정렬). */
 export type PredStatus = "completed" | "failed" | "skipped" | "pending" | "running";
@@ -180,6 +181,67 @@ export function resolveFailureRecoveryChannel(input: {
 
 /** 종결 이슈 상태 — 이 상태의 연결 이슈는 회복 채널이 닫혀 있다. */
 export const TERMINAL_RECOVERY_ISSUE_STATUSES: ReadonlySet<string> = new Set(["done", "cancelled"]);
+
+/**
+ * [mechanical QA rejection — 2026-10-17] 기계 QA 콘텐츠 반려 서명 화이트리스트.
+ *   `qa_artifact_verdict_failed`(도구 자체 검사 실패) 또는
+ *   `qa_artifact_runtime_checks_failed:<check-ids>`(서버 콘텐츠 규칙 실패)만 판정 도출(judgable)
+ *   대상이다. 그 외 서명(입력 변조·스코프 불일치·selector 세대 불일치·크래시 등)은 infra 실패로
+ *   P4 가드(재작업 미발화 → 하드 실패/오너 카드)를 그대로 따른다.
+ *   서명 원천: verifyQaArtifact throw(qa-artifact-receipt.ts) → persistFailedToolDispatch 가
+ *   stepRun.lastDispatchErrorSummary + metadata.toolInvocation.dispatchError 에 기록.
+ */
+const MECHANICAL_QA_REJECTION_SUMMARY_PATTERN = /^qa_artifact_(?:verdict_failed|runtime_checks_failed:.+)$/;
+
+/** stepRun 에 기록된 마지막 디스패치 실패 요약 — 컬럼 우선, metadata.toolInvocation.dispatchError 보조. */
+function readStepRunErrorSummary(run: {
+  lastDispatchErrorSummary: string | null;
+  metadata?: unknown;
+}): string | null {
+  if (typeof run.lastDispatchErrorSummary === "string" && run.lastDispatchErrorSummary.length > 0) {
+    return run.lastDispatchErrorSummary;
+  }
+  const metadata = run.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const invocation = (metadata as Record<string, unknown>).toolInvocation;
+  if (!invocation || typeof invocation !== "object" || Array.isArray(invocation)) return null;
+  const dispatchError = (invocation as Record<string, unknown>).dispatchError;
+  return typeof dispatchError === "string" && dispatchError.length > 0 ? dispatchError : null;
+}
+
+/**
+ * [목적] 이슈 없는 기계 QA stepRun 의 실패 서명이 콘텐츠 반려 화이트리스트에 정확히 일치하면 그
+ *   서명을 돌려주고, 그 외(infra/알 수 없음)는 null. 순수 함수 — 판정 도출(edge 판정)과 재작업
+ *   피드백 렌더(loop-driver)가 같은 화이트리스트를 공유한다.
+ */
+export function mechanicalQaRejectionSummary(run: {
+  lastDispatchErrorSummary: string | null;
+  metadata?: unknown;
+}): string | null {
+  const summary = readStepRunErrorSummary(run);
+  return summary !== null && MECHANICAL_QA_REJECTION_SUMMARY_PATTERN.test(summary) ? summary : null;
+}
+
+/**
+ * [목적] QA-like + 이슈 없는 failed stepRun 의 콘텐츠 반려 여부(순수 함수). true 면 호출자
+ *   (buildPredFactsMap)가 verdict="request_changes" 를 도출해 기존 qa_request_changes 백엔지와
+ *   동일하게 흘린다. false 는 판정 도출 없음 — verdict null + verdictChecked 유지로 P4 가드 불변.
+ * [입력] step(역할 판정용 최소 구조 — WorkflowStep 구조 호환), run(stepRun 최소 구조).
+ */
+export function deriveMechanicalQaRejection(input: {
+  step: WorkflowStepRoleInput;
+  run: {
+    issueId: string | null;
+    status: string;
+    lastDispatchErrorSummary: string | null;
+    metadata?: unknown;
+  };
+}): boolean {
+  return isQaLikeStep(input.step)
+    && input.run.status === "failed"
+    && !input.run.issueId
+    && mechanicalQaRejectionSummary(input.run) !== null;
+}
 
 /**
  * [목적] 대상 step 의 활성화 상태를 판정. 호출자는 step 이 현재 "pending + issueId==null"(아직 발화 전) 임을
