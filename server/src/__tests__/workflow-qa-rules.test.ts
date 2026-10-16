@@ -3,6 +3,49 @@ import { evaluateQaRules, hashArtifactContract, hashQaConfig } from "../services
 import { resolveEffectiveQaConfig } from "@paperclipai/shared";
 
 const base = { provenanceValid: true, resultValid: true, json: { title: "A report", source: "https://example.com/article" } };
+describe("https-links loopback exemption (local-install evidence)", () => {
+  it.each([
+    "http://127.0.0.1:7077/mcp",
+    "http://localhost:3000/docs",
+    "http://[::1]:8080/health",
+    "http://sub.localhost:5173/",
+  ])("allows plain-http loopback link %s in code blocks and strings", async (link) => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json, code: `curl ${link}`, plain: link } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+  it.each([
+    "http://example.com/insecure",
+    "http://127.0.0.2/not-the-loopback-host",
+    "http://0.0.0.0:8080/",
+  ])("still rejects plain-http link %s", async (link) => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json, link } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(false);
+    expect(result.ok).toBe(false);
+  });
+  it("keeps https links and relative/fragment links passing unchanged", async () => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json, https: "https://example.com/a", rel: "assets/x.png", frag: "#top" } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+  it("does not count loopback http links as https source links", async () => {
+    const config = resolveEffectiveQaConfig({ rules: { "min-source-links": { params: { min: 1 } } } });
+    const result = await evaluateQaRules({ ...base, config, json: { title: "Local proof", verify: "curl http://127.0.0.1:7077/mcp" } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
+    expect(result.checks.find(c => c.id === "min-source-links")?.ok).toBe(false);
+  });
+  it("accepts a kenfold-style local-install report whose code block cites http://127.0.0.1:7077/mcp", async () => {
+    const result = await evaluateQaRules({ ...base, json: {
+      title: "kenfold service report",
+      install: "kenfold serve --port 7077",
+      verify: "curl -X POST http://127.0.0.1:7077/mcp",
+      evidence: "MCP endpoint responded over loopback http",
+    } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe("generic runtime QA rules", () => {
   it("always runs the six mandatory rules without requiring a plugin result", async () => {
     const result = await evaluateQaRules(base);
