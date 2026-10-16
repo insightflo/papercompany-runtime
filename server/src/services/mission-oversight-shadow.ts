@@ -140,10 +140,12 @@ export async function readMissionCadenceSnapshot(db: Db, companyId: string, miss
       const step = stepRows.find((sr) => sr.id === hb.stepId || (!hb.stepId && hb.issueId !== null && sr.issueId === hb.issueId && currentRuns.has(sr.workflowRunId)));
       const issue = workIssues.find((i) => i.id === hb.issueId);
       // Assignment-path heartbeats retain pre-start generation 0; only non-zero mismatches prove supersession.
+      // Initial-generation assignment wakes can precede step start; resets still require creation at or after start.
       const current = (!hb.stepId || Boolean(step)) && (["queued", "running"].includes(hb.status) || latestHb.get(group(hb)) === hb.id)
         && !["done", "cancelled"].includes(issue?.status ?? "")
         && (!step || (currentRuns.has(step.workflowRunId) && (hb.generation === null || hb.generation === 0 || hb.generation === step.executionGeneration)
-          && (step.startedAt === null || hb.createdAt >= step.startedAt) && readWorkflowRetryMetadata(step.metadata.workflowRetry)?.state !== "waiting"));
+          && (step.startedAt === null || hb.createdAt >= step.startedAt || (step.executionGeneration === 0 && hb.generation === 0))
+          && readWorkflowRetryMetadata(step.metadata.workflowRetry)?.state !== "waiting"));
       s.heartbeats.push({ id: hb.id, status: hb.status, current, stepId: step?.id ?? null,
         observedAt: hb.status === "queued" ? hb.createdAt : hb.observedAt, startedAt: hb.startedAt, finishedAt: hb.finishedAt,
         allowedIntervalMs: timeoutByStep.get(step?.id ?? "") ?? 15 * 60_000, waiting: hb.issueId !== null && waitingIssueIds.has(hb.issueId) });

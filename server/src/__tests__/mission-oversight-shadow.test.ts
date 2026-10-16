@@ -41,9 +41,9 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
   }
 
   // Reproduce assignment admission before the step starts: heartbeat keeps generation 0.
-  async function assignmentHeartbeat(generation = 0, observedAt = at(25)) {
+  async function assignmentHeartbeat(generation = 0, observedAt = at(25), stepGeneration = 3, stepStartedAt = at(0)) {
     const f = await world(), w = await workflow(f, "running");
-    await db.update(workflowStepRuns).set({ executionGeneration: 3 }).where(eq(workflowStepRuns.id, w.step.id));
+    await db.update(workflowStepRuns).set({ executionGeneration: stepGeneration, startedAt: stepStartedAt }).where(eq(workflowStepRuns.id, w.step.id));
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.company.id, agentId: f.agent.id,
       missionId: f.mission.id, source: "assignment", reason: "issue_assigned", status: "claimed",
       workflowStepRunId: w.step.id, workflowExecutionGeneration: generation, requestedAt: at(0) }).returning();
@@ -53,13 +53,37 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     return { f, w, hb };
   }
 
+  it("assignment heartbeat created before step start on an initial-generation step is current live evidence, not a ghost", async () => {
+    for (const leadMs of [26_000, 25]) {
+      const { f, hb } = await assignmentHeartbeat(0, at(25), 0, new Date(at(0).getTime() + leadMs));
+      const s = (await read(f))!;
+      expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: true }));
+      expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "none", wouldTrigger: false,
+        reasonCode: "running_with_fresh_heartbeat", computedTimestamps: { oldest_running_heartbeat_at: at(25).toISOString() } });
+    }
+  });
+  it("a pre-start generation-0 heartbeat stays excluded after the step resets to generation 1", async () => {
+    const { f, w, hb } = await assignmentHeartbeat(0, at(25), 0, new Date(at(0).getTime() + 26_000));
+    await db.update(workflowStepRuns).set({ executionGeneration: 1, startedAt: at(1) }).where(eq(workflowStepRuns.id, w.step.id));
+    const s = (await read(f))!;
+    expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: false }));
+    expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "liveness_ghost" });
+  });
+  it("a stale pre-start heartbeat beyond its allowed interval is still a liveness ghost", async () => {
+    const { f, hb } = await assignmentHeartbeat(0, at(0), 0, new Date(at(0).getTime() + 26_000));
+    const s = (await read(f))!;
+    expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: true, allowedIntervalMs: 1800_000 }));
+    expect(evaluateMissionOversightCadence(s, new Date(at(30).getTime() - 1)).triggerKind).toBe("none");
+    for (const minute of [30, 31]) expect(evaluateMissionOversightCadence(s, at(minute))).toMatchObject({
+      state: "RUNNING", triggerKind: "liveness_ghost", wouldTrigger: true });
+  });
+
   it("assignment-path gen-0 heartbeat on a generation-3 step is current live evidence, not a ghost", async () => {
     const { f, hb } = await assignmentHeartbeat();
     const s = (await read(f))!;
     expect(s.heartbeats).toContainEqual(expect.objectContaining({ id: hb.id, current: true }));
     expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "none", wouldTrigger: false });
   });
-
   it("a stale gen-0 heartbeat beyond its allowed interval is still a liveness ghost", async () => {
     const { f, hb } = await assignmentHeartbeat(0, at(0));
     const s = (await read(f))!;
@@ -68,7 +92,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     for (const minute of [30, 31]) expect(evaluateMissionOversightCadence(s, at(minute))).toMatchObject({
       state: "RUNNING", triggerKind: "liveness_ghost", wouldTrigger: true });
   });
-
   it("a mismatched non-zero generation heartbeat stays excluded as superseded", async () => {
     const { f, hb } = await assignmentHeartbeat(2);
     const s = (await read(f))!;
@@ -76,7 +99,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(evaluateMissionOversightCadence(s, at(26))).toMatchObject({ state: "RUNNING", triggerKind: "liveness_ghost",
       computedTimestamps: { oldest_running_heartbeat_at: null } });
   });
-
   it("evaluateMissionOversightForMission returns scoped verdict or null", async () => {
     const f = await world(), planning = await world("planning"), paused = await world("paused");
     await workflow(f, "failed");
@@ -89,7 +111,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(await read(f)).toEqual(before);
     expect(await db.select().from(activityLog)).toEqual(audit);
   });
-
   it("stores queryable immutable JSON; concurrent same tick/generation dedupes, later ticks and generations survive", async () => {
     const f = await world(), w = await workflow(f);
     const before = await read(f);
@@ -109,7 +130,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(await rows(f)).toHaveLength(3);
     expect((await rows(f)).find((row) => row.details?.inputGeneration && row.details.sweepAt === at(10).toISOString())?.details).toBeDefined();
   });
-
   it("maps a 26-minute build's existing heartbeat + step timeout, and rejects stale/wrong generation survival", async () => {
     const f = await world(), w = await workflow(f, "running");
     const [issue] = await db.insert(issues).values({ companyId: f.company.id, missionId: f.mission.id, title: "Build", status: "in_progress", startedAt: at(0), createdAt: at(0) }).returning();
@@ -125,7 +145,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     await db.update(heartbeatRuns).set({ updatedAt: at(30), workflowExecutionGeneration: 1 }).where(eq(heartbeatRuns.id, hb.id));
     expect(evaluateMissionOversightCadence((await read(f))!, at(31)).triggerKind).toBe("liveness_ghost");
   });
-
   it("maps actual retry metadata and grace recheck deadlines; malformed retry never grants an exemption", async () => {
     const f = await world(), w = await workflow(f);
     await db.update(workflowStepRuns).set({ retryCount: 1, metadata: { workflowRetry: buildWorkflowRetryMetadata({ retryNumber: 1,
@@ -137,7 +156,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     await db.update(workflowStepRuns).set({ metadata: { controlNodeGraceWait: { reason: "work_product_pending", since: at(0).toISOString(), attempts: 1, nextEvaluateAt: at(10).toISOString() } } }).where(eq(workflowStepRuns.id, w.step.id));
     expect(evaluateMissionOversightCadence((await read(f))!, at(9))).toMatchObject({ state: "WAITING_EXPLICIT", wouldTrigger: false });
   });
-
   it("maps real pending approvals, then counts satisfaction; pending dependency is not ready", async () => {
     const f = await world(), w = await workflow(f, "pending", ["missing-predecessor"]);
     expect(evaluateMissionOversightCadence((await read(f))!, at(10)).state).toBe("IDLE_QUIET");
@@ -149,7 +167,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     await db.update(approvals).set({ status: "approved", decidedAt: at(10) }).where(eq(approvals.id, approval.id));
     expect(evaluateMissionOversightCadence((await read(f))!, at(11)).computedTimestamps.last_progress_at).toBe(at(10).toISOString());
   });
-
   it("ready age begins at approval release; machine tool results during a run advance progress", async () => {
     const f = await world(), w = await workflow(f);
     const [issue] = await db.insert(issues).values({ companyId: f.company.id, missionId: f.mission.id, title: "Released", status: "todo", createdAt: at(0) }).returning();
@@ -162,7 +179,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     const v = evaluateMissionOversightCadence((await read(f))!, at(13));
     expect(v.computedTimestamps.last_progress_at).toBe(at(12).toISOString());
   });
-
   it("dispatching retry does not hide its current heartbeat; a pending approval never hides an actual failed step", async () => {
     const f = await world(), w = await workflow(f, "running");
     const [issue] = await db.insert(issues).values({ companyId: f.company.id, missionId: f.mission.id, title: "Retry", status: "in_progress", createdAt: at(0) }).returning();
@@ -176,7 +192,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     await db.update(workflowStepRuns).set({ status: "failed", completedAt: at(26) }).where(eq(workflowStepRuns.id, w.step.id));
     expect(evaluateMissionOversightCadence((await read(f))!, at(26)).triggerKind).toBe("immediate_failure");
   });
-
   it("desigma: review-only heartbeats/events and restamped terminal rows never reset progress", async () => {
     const f = await world(), w = await workflow(f, "failed");
     await db.update(workflowRuns).set({ status: "completed", completedAt: at(1) }).where(eq(workflowRuns.id, w.run.id));
@@ -196,7 +211,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(v).toMatchObject({ state: "IDLE_QUIET", triggerKind: "stall_idle", computedTimestamps: {
       last_progress_at: at(1).toISOString(), last_event_at: at(61).toISOString(), last_observed_at: at(61).toISOString() } });
   });
-
   it("direct mission heartbeats and issue-less typed workflow heartbeats are real execution, not missing ghosts", async () => {
     const f = await world();
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.company.id, agentId: f.agent.id, missionId: f.mission.id,
@@ -209,7 +223,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
       workflowExecutionGeneration: 2, status: "running", startedAt: at(0), createdAt: at(0), updatedAt: at(25) });
     expect(evaluateMissionOversightCadence((await read(f))!, at(26))).toMatchObject({ state: "RUNNING", wouldTrigger: false });
   });
-
   it("direct mission periodic-review heartbeats affect observation/event time only, never progress or running exemption", async () => {
     const f = await world();
     await db.insert(workflowTransitionEvents).values({ companyId: f.company.id, missionId: f.mission.id, layer: "workflow_sync",
@@ -222,7 +235,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(v).toMatchObject({ state: "IDLE_QUIET", triggerKind: "stall_idle", computedTimestamps: {
       last_progress_at: at(1).toISOString(), last_event_at: at(61).toISOString(), last_observed_at: at(61).toISOString() } });
   });
-
   it("direct mission queued requests are ready work, but periodic review queueing is observation only", async () => {
     const f = await world();
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.company.id, agentId: f.agent.id, missionId: f.mission.id,
@@ -231,7 +243,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     await db.update(agentWakeupRequests).set({ reason: "issue_assigned" }).where(eq(agentWakeupRequests.id, wake.id));
     expect(evaluateMissionOversightCadence((await read(f))!, at(10))).toMatchObject({ state: "READY_NOT_STARTED", triggerKind: "ready_not_started" });
   });
-
   it("a requested pending run without materialized steps is ready; child-start deadline is an explicit wait", async () => {
     const f = await world(), w = await workflow(f);
     await db.delete(workflowStepRuns).where(eq(workflowStepRuns.id, w.step.id));
@@ -241,7 +252,6 @@ describe("durable mission oversight shadow (isolated PostgreSQL)", () => {
     expect(evaluateMissionOversightCadence((await read(f))!, at(10))).toMatchObject({ state: "WAITING_EXPLICIT", wouldTrigger: false });
     expect(evaluateMissionOversightCadence((await read(f))!, at(15)).triggerKind).toBe("wait_overdue");
   });
-
   it("read-only scope denial and shadow add only audit rows; all active missions including quiet/planning are observed", async () => {
     const f = await world(), planning = await world("planning"), paused = await world("paused");
     await workflow(f, "failed");
