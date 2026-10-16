@@ -33,20 +33,23 @@
  *     재호출하지 않으므로 1 sync = (step 당) 최대 1 리셋.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueComments, issues, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import {
   classifyStepActivation,
   conditionalEdgeHolds,
+  mechanicalQaRejectionSummary,
   resolveEdges,
   workflowHasConditionalEdges,
   type EdgeBearingStep,
   type PredFacts,
 } from "./edge-condition.js";
 import { resetStepRunForRework } from "./step-reset.js";
+import { setWorkflowStepRunStatus } from "../step-status-fencing.js";
 import { filterFreshRejectedQas } from "./stale-verdict-guard.js";
+import { logActivity } from "../../activity-log.js";
 import { isDeliveryReadbackStep, isDeliveryRelevantStep } from "../delivery-verification-gate.js";
 import { writeQualityFinding } from "../../quality-finding-writer.js";
 import { buildWorkflowReworkContract, renderSourceScopeTag, renderWorkflowReworkComment, applyRecurrencePromotion } from "./rework-contract.js"; import { normalizeSystemLanguage } from "../../missions/system-language.js";
@@ -72,6 +75,31 @@ interface LoopRun {
 }
 
 const TERMINAL_STEP_RUN_STATUSES = new Set(["completed", "failed", "skipped"]);
+
+/**
+ * [mechanical QA requeue — 2026-10-17] 반려된 이슈 없는 QA stepRun 재큐 시 클리어할 메타데이터 키.
+ *   구조 게이트 GATE_STALE_REQUEUE_CLEAR_KEYS 패턴(structural-gate-rework.ts) + QA 영수증 키.
+ *   사전 확인: 다음 파견(startIssueLessToolStepRun)은 새 requestId 로 toolInvocation/toolQueue/
+ *   artifactExecution 을 새로 기록하고 prepareQaArtifactRequest 가 toolArtifactRequest 를 새로
+ *   병합하며, 완료 검증(assertQaReceiptScope)은 낡은 request/receipt 를 새 스냅숏과 비교해 거부한다
+ *   → 클리어된 키는 재파견 전까지 늦은 완료 콜백을 조기 차단(qa_artifact_receipt_scope_mismatch)하고
+ *   새 시도와 충돌하지 않는다.
+ */
+const MECHANICAL_QA_REQUEUE_CLEAR_KEYS = [
+  "toolInvocation", "toolResult", "toolQueue", "cacheHit", "concurrencyBlocked",
+  "controlFlowSkipped", "retentionDeleted",
+  "artifactExecution", "toolArtifactRequest", "toolArtifactReceipt",
+] as const;
+
+/** 기계 QA 재작업 피드백 렌더 — structural-gate boundedFeedback 관례(총 2000자, 항목 200자). */
+function renderMechanicalQaFeedback(stepId: string, failingChecks: string): string {
+  return [
+    `### Mechanical QA gate feedback: ${stepId}`,
+    `Verdict: REQUEST_CHANGES (mechanical content rules)`,
+    `Failing checks: ${failingChecks.slice(0, 200)}`,
+    `Fix the flagged content-rule violations in the registered work product and re-register it.`,
+  ].join("\n").slice(0, 2000);
+}
 
 export interface ApplyBackEdgeReworkInput {
   db: Db;
@@ -115,14 +143,29 @@ async function loadQaReworkFeedback(input: {
   // [rework feedback authority] the request-changes rationale is read ONLY from the official
   //   workflow_api verdict event payload bound to this QA issue's current run + step. Comments,
   //   heartbeat result, and stdout are not parsed for feedback.
-  if (!input.qaIssueId || !input.workflowRunId || !input.workflowStepRunId) return null;
-  return loadWorkflowApiFeedback({
-    db: input.db,
-    companyId: input.companyId,
-    issueId: input.qaIssueId,
-    workflowRunId: input.workflowRunId,
-    workflowStepRunId: input.workflowStepRunId,
-  });
+  if (input.qaIssueId && input.workflowRunId && input.workflowStepRunId) {
+    return loadWorkflowApiFeedback({
+      db: input.db,
+      companyId: input.companyId,
+      issueId: input.qaIssueId,
+      workflowRunId: input.workflowRunId,
+      workflowStepRunId: input.workflowStepRunId,
+    });
+  }
+  // [mechanical QA fallback — 2026-10-17] 이슈 없는 기계 QA 반려는 공식 verdict 이벤트가 없다 —
+  //   stepRun 실패 서명에서 기계 피드백을 렌더한다. 판정 도출 화이트리스트(mechanicalQaRejection-
+  //   Summary)와 같은 서명만 렌더하고, 그 외(infra)는 폴백 없이 null(기존 재작업 계약 경로 유지).
+  //   dag-engine 을 import 하지 않는다 — stepRun 조회는 db 직접(모듈 분해 원칙).
+  if (!input.workflowStepRunId) return null;
+  const [qaStepRun] = await input.db.select().from(workflowStepRuns)
+    .where(eq(workflowStepRuns.id, input.workflowStepRunId)).limit(1);
+  if (!qaStepRun || qaStepRun.issueId) return null;
+  const summary = mechanicalQaRejectionSummary(qaStepRun);
+  if (summary === null) return null;
+  const failingChecks = summary === "qa_artifact_verdict_failed"
+    ? "tool checks failed"
+    : summary.slice("qa_artifact_runtime_checks_failed:".length);
+  return renderMechanicalQaFeedback(qaStepRun.stepId, failingChecks || "tool checks failed");
 }
 
 interface RejectedQaWithFindings {
@@ -286,8 +329,18 @@ export async function applyBackEdgeReworkPass(
     // they belong to a previous generation and must not consume the rework cap again.
     // Verdict timing is conservative (unknown => not stale) to preserve prior behavior.
     const producerCompletedAt = stepRun.completedAt ?? null;
+    // [mechanical QA freshness — 2026-10-17] 이슈 없는 기계 반려은 verdict 이벤트가 없어
+    //   filterFreshRejectedQas(qaIssueId 기반) 가 항상 통과시킨다. 여기서 인라인 동등 가드를 둔다:
+    //   관측 시각 = qaRun.completedAt ?? lastDispatchErrorAt 이 생산자 현재 완료 이전이면 이전 세대의
+    //   반려로 재작업에서 배제한다(이중 한도 소모 방지 — RES-995 등가). 시각 미상 = not stale(기존 보수 원칙).
+    const rejectedMechanicallyFresh = rejectedQasRaw.filter((q) => {
+      if (q.qaRun?.issueId) return true; // issue-backed 반려은 아래 verdict-timing 가드가 판정
+      const observedAt = q.qaRun?.completedAt ?? q.qaRun?.lastDispatchErrorAt ?? null;
+      if (!observedAt || !producerCompletedAt) return true;
+      return observedAt.getTime() >= producerCompletedAt.getTime();
+    });
     const rejectedQas = filterFreshRejectedQas(
-      rejectedQasRaw,
+      rejectedMechanicallyFresh,
       producerCompletedAt,
       input.validationVerdictsByIssueId,
     );
@@ -489,6 +542,58 @@ export async function applyBackEdgeReworkPass(
       });
     }
     reworkedCount += 1;
+
+    // [mechanical QA requeue — 2026-10-17] 백엔지 재작업이 생산자를 리셋하면, 반려된 이슈 없는
+    //   (기계) QA stepRun 도 CAS failed→pending 리셋한다(구조 게이트 stale 재큐 패턴). 생산자 재완료 후
+    //   launch 루프가 새 requestId 로 QA 를 재파견한다 — 이슈 없는 QA엔 validation-recheck 재발화 경로가
+    //   없어 이 재큐가 유일한 재실행 통로다. iterationIndex 불변(cap은 생산자 iteration 이 지배),
+    //   낡은 디스패치/영수증 메타데이터는 MECHANICAL_QA_REQUEUE_CLEAR_KEYS 로 클리어.
+    for (const q of rejectedQas) {
+      const qaRun = q.qaRun;
+      if (!qaRun || qaRun.issueId || qaRun.status !== "failed") continue;
+      const metadata = qaRun.metadata && typeof qaRun.metadata === "object" && !Array.isArray(qaRun.metadata)
+        ? { ...(qaRun.metadata as Record<string, unknown>) }
+        : {};
+      for (const key of MECHANICAL_QA_REQUEUE_CLEAR_KEYS) delete metadata[key];
+      const requeued = await setWorkflowStepRunStatus(db, {
+        stepRunId: qaRun.id,
+        status: "pending",
+        patch: {
+          startedAt: null,
+          completedAt: null,
+          lastDispatchAttemptAt: null,
+          lastDispatchAcceptedAt: null,
+          lastDispatchErrorAt: null,
+          lastDispatchErrorSummary: null,
+          lastDispatchRequestId: null,
+          metadata,
+        },
+        expectedStatuses: ["failed"],
+        // 관측 스냅샷에 대한 타이트 CAS — 같은 상태라도 새 세대 콜백(다른 iteration/requestId)은 살린다.
+        extraConditions: [
+          eq(workflowStepRuns.iterationIndex, qaRun.iterationIndex ?? 0),
+          qaRun.lastDispatchRequestId
+            ? eq(workflowStepRuns.lastDispatchRequestId, qaRun.lastDispatchRequestId)
+            : isNull(workflowStepRuns.lastDispatchRequestId),
+        ],
+      });
+      if (!requeued) continue; // CAS lost — 다른 실행자가 이미 옮겼다; 늦은 재큐는 폐기
+      await logActivity(db, {
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "workflow:control-flow-rework",
+        action: "workflow.mechanical_qa_requeue",
+        entityType: "workflow_step_run",
+        entityId: qaRun.id,
+        details: {
+          workflowRunId: run.id,
+          stepId: qaRun.stepId,
+          producerStepId: step.id,
+          iterationIndex: qaRun.iterationIndex ?? null,
+          reason: `qa_request_changes(mechanical content rejection, producer rework ${step.id})`,
+        },
+      });
+    }
   }
 
   const effectiveStepRuns = reworkedCount > 0
