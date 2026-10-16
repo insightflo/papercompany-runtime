@@ -65,6 +65,7 @@ import { logger } from "../../middleware/logger.js";
 import type { ConditionalEdge } from "./control-flow/types.js";
 import {
   classifyStepActivation,
+  deriveMechanicalQaRejection,
   findSkippableSteps,
   resolveEdges,
   resolveFailureRecoveryChannel,
@@ -2137,10 +2138,16 @@ function buildPredFactsMap(
     const liveVerdict = run?.issueId
       ? validationVerdictsByIssueId?.get(run.issueId)?.verdict ?? null
       : null;
+    // [mechanical QA rejection — 2026-10-17] 이슈 없는 기계 QA tool step 의 콘텐츠 반려(화이트리스트 실패
+    //   서명)는 verdict="request_changes" 를 도출해 기존 qa_request_changes 백엔지·재작업 계약·cap 과
+    //   Agent QA 판정과 같은 모양으로 흐른다(kenfold 780dada3 — 반려가 재작업 없이 종결되던 gap).
+    //   infra 서명은 도출하지 않는다: verdict null + verdictChecked 유지 → P4 가드(재작업 미발화) 불변.
+    const verdict = liveVerdict
+      ?? (run && deriveMechanicalQaRejection({ step, run }) ? "request_changes" as const : null);
     facts.set(step.id, {
       status: (run?.status ?? "pending") as PredStatus,
       isQaGate: isValidationGateCandidate({ step }),
-      verdict: liveVerdict,
+      verdict,
       // validationVerdictsByIssueId 맵이 제공됐으면(P4) verdictChecked=true. 맵에 이 이슈가 없으면
       // liveVerdict=null 이고 edge-condition 은 이를 "조사했으나 판정 없음(infra 실패)"으로 해석한다.
       verdictChecked: validationVerdictsByIssueId !== undefined,

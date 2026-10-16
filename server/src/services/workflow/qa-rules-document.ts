@@ -53,12 +53,23 @@ export function inspectQaDocument(json: unknown, html?: string, internalPathRoot
     try { const url = new URL(link); return url.protocol === "https:" && !url.username && !url.password; }
     catch { return false; }
   };
+  // Local-install reports legitimately prove behavior over plain http on loopback hosts only.
+  // The exemption requires successful URL parsing plus an exact loopback hostname; every other
+  // plain-http link (including 0.0.0.0 and 127.0.0.2) stays rejected.
+  const isLoopbackHost = (hostname: string) => {
+    const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // [::1] → ::1
+    return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1";
+  };
+  const isHttpLoopback = (link: string) => {
+    try { const url = new URL(link); return url.protocol === "http:" && isLoopbackHost(url.hostname); }
+    catch { return false; }
+  };
   // Relative links/fragments refer to this artifact. Protocol-relative and active schemes do not.
   const secureLinks = [...links].every(link => {
     const normalized = link.trim().replace(/[\u0000-\u0020]/g, "");
     if (!normalized || normalized.startsWith("#")) return true;
     if (!/^[a-z][a-z0-9+.-]*:/i.test(normalized) && !normalized.startsWith("//") && !normalized.startsWith("\\")) return true;
-    return isHttps(normalized);
+    return isHttps(normalized) || isHttpLoopback(normalized);
   });
   return { text, externalScript, externalIframe, sensitive, secureLinks,
     sourceLinks: [...links].filter(isHttps) };
