@@ -4,6 +4,7 @@ import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwne
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
+import { createMissionOversightLivenessLane, type MissionOversightLivenessGhostWakeRequestedHandler } from "./mission-oversight-liveness-lane.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MINUTES = 30;
@@ -12,6 +13,8 @@ export interface MissionOwnerSupervisionMonitorOptions {
   intervalMs?: number;
   failureLaneIntervalMs?: number;
   onMissionOversightFailureWakeRequested?: MissionOversightFailureWakeRequestedHandler;
+  livenessLaneIntervalMs?: number;
+  onMissionOversightLivenessGhostWakeRequested?: MissionOversightLivenessGhostWakeRequestedHandler;
   staleAfterMinutes?: number;
   runImmediately?: boolean;
   applySafeActions?: boolean;
@@ -40,6 +43,11 @@ export function createMissionOwnerSupervisionMonitor(
   const failureLane = options.onMissionOversightFailureWakeRequested ? createMissionOversightFailureLane(db, {
     failureLaneIntervalMs: options.failureLaneIntervalMs,
     onMissionOversightFailureWakeRequested: options.onMissionOversightFailureWakeRequested,
+  }) : null;
+
+  const livenessLane = options.onMissionOversightLivenessGhostWakeRequested ? createMissionOversightLivenessLane(db, {
+    livenessLaneIntervalMs: options.livenessLaneIntervalMs,
+    onMissionOversightLivenessGhostWakeRequested: options.onMissionOversightLivenessGhostWakeRequested,
   }) : null;
 
   async function run(): Promise<void> {
@@ -97,10 +105,12 @@ export function createMissionOwnerSupervisionMonitor(
       if (timer) return;
       timer = setInterval(() => void run(), intervalMs);
       failureLane?.start();
+      livenessLane?.start();
       if (runImmediately) void run();
     },
     stop() {
       failureLane?.stop();
+      livenessLane?.stop();
       if (!timer) return;
       clearInterval(timer);
       timer = null;
