@@ -957,6 +957,21 @@ export async function createApp(
         },
       });
     },
+    onMissionOversightLivenessGhostWakeRequested: async ({ mission, verdict, idempotencyKey }) => {
+      await heartbeat.wakeup(mission.ownerAgentId, {
+        source: "assignment", triggerDetail: "system", reason: "mission_oversight_liveness_ghost", idempotencyKey,
+        payload: {
+          missionId: mission.id, mutation: "mission_oversight_liveness_ghost",
+          hint: "Mission heartbeat stopped: inspect GET /api/missions/{id}/runtime-snapshot and current heartbeats. If needed, take an explicit owner decision (retry/reassign/escalate via the owner-recovery API); do not infer recovery from comments.",
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-oversight-liveness-lane",
+        contextSnapshot: {
+          missionId: mission.id, source: "mission_oversight_liveness_ghost",
+          state: verdict.state, reasonCode: verdict.reasonCode,
+        },
+      });
+    },
     onPlanQaIssueCreated: enqueuePlanQaWakeup,
   });
   missionOwnerSupervisionMonitor.start();
