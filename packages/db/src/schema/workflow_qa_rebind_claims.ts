@@ -18,6 +18,7 @@ export const workflowQaRebindClaims = pgTable("workflow_qa_rebind_claims", {
   expectedDigests: jsonb("expected_digests").$type<Record<string, unknown>>(),
   authorityVersion: integer("authority_version").notNull(),
   executionGeneration: integer("execution_generation").notNull(),
+  recoveryAttempts: integer("recovery_attempts").notNull().default(0),
   requestId: text("request_id"),
   claimedAt: timestamp("claimed_at", { withTimezone: true }),
   authorityId: uuid("authority_id").references(() => workflowRecoveryAuthorities.id),
@@ -30,4 +31,5 @@ export const workflowQaRebindClaims = pgTable("workflow_qa_rebind_claims", {
   pendingIdx: index("workflow_qa_rebind_claims_company_status_idx").on(table.companyId, table.status),
   statusCheck: check("workflow_qa_rebind_claims_status_check", sql`${table.status} in
     ('candidate','auto_eligible','card_required','blocked','excluded','claimed','recovered','dismissed')`),
+  recoveryAttemptsCheck: check("workflow_qa_rebind_claims_recovery_attempts_check", sql`${table.recoveryAttempts} >= 0`),
 }));

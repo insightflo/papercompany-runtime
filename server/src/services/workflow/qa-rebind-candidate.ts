@@ -119,6 +119,8 @@ export async function sweepQaRebindCandidates(db: Db, now = new Date()): Promise
             status: reconcile.status, reasonCode: reconcile.reasonCode,
             requestId: reconcile.requestId, executionGeneration: reconcile.executionGeneration,
             authorityVersion: reconcile.authorityVersion, updatedAt: now,
+            // CAS refresh means the target moved on: a fresh dispatch earns fresh recovery attempts.
+            ...(reconcile.status === "candidate" ? { recoveryAttempts: 0 } : {}),
           }).where(and(eq(workflowQaRebindClaims.companyId, companyId), eq(workflowQaRebindClaims.id, candidate.id),
             eq(workflowQaRebindClaims.status, candidate.status))).returning({ id: workflowQaRebindClaims.id });
           if (!moved) return 0;
