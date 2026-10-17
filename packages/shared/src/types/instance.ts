@@ -29,6 +29,11 @@ export interface InstanceExperimentalSettings {
   enableQaRebindRecoveryV1: boolean;
   /** [qa-rebind recovery v1] 회사 단위 허용 목록. 기본 빈 목록. */
   enableQaRebindRecoveryCompanyIdsV1: string[];
+  /** [workproduct selector-reject v1 — 소비 하드닝 4단계] selector 없는 타-단계 참조 소비의
+   *  명시 거부(전체). 기본 off — off 면 폴백 핀 감사만 축적(fail-open). */
+  enableWorkProductSelectorRejectV1: boolean;
+  /** [workproduct selector-reject v1] 회사 단위 허용 목록. 기본 빈 목록. */
+  enableWorkProductSelectorRejectCompanyIdsV1: string[];
   /** Broad search release by company, mission, or running agent (OR matching). Empty lists deny. */
   broadSearchAllowedCompanyIdsV1: string[];
   broadSearchAllowedMissionIdsV1: string[];
