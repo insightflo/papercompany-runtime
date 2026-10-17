@@ -10,6 +10,12 @@ import { publishLiveEvent } from "../services/live-events.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
+// [Stage 1 bridge] 카드 생성(write.create)이 operator_decision.created live 이벤트를 추가 발행한다.
+//   기존 계약("알림 1회")은 사람 알림(mission.human_input_requested) 기준이므로 타입으로 센다.
+function humanAlertPublishes() {
+  return vi.mocked(publishLiveEvent).mock.calls.filter((call) => (call[0] as { type?: string })?.type === "mission.human_input_requested");
+}
+
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
 let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -77,7 +83,7 @@ describeEP("oversight structured human-input submissions", () => {
     const [activity] = await db.select().from(activityLog).where(eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION));
     expect(activity?.details).toMatchObject({ issueId: s.issueId, decisionEventId: result.eventId, decision });
     expect(activity?.details).not.toHaveProperty("sourceIssueId");
-    expect(publishLiveEvent).toHaveBeenCalledTimes(1);
+    expect(humanAlertPublishes()).toHaveLength(1);
     const requests = await listCompanyHumanOperatorRequests(db, { companyId: s.companyId });
     expect(requests[0]).toMatchObject({ issueId: s.issueId, missionId: s.missionId });
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, s.companyId))).toHaveLength(0);
@@ -88,7 +94,7 @@ describeEP("oversight structured human-input submissions", () => {
     const results = await Promise.all([submit(s, data), submit(s, data), submit(s, data)]);
     expect(new Set(results.map((result) => result.eventId)).size).toBe(1);
     expect(await snapshot(s.issueId).then((state) => state.activityIds)).toHaveLength(1);
-    expect(publishLiveEvent).toHaveBeenCalledTimes(1);
+    expect(humanAlertPublishes()).toHaveLength(1);
   });
 
   it("rejects foreign company, owner, issue, and run without durable changes", async () => {

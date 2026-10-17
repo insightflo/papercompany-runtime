@@ -5,10 +5,10 @@
 // [권한] 체크아웃된 unblock 또는 제한된 oversight issue의 agent run 만 제출 가능.
 import type { Db } from "@paperclipai/db";
 import type { MissionOwnerDecisionSubmit } from "@paperclipai/shared";
-import { heartbeatRuns, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
+import { heartbeatRuns, issues, missions, workflowRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { badRequest, conflict, forbidden, unauthorized } from "../../errors.js";
+import { badRequest, conflict, forbidden, HttpError, unauthorized } from "../../errors.js";
 import { issueService } from "../issues.js";
 import { assertOwnerRecoveryTarget } from "./owner-recovery-target.js";
 import { ownerDecisionRequestsHuman, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
@@ -25,6 +25,10 @@ import {
 } from "./human-operator-alert-events.js";
 import { completeUnblockActionWithSourceHandback } from "./owner-action-completion.js";
 import { extractQaCapProducerIssueRef, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
+import {
+  createMissionOwnerHumanInputDecisionCard,
+  type MissionOwnerHumanInputCardSpec,
+} from "./mission-owner-human-input-card.js";
 
 export type OwnerRecoveryApiActor = {
   readonly actorType: "agent" | "user";
@@ -113,12 +117,13 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
   }
   let sourceIssueId: string | null = null;
   let sourceIssueOriginKind: string | null = null;
+  let sourceIssueOriginRunId: string | null = null;
   if (!isOversight) {
     sourceIssueId = issue.originId;
     if (!sourceIssueId) {
       throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
     }
-    const [sourceIssue] = await db.select({ missionId: issues.missionId, originKind: issues.originKind })
+    const [sourceIssue] = await db.select({ missionId: issues.missionId, originKind: issues.originKind, originRunId: issues.originRunId })
       .from(issues)
       .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
       .limit(1).for("share");
@@ -126,6 +131,7 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
       throw conflict("Owner-recovery decision API requires a source issue in the same company and mission");
     }
     sourceIssueOriginKind = sourceIssue.originKind;
+    sourceIssueOriginRunId = sourceIssue.originRunId;
   }
   // Only a versioned durable tool card requires a tool target; human and legacy cards stay optional.
   if (!isOversight && toolRecoveryDecisionEffect(data.decision) !== "no_tool_action"
@@ -165,6 +171,9 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
     ownerAgentId: mission.ownerAgentId,
     sourceIssueId,
     sourceIssueOriginKind,
+    sourceIssueOriginRunId,
+    // [D5 anchor] FOR UPDATE 잠금 하의 결정 시점 이슈 상태 — 카드 targetSnapshot 앵커(issueStatus).
+    ownerIssueStatus: currentIssue?.status ?? null,
     isOversight,
   };
 }
@@ -179,7 +188,7 @@ export async function submitMissionOwnerDecision(input: {
   const committed = await input.db.transaction(async (tx) => {
     const auth = await authorizeOwnerRecoveryApi(tx as unknown as Db, input.issueId, input.actor, input.data);
     if (!auth) throw conflict("Owner-recovery decision API can only be used for mission-owner unblock issues");
-    const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind, isOversight } = auth;
+    const { issue, ownerAgentId, sourceIssueId, sourceIssueOriginKind, sourceIssueOriginRunId, isOversight } = auth;
     const submission = toSubmission(input.data, isOversight);
     // Existing QA-cap producer resolution is unchanged by this tool-target slice.
     let effectiveSubmission = submission;
@@ -199,6 +208,7 @@ export async function submitMissionOwnerDecision(input: {
     const needsHumanAlert = ownerDecisionRequestsHuman(effectiveSubmission.decision);
     let humanPayload: Awaited<ReturnType<typeof materializeHumanOperatorRequestEvent>>["payload"] = null;
     let humanInserted = false;
+    let humanInputCardSpec: MissionOwnerHumanInputCardSpec | null = null;
     const recorded = await recordMissionOwnerDecision({
       db: tx,
       issue: { id: issue.id, companyId: issue.companyId, missionId: issue.missionId! },
@@ -214,12 +224,56 @@ export async function submitMissionOwnerDecision(input: {
       });
       humanPayload = materialized.payload;
       humanInserted = materialized.inserted;
+      if (humanPayload) {
+        // [D5] workflowRunId 는 실제 workflowRuns 행이 확인될 때만 스냅샷에 넣는다 — heartbeat
+        //   runId 는 heartbeatRuns.id 라 별도 테이블이며, 엉칻은 값은 resolve 시 영구 409 가 된다.
+        let verifiedRunId: string | null = null;
+        if (sourceIssueOriginRunId) {
+          const [runRow] = await tx.select({ id: workflowRuns.id }).from(workflowRuns)
+            .where(and(eq(workflowRuns.id, sourceIssueOriginRunId), eq(workflowRuns.companyId, issue.companyId)))
+            .limit(1);
+          verifiedRunId = runRow?.id ?? null;
+        }
+        // [D4 fail-closed] 매핑 근거(앵커) 해석 불가는 커밋 전 422 — ledger·알림이 함께 롤백되고
+        //   오너가 증거를 갖춰 재제출하면 새 결정 이벤트로 다시 진행된다.
+        humanInputCardSpec = {
+          companyId: issue.companyId,
+          missionId: humanPayload.missionId,
+          decisionEventId: recorded.eventId,
+          decision: humanPayload.decision,
+          ownerActionIssueId: issue.id,
+          ownerActionIssueStatus: auth.ownerIssueStatus ?? "",
+          requestedByAgentId: ownerAgentId,
+          reason: humanPayload.reason,
+          nextAction: humanPayload.nextAction,
+          evidence: humanPayload.evidence,
+          issueTitle: humanPayload.issueTitle ?? null,
+          issueIdentifier: humanPayload.issueIdentifier ?? null,
+          sourceIssueId: humanPayload.sourceIssueId ?? null,
+          workflowRunId: verifiedRunId,
+        };
+      }
     }
-    return { recorded, humanInserted, humanPayload, issue, sourceIssueOriginKind, submission };
+    return { recorded, humanInserted, humanPayload, humanInputCardSpec, issue, sourceIssueOriginKind, submission };
   });
-  const { recorded, humanInserted, humanPayload, issue, sourceIssueOriginKind, submission } = committed;
+  const { recorded, humanInserted, humanPayload, humanInputCardSpec, issue, sourceIssueOriginKind, submission } = committed;
   if (humanInserted && humanPayload) {
     publishHumanOperatorRequestEvent(issue.companyId, humanPayload);
+  }
+  // [D4] 카드 생성은 ledger 커밋 후 — write.create() 가 자체 트랜잭션을 소유하므로 외부 tx 에
+  //   넣지 않는다. 실패 시 요청을 5xx 로 실패(fail-closed): 에이전트 재제출 → ledger dedup 이
+  //   동일 eventId 반환 → requestKey 멱등으로 카드 재생성. 알림 1회 계약은 유지된다.
+  if (humanInputCardSpec) {
+    try {
+      await createMissionOwnerHumanInputDecisionCard(input.db, humanInputCardSpec);
+    } catch (error) {
+      throw new HttpError(500, "Operator decision card creation failed after the decision was committed. Resubmit the same decision — the ledger dedup returns the same event and the card is recreated by its idempotent request key.", {
+        code: "mission_owner_human_input_card_failed",
+        decisionEventId: recorded.eventId,
+        requestKey: humanInputCardSpec.decisionEventId ? `moi1:${humanInputCardSpec.decisionEventId}` : null,
+        cause: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    }
   }
   // This is the point where INF-181 had both durable authorities but no handback. Issue-less tool
   // recovery remains owned by supervision; only a workflow-backed source resumes here.
