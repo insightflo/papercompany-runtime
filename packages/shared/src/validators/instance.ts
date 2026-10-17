@@ -61,6 +61,11 @@ export const instanceExperimentalSettingsSchema = z.object({
   // [qa-rebind recovery v1] QA 재바인드 자동 복구 — 기본 off(fail-closed). 회사 목록은 부분 롤아웃용.
   enableQaRebindRecoveryV1: z.boolean().default(false),
   enableQaRebindRecoveryCompanyIdsV1: z.array(z.string().uuid()).default([]),
+  // [workproduct selector-reject v1 — 소비 하드닍 4단계] selector 없는 타-단계 참조 소비의 명시 거부.
+  // 기본 off(fail-open — 폴백 핀 감사만 축적). 회사 목록은 부분 롤아웃용. 읽기 경로는
+  // services/workflow/workproduct-selector-reject-flag.ts (raw jsonb, 부재·불량 fail-open).
+  enableWorkProductSelectorRejectV1: z.boolean().default(false),
+  enableWorkProductSelectorRejectCompanyIdsV1: z.array(z.string().uuid()).default([]),
   // Broad search release: matching company, mission, or running agent grants access; empty lists deny.
   broadSearchAllowedCompanyIdsV1: z.array(z.string().uuid()).default([]),
   broadSearchAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
