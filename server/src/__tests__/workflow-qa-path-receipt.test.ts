@@ -7,6 +7,33 @@ import { captureArtifactRoot, digest } from "../services/workflow/artifact-files
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
 
+// A mechanical content rejection carries the violating links in its dispatch summary so the
+// persisted metadata and the rework feedback can show WHAT violated, not just the check id.
+it("runtime check failure summary carries the violating link detail", async () => {
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-path-receipt-detail-")));
+  try {
+    await mkdir(path.join(dir, "input"));
+    const source = Buffer.from(JSON.stringify({ text: "see http://example.com/insecure for details" }));
+    await writeFile(path.join(dir, "input", "content.json"), source);
+    const contract = { role: "qa" as const, resultAdapter: "generic" as const, resultSchemaVersion: "workflow.qa-result.v1",
+      resultFileName: "inspection.json", inputParams: {}, deploymentFiles: ["inspect.mjs"], inputEnvelopeVersion: "input.v1" };
+    await writeFile(path.join(dir, contract.resultFileName), JSON.stringify({ schemaVersion: contract.resultSchemaVersion,
+      ok: true, checks: [{ id: "plugin", ok: true }], inputDigest: { sha256: digest(source) }, assetManifest: [] }));
+    const companyId = randomUUID(), missionId = randomUUID(), workflowRunId = randomUUID(), stepRunId = randomUUID();
+    const snapshot = { root: await captureArtifactRoot(dir), outputRoot: dir, outputRootHash: "a".repeat(64),
+      companyId, missionId, workflowRunId, stepRunId, stepId: "inspect", executionGeneration: 0, retryCount: 0, iterationIndex: 0,
+      requestId: "request", artifactExecution: freezeArtifactAttempt({ adapterConfig: { artifactContract: contract },
+        step: {}, executionGeneration: 0, requestId: "request" }),
+      input: { workProductId: randomUUID(), path: path.join(dir, "content.json"), sha256: digest(source), byteSize: source.length,
+        assetsRoot: "", assetManifest: [], producer: { schemaVersion: "workflow.work-product-producer.v1" as const,
+          companyId, missionId, workflowRunId, stepRunId, stepId: "write", executionGeneration: 0, retryCount: 0,
+          iterationIndex: 0, heartbeatRunId: randomUUID() } } };
+    await expect(verifyQaArtifact({ snapshot }, { id: randomUUID(), name: "inspect" },
+      [{ fileName: "inspect.mjs", sha256: "b".repeat(64), byteSize: 1 }]))
+      .rejects.toThrow("qa_artifact_runtime_checks_failed:https-links insecure links: http://example.com/insecure");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 // A valid plugin result cannot bypass runtime-owned path inspection of captured input bytes.
 it.each(["attempt", "captured", "none"])("receipt verification checks runtime roots even with valid plugin digests (leak=%s)", async leak => {
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-path-receipt-")));

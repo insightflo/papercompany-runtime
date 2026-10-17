@@ -124,6 +124,7 @@ describe("deriveMechanicalQaRejection (pure)", () => {
       "qa_artifact_input_changed",
       "qa_artifact_request_stale",
       "qa_artifact_input_digest_mismatch",
+      "qa_document_limit",
       "Workflow tool step executor is not configured.",
       "",
     ]) {
@@ -285,6 +286,29 @@ describeDb("mechanical QA rejection → rework loop (integration)", () => {
     // Producer issue received the rendered rework comment with the mechanical feedback.
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, seed.producerIssueId));
     expect(comments.some((c) => c.body.includes("Mechanical QA gate feedback"))).toBe(true);
+  });
+
+  it("①b surfaces the violating-link detail from the failure summary in the mechanical rework feedback", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-mech-qa-1b" });
+    const now = Date.now();
+    const seed = await seedRun({
+      errorSummary: "qa_artifact_runtime_checks_failed:https-links insecure links: http://example.com/insecure",
+      qaCompletedAt: new Date(now - 5 * 60_000),
+      producerCompletedAt: new Date(now - 10 * 60_000),
+    });
+
+    await syncWorkflowRunState(db, seed.runId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.runId));
+    const producer = rows.find((r) => r.stepId === "produce")!;
+    expect(producer.iterationIndex).toBe(1);
+    const contract = readContract(producer.metadata);
+    expect(contract).not.toBeNull();
+    const fbs = contract!.qaFeedbacks as readonly { qaStepId: string; feedback: string | null }[];
+    // The detail rides the whitelisted signature (ids + detail) into the producer-visible feedback.
+    expect(fbs.some((f) => f.feedback?.includes("Failing checks: https-links insecure links: http://example.com/insecure"))).toBe(true);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, seed.producerIssueId));
+    expect(comments.some((c) => c.body.includes("http://example.com/insecure"))).toBe(true);
   });
 
   it("④ excludes a mechanical rejection observed before the producer's current completion (stale, no rework)", async () => {

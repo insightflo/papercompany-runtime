@@ -56,7 +56,14 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
       ...(s.input.mode === "html" ? { html: source.toString("utf8") } : { json: JSON.parse(source.toString("utf8")) }),
       assetManifest: s.input.assetManifest,
       internalPathRoots: await resolveQaInternalPathRoots([s.outputRoot, s.root.path, ...(s.internalPathRoots ?? [])]) });
-    if (!evaluated.ok) throw new Error(`qa_artifact_runtime_checks_failed:${evaluated.checks.filter(c => !c.ok).map(c => c.id).join(',')}`);
+    if (!evaluated.ok) {
+      // ids stay first (whitelist + id-only consumers); string details (e.g. violating links) ride
+      // after them, bounded, so the persisted summary and mechanical rework feedback stay actionable.
+      const failed = evaluated.checks.filter(c => !c.ok);
+      const details = failed.flatMap(c => (typeof c.detail === "string" && c.detail.length > 0) ? [c.detail] : [])
+        .join(" ").slice(0, 300);
+      throw new Error(`qa_artifact_runtime_checks_failed:${failed.map(c => c.id).join(",")}${details ? ` ${details}` : ""}`);
+    }
     runtimeChecks = evaluated.checks;
   }
   const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
