@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { evaluateQaRules, hashArtifactContract, hashQaConfig } from "../services/workflow/qa-rules.js";
-import { resolveEffectiveQaConfig } from "@paperclipai/shared";
+import { appendQaCheck, evaluateQaRules, hashArtifactContract, hashQaConfig } from "../services/workflow/qa-rules.js";
+import { qaConfigSchema, resolveEffectiveQaConfig, type QaCheck } from "@paperclipai/shared";
 
 const base = { provenanceValid: true, resultValid: true, json: { title: "A report", source: "https://example.com/article" } };
 describe("https-links loopback exemption (local-install evidence)", () => {
@@ -56,6 +56,79 @@ describe("https-links loopback exemption (local-install evidence)", () => {
     } });
     expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("fail-closed check constructor: failing checks must carry a brief one-line detail", () => {
+  it("throws qa_check_detail_required when a failing check would carry no usable detail", () => {
+    const checks: QaCheck[] = [];
+    expect(() => appendQaCheck(checks, "demo", false)).toThrow("qa_check_detail_required");
+    expect(() => appendQaCheck(checks, "demo", false, "   ")).toThrow("qa_check_detail_required");
+    // Multi-line details would break the mechanical-rejection whitelist signature (no dotall).
+    expect(() => appendQaCheck(checks, "demo", false, "line\nbreak")).toThrow("qa_check_detail_required");
+    expect(() => appendQaCheck(checks, "demo", false, "brief summary")).not.toThrow();
+    appendQaCheck(checks, "demo", true); // passing checks stay detail-free (receipt contract)
+    expect(checks[0]).toEqual({ id: "demo", ok: false, severity: "error", detail: "brief summary" });
+    expect(checks[1]).toEqual({ id: "demo", ok: true, severity: "error" });
+  });
+
+  it("every schema-configured rule failing at once still yields a non-empty one-line detail per check (exhaustive)", async () => {
+    // Table-driven from the config schema: a new rule id added to schema+switch joins this test automatically.
+    const ruleIds = Object.keys(qaConfigSchema.shape.rules.shape);
+    const config = resolveEffectiveQaConfig({ rules: {
+      "min-source-links": { params: { min: 4 } },
+      "tag-count": { params: { min: 2, max: 3 } },
+      "required-fields": { params: { pointers: ["/title", "/summary"] } },
+      "no-template-remnants": { params: { patterns: ["REPLACE.[ME]"] } },
+      "asset-existence": { params: { pointers: ["/images/*"] } },
+      "uploaded-asset-required": {},
+      "links-reachable": {},
+    } });
+    const json = { title: "", password: "synthetic", source: "https://example.com/a",
+      bad: "http://example.com/insecure", tags: ["one"], images: ["missing.png"], text: "REPLACE.[ME]" };
+    const html = '<script src="https://example.com/x.js"></script><iframe src="https://example.com/f"></iframe>';
+    const result = await evaluateQaRules({ provenanceValid: false, resultValid: false, config, json, html });
+    expect(result.checks.filter(c => !c.ok).map(c => c.id).sort()).toEqual([...ruleIds].sort());
+    for (const check of result.checks.filter(c => !c.ok)) {
+      expect(typeof check.detail).toBe("string");
+      expect(String(check.detail).trim().length).toBeGreaterThan(0);
+      expect(String(check.detail)).not.toMatch(/[\r\n]/);
+    }
+    const detail = (id: string) => result.checks.find(c => c.id === id)!.detail as string;
+    expect(detail("provenance")).toBe("provenance validation failed");
+    expect(detail("result-format")).toBe("result format validation failed");
+    expect(detail("no-sensitive-data")).toBe("sensitive data pattern matched");
+    expect(detail("no-external-script")).toBe("external or active script element");
+    expect(detail("no-external-iframe")).toBe("iframe present");
+    expect(detail("min-source-links")).toBe("3/4 https source links");
+    expect(detail("uploaded-asset-required")).toBe("no verified uploaded assets");
+    expect(detail("tag-count")).toBe("tags 1 (min 2, max 3)");
+    expect(detail("required-fields")).toBe("2 required fields missing");
+    expect(detail("no-template-remnants")).toBe('template remnants matched: "REPLACE.[ME]"');
+    expect(detail("asset-existence")).toBe("1 asset references missing");
+    expect(detail("links-reachable")).toBe("blocked by earlier failed checks");
+    expect(detail("https-links")).toContain("insecure links: http://example.com/insecure");
+    // Passing checks stay detail-free and document values never ride the details.
+    expect(result.checks.filter(c => c.ok).map(c => c.detail)).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("synthetic");
+  });
+
+  it("links-reachable's own failure branch reports the source count without echoing link values", async () => {
+    // 21 unique https links exceed qaLinksReachable's cap — deterministic failure, no network.
+    const sources = Array.from({ length: 21 }, (_, i) => `https://example.com/s/${i}/article`);
+    const config = resolveEffectiveQaConfig({ rules: { "links-reachable": {} } });
+    const result = await evaluateQaRules({ ...base, config, json: { title: "T", source: sources[0], more: sources.slice(1) } });
+    expect(result.checks.find(c => c.id === "links-reachable")).toMatchObject({ ok: false,
+      detail: "unreachable or over-limit links (21 sources)" });
+  });
+
+  it("params-missing rule configs fail closed with the qa_rule_params_required detail", async () => {
+    const config = resolveEffectiveQaConfig({ rules: {
+      "tag-count": {}, "required-fields": {}, "no-template-remnants": {}, "asset-existence": {} } });
+    const result = await evaluateQaRules({ ...base, config });
+    for (const id of ["tag-count", "required-fields", "no-template-remnants", "asset-existence"]) {
+      expect(result.checks.find(c => c.id === id)).toMatchObject({ id, ok: false, detail: "qa_rule_params_required" });
+    }
   });
 });
 
