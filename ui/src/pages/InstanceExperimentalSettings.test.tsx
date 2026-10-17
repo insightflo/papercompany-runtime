@@ -13,6 +13,7 @@ vi.mock("@tanstack/react-query", () => ({
       ? {
         enableKnowledgePatternInjection: true,
         enableQaRebindRecoveryV1: false,
+        enableWorkProductSelectorRejectV1: true,
       }
       : undefined,
     isLoading: false,
@@ -34,5 +35,6 @@ describe("InstanceExperimentalSettings", () => {
     expect(html).toContain("QA Rebind Recovery V1");
     expect(html).toMatch(/aria-label="Toggle knowledge pattern injection"[^>]*aria-pressed="true"/);
     expect(html).toMatch(/aria-label="Toggle QA rebind recovery v1"[^>]*aria-pressed="false"/);
+    expect(html).toMatch(/aria-label="Toggle work-product selector reject v1"[^>]*aria-pressed="true"/);
   });
 });
