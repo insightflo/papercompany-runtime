@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composeOperatorDecisionCardNotification, composeRunFailureNotification, formatEventNotification } from "../channel/telegram/outbound.js";
+import { composeOperatorDecisionCardNotification, composeRunFailureNotification, formatEventNotification, operatorDecisionBoardUrl } from "../channel/telegram/outbound.js";
 
 describe("Telegram outbound notifications", () => {
   it("suppresses normal heartbeat success events", () => {
@@ -72,6 +72,55 @@ describe("Telegram outbound notifications", () => {
     expect(message).toContain("RES-935");
     expect(message).toContain("Browser auth is required.");
     expect(message).not.toContain("*Success*");
+  });
+
+  it("adds a one-line request summary and the operator decision card link when resolvable", () => {
+    const message = formatEventNotification({
+      type: "mission.human_input_requested",
+      payload: {
+        missionId: "934e9993-7175-4956-8c93-4fa8150fdc41",
+        issueId: "6b540c35-3067-4e12-864a-79a3b08a0a76",
+        issueIdentifier: "RES-935",
+        issueTitle: "Resolve blocked source",
+        decision: "request_input",
+        reason: "Browser auth is required.",
+        nextAction: "Human operator should reauthorize the session.",
+      },
+    }, { boardUrl: "https://ops.example.com/RES/human-operator" });
+
+    expect(message).toContain("Summary: request_input — RES-935 — Browser auth is required.");
+    expect(message).toContain("카드: https://ops.example.com/RES/human-operator");
+    // 링크가 있으면 정적 힌트 대신 링크 한 줄만 보낸다(표시 전용 — 버튼 없음).
+    expect(message).not.toContain("→ 게시판 Human Operator 화면에서 선택");
+  });
+
+  it("degrades the card link to a board hint when no URL can be resolved", () => {
+    const message = formatEventNotification({
+      type: "mission.human_input_requested",
+      payload: {
+        missionId: "934e9993-7175-4956-8c93-4fa8150fdc41",
+        issueId: "6b540c35-3067-4e12-864a-79a3b08a0a76",
+        decision: "escalate",
+      },
+    });
+
+    expect(message).toContain("Summary: escalate — 6b540c35");
+    expect(message).toContain("→ 게시판 Human Operator 화면에서 선택");
+    expect(message).not.toContain("카드:");
+  });
+
+  it("omits the summary line when the payload has no decision or issue label", () => {
+    const message = formatEventNotification({
+      type: "mission.human_input_requested",
+      payload: {},
+    }, { boardUrl: "https://ops.example.com/human-operator" });
+
+    expect(message).not.toContain("Summary:");
+    expect(message).toContain("카드: https://ops.example.com/human-operator");
+  });
+
+  it("builds the board URL from the public base URL and the company issue prefix", () => {
+    expect(operatorDecisionBoardUrl("https://ops.example.com/", "RES")).toBe("https://ops.example.com/RES/human-operator");
   });
 });
 
