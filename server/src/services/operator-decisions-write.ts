@@ -5,6 +5,7 @@ import {
   agents,
   issueComments,
   issues,
+  missions,
   operatorDecisionContinuations,
   operatorDecisions,
   workflowRuns,
@@ -12,7 +13,7 @@ import {
 } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput, OperatorDecisionTargetSnapshot } from "@paperclipai/shared/types/operator-decision";
 import { operatorDecisionOutcomeInputSchema } from "@paperclipai/shared/validators/operator-decision";
-import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { guardQualityWrite } from "./quality/write-guard.js";
@@ -32,6 +33,18 @@ const STALE_SWEEP_ACTOR_ID = "system:operator-decision-stale-sweep";
 // [stale-card sweep 4a] 한 번의 pollOnce 스윕이 검사하는 후보 상한 — 대량 테이블 스캔·장기 점유 방지.
 const STALE_SWEEP_BATCH_LIMIT = 50;
 
+// [moi currentness 완화 2026-10-17] 사람 응답 대기 중 이슈 상태 churn(todo↔in_progress↔blocked)은
+//   정상 — moi 카드의 currentness는 이슈 종결 여부 기준이다(라이브 사고 2026-10-17 14:30Z: 사람이 볼
+//   새 없이 생성 2분 만에 stale sweep 이 issueStatus 불일치로 정당한 요청을 취소). 값 원본은
+//   missions/mission-owner-human-input-card.ts 가 스냅샷 생산자다(순환 import 회피로 여기 값 복제).
+const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
+// [moi currentness] 종결 이슈 상태 — routes/execution-workspaces.ts TERMINAL_ISSUE_STATUSES 와 같은 기준.
+const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
+
+// [moi currentness] issueStatus 비교 정책 — "exact" 는 기존 정확-스냅샷(qa rebind·source defect 등
+//   전 유형 불변), "terminal_only" 는 moi 전용 완화(열린 상태 간 전환은 통과, 종결만 mismatch).
+export type IssueStatusCurrentnessPolicy = "exact" | "terminal_only";
+
 function conflictFor(id: string, status: string, message = "Operator decision conflict") {
   return conflict(message, { operatorDecisionId: id, status });
 }
@@ -45,22 +58,24 @@ function readTargetSnapshot(sourceContext: unknown): OperatorDecisionTargetSnaps
   return candidate as OperatorDecisionTargetSnapshot;
 }
 
-// [currentness gate] 늦은 선택 보호 — 생성 시점 스냅샷과 현재 DB 상태를 CAS 트랜잭션 안에서 같은 tx로
-//   재검증한다(검사-저장 창 최소화). 회사 스코프에서 행이 사라졌거나 지정한 상태·generation이 다르면
-//   409 target_changed. throw 로 트랜잭션이 롤백되므로 결과 저장·continuation 생성이 모두 취소되고
-//   카드는 pending 유지 — 상태가 원복되면 같은 카드로 다시 resolve 할 수 있다(거부는 영구적이지 않음).
-async function assertTargetSnapshotCurrent(
+// [currentness gate] 스냅샷과 현재 DB 상태를 비교해 mismatch 필드 목록만 반환한다(판정 순수 함수).
+//   issueStatusPolicy="terminal_only" 는 moi 카드용 완화 — 사람 응답 대기 중 이슈 상태 churn 은
+//   정상이므로 종결(done/cancelled) 도달만 mismatch 로 본다(2026-10-17 사고). 그 외 식별자
+//   존재·회사 스코프·workflowRun/stepRun 비교는 죽은 대상 거부(CAS 개념)로 그대로 유지된다.
+async function collectTargetSnapshotMismatch(
   tx: Pick<Db, "select">,
-  operatorDecisionId: string,
   companyId: string,
   snapshot: OperatorDecisionTargetSnapshot,
-): Promise<void> {
+  issueStatusPolicy: IssueStatusCurrentnessPolicy = "exact",
+): Promise<string[]> {
   const mismatch: string[] = [];
   if (snapshot.issueId != null) {
     const issue = await tx.select({ companyId: issues.companyId, status: issues.status }).from(issues)
       .where(eq(issues.id, snapshot.issueId)).then((rows) => rows[0] ?? null);
     if (!issue || issue.companyId !== companyId) mismatch.push("issueId");
-    else if (snapshot.issueStatus != null && issue.status !== snapshot.issueStatus) mismatch.push("issueStatus");
+    else if (issueStatusPolicy === "terminal_only") {
+      if (TERMINAL_ISSUE_STATUSES.has(issue.status)) mismatch.push("issueStatus");
+    } else if (snapshot.issueStatus != null && issue.status !== snapshot.issueStatus) mismatch.push("issueStatus");
   }
   if (snapshot.workflowRunId != null) {
     const run = await tx.select({ companyId: workflowRuns.companyId, status: workflowRuns.status }).from(workflowRuns)
@@ -84,6 +99,21 @@ async function assertTargetSnapshotCurrent(
       }
     }
   }
+  return mismatch;
+}
+
+// [currentness gate] 늦은 선택 보호 — 생성 시점 스냅샷과 현재 DB 상태를 CAS 트랜잭션 안에서 같은 tx로
+//   재검증한다(검사-저장 창 최소화). 회사 스코프에서 행이 사라졌거나 지정한 상태·generation이 다르면
+//   409 target_changed. throw 로 트랜잭션이 롤백되므로 결과 저장·continuation 생성이 모두 취소되고
+//   카드는 pending 유지 — 상태가 원복되면 같은 카드로 다시 resolve 할 수 있다(거부는 영구적이지 않음).
+async function assertTargetSnapshotCurrent(
+  tx: Pick<Db, "select">,
+  operatorDecisionId: string,
+  companyId: string,
+  snapshot: OperatorDecisionTargetSnapshot,
+  issueStatusPolicy: IssueStatusCurrentnessPolicy = "exact",
+): Promise<void> {
+  const mismatch = await collectTargetSnapshotMismatch(tx, companyId, snapshot, issueStatusPolicy);
   if (mismatch.length > 0) {
     throw conflict("Operator decision target changed since card creation", {
       code: "target_changed",
@@ -301,7 +331,10 @@ export function operatorDecisionWriteService(db: Db) {
       //   (applied=false)는 스냅샷과 무관하게 그대로 둔다. throw 시 트랜잭션이 롤백되어 카드는 pending 유지.
       const targetSnapshot = readTargetSnapshot(updated.sourceContext);
       if (targetSnapshot) {
-        await assertTargetSnapshotCurrent(tx, id, updated.companyId, targetSnapshot);
+        // [moi currentness 완화 2026-10-17] 사람 응답 대기 중 이슈 상태 churn 은 정상 — moi 카드의
+        //   currentness는 이슈 종결 여부 기준(종결 이슈 resolve 는 기존대로 409 target_changed).
+        await assertTargetSnapshotCurrent(tx, id, updated.companyId, targetSnapshot,
+          updated.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
       }
       let continuationId: string | null = null;
       if (updated.continuationMode === "issue_current_assignee") {
@@ -426,13 +459,20 @@ export function operatorDecisionWriteService(db: Db) {
 
   // [stale-card sweep 4a] 선택 전 상태 변경 → 카드 자동 취소(2026-10-15 정책). 스냅샷 있는 pending 카드 중
   //   현재 상태와 불일치하는 카드를 시스템 주체로 cancelled 처리한다. 불일치 판정은 2단계
-  //   assertTargetSnapshotCurrent(409 target_changed)를 그대로 재사용하고, 취소는 pending CAS 로만
+  //   assertTargetSnapshotCurrent(409 target_changed)와 같은 비교(collectTargetSnapshotMismatch)를
+  //   재사용하고, 취소는 pending CAS 로만
   //   적용해 동시 resolve 승리 시 조용히 건너뛴다. 취소는 continuation/wakeup 을 만들지 않는다.
   //   Quality 연결 카드(qualityActionId)는 T5 전용 경로 계약대로 후보에서 제외한다.
+  // [moi terminal-anchor sweep 2026-10-17] mission_owner_human_input pending 카드는 완화 기준으로만
+  //   취소한다 — 앵커 이슈 종결(done/cancelled)·소멸, 스냅샷 식별자 소멸, 또는 미션 cancelled.
+  //   열린 상태 간 이슈 status churn 으로는 사람 결정 요청을 취소하지 않는다(사람이 볼 새 없이 승인
+  //   버튼이 사라진 2026-10-17 라이브 사고 재발 방지). 미션 completed 는 앵커 이슈 종결로 이미
+  //   커버되므로 취소 트리거에 넣지 않는다(미션명·이슈명 같은 예시 특수 로직 없음).
   async function sweepStalePendingCards(now = new Date()) {
     const candidates = await db.select({
       id: operatorDecisions.id,
       companyId: operatorDecisions.companyId,
+      sourceType: operatorDecisions.sourceType,
       sourceContext: operatorDecisions.sourceContext,
     }).from(operatorDecisions).where(and(
       eq(operatorDecisions.status, "pending"),
@@ -447,15 +487,20 @@ export function operatorDecisionWriteService(db: Db) {
       // 재검증 식별자(issueId/workflowRunId/stepRunId) 없는 스냅샷은 판정 불가 — 쓰지 않고 건너뛴다.
       if (!snapshot || (snapshot.issueId == null && snapshot.workflowRunId == null && snapshot.stepRunId == null)) continue;
       checked += 1;
-      let mismatch: string[];
-      try {
-        await assertTargetSnapshotCurrent(db, candidate.id, candidate.companyId, snapshot);
-        continue; // 여전히 일치 — 아무 것도 쓰지 않는다.
-      } catch (error) {
-        const details = error instanceof HttpError ? error.details as { code?: string; mismatch?: string[] } | undefined : undefined;
-        if (!(error instanceof HttpError) || error.status !== 409 || details?.code !== "target_changed") throw error;
-        mismatch = details.mismatch ?? [];
+      const moi = candidate.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE;
+      const mismatch = await collectTargetSnapshotMismatch(db, candidate.companyId, snapshot,
+        moi ? "terminal_only" : "exact");
+      if (moi && mismatch.length === 0) {
+        // [moi] 미션 cancelled 판정 — missionId 는 moi 카드 생성 시 항상 채워진다(빠면 판정 불가로 통과).
+        const sourceContext = candidate.sourceContext as unknown as Record<string, unknown> | null;
+        const missionId = typeof sourceContext?.missionId === "string" ? sourceContext.missionId : null;
+        if (missionId) {
+          const mission = await db.select({ companyId: missions.companyId, status: missions.status }).from(missions)
+            .where(eq(missions.id, missionId)).then((rows) => rows[0] ?? null);
+          if (mission?.companyId === candidate.companyId && mission.status === "cancelled") mismatch.push("missionStatus");
+        }
       }
+      if (mismatch.length === 0) continue; // 여전히 일치 — 아무 것도 쓰지 않는다.
       const cancelledNow = await db.transaction(async (tx) => {
         const updated = await tx.update(operatorDecisions).set({
           status: "cancelled", cancelledAt: now, updatedAt: now,

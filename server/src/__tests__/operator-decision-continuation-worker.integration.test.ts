@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentWakeupRequests,
@@ -7,6 +7,7 @@ import {
   companies,
   createDb,
   issues,
+  missions,
   operatorDecisionContinuations,
   operatorDecisions,
 } from "@paperclipai/db";
@@ -293,17 +294,25 @@ describeDb("operator decision continuation worker", () => {
   //   스냅샷 불일치 pending 카드만 cancelled 로 만들고, 일치/스냅샷 없음/이미 종결 카드는 쓰지 않는다.
   //   스윕이 wakeup 이나 continuation 을 만들지 않는다.
   describe("stale pending card sweep", () => {
+    // [moi sweep] missionStatus 판정용 missions fixture 정리 — ownerAgentId FK 가 바깥 afterEach 의
+    //   agents 삭제를 막기 전에(안→밖 순서) 지운다.
+    afterEach(async () => {
+      await db.delete(missions);
+    });
+
     async function insertSweepCard(options: {
       status?: "pending" | "resolved";
       targetSnapshot?: Record<string, unknown>;
+      sourceType?: string;
+      missionId?: string | null;
     } = {}) {
       const cardId = randomUUID();
       const status = options.status ?? "pending";
       await db.insert(operatorDecisions).values({
         id: cardId, companyId, requestKey: randomUUID(), requestHash: "hash", status,
-        interactionType: "single_select", title: "Sweep", sourceType: "workflow_step", sourceId: "step",
+        interactionType: "single_select", title: "Sweep", sourceType: options.sourceType ?? "workflow_step", sourceId: "step",
         sourceContext: {
-          missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [],
+          missionId: options.missionId ?? null, workflowId: null, workflowRunId: null, artifactRefs: [],
           ...(options.targetSnapshot ? { targetSnapshot: options.targetSnapshot } : {}),
         },
         issueId, definition, continuationMode: "none",
@@ -374,6 +383,73 @@ describeDb("operator decision continuation worker", () => {
       expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-s4" }).pollOnce(fixtureTime)).toBe(0);
       expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
       expect(await cardActivities(cardId)).toHaveLength(0);
+    });
+
+    // [moi terminal-anchor sweep 2026-10-17] 사람 결정(mission_owner_human_input) pending 카드는 앵커
+    //   이슈가 종결(done/cancelled)되거나 미션이 cancelled 될 때만 취소된다 — 열린 상태 간 status
+    //   churn(todo↔in_progress↔blocked)은 사람 응답 대기 중 정상 흐름이라 카드를 살려둔다(라이브 사고
+    //   2026-10-17 14:30Z: 사람이 볼 새 없이 생성 2분 만에 자동 취소).
+    async function insertMissionFixture(status: string) {
+      const id = randomUUID();
+      await db.insert(missions).values({ id, companyId, ownerAgentId: agentId, title: "moi sweep mission", status });
+      return id;
+    }
+
+    it("SW-M1: keeps a moi pending card alive across open-state issue churn and reports cancelled=0", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const missionFixtureId = await insertMissionFixture("active");
+      const cardId = await insertSweepCard({
+        sourceType: "mission_owner_human_input", missionId: missionFixtureId,
+        targetSnapshot: { issueId, issueStatus: "in_progress" },
+      });
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+      const wakeup = vi.fn();
+      expect(await operatorDecisionContinuationWorker(db, { wakeup, workerId: "sweep-moi-1" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending", cancelledAt: null });
+      expect((await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled")).toHaveLength(0);
+      expect(wakeup).not.toHaveBeenCalled();
+      // 직접 호출 집계 계약 — churn 후에도 checked 1·cancelled 0(생존).
+      await expect(operatorDecisionWriteService(db).sweepStalePendingCards(fixtureTime))
+        .resolves.toEqual({ checked: 1, cancelled: 0 });
+    });
+
+    it("SW-M2: cancels a moi pending card when the anchor issue is terminal (done)", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const missionFixtureId = await insertMissionFixture("active");
+      const cardId = await insertSweepCard({
+        sourceType: "mission_owner_human_input", missionId: missionFixtureId,
+        targetSnapshot: { issueId, issueStatus: "in_progress" },
+      });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-moi-2" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
+      const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
+      expect(cancelActivity).toMatchObject({ actorId: "system:operator-decision-stale-sweep" });
+      expect(cancelActivity?.details).toMatchObject({ reason: "target_changed", mismatch: ["issueStatus"] });
+    });
+
+    it("SW-M3: cancels a moi pending card when the mission is cancelled even if the issue stays open", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const missionFixtureId = await insertMissionFixture("cancelled");
+      const cardId = await insertSweepCard({
+        sourceType: "mission_owner_human_input", missionId: missionFixtureId,
+        targetSnapshot: { issueId, issueStatus: "in_progress" },
+      });
+      await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-moi-3" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
+      const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
+      expect(cancelActivity?.details).toMatchObject({ reason: "target_changed", mismatch: ["missionStatus"] });
+    });
+
+    it("SW-M4: non-moi cards keep the exact-snapshot sweep on the same open-state churn", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const cardId = await insertSweepCard({ targetSnapshot: { issueId, issueStatus: "todo" } });
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-moi-4" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
+      const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
+      expect(cancelActivity?.details).toMatchObject({ reason: "target_changed", mismatch: ["issueStatus"] });
     });
   });
 });

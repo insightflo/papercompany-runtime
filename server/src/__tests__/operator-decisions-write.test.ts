@@ -316,5 +316,55 @@ describeDb("operator decision write service", () => {
       expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
       expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
     });
+
+    // [moi currentness 완화 2026-10-17] 사람 결정 대기 중 이슈 상태 churn(todo↔in_progress↔blocked)은
+    //   정상 — mission_owner_human_input(moi) 카드의 currentness는 이슈 종결 여부 기준으로 판정한다.
+    //   라이브 사고(2026-10-17 14:30Z): 사람이 볼 새 없이 생성 2분 만에 issueStatus 불일치로 카드 취소.
+    describe("mission_owner_human_input terminal-anchor currentness", () => {
+      function moiCard(requestKey: string, targetSnapshot: Record<string, unknown>) {
+        const base = input(requestKey, issueId);
+        return {
+          ...base,
+          sourceType: "mission_owner_human_input",
+          sourceId: requestKey,
+          sourceContext: { ...base.sourceContext, missionId: "mission-moi", targetSnapshot },
+        };
+      }
+
+      it("M1: resolves across open-state issue status churn (in_progress→blocked)", async () => {
+        const service = operatorDecisionWriteService(db);
+        const created = await service.create(companyId, moiCard("moi-open-churn", {
+          issueId, issueStatus: "in_progress",
+        }), { type: "agent", id: agentId });
+        await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+        const resolved = await service.resolve(created.decision.id, resolveBody, "board");
+        expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
+        expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
+      });
+
+      it("M2: terminal anchor issue (done) still rejects with 409 target_changed and stays pending", async () => {
+        const service = operatorDecisionWriteService(db);
+        const created = await service.create(companyId, moiCard("moi-terminal", {
+          issueId, issueStatus: "in_progress",
+        }), { type: "agent", id: agentId });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+        await expect(service.resolve(created.decision.id, resolveBody, "board"))
+          .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["issueStatus"] } });
+        expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending", result: null });
+        expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
+        expect(await db.select().from(issueComments)).toHaveLength(0);
+      });
+
+      it("M3: non-moi cards keep the exact-snapshot rejection on the same open-state churn", async () => {
+        const service = operatorDecisionWriteService(db);
+        const created = await service.create(companyId, snapshotCard("exact-open-churn", {
+          issueId, issueStatus: "todo",
+        }), { type: "agent", id: agentId });
+        await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+        await expect(service.resolve(created.decision.id, resolveBody, "board"))
+          .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["issueStatus"] } });
+        expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending" });
+      });
+    });
   });
 });

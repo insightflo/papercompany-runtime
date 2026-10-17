@@ -6,7 +6,7 @@
 //   웨이크 전달까지를 라우트 레벨로 증명한다. Stage 1 브리지(mission-owner-human-input-card)와
 //   Stage 2 UI 바인딩 규약(행 evidenceRefs.decisionEventId ↔ 카드 requestKey)의 접합을 함께 검증한다.
 // [시나리오] S1 풀 루프 / S2 중복 제출 멱등+알림 1회 / S3 카드 생성 실패 fail-closed(D4) /
-//   S4 target_changed 409 후 복원 재해결(D5 앵커 issueId+issueStatus) / S5 escalate 동일 계약 /
+//   S4 열린 상태 churn 은 resolve 허용 + 종결 앵커 409 후 복원 재해결(D5 앵커 issueId+issueStatus, 종결 기준) / S5 escalate 동일 계약 /
 //   S6 C4 인박스↔카드 연결 키가 라우트 응답에서 유지됨.
 // [웨이크 모드] resolve 즉시 웨이크는 오너의 활성 checkout run 존재 여부에 따라 두 가지로 전달된다 —
 //   run 종료 후: reason=operator_decision_resolved_assignee_wakeup(신규 queued wake),
@@ -298,7 +298,7 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     expect(publishesOfType("mission.human_input_requested")).toHaveLength(1);
   });
 
-  it("S4: drifted owner-issue status rejects resolve with 409 target_changed and the restored card re-resolves", async () => {
+  it("S4: open-state issue churn keeps the moi card resolvable; a terminal anchor still 409s and restores", async () => {
     const submitted = await submitDecision();
     const eventId: string = submitted.body.eventId;
     const card = await moiCard(eventId);
@@ -307,16 +307,9 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     expect((row!.sourceContext as { targetSnapshot: Record<string, unknown> }).targetSnapshot)
       .toEqual({ issueId, issueStatus: "in_progress" });
 
+    // [2026-10-17 사고 재발 방지] 사람 응답 대기 중 이슈 상태 churn(in_progress→blocked)은 정상 —
+    //   moi 카드의 currentness는 이슈 종결 여부 기준이라 열린 이슈에서 resolve 가 409 없이 통과한다.
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
-    const conflict = await resolveCard(card.id);
-    expect(conflict.status).toBe(409);
-    expect(conflict.body).toMatchObject({
-      details: { code: "target_changed", mismatch: expect.arrayContaining(["issueStatus"]), operatorDecisionId: card.id },
-    });
-    const [stillPending] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, card.id));
-    expect(stillPending).toMatchObject({ status: "pending", result: null });
-
-    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
     await completeOwnerRun();
     const resolved = await resolveCard(card.id);
     expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
@@ -324,6 +317,33 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     const wakes = await wakeRowsByIdempotencyKey(card.id);
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved_assignee_wakeup" });
+
+    // 종결 앵커는 여전히 409 target_changed — 두 번째 결정 이벤트(실제 브리지 서비스로 직접 생성)로
+    //   증명한다. 첫 resolve 의 웨이크 체인이 오너 run 을 새로 떠워려 checkout 이 이동했으므로 라우트
+    //   재제출 대신 동일 생산자(createMissionOwnerHumanInputDecisionCard)를 쓴다(제출 라우트는 S1–S3 커버).
+    const secondEventId = randomUUID();
+    await createMissionOwnerHumanInputDecisionCard(db, {
+      companyId, missionId, decisionEventId: secondEventId, decision: "request_input",
+      ownerActionIssueId: issueId, ownerActionIssueStatus: "in_progress",
+      requestedByAgentId: ownerId, reason: "종결 앵커 409 경로 증명용 두 번째 요청",
+    });
+    const [secondRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.requestKey, `moi1:${secondEventId}`));
+    expect(secondRow).toMatchObject({ status: "pending" });
+    const secondCardId: string = secondRow!.id;
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+    const conflict = await resolveCard(secondCardId);
+    expect(conflict.status).toBe(409);
+    expect(conflict.body).toMatchObject({
+      details: { code: "target_changed", mismatch: expect.arrayContaining(["issueStatus"]), operatorDecisionId: secondCardId },
+    });
+    const [stillPending] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, secondCardId));
+    expect(stillPending).toMatchObject({ status: "pending", result: null });
+
+    // 종결 후 원복(재오픈)이면 같은 카드로 다시 resolve 할 수 있다(거부는 영구적이지 않음).
+    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+    const restored = await resolveCard(secondCardId);
+    expect(restored.status, JSON.stringify(restored.body)).toBe(200);
+    expect(restored.body.data).toMatchObject({ applied: true, decision: { status: "resolved" } });
   }, 30_000);
 
   it("S5: escalate submissions satisfy the same card contract and deliver the resolve wake", async () => {
