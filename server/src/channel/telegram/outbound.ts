@@ -9,7 +9,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
-import { agents, channelConfigs, heartbeatRuns, issues, missions } from "@paperclipai/db";
+import { agents, channelConfigs, companies, heartbeatRuns, issues, missions } from "@paperclipai/db";
 import { getChannelRegistry } from "../index.js";
 import { logger } from "../../middleware/logger.js";
 import { summarizeHeartbeatRunResultJson } from "../../services/heartbeat-run-summary.js";
@@ -97,7 +97,9 @@ function buildOutboundHandler(db: Db, companyId: string) {
         message = await buildOperatorDecisionCardNotification(db, event);
       }
       if (!message) {
-        message = formatEventNotification(event);
+        message = formatEventNotification(event, {
+          boardUrl: await resolveHumanInputBoardUrl(db, companyId, event),
+        });
       }
       if (message) {
         await sender(chatId, message);
@@ -376,7 +378,99 @@ async function buildOperatorDecisionCardNotification(
   }
 }
 
-export function formatEventNotification(event: { type: string; payload?: Record<string, unknown> }): string | null {
+/**
+ * 운영자 결정 화면(보드 Human Operator) 절대 URL. ui 라우터의 회사 접두 보드 라우트
+ * (`/:companyPrefix/human-operator`, Sidebar “Human Operator”와 동일 화면) 기준이며,
+ * baseUrl 은 서버 공개 URL(progress 콜백·auth 와 동일 소스)이다. 표시 전용 링크다 —
+ * Telegram 내 결정 액션은 이 알림 계약에 없다.
+ */
+export function operatorDecisionBoardUrl(baseUrl: string, issuePrefix: string): string {
+  return `${baseUrl.replace(/\/$/, "")}/${encodeURIComponent(issuePrefix)}/human-operator`;
+}
+
+function appPublicBaseUrl(): string | null {
+  const raw = process.env.PAPERCLIP_PUBLIC_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.toString().replace(/\/$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the operator decision board URL for a human-input request event.
+ * Returns null for other event types, when no public base URL is configured, or
+ * when the company (and therefore its issue prefix) cannot be loaded — the
+ * message then degrades to a static board hint instead of an unknown link.
+ */
+async function resolveHumanInputBoardUrl(
+  db: Db,
+  companyId: string,
+  event: { type: string },
+): Promise<string | null> {
+  if (event.type !== "mission.human_input_requested") return null;
+  const baseUrl = appPublicBaseUrl();
+  if (!baseUrl) return null;
+  try {
+    const [company] = await db
+      .select({ issuePrefix: companies.issuePrefix })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .limit(1);
+    return company?.issuePrefix ? operatorDecisionBoardUrl(baseUrl, company.issuePrefix) : null;
+  } catch (err) {
+    logger.warn({
+      msg: "Failed to resolve operator decision board URL; using static board hint",
+      companyId,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Compose the human-input request notification. Pure function — exported for
+ * tests. Lines with missing context are omitted so the message degrades
+ * gracefully instead of showing "unknown". The card link is display-only:
+ * when no board URL can be resolved it falls back to a static board hint.
+ */
+export function composeHumanInputRequestedNotification(input: {
+  issueTitle?: string | null;
+  issueIdentifier?: string | null;
+  issueId?: string | null;
+  missionId?: string | null;
+  decision?: string | null;
+  reason?: string | null;
+  nextAction?: string | null;
+  boardUrl?: string | null;
+}): string {
+  const issueLabel = input.issueIdentifier ?? (input.issueId ? input.issueId.slice(0, 8) : null);
+  const issueLine = input.issueTitle && issueLabel
+    ? `${issueLabel} — ${input.issueTitle}`
+    : input.issueTitle ?? (issueLabel ? `Issue ${issueLabel}` : null);
+  const reasonFirstLine = input.reason?.split("\n")[0]?.trim().slice(0, 160) ?? null;
+  const summarySegments = [input.decision ?? null, issueLabel, reasonFirstLine]
+    .filter((segment): segment is string => Boolean(segment));
+  const summaryLine = summarySegments.length > 0 ? `Summary: ${summarySegments.join(" — ")}` : null;
+  const cardLine = input.boardUrl ? `카드: ${input.boardUrl}` : "→ 게시판 Human Operator 화면에서 선택";
+  const lines = [
+    "*Human input required*",
+    summaryLine,
+    issueLine,
+    input.missionId ? `Mission: ${input.missionId.slice(0, 8)}` : null,
+    input.decision ? `Decision: ${input.decision}` : null,
+    input.reason ? `Reason: ${input.reason}` : null,
+    input.nextAction ? `Next: ${input.nextAction}` : null,
+    cardLine,
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n").slice(0, 3500);
+}
+
+export function formatEventNotification(event: { type: string; payload?: Record<string, unknown> }, options?: {
+  boardUrl?: string | null;
+}): string | null {
   const { type, payload } = event;
 
   switch (type) {
@@ -400,23 +494,16 @@ export function formatEventNotification(event: { type: string; payload?: Record<
     }
 
     case "mission.human_input_requested": {
-      const missionId = readString(payload?.missionId);
-      const issueId = readString(payload?.issueId);
-      const issueTitle = readString(payload?.issueTitle);
-      const issueIdentifier = readString(payload?.issueIdentifier);
-      const decision = readString(payload?.decision);
-      const reason = readString(payload?.reason);
-      const nextAction = readString(payload?.nextAction);
-      const issueLabel = issueIdentifier ?? (issueId ? issueId.slice(0, 8) : null);
-      const lines = [
-        "*Human input required*",
-        issueTitle && issueLabel ? `${issueLabel} — ${issueTitle}` : issueTitle ?? (issueLabel ? `Issue ${issueLabel}` : null),
-        missionId ? `Mission: ${missionId.slice(0, 8)}` : null,
-        decision ? `Decision: ${decision}` : null,
-        reason ? `Reason: ${reason}` : null,
-        nextAction ? `Next: ${nextAction}` : null,
-      ].filter((line): line is string => Boolean(line));
-      return lines.length > 1 ? lines.join("\n").slice(0, 3500) : null;
+      return composeHumanInputRequestedNotification({
+        issueTitle: readString(payload?.issueTitle),
+        issueIdentifier: readString(payload?.issueIdentifier),
+        issueId: readString(payload?.issueId),
+        missionId: readString(payload?.missionId),
+        decision: readString(payload?.decision),
+        reason: readString(payload?.reason),
+        nextAction: readString(payload?.nextAction),
+        boardUrl: options?.boardUrl ?? null,
+      });
     }
 
     case "plugin.worker.crashed": {
