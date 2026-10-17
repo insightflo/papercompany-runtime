@@ -114,6 +114,20 @@ describe("generic runtime QA rules", () => {
     for (let i = 0; i < 150; i += 1) deep = { child: deep };
     await expect(evaluateQaRules({ ...base, json: deep })).rejects.toThrow("qa_document_limit");
   });
+  it("reports the violating links in the https-links check detail (credentials stripped)", async () => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json,
+      bad: "http://example.com/insecure",
+      credentialed: "https://user:secret@evil.example/x" } });
+    const check = result.checks.find(c => c.id === "https-links")!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("http://example.com/insecure");
+    // Userinfo is stripped from the echoed link — the detail must never echo credentials.
+    expect(String(check.detail)).toContain("https://evil.example/x");
+    expect(JSON.stringify(result)).not.toContain("secret");
+    // A passing document keeps the check detail-free (contract unchanged on success).
+    const passing = await evaluateQaRules(base);
+    expect(passing.checks.find(c => c.id === "https-links")?.detail).toBeUndefined();
+  });
   it("hashes validated configs canonically and detects policy changes", () => {
     expect(hashQaConfig({ rules: {} })).toBe(hashQaConfig(resolveEffectiveQaConfig()));
     expect(hashQaConfig({ rules: { "tag-count": { params: { min: 1 } } } })).not.toBe(hashQaConfig({ rules: {} }));

@@ -48,7 +48,16 @@ export async function evaluateQaRules(input: QaRulesInput): Promise<QaRulesResul
       case "no-sensitive-data": add(id, !!document && !document.sensitive); break;
       case "no-external-script": add(id, !!document && !document.externalScript); break;
       case "no-external-iframe": add(id, !!document && !document.externalIframe); break;
-      case "https-links": add(id, !!document && document.secureLinks); break;
+      case "https-links": {
+        // Rejection detail carries the violating links (userinfo-stripped, bounded) so the
+        // persisted dispatch summary and the rework feedback show WHAT violated, not just the id.
+        const insecure = document?.insecureLinks ?? [];
+        const detail = insecure.length > 0
+          ? `insecure links: ${insecure.slice(0, 5).map(link => link.slice(0, 160)).join(" ")}${insecure.length > 5 ? " …" : ""}`
+          : undefined;
+        add(id, !!document && document.secureLinks, detail);
+        break;
+      }
       case "min-source-links": {
         const params = config.rules["min-source-links"]?.params;
         if (!params) { add(id, false, "qa_rule_params_required"); break; }

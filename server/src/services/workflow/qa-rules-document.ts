@@ -68,12 +68,17 @@ export function inspectQaDocument(json: unknown, html?: string, internalPathRoot
     } catch { return false; }
   };
   // Relative links/fragments refer to this artifact. Protocol-relative and active schemes do not.
-  const secureLinks = [...links].every(link => {
+  const isSecureLink = (link: string) => {
     const normalized = link.trim().replace(/[\u0000-\u0020]/g, "");
     if (!normalized || normalized.startsWith("#")) return true;
     if (!/^[a-z][a-z0-9+.-]*:/i.test(normalized) && !normalized.startsWith("//") && !normalized.startsWith("\\")) return true;
     return isHttps(normalized) || isHttpLoopback(normalized);
-  });
-  return { text, externalScript, externalIframe, sensitive, secureLinks,
+  };
+  // Violating links for rejection detail. Userinfo is stripped before echoing — the
+  // detail lands in dispatch summaries and feedback, which must never carry credentials.
+  const insecureLinks = [...links].filter(link => !isSecureLink(link))
+    .map(link => link.trim().replace(/[\u0000-\u0020]/g, "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i, "$1"));
+  const secureLinks = insecureLinks.length === 0;
+  return { text, externalScript, externalIframe, sensitive, secureLinks, insecureLinks,
     sourceLinks: [...links].filter(isHttps) };
 }
