@@ -23,6 +23,19 @@ describe("https-links loopback exemption (local-install evidence)", () => {
     expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(false);
     expect(result.ok).toBe(false);
   });
+  it.each([
+    "http://user:pass@127.0.0.1:7077/mcp",
+    "http://user@localhost:3000/docs",
+    "http://:pass@[::1]:8080/health",
+  ])("rejects plain-http loopback link %s carrying credentials (exemption is bare loopback addresses only)", async (link) => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json, link } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(false);
+    expect(result.ok).toBe(false);
+  });
+  it("still allows loopback URLs whose @ appears only in the path (no userinfo)", async () => {
+    const result = await evaluateQaRules({ ...base, json: { ...base.json, link: "http://127.0.0.1:8080/@loop" } });
+    expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);
+  });
   it("keeps https links and relative/fragment links passing unchanged", async () => {
     const result = await evaluateQaRules({ ...base, json: { ...base.json, https: "https://example.com/a", rel: "assets/x.png", frag: "#top" } });
     expect(result.checks.find(c => c.id === "https-links")?.ok).toBe(true);

@@ -55,14 +55,17 @@ export function inspectQaDocument(json: unknown, html?: string, internalPathRoot
   };
   // Local-install reports legitimately prove behavior over plain http on loopback hosts only.
   // The exemption requires successful URL parsing plus an exact loopback hostname; every other
-  // plain-http link (including 0.0.0.0 and 127.0.0.2) stays rejected.
+  // plain-http link (including 0.0.0.0 and 127.0.0.2) stays rejected. Credential-bearing URLs
+  // (user:pass@) are never exempt — the exemption is for bare loopback addresses only, mirroring isHttps.
   const isLoopbackHost = (hostname: string) => {
     const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // [::1] → ::1
     return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1";
   };
   const isHttpLoopback = (link: string) => {
-    try { const url = new URL(link); return url.protocol === "http:" && isLoopbackHost(url.hostname); }
-    catch { return false; }
+    try {
+      const url = new URL(link);
+      return url.protocol === "http:" && !url.username && !url.password && isLoopbackHost(url.hostname);
+    } catch { return false; }
   };
   // Relative links/fragments refer to this artifact. Protocol-relative and active schemes do not.
   const secureLinks = [...links].every(link => {
