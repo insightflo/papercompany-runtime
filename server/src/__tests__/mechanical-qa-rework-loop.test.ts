@@ -124,6 +124,7 @@ describe("deriveMechanicalQaRejection (pure)", () => {
       "qa_artifact_input_changed",
       "qa_artifact_request_stale",
       "qa_artifact_input_digest_mismatch",
+      "qa_document_limit",
       "Workflow tool step executor is not configured.",
       "",
     ]) {

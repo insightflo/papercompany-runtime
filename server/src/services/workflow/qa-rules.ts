@@ -29,7 +29,15 @@ export async function evaluateQaRules(input: QaRulesInput): Promise<QaRulesResul
   const config = resolveEffectiveQaConfig(undefined, input.config);
   const checks: QaCheck[] = [];
   let document: ReturnType<typeof inspectQaDocument> | undefined;
-  try { document = inspectQaDocument(input.json, input.html, input.internalPathRoots); } catch { /* limits fail closed below */ }
+  try { document = inspectQaDocument(input.json, input.html, input.internalPathRoots); }
+  catch (error) {
+    // [infra separation] Document inspection limits (size/depth/node budget) are infra/config
+    // failures, not content-rule verdicts: the content was never inspected. Propagate the
+    // qa_document_limit signature so verifyQaArtifact records it as-is — it does NOT match the
+    // mechanical content-rejection whitelist, so the rework loop stays closed for it (P4 guard).
+    if (error instanceof Error && error.message === "qa_document_limit") throw error;
+    /* other limits fail closed below */
+  }
   const add = (id: string, ok: boolean, detail?: string) => checks.push({ id, ok, severity: "error", ...(detail ? { detail } : {}) });
   const assets = input.assetManifest ?? [];
   for (const [id, rule] of Object.entries(config.rules)) {

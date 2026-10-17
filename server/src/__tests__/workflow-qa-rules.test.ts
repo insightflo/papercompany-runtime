@@ -107,6 +107,13 @@ describe("generic runtime QA rules", () => {
       expect((await evaluateQaRules({ ...base, config: { rules } })).ok).toBe(false);
     }
   });
+  it("propagates qa_document_limit as its own infra failure instead of failing content checks", async () => {
+    // Depth > 100 hits inspectQaDocument's structural limit; the failure is an
+    // inspection/infra limit, not a content-rule verdict (no rework loop derivation).
+    let deep: unknown = { leaf: true };
+    for (let i = 0; i < 150; i += 1) deep = { child: deep };
+    await expect(evaluateQaRules({ ...base, json: deep })).rejects.toThrow("qa_document_limit");
+  });
   it("hashes validated configs canonically and detects policy changes", () => {
     expect(hashQaConfig({ rules: {} })).toBe(hashQaConfig(resolveEffectiveQaConfig()));
     expect(hashQaConfig({ rules: { "tag-count": { params: { min: 1 } } } })).not.toBe(hashQaConfig({ rules: {} }));
