@@ -35,6 +35,11 @@ import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js"
 let testDb: QualityTestDb, root: string;
 const selector = { type: "document", title: "content.json" };
 const contract = { schemaVersion: "manual-onboarding.qa.v1", role: "qa", inputStepId: "write" };
+// Registered tool contract mirrors the units' declared `contract` (role + schemaVersion) so the
+// fixture's corrected plans pass the submission-time registration comparison; preflight compares
+// the declaration against this registration exactly like dispatch-time freezeCompanyArtifactAttempt.
+const registeredReviewContract = { role: "qa", resultFileName: "qa-result.json", resultSchemaVersion: "manual-onboarding.qa.v1",
+  resultAdapter: "generic", inputParams: {}, deploymentFiles: ["runner.mjs"], inputEnvelopeVersion: "workflow.artifact-input.v1" };
 const envKeys = ["PAPERCLIP_STORAGE_PROVIDER", "PAPERCLIP_STORAGE_LOCAL_DIR"] as const;
 const savedEnv = envKeys.map(key => process.env[key]);
 
@@ -55,13 +60,14 @@ describeQualityDb("mission plan artifact materialization preflight", () => {
     envKeys.forEach((key, i) => { if (savedEnv[i] === undefined) delete process.env[key]; else process.env[key] = savedEnv[i]; });
   });
 
-  async function world(sourceRevision = false) {
+  async function world(sourceRevision = false, toolArtifactContract: Record<string, unknown> | null = registeredReviewContract) {
     const db = testDb.db, f = await seedPaqoMissionFixture(db, "Artifact preflight");
     await db.update(companies).set({ workProductRoot: root }).where(eq(companies.id, f.companyId));
     await db.update(missions).set({ status: "planning" }).where(eq(missions.id, f.missionId));
     await db.update(issues).set({ status: "done", assigneeAgentId: f.ownerAgentId }).where(eq(issues.id, f.planningIssueId));
     const [tool] = await db.insert(toolDefinitions).values({ companyId: f.companyId, name: "local-review",
-      description: "Local definition-only tool", adapterType: "builtin", adapterConfig: {}, enabled: true }).returning();
+      description: "Local definition-only tool", adapterType: "builtin",
+      adapterConfig: { ...(toolArtifactContract ? { artifactContract: toolArtifactContract } : {}) }, enabled: true }).returning();
     await db.insert(agentToolGrants).values({ companyId: f.companyId, agentId: f.otherAgentId, toolId: tool!.id, grantedBy: "board" });
     if (sourceRevision) {
       const [source] = await db.insert(missions).values({ companyId: f.companyId, ownerAgentId: f.ownerAgentId,
@@ -153,6 +159,42 @@ describeQualityDb("mission plan artifact materialization preflight", () => {
     expect(await testDb.db.select().from(missionPlanQaVerdicts).where(eq(missionPlanQaVerdicts.missionId, w.missionId))).toEqual([]);
     const [ledger] = await testDb.db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, w.missionId));
     expect(ledger!.status).toBe("submitted");
+    await noExecution(w);
+  });
+
+  it("rejects a declared tool artifact contract that mismatches the registered tool definition at submission", async () => {
+    // [2026-10-17 manual-onboarding incident] preflight passed a QA step whose declared schemaVersion
+    // differed from the tool registration; the plan failed only at dispatch (422 artifact_contract_step_mismatch).
+    const w = await world(false, { ...registeredReviewContract, resultSchemaVersion: "workflow.qa-result.v1" });
+    const result = await w.submit();
+    expect(result.status).toBe("invalid");
+    if (result.status !== "invalid") throw new Error("Mismatched tool contract was not rejected");
+    expect(result.reason).toBe("tool_artifact_contract_mismatch");
+    expect(result.diagnostics).toHaveLength(1);
+    const diagnostic = result.diagnostics[0]!;
+    expect(diagnostic).toMatchObject({ code: "tool_artifact_contract_mismatch", severity: "invalid",
+      details: { toolName: "local-review", declaredRole: "qa", declaredSchemaVersion: "manual-onboarding.qa.v1",
+        registeredRole: "qa", registeredResultSchemaVersion: "workflow.qa-result.v1" } });
+    const stepId = (diagnostic as { details?: { stepId?: string } }).details?.stepId;
+    expect(typeof stepId).toBe("string");
+    // The message must be actionable: step id, tool name, declared value, registered value.
+    expect(diagnostic.message).toContain(stepId!);
+    expect(diagnostic.message).toContain("local-review");
+    expect(diagnostic.message).toContain("manual-onboarding.qa.v1");
+    expect(diagnostic.message).toContain("workflow.qa-result.v1");
+    const [ledger] = await testDb.db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, w.missionId));
+    expect(ledger).toMatchObject({ status: "rejected", rejectionReason: "tool_artifact_contract_mismatch", diagnostics: result.diagnostics });
+    await noExecution(w);
+  });
+
+  it("rejects a declared tool artifact contract when the tool registration declares none", async () => {
+    const w = await world(false, null);
+    const result = await w.submit();
+    expect(result).toMatchObject({ status: "invalid", reason: "tool_artifact_contract_required",
+      diagnostics: [expect.objectContaining({ code: "tool_artifact_contract_required", severity: "invalid",
+        message: expect.stringContaining("local-review") })] });
+    const [ledger] = await testDb.db.select().from(missionPlanDecisionSubmissions).where(eq(missionPlanDecisionSubmissions.missionId, w.missionId));
+    expect(ledger).toMatchObject({ status: "rejected", rejectionReason: "tool_artifact_contract_required" });
     await noExecution(w);
   });
 
