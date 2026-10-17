@@ -56,6 +56,12 @@ const toggles = [
     description: "Automatically recover QA steps whose reviewed work product was regenerated, distinguishing generation-only rebinds from material content changes. Applies to all companies on this instance.",
     label: "Toggle QA rebind recovery v1",
   },
+  {
+    field: "enableWorkProductSelectorRejectV1",
+    title: "Work-Product Selector Reject V1",
+    description: "Selector-less cross-step work product consumption is rejected with a copy-paste workProductSelectors snippet instead of pinning the current primary by fallback order. Seeded references and explicit selectors are unaffected. Per-company rollout uses enableWorkProductSelectorRejectCompanyIdsV1 (API only).",
+    label: "Toggle work-product selector reject v1",
+  },
 ] as const;
 
 interface Props {
