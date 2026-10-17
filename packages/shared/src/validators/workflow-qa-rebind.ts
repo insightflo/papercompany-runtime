@@ -9,6 +9,7 @@ export const workflowQaRebindReasonSchema = z.enum([
   "generation_only", "failure_cascade_skipped", "receipt_v1_no_contract_hash", "receipt_scope_mismatch",
   "receipt_unavailable", "contract_invalid", "frozen_digest_mismatch", "publication_unproven",
   "published_same_qa", "producer_unproven", "producer_bytes_mismatch", "candidate_target_changed",
+  "run_not_failed", "consumer_terminal", "recovery_attempts_exhausted",
 ]);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 export const workflowQaRebindExpectedDigestsSchema = z.object({

@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   companies,
@@ -44,6 +45,9 @@ export async function cleanupTerminalBoundaryTables(db: Db): Promise<void> {
   await db.delete(issues);
   await db.delete(missions);
   await db.delete(agents);
+  // [소비 하드닉 4단계] 폴백 핀 감사(activity_log)가 companies 를 FK(NO ACTION) 로 참조한다 —
+  // 감사를 남기는 기능이 늘어난 만큼 회사 삭제 전에 activity_log 를 먼저 비운다.
+  await db.delete(activityLog);
   await db.delete(companies);
 }
 

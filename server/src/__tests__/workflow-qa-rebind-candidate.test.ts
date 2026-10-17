@@ -3,10 +3,11 @@ import { chmod, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { expect, it } from "vitest";
-import { activityLog, agentWakeupRequests, operatorDecisions, workflowRecoveryAuthorities,
+import { activityLog, agentWakeupRequests, operatorDecisions, toolDefinitions, workflowRecoveryAuthorities,
   missions, workflowRuns, workflowStepRuns, workflowQaRebindClaims } from "@paperclipai/db";
 import { artifactDagFixture } from "./helpers/artifact-dag-fixture.js";
 import { captureExecutionDefinition } from "../services/workflow/execution-definition.js";
+import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { prepareQaConsumer } from "../services/workflow/qa-artifact-consumer.js";
 import { classifyQaRebindCandidate, persistQaRebindCandidate, sweepQaRebindCandidates } from "../services/workflow/qa-rebind-candidate.js";
 import { rebindProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
@@ -200,6 +201,99 @@ it("NOTE: completion callback candidate INSERT failure preserves the authoritati
     await f.db.execute(sql`DROP TRIGGER qa_rebind_callback_reject ON workflow_qa_rebind_claims`);
     await f.db.execute(sql`DROP FUNCTION qa_rebind_callback_reject()`);
   }
+});
+
+// Drift reconciliation: stranded candidate/auto_eligible claims must converge, never orbit forever.
+const claimsOf = (f: Awaited<ReturnType<typeof fixture>>) => f.db.select().from(workflowQaRebindClaims)
+  .where(eq(workflowQaRebindClaims.companyId, f.companyId));
+const reconciledAudits = (f: Awaited<ReturnType<typeof fixture>>) => f.db.select().from(activityLog).where(and(
+  eq(activityLog.companyId, f.companyId), eq(activityLog.action, "workflow.qa_rebind_reconciled")));
+/** Re-dispatch the failed consumer like the engine does: new request/generation plus a fresh frozen attempt. */
+const redispatchConsumer = async (f: Awaited<ReturnType<typeof fixture>>, requestId: string, executionGeneration: number) => {
+  const [publisher] = await f.db.select().from(toolDefinitions).where(and(
+    eq(toolDefinitions.companyId, f.companyId), eq(toolDefinitions.name, "publisher")));
+  const [step] = await f.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.publishId));
+  await f.db.update(workflowStepRuns).set({ lastDispatchRequestId: requestId, executionGeneration,
+    metadata: { ...step.metadata, artifactExecution: freezeArtifactAttempt(
+      { adapterConfig: publisher.adapterConfig, step: {}, executionGeneration, requestId }) } })
+    .where(eq(workflowStepRuns.id, f.publishId));
+};
+
+it.each(["completed", "cancelled"])("reconcile: terminal non-failed run excludes candidate claims with audit", async runStatus => {
+  const f = await fixture();
+  await f.persist();
+  await f.db.update(workflowRuns).set({ status: runStatus }).where(eq(workflowRuns.id, f.runId));
+  await sweepQaRebindCandidates(f.db);
+  const [claim] = await claimsOf(f);
+  expect(claim).toMatchObject({ status: "excluded", reasonCode: "run_not_failed" });
+  const audits = await reconciledAudits(f);
+  expect(audits).toHaveLength(1);
+  expect(audits[0]).toMatchObject({ actorType: "system", actorId: "qa-rebind-reconciler",
+    action: "workflow.qa_rebind_reconciled", entityType: "workflow_qa_rebind_claim", entityId: claim.id,
+    details: { schemaVersion: "workflow.qa-rebind-reconciled.v1", from: "candidate", to: "excluded",
+      reasonCode: "run_not_failed", requestId: claim.requestId,
+      executionGeneration: claim.executionGeneration, authorityVersion: claim.authorityVersion } });
+  await sweepQaRebindCandidates(f.db);
+  expect(await reconciledAudits(f)).toHaveLength(1);
+  expect((await claimsOf(f))[0].status).toBe("excluded");
+});
+
+it("reconcile: terminal non-failed run also settles a stranded auto_eligible claim", async () => {
+  const f = await fixture();
+  await f.persist();
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0].status).toBe("auto_eligible");
+  await f.db.update(workflowRuns).set({ status: "completed" }).where(eq(workflowRuns.id, f.runId));
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "excluded", reasonCode: "run_not_failed" });
+  expect((await reconciledAudits(f))[0].details).toMatchObject({ from: "auto_eligible", to: "excluded" });
+});
+
+it.each(["skipped", "completed"])("reconcile: terminal non-failed consumer on a failed run excludes claims", async stepStatus => {
+  const f = await fixture();
+  await f.persist();
+  await f.db.update(workflowStepRuns).set({ status: stepStatus }).where(eq(workflowStepRuns.id, f.publishId));
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "excluded", reasonCode: "consumer_terminal" });
+  const audits = await reconciledAudits(f);
+  expect(audits).toHaveLength(1);
+  expect(audits[0].details).toMatchObject({ from: "candidate", to: "excluded", reasonCode: "consumer_terminal" });
+  await sweepQaRebindCandidates(f.db);
+  expect(await reconciledAudits(f)).toHaveLength(1);
+  expect((await claimsOf(f))[0].status).toBe("excluded");
+});
+
+it("reconcile: a moved failure target refreshes claim CAS and returns it to classification", async () => {
+  const f = await fixture();
+  await f.persist();
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "auto_eligible", requestId: "publisher",
+    executionGeneration: 0, authorityVersion: 0 });
+  await redispatchConsumer(f, "publisher-next", 4);
+  await f.db.update(workflowRuns).set({ dispatchAuthorityVersion: 1 }).where(eq(workflowRuns.id, f.runId));
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "auto_eligible", reasonCode: "generation_only",
+    requestId: "publisher-next", executionGeneration: 4, authorityVersion: 1 });
+  const audits = await reconciledAudits(f);
+  expect(audits).toHaveLength(1);
+  expect(audits[0].details).toMatchObject({ from: "auto_eligible", to: "candidate", reasonCode: null,
+    requestId: "publisher-next", executionGeneration: 4, authorityVersion: 1 });
+  await sweepQaRebindCandidates(f.db);
+  expect(await reconciledAudits(f)).toHaveLength(1);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "auto_eligible", requestId: "publisher-next" });
+});
+
+it("reconcile: card_required claims are never drift-reconciled", async () => {
+  const f = await fixture();
+  const { contractHash: _, qaConfigHash: __, runtimeChecks: ___, pluginChecks: ____, ...legacy } = f.receipt as any;
+  await f.patchQa({ ...f.qa.metadata, toolArtifactReceipt: { ...legacy, schemaVersion: "workflow.tool-artifact.v1" } });
+  await f.persist();
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "card_required", reasonCode: "receipt_v1_no_contract_hash" });
+  await f.db.update(workflowRuns).set({ status: "completed" }).where(eq(workflowRuns.id, f.runId));
+  await sweepQaRebindCandidates(f.db);
+  expect((await claimsOf(f))[0]).toMatchObject({ status: "card_required", reasonCode: "receipt_v1_no_contract_hash" });
+  expect(await reconciledAudits(f)).toHaveLength(0);
 });
 
 it("NOTE: consumer failure and finalizeRunTerminal serialize run before step without deadlock", async () => {

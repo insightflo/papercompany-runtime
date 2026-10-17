@@ -1,5 +1,6 @@
-import { and, desc, eq, notExists } from "drizzle-orm";
+import { and, desc, eq, ne, notExists } from "drizzle-orm";
 import { registeredProducer, preserveProducerMetadata } from "./work-products/producer-provenance.js";
+import { matchWorkProductContractPromotion, recordContractPromotionAudit, type ContractPromotionMatch } from "./work-products/contract-promotion.js";
 import { metadataPath, resolveWorkProductLocalFilePath, sealedProducerMetadata } from "./work-products/producer-seal.js";
 export { resolveWorkProductLocalFilePath } from "./work-products/producer-seal.js";
 import { existsSync } from "node:fs";
@@ -128,20 +129,34 @@ export function workProductService(db: Db) {
         data = { ...data, sourceExecutionGeneration: producer?.executionGeneration ?? null,
           metadata: await sealedProducerMetadata(data, producer) };
         let isPrimary: boolean | undefined = data.isPrimary;
+        let contractMatch: ContractPromotionMatch | null = null;
         if (isPrimary === undefined) {
-          const [existingPrimary] = await tx
-            .select({ id: issueWorkProducts.id })
-            .from(issueWorkProducts)
-            .where(
-              and(
-                eq(issueWorkProducts.companyId, companyId),
-                eq(issueWorkProducts.issueId, issueId),
-                eq(issueWorkProducts.type, data.type),
-                eq(issueWorkProducts.isPrimary, true),
-              ),
-            )
-            .limit(1);
-          isPrimary = !existingPrimary;
+          // [산출물 소비 하드닝 2a] 미지정 해석 우선순위: ① 계약 부합 승격 > ② 빈 이슈 첫 등록만 > false.
+          //   위임(delegation) 등록은 원본 미러 의미 보존을 위해 ① 대상이 아니다(생산자 run/step 신원도 없다).
+          if (!delegation && producer?.schemaVersion === "workflow.work-product-producer.v1") {
+            contractMatch = await matchWorkProductContractPromotion(tx, {
+              workflowRunId: producer.workflowRunId, producerStepId: producer.stepId,
+              type: data.type, title: data.title,
+            });
+          }
+          if (contractMatch) {
+            isPrimary = true;
+          } else {
+            // ② 이슈에 타입 무관 비archived 산출물이 없을 때만 첫 등록이 대표다
+            //   (구 규칙 "타입별 첫 등록" 폐지 — 혼합 타입 이슈의 두 번째 타입 첫 산출물은 대표 아님).
+            const [existingAnyProduct] = await tx
+              .select({ id: issueWorkProducts.id })
+              .from(issueWorkProducts)
+              .where(
+                and(
+                  eq(issueWorkProducts.companyId, companyId),
+                  eq(issueWorkProducts.issueId, issueId),
+                  ne(issueWorkProducts.status, "archived"),
+                ),
+              )
+              .limit(1);
+            isPrimary = !existingAnyProduct;
+          }
         }
         if (isPrimary) {
           await tx
@@ -155,6 +170,7 @@ export function workProductService(db: Db) {
               ),
             );
         }
+        let inserted: IssueWorkProductRow | null = null;
         if (isPrimary) {
           // [봇 bug·high 교정] 트랜잭션 내 문장 실패 후 재시도는 25P02 로 반드시 실패한다 —
           //   첫 insert 를 savepoint(중첩 tx)로 감싸 23505 를 savepoint 밖으로 끊어낸 뒤,
@@ -177,27 +193,35 @@ export function workProductService(db: Db) {
               .then((rows) => rows[0] ?? null);
           };
           try {
-            return await insertPrimary();
+            inserted = await insertPrimary();
           } catch (error) {
             // [봇 bug·high 교정] drizzle 은 원본 PG 오류를 cause 체인에 둔다 — 공용 판별 사용.
             if (!isPgUniqueViolation(error)) throw error;
-            return await tx
+            inserted = await tx
               .insert(issueWorkProducts)
               .values({ ...data, isPrimary: false, companyId, issueId })
               .returning()
               .then((rows) => rows[0] ?? null);
           }
+        } else {
+          inserted = await tx
+            .insert(issueWorkProducts)
+            .values({
+              ...data,
+              isPrimary,
+              companyId,
+              issueId,
+            })
+            .returning()
+            .then((rows) => rows[0] ?? null);
         }
-        return await tx
-          .insert(issueWorkProducts)
-          .values({
-            ...data,
-            isPrimary,
-            companyId,
-            issueId,
-          })
-          .returning()
-          .then((rows) => rows[0] ?? null);
+        // ① 계약 부합 승격만 감사 — 23505 폴백으로 비대표로 확정된 경우는 승격이 아니므로 제외.
+        if (inserted && contractMatch && inserted.isPrimary) {
+          await recordContractPromotionAudit(tx as Pick<Db, "insert">, {
+            companyId, workProductId: inserted.id, match: contractMatch,
+          });
+        }
+        return inserted;
       });
       return row ? toIssueWorkProduct(row) : null;
     },

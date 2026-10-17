@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { activityLog, companies, missions, issueWorkProducts, workflowQaRebindClaims, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { workflowQaRebindClassificationResultSchema, type WorkflowQaRebindClassificationResult } from "@paperclipai/shared/validators/workflow-qa-rebind";
 import { readQaReceiptBytes } from "./qa-artifact-receipt.js";
@@ -7,6 +7,7 @@ import type { DbOrTx } from "./execution-definition.js";
 import { readObject } from "./core-tool-context.js";
 import { logger } from "../../middleware/logger.js";
 import { isQaRebindRecoveryEnabled } from "./qa-rebind-recovery-flag.js";
+import { isTerminalRunStatus } from "./run-terminal-boundary-cause.js";
 export type { QaRebindCandidateScope } from "./qa-rebind-evidence.js";
 
 /** Deterministic DB/hash evidence only. Never consult comments, stdout, error prose or live source content. */
@@ -66,15 +67,19 @@ export async function persistQaRebindCandidate(db: DbOrTx, scope: QaRebindCandid
   }
 }
 
+/** Terminal-but-not-failed consumer step runs can never be recovered against this failure observation. */
+const TERMINAL_CONSUMER_STATUSES = new Set(["completed", "skipped", "cancelled", "canceled"]);
+
 /** B is opt-in. Human cards are independent of that flag and use the same strict recovery. */
 export async function sweepQaRebindCandidates(db: Db, now = new Date()): Promise<number> {
   let classified = 0;
   // Enumerate tenants, then scope every candidate/run/step query to that tenant.
   for (const { id: companyId } of await db.select({ id: companies.id }).from(companies)) {
+    // Reconciliation targets: once auto_eligible, a claim must still converge when its target moves on.
     const pending = await db.select({ candidate: workflowQaRebindClaims }).from(workflowQaRebindClaims)
       .innerJoin(workflowRuns, eq(workflowRuns.id, workflowQaRebindClaims.workflowRunId)).where(and(
         eq(workflowQaRebindClaims.companyId, companyId), eq(workflowRuns.companyId, companyId),
-        eq(workflowQaRebindClaims.status, "candidate"), eq(workflowRuns.status, "failed")));
+        inArray(workflowQaRebindClaims.status, ["candidate", "auto_eligible"])));
     for (const { candidate } of pending) {
       classified += await db.transaction(async tx => {
         // Mission → run → steps → product → claim, including observation paths.
@@ -84,11 +89,48 @@ export async function sweepQaRebindCandidates(db: Db, now = new Date()): Promise
           eq(missions.companyId, companyId), eq(missions.id, scopeRun.missionId))).for("share");
         const [run] = await tx.select().from(workflowRuns).where(and(
           eq(workflowRuns.companyId, companyId), eq(workflowRuns.id, candidate.workflowRunId))).for("share");
-        if (!run || run.status !== "failed" || run.missionId !== scopeRun?.missionId) return 0;
-        await tx.select({ id: workflowStepRuns.id }).from(workflowStepRuns)
+        if (!run || run.missionId !== scopeRun?.missionId) return 0;
+        const steps = (await tx.select({ step: workflowStepRuns }).from(workflowStepRuns)
           .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId)).where(and(
             eq(workflowRuns.companyId, companyId), eq(workflowRuns.id, run.id)))
-          .orderBy(asc(workflowStepRuns.id)).for("share", { of: workflowStepRuns });
+          .orderBy(asc(workflowStepRuns.id)).for("share", { of: workflowStepRuns })).map(r => r.step);
+        const consumer = steps.find(s => s.id === candidate.consumerStepRunId);
+        if (!consumer) return 0;
+        // Drift reconciliation before classification: settle claims whose run or failure target moved on.
+        // card_required/blocked/claimed/recovered/dismissed never enter here (approvalTargetHash contract).
+        let reconcile: { status: string; reasonCode: string | null; requestId: string | null;
+          executionGeneration: number; authorityVersion: number } | null = null;
+        if (isTerminalRunStatus(run.status) && run.status !== "failed") {
+          reconcile = { status: "excluded", reasonCode: "run_not_failed", requestId: candidate.requestId,
+            executionGeneration: candidate.executionGeneration, authorityVersion: candidate.authorityVersion };
+        } else if (run.status === "failed" && TERMINAL_CONSUMER_STATUSES.has(consumer.status)) {
+          reconcile = { status: "excluded", reasonCode: "consumer_terminal", requestId: candidate.requestId,
+            executionGeneration: candidate.executionGeneration, authorityVersion: candidate.authorityVersion };
+        } else if (run.status === "failed" && consumer.status === "failed" && (
+          candidate.requestId !== consumer.lastDispatchRequestId
+          || candidate.executionGeneration !== consumer.executionGeneration
+          || candidate.authorityVersion !== run.dispatchAuthorityVersion)) {
+          // Same failure, newer dispatch: refresh CAS so this pass's classification revalidates it.
+          reconcile = { status: "candidate", reasonCode: null, requestId: consumer.lastDispatchRequestId,
+            executionGeneration: consumer.executionGeneration, authorityVersion: run.dispatchAuthorityVersion };
+        }
+        if (reconcile) {
+          const [moved] = await tx.update(workflowQaRebindClaims).set({
+            status: reconcile.status, reasonCode: reconcile.reasonCode,
+            requestId: reconcile.requestId, executionGeneration: reconcile.executionGeneration,
+            authorityVersion: reconcile.authorityVersion, updatedAt: now,
+            // CAS refresh means the target moved on: a fresh dispatch earns fresh recovery attempts.
+            ...(reconcile.status === "candidate" ? { recoveryAttempts: 0 } : {}),
+          }).where(and(eq(workflowQaRebindClaims.companyId, companyId), eq(workflowQaRebindClaims.id, candidate.id),
+            eq(workflowQaRebindClaims.status, candidate.status))).returning({ id: workflowQaRebindClaims.id });
+          if (!moved) return 0;
+          await tx.insert(activityLog).values({ companyId, actorType: "system", actorId: "qa-rebind-reconciler",
+            action: "workflow.qa_rebind_reconciled", entityType: "workflow_qa_rebind_claim", entityId: candidate.id,
+            details: { schemaVersion: "workflow.qa-rebind-reconciled.v1", from: candidate.status, to: reconcile.status,
+              reasonCode: reconcile.reasonCode, requestId: reconcile.requestId,
+              executionGeneration: reconcile.executionGeneration, authorityVersion: reconcile.authorityVersion } });
+          if (reconcile.status !== "candidate") return 0;
+        } else if (candidate.status !== "candidate" || run.status !== "failed") return 0;
         const scope = { companyId, workflowRunId: run.id, consumerStepRunId: candidate.consumerStepRunId };
         const classification = await classifyQaRebindCandidate(tx as unknown as Db, scope);
         if (!classification) return 0;

@@ -28,6 +28,11 @@ import {
 } from "../services/operator-approval-wait.js";
 import { workProductService } from "../services/work-products.js";
 import { retryIssueLessToolWorkflowStep } from "../services/workflow/dag-engine.js";
+import {
+  findWorkflowDefinitionStepWarnings,
+  summarizeDefinitionStepWarnings,
+  type WorkflowDefinitionStepWarning,
+} from "../services/workflow/definition-step-validation.js";
 import { PRODUCER_REBIND_ELIGIBLE_DISPATCH_ERRORS, consumerDependsOnProducer, rebindOrPromoteProducerProvenance } from "../services/workflow/producer-provenance-rebind.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { enableQaCapAcceptanceForCompany } from "../services/workflow/qa-cap-acceptance-rollout.js";
@@ -46,6 +51,7 @@ import {
 } from "../services/workflow/tool-catalog.js";
 import type { WorkflowDefinition, WorkflowRun, WorkflowStepRun } from "../services/workflow/types.js";
 import { badRequest, conflict, notFound, unauthorized, unprocessable } from "../errors.js";
+import { logger } from "../middleware/logger.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { workflowResumeRoutes } from "./workflow-resume.js";
 import { assertWorkflowQaConfigWrite, updateAuthorizedWorkflowDefinition } from './workflow-qa-config-auth.js';
@@ -65,6 +71,16 @@ function serializeValue(value: unknown): unknown {
 const serializeDefinition = (definition: WorkflowDefinition) => serializeValue(definition) as Record<string, unknown>;
 const serializeRun = (run: WorkflowRun) => serializeValue(run) as Record<string, unknown>;
 const serializeStepRun = (stepRun: WorkflowStepRun) => serializeValue(stepRun) as Record<string, unknown>;
+
+/** [산출물 소비 하드닝 1단계] 이번 쓰기에 저장된 steps의 규칙 없는 타-단계 참조 경고(warn-only).
+ * 감사는 activity log details.definitionWarnings 요약 + logger.warn 전체 문구. */
+function logDefinitionStepWarnings(scope: { workflowId: string; companyId: string }, warnings: readonly WorkflowDefinitionStepWarning[]): void {
+  if (!warnings.length) return;
+  logger.warn({
+    workflowId: scope.workflowId, companyId: scope.companyId,
+    definitionWarnings: warnings.map(({ kind, stepId, referencedStepId, message }) => ({ kind, stepId, referencedStepId, message })),
+  }, "workflow definition saved with selector-less work product references");
+}
 
 type AgentNameById = ReadonlyMap<string, string>;
 
@@ -392,6 +408,9 @@ export function workflowRoutes(db: Db) {
       ...req.body,
       companyId,
     }));
+    // POST는 항상 steps를 저장하므로 저장된 정의로 경고를 계산한다(빈 배열 포함, additive 필드).
+    const warnings = findWorkflowDefinitionStepWarnings(definition.steps);
+    logDefinitionStepWarnings({ workflowId: definition.id, companyId }, warnings);
     const actor = actorForActivity(req);
     await logActivity(db, {
       companyId,
@@ -402,9 +421,9 @@ export function workflowRoutes(db: Db) {
       action: "workflow.created",
       entityType: "workflow",
       entityId: definition.id,
-      details: { name: definition.name },
+      details: { name: definition.name, ...(warnings.length ? { definitionWarnings: summarizeDefinitionStepWarnings(warnings) } : {}) },
     });
-    res.status(201).json(serializeDefinition(definition));
+    res.status(201).json({ ...serializeDefinition(definition), warnings });
   });
 
   router.get("/workflows/:workflowId", async (req, res) => {
@@ -425,6 +444,9 @@ export function workflowRoutes(db: Db) {
     assertWorkflowQaConfigWrite(req, existing.steps);
     const definition = await workflowDomainCall(() => updateAuthorizedWorkflowDefinition(db, workflowId, req));
     if (!definition) throw notFound("Workflow definition not found");
+    // PATCH는 이번에 steps를 쓴 경우에만 경고를 계산한다(steps 미포함 패치는 경고 없음).
+    const warnings = req.body.steps !== undefined ? findWorkflowDefinitionStepWarnings(definition.steps) : undefined;
+    if (warnings) logDefinitionStepWarnings({ workflowId, companyId: existing.companyId }, warnings);
     const actor = actorForActivity(req);
     await logActivity(db, {
       companyId: existing.companyId,
@@ -435,9 +457,12 @@ export function workflowRoutes(db: Db) {
       action: "workflow.updated",
       entityType: "workflow",
       entityId: workflowId,
-      details: { changedFields: Object.keys(req.body) },
+      details: {
+        changedFields: Object.keys(req.body),
+        ...(warnings?.length ? { definitionWarnings: summarizeDefinitionStepWarnings(warnings) } : {}),
+      },
     });
-    res.json(serializeDefinition(definition));
+    res.json(warnings === undefined ? serializeDefinition(definition) : { ...serializeDefinition(definition), warnings });
   });
 
   router.delete("/workflows/:workflowId", async (req, res) => {

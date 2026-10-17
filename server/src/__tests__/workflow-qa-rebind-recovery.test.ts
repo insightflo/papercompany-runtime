@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { afterAll, expect, it } from "vitest";
-import { activityLog, agentWakeupRequests, instanceSettings, issueWorkProducts, missions, workflowQaRebindClaims,
+import { activityLog, agentWakeupRequests, instanceSettings, issueWorkProducts, missions, operatorDecisions, workflowQaRebindClaims,
   workflowRecoveryAuthorities, workflowRuns, workflowStepRuns, workflowTerminalDecisions, workflowTransitionEvents } from "@paperclipai/db";
 import { qaRebindFixture } from "./helpers/qa-rebind-fixture.js";
 import { sweepQaRebindCandidates } from "../services/workflow/qa-rebind-candidate.js";
@@ -131,6 +131,73 @@ it("flag on sweeps reuse the DAG wrapper and persist one accepted recovery", asy
   await sweepQaRebindCandidates(f.db);
   expect((await snapshot(f)).authorities).toEqual(after.authorities);
 });
+
+// Bounded recovery: repeated failed sweeps must escalate to an operator card, never spin forever.
+const failedSweeps = async (f: Awaited<ReturnType<typeof seed>>, times: number) => {
+  for (let n = 0; n < times; n++) await sweepQaRebindCandidates(f.db);
+  return (await snapshot(f)).claims[0];
+};
+
+it("recovery failures are bounded: three failed sweeps escalate to card_required with one audit and one card", async () => {
+  const f = await seed(); await flag(f, true);
+  await writeFile(f.content, "changed after classification");
+  for (const attempts of [1, 2]) {
+    await sweepQaRebindCandidates(f.db);
+    expect((await snapshot(f)).claims[0]).toMatchObject({ status: "auto_eligible", recoveryAttempts: attempts });
+  }
+  await sweepQaRebindCandidates(f.db);
+  const escalated = await snapshot(f);
+  expect(escalated.claims[0]).toMatchObject({ status: "card_required",
+    reasonCode: "recovery_attempts_exhausted", recoveryAttempts: 3 });
+  const exhausted = escalated.activities.filter(a => a.action === "workflow.qa_rebind_recovery_exhausted");
+  expect(exhausted).toHaveLength(1);
+  expect(exhausted[0]).toMatchObject({ companyId: f.companyId, actorType: "system", actorId: "qa-rebind-recovery",
+    entityType: "workflow_qa_rebind_claim", entityId: escalated.claims[0].id,
+    details: { schemaVersion: "workflow.qa-rebind-recovery-exhausted.v1", from: "auto_eligible", to: "card_required",
+      reasonCode: "recovery_attempts_exhausted", attempts: 3 } });
+  const cards = await f.db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, f.companyId));
+  expect(cards).toHaveLength(1); expect(cards[0].status).toBe("pending");
+  // Guard idempotence: once the claim leaves auto_eligible, attempts freeze and cards replay without duplicates.
+  await sweepQaRebindCandidates(f.db); await sweepQaRebindCandidates(f.db);
+  const settled = await snapshot(f);
+  expect(settled.claims[0]).toMatchObject({ status: "card_required", recoveryAttempts: 3 });
+  expect(settled.activities.filter(a => a.action === "workflow.qa_rebind_recovery_exhausted")).toHaveLength(1);
+  expect(await f.db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, f.companyId))).toHaveLength(1);
+});
+
+it("successful recovery never counts an attempt", async () => {
+  const f = await seed(); await flag(f, true);
+  await sweepQaRebindCandidates(f.db);
+  expect((await snapshot(f)).claims[0]).toMatchObject({ status: "recovered", recoveryAttempts: 0 });
+});
+
+it("a moved failure target resets recovery attempts via CAS reconciliation", async () => {
+  const f = await seed(); await flag(f, true);
+  const original = await readFile(f.content, "utf8");
+  await writeFile(f.content, "changed after classification");
+  expect(await failedSweeps(f, 1)).toMatchObject({ status: "auto_eligible", recoveryAttempts: 1 });
+  await writeFile(f.content, original);
+  // Same failure, newer authority: reconciliation refreshes the CAS claim back through candidate.
+  await f.db.update(workflowRuns).set({ dispatchAuthorityVersion: 1 }).where(eq(workflowRuns.id, f.runId));
+  await f.db.insert(workflowTerminalDecisions).values({ companyId: f.companyId, workflowRunId: f.runId,
+    decidedAuthorityVersion: 1, decision: "failed", policyCause: "recovery_deadline_hard",
+    discoveryPath: "stuck_diagnostic", origin: "reconciler", recoveryGate: {} });
+  await sweepQaRebindCandidates(f.db);
+  expect((await snapshot(f)).claims[0]).toMatchObject({ status: "recovered", recoveryAttempts: 0 });
+});
+
+it.each(["run_not_failed", "consumer_terminal"] as const)(
+  "exclusion reconciliation (%s) never resets recovery attempts", async kind => {
+    const f = await seed(); await flag(f, true);
+    await writeFile(f.content, "changed after classification");
+    expect(await failedSweeps(f, 1)).toMatchObject({ status: "auto_eligible", recoveryAttempts: 1 });
+    if (kind === "run_not_failed") await f.db.update(workflowRuns).set({ status: "cancelled" }).where(eq(workflowRuns.id, f.runId));
+    else await f.db.update(workflowStepRuns).set({ status: "completed" }).where(eq(workflowStepRuns.id, f.publishId));
+    await sweepQaRebindCandidates(f.db);
+    expect((await snapshot(f)).claims[0]).toMatchObject({ status: "excluded", reasonCode: kind, recoveryAttempts: 1 });
+    await sweepQaRebindCandidates(f.db);
+    expect((await snapshot(f)).claims[0]).toMatchObject({ status: "excluded", reasonCode: kind, recoveryAttempts: 1 });
+  });
 
 it("T12: already_rebound with a different expected SHA rejects without writes; board replay stays unchanged", async () => {
   const f = await seed(); await rebind(f);

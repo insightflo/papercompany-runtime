@@ -147,3 +147,76 @@ describe('service variants cannot bypass save validation', () => {
     expect(saved.adapterConfig).toEqual({});
   });
 });
+
+describe('workproduct selector definition warnings (stage 1 warn-only gate)', () => {
+  const producer = { id: 'build-content', name: 'Build content', agentId, dependencies: [] };
+  const consumer = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, name: id, agentId, dependencies: ['build-content'],
+    toolArgs: { sourceContentPath: '{$steps.build-content.workProductPath}' }, ...extra,
+  });
+  const expectedWarning = {
+    kind: 'workproduct_selector_missing', stepId: 'publish-report', referencedStepId: 'build-content',
+  };
+
+  it('warns without rejecting selector-less ancestor references on create and update, and audits them', async () => {
+    const steps = [producer, consumer('publish-report')];
+    const created = await request(app()).post(`/api/companies/${companyId}/workflows`).send({ name: 'warn gate', steps });
+    expect(created.status).toBe(201);
+    expect(created.body.warnings).toEqual([expect.objectContaining(expectedWarning)]);
+    expect(created.body.warnings[0].message).toContain('"publish-report"');
+    expect(created.body.warnings[0].message).toContain('"build-content"');
+    expect(created.body.warnings[0].message).toContain('"workProductSelectors"');
+    expect(created.body.warnings[0].message).toContain('seed');
+    expect(created.body.warnings[0].message).toContain('qa_artifact_consumer_input_mismatch');
+
+    const updated = await request(app()).patch(`/api/workflows/${created.body.id}`).send({ steps });
+    expect(updated.status).toBe(200);
+    expect(updated.body.warnings).toEqual([expect.objectContaining(expectedWarning)]);
+
+    const audits = await fixture.reader.select().from(activityLog).where(eq(activityLog.entityId, created.body.id));
+    expect(audits.map(a => a.action)).toEqual(['workflow.created', 'workflow.updated']);
+    for (const audit of audits) {
+      expect(audit.details?.definitionWarnings).toEqual([expectedWarning]);
+    }
+  });
+
+  it('returns empty warnings when references are selector-covered and none for step-less patches', async () => {
+    const steps = [producer, consumer('publish-report', {
+      workProductSelectors: { 'build-content': { type: 'document', title: 'content.json' } },
+    })];
+    const created = await request(app()).post(`/api/companies/${companyId}/workflows`).send({ name: 'clean gate', steps });
+    expect(created.status).toBe(201);
+    expect(created.body.warnings).toEqual([]);
+
+    const renamed = await request(app()).patch(`/api/workflows/${created.body.id}`).send({ name: 'clean gate renamed' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.warnings).toBeUndefined();
+    const repatched = await request(app()).patch(`/api/workflows/${created.body.id}`).send({ steps });
+    expect(repatched.status).toBe(200);
+    expect(repatched.body.warnings).toEqual([]);
+
+    const audits = await fixture.reader.select().from(activityLog).where(eq(activityLog.entityId, created.body.id));
+    for (const audit of audits) {
+      expect(audit.details?.definitionWarnings).toBeUndefined();
+    }
+  });
+
+  it('rejects duplicate step ids at the shared store save boundary', async () => {
+    const steps = [producer, consumer('publish-report'), consumer('publish-report')];
+    const created = await request(app()).post(`/api/companies/${companyId}/workflows`).send({ name: 'dup gate', steps: [producer] });
+    expect(created.status).toBe(201);
+    for (const method of ['post', 'patch'] as const) {
+      const url = method === 'post' ? `/api/companies/${companyId}/workflows` : `/api/workflows/${created.body.id}`;
+      const response = await request(app())[method](url).send({ name: 'duplicated', steps });
+      // HTTP 경로는 엔진 validateDag("Duplicate step IDs detected")가 먼저 422로 거부한다.
+      expect(response.status).toBe(422);
+      expect(response.body.error).toContain('Duplicate step IDs');
+      expect(response.body.warnings).toBeUndefined();
+    }
+    // store 직접 호출(도구·테스트)은 공유 저장 게이트가 같은 거부로 닫는다.
+    const definition = await createWorkflowDefinition(fixture.db, { companyId, name: 'dup store', steps: [] });
+    await expect(createWorkflowDefinition(fixture.db, { companyId, name: 'dup store 2', steps: steps as never })).rejects.toThrow(/Duplicate workflow step ids: publish-report/);
+    await expect(updateWorkflowDefinition(fixture.db, definition.id, { steps: steps as never })).rejects.toThrow(/Duplicate workflow step ids: publish-report/);
+    expect((await workflowService.getDefinition(fixture.reader, definition.id))!.steps).toEqual([]);
+  });
+});
