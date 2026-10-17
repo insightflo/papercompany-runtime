@@ -53,6 +53,10 @@ describe("tool recovery brief creation (real transaction)", () => {
     expect(text).toContain("registration_not_applicable");
     expect(text).toContain("restart_from_start");
     expect(text).toContain("board approval");
+    // Stage 2(D4): 오너 자가 교체 안내 — 교정 메타데이터 재실행 경로와 필수 필드를 브리프가 알려야 한다.
+    expect(text).toContain("POST /api/issues/{this issue id}/owner-recovery/replacement");
+    for (const field of ["sourceRunId", "decisionEventId", "metadata", "idempotencyKey"])
+      expect(text).toContain(field);
     expect(result.issue.originId).toBe(input.oversightIssue.id);
     expect(result.issue.originKind).toBe("mission_main_executor_unblock");
     const again = await create(input);
@@ -106,6 +110,8 @@ describe("tool recovery brief creation (real transaction)", () => {
     await db.insert(toolDefinitions).values({ companyId: foreign.mission.companyId, name: "collect-us-stockflow", adapterType: "builtin", adapterConfig: { command: "FOREIGN_COMMAND" } });
     const result = await create(input);
     expect(result.issue.description).toContain("구조화된 시스템 사실");
+    expect(result.issue.description).toContain("owner-recovery/replacement");
+    expect(result.issue.description).toContain("교정 metadata");
     expect(result.issue.description).toContain("unavailable");
     expect(result.issue.description).not.toContain("FOREIGN_COMMAND");
   });
