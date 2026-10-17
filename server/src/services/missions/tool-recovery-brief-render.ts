@@ -9,8 +9,8 @@ export function renderToolRecoveryBriefFacts(facts: ToolRecoveryBriefFacts): str
     "recoveryTarget:", "```json", JSON.stringify(facts.recoveryTarget, null, 2), "```",
     ko ? "현재 미션 오너 에이전트의 이 복구 이슈 실행/체크아웃이 필요합니다. 운영자는 오너를 대신해 결정을 제출할 수 없습니다."
       : "Submission requires the current mission-owner agent's heartbeat and checkout on this owner-action issue; board cannot submit as owner.",
-    ko ? "재시도와 산출물 복구는 잠금 안에서 최신 결정과 증거를 다시 확인합니다. 처음부터 재시작은 별도 운영자 승인(board approval)이 필요합니다."
-      : "Retry and artifact recovery revalidate latest decision and evidence under locks. restart_from_start needs separate board approval and owner admission.",
+    ko ? "재시도와 산출물 복구는 잠금 안에서 최신 결정과 증거를 다시 확인합니다. 처음부터 재시작 재실행 중 입력 메타데이터 교정(URL 스킴 등 실패 원인 정정)이 필요한 경우 오너는 자기 미션에 한해 POST /api/issues/{this issue id}/owner-recovery/replacement 로 sourceRunId, decisionEventId, 교정 metadata, idempotencyKey를 담아 제안과 승인을 한 번에 기록할 수 있습니다. 그 밖의 처음부터 재시작은 별도 운영자 승인(board approval)이 필요하며, 사람 제안+승인(보드) 경로도 그대로 유효합니다."
+      : "Retry and artifact recovery revalidate latest decision and evidence under locks. When a restart_from_start rerun needs corrected input metadata (e.g. fixing the failure cause such as a URL scheme), the owner may propose and approve it in one call for their own mission via POST /api/issues/{this issue id}/owner-recovery/replacement with sourceRunId, decisionEventId, corrected metadata and idempotencyKey. Other restart_from_start reruns still need separate board approval and owner admission; the human propose-and-approve board path remains valid.",
     ...(["submission", "execution", "decisions", "registration", "registry", "toolResult", "invocationPaths", "producers", "relatedPatterns", "languageLookup"] as const)
       .map(key => `${key}: ${JSON.stringify(facts[key])}`),
     ko ? "toolResult.error는 실행기가 저장한 오류 설명이며 오류 코드나 실행 권한이 아닙니다. recover_artifact에는 reworkTargetRef(우선) 또는 sourceIssueRef로 공식 산출물을 소유한 같은 회사·미션의 생산자 이슈 ID/식별자를 지정하세요. recoveryTarget은 실패한 도구 시도를 가리키며 생산자 참조를 대신하지 않습니다."

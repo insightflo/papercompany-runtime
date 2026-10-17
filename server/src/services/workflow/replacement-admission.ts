@@ -45,10 +45,14 @@ export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, ac
     }
     const scope = await lockReplacementScope(t, input.companyId, source.id, intent.decisionEventId);
     const [approval] = await tx.select().from(approvals).where(and(eq(approvals.id, intent.approvalId), eq(approvals.companyId, input.companyId))).for("update");
-    if (!approval || approval.type !== "workflow_replacement" || approval.status !== "approved" || !approval.decidedByUserId
-      || approval.decidedByUserId.startsWith("agent:")) throw conflict("replacement_operator_approval_required");
+    if (!approval || approval.type !== "workflow_replacement" || approval.status !== "approved") throw conflict("replacement_operator_approval_required");
     const parsed = replacementApprovalPayloadSchema.safeParse(approval.payload);
     if (!parsed.success) throw conflict("replacement_approval_invalid");
+    // Operator approval 또는 오너 에이전트 자가 승인만 입장 가능. 자가 승인은 payload 마커와
+    // 입장 요청자(= payload 에 기록된 미션 오너) 일치일 때만 사람 승인(decidedByUserId)을 대신한다.
+    const ownerSelfApproved = parsed.data.ownerAgentSelfApproval === true
+      && parsed.data.requesterAgentId === requester.agentId && parsed.data.requesterAgentId === scope.mission.ownerAgentId;
+    if (!ownerSelfApproved && (!approval.decidedByUserId || approval.decidedByUserId.startsWith("agent:"))) throw conflict("replacement_operator_approval_required");
     const p = parsed.data;
     const definition = await lockReplacementDefinition(t, input.companyId, source.workflowId);
     const metadata = normalizeWorkflowRunInputs(p.inputContract, input.metadata);

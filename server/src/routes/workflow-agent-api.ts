@@ -17,6 +17,8 @@ import {
 } from "@paperclipai/shared/validators/workflow-agent-api";
 import { validate } from "../middleware/validate.js";
 import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
+import { ownerSelfReplacementSchema, type OwnerSelfReplacement } from "@paperclipai/shared/validators/workflow-replacement";
+import { ownerSelfReplacement } from "../services/workflow/owner-self-replacement.js";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -292,6 +294,35 @@ export function workflowAgentApiRoutes(db: Db) {
       },
     });
     res.status(201).json({ eventId: recorded.eventId, createdAt: recorded.createdAt, decision: recorded.submission.decision });
+  });
+
+  // 오너 에이전트 자기 미션 실패 런의 교정 메타데이터 replacement — 제안+승인을 한 번에 기록한다.
+  // 인가는 owner-recovery 결정 라우트와 동일 체인(미션 오너 + heartbeat identity + 체크아웃).
+  router.post("/issues/:id/owner-recovery/replacement", hermesOpsMutationGuard("owner_recovery.replacement.self_approve"), validate(ownerSelfReplacementSchema), async (req, res) => {
+    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    assertCompanyAccess(req, issue.companyId);
+    const actor = getActorInfo(req);
+    const data: OwnerSelfReplacement = req.body;
+    const result = await ownerSelfReplacement(db, { issueId: issue.id, actor, request: data });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.owner_recovery_replacement_recorded",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        approvalId: result.approval.id,
+        sourceRunId: data.sourceRunId,
+        targetRunId: result.targetRunId,
+        replay: result.replay,
+      },
+    });
+    res.status(201).json({ approvalId: result.approval.id, status: result.approval.status,
+      targetRunId: result.targetRunId, replay: result.replay });
   });
 
   return router;
