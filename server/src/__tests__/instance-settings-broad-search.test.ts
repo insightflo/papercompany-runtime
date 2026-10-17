@@ -61,6 +61,28 @@ describe("instance settings broad search allowlists — real database", () => {
     });
   });
 
+  it("persists and reads back the workproduct selector-reject flags (write path projection)", async () => {
+    // [소비 하드닝 4단계 — 플래그 쓰기 경로 마지막 조각] 스키마 통과 후 normalizeExperimentalSettings
+    // 의 명시적 투영에서 버려지면 PATCH 가 성공해도 값이 저장되지 않는다 — 왕복을 입증한다.
+    const service = instanceSettingsService(db);
+    const updated = await service.updateExperimental({
+      enableWorkProductSelectorRejectCompanyIdsV1: [companyId],
+    });
+    expect(updated.experimental.enableWorkProductSelectorRejectCompanyIdsV1).toEqual([companyId]);
+    expect(updated.experimental.enableWorkProductSelectorRejectV1).toBe(false);
+    expect(await service.getExperimental()).toMatchObject({
+      enableWorkProductSelectorRejectV1: false,
+      enableWorkProductSelectorRejectCompanyIdsV1: [companyId],
+    });
+    const flipped = await service.updateExperimental({ enableWorkProductSelectorRejectV1: true });
+    expect(flipped.experimental.enableWorkProductSelectorRejectV1).toBe(true);
+    const [stored] = await db.select().from(instanceSettings);
+    expect(stored?.experimental).toMatchObject({
+      enableWorkProductSelectorRejectV1: true,
+      enableWorkProductSelectorRejectCompanyIdsV1: [companyId],
+    });
+  });
+
   it("persists lists and keeps omitted scopes while clearing a selected scope", async () => {
     const service = instanceSettingsService(db);
     const updated = await service.updateExperimental(allowedScopes);

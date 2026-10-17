@@ -41,6 +41,9 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
       enableKnowledgePatternInjection: parsed.data.enableKnowledgePatternInjection ?? false,
       enableQaRebindRecoveryV1: parsed.data.enableQaRebindRecoveryV1 ?? false,
       enableQaRebindRecoveryCompanyIdsV1: parsed.data.enableQaRebindRecoveryCompanyIdsV1 ?? [],
+      // [소비 하드닝 4단계 — 플래그 쓰기 경로] 스키마와 이 투영이 함께 있어야 PATCH 로 저장된다.
+      enableWorkProductSelectorRejectV1: parsed.data.enableWorkProductSelectorRejectV1 ?? false,
+      enableWorkProductSelectorRejectCompanyIdsV1: parsed.data.enableWorkProductSelectorRejectCompanyIdsV1 ?? [],
       broadSearchAllowedCompanyIdsV1: parsed.data.broadSearchAllowedCompanyIdsV1 ?? [],
       broadSearchAllowedMissionIdsV1: parsed.data.broadSearchAllowedMissionIdsV1 ?? [],
       broadSearchAllowedAgentIdsV1: parsed.data.broadSearchAllowedAgentIdsV1 ?? [],
@@ -57,6 +60,9 @@ function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettin
     enableKnowledgePatternInjection: false,
     enableQaRebindRecoveryV1: false,
     enableQaRebindRecoveryCompanyIdsV1: [],
+    // [소비 하드닝 4단계] 파싱 실패 폴백 기본값도 스키마 전체 키와 일치시킨다(fail-open).
+    enableWorkProductSelectorRejectV1: false,
+    enableWorkProductSelectorRejectCompanyIdsV1: [],
     broadSearchAllowedCompanyIdsV1: [],
     broadSearchAllowedMissionIdsV1: [],
     broadSearchAllowedAgentIdsV1: [],
