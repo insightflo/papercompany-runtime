@@ -138,6 +138,58 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.humanReview!.decisionSubject).toContain("escalate");
     expect(card.definition.humanReview!.recommendedNextStep).toBe(spec({ decision: "escalate" }).nextAction);
   });
+
+  // ---------- system escalate: nextAction 열거에서 복구 경로 옵션 파생(일반 규칙) ----------
+
+  const SYSTEM_ESCALATE_NEXT_ACTION_EN = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
+  const SYSTEM_ESCALATE_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다.";
+
+  it("derives the enumerated recovery paths as options for system escalate", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.map((option) => option.id)).toEqual([
+      "retry-with-revised-input", "replan", "reassign", "cancel",
+    ]);
+    expect(card.definition.options.map((option) => option.label)).toEqual([
+      "retry with revised input", "replan", "reassign", "cancel",
+    ]);
+    expect(card.definition.actions).toHaveLength(1);
+    expect(card.definition.actions[0]).toMatchObject({ id: "submit", outcome: "submit", tone: "primary", requiresSelection: true });
+    expect(card.definition.selection).toEqual({ min: 1, max: 1 });
+    expect(card.definition.comment.mode).toBe("optional");
+    expect(card.definition.humanReview!.recommendedNextStep).toBe(SYSTEM_ESCALATE_NEXT_ACTION_EN);
+  });
+
+  it("derives the same recovery paths from the Korean system escalate nextAction", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.map((option) => option.label)).toEqual([
+      "운영자가 입력 수정 후 재시도", "계획 변경", "담당자 변경", "취소",
+    ]);
+  });
+
+  it("keeps the default approve/hold/reject for agent submissions even with an enumerated nextAction", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(card.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+    expect(card.definition.comment.mode).toBe("required");
+  });
+
+  it("keeps the default options for system request_input and system escalate without an enumeration", () => {
+    const requestInput = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "request_input", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(requestInput.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+    const noEnumeration = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: "운영자 승인 후 다음 단계를 진행해 주세요",
+    }));
+    expect(noEnumeration.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+  });
 });
 
 // ---------- Part B: submission bridge (embedded Postgres) ----------

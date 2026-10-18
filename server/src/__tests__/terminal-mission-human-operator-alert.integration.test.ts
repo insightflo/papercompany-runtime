@@ -10,6 +10,7 @@ import {
   issueComments,
   issues,
   missions,
+  operatorDecisions,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -23,6 +24,7 @@ import {
 import { missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
+import { MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "../services/missions/mission-owner-human-input-card.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -94,6 +96,7 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
   }, 60_000);
 
   afterEach(async () => {
+    await db.delete(operatorDecisions);
     await db.delete(workflowTransitionEvents);
     await db.delete(issueComments);
     await db.delete(activityLog);
@@ -380,6 +383,122 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
     ]));
     expect(failedRunIdsByWorkflowRun.get(firstWorkflowRunId)).toEqual([seed.failedRunId]);
     expect(failedRunIdsByWorkflowRun.get(secondWorkflowRunId)).toEqual([secondFailedRunId]);
+  });
+
+  it("creates the operator decision card for the system terminal escalation (moi1 contract)", async () => {
+    const seed = await seedTerminalFixture(db);
+    await missionService(db).runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-07-01T00:10:00.000Z") });
+
+    const [reportEvent] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+      .where(and(eq(workflowTransitionEvents.eventType, REPORT_EVENT_TYPE), eq(workflowTransitionEvents.correlationId, seed.ownerActionIssueId)));
+    expect(reportEvent).toBeTruthy();
+
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId));
+    expect(card).toMatchObject({
+      requestKey: `moi1:${reportEvent!.id}`,
+      sourceType: MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
+      sourceId: reportEvent!.id,
+      issueId: seed.ownerActionIssueId,
+      requestedByAgentId: seed.ownerAgentId,
+      status: "pending",
+      continuationMode: "issue_current_assignee",
+    });
+    const definition = card!.definition as {
+      options: { id: string }[];
+      actions: { id: string }[];
+      comment: { mode: string };
+      humanReview?: unknown;
+    };
+    // 시스템 escalate nextAction 의 복구 경로 열거가 그대로 선택지가 된다(사람이 누를 승인 버튼).
+    expect(definition.options.map((option) => option.id)).toEqual(["retry-with-revised-input", "replan", "reassign", "cancel"]);
+    expect(definition.actions.map((action) => action.id)).toEqual(["submit"]);
+    expect(definition.comment.mode).toBe("optional");
+    expect(definition.humanReview).toBeTruthy();
+    const context = card!.sourceContext as { missionId: string; targetSnapshot: { issueId: string; issueStatus: string } };
+    expect(context.missionId).toBe(seed.missionId);
+    expect(context.targetSnapshot).toEqual({ issueId: seed.ownerActionIssueId, issueStatus: "blocked" });
+
+    // 시스템 payload 에 nextAction/evidence 가 실제 값으로 매핑됐다(inbox 표시 + 카드 요약 원본).
+    const [inbox] = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, seed.companyId),
+      eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION),
+      eq(activityLog.entityId, seed.ownerActionIssueId),
+    ));
+    const details = inbox?.details as { nextAction?: string; evidence?: string } | undefined;
+    expect(details?.nextAction).toContain("recovery path");
+    expect(details?.evidence).toContain("failed-runs=");
+  });
+
+  it("keeps one card across repeated supervision runs and recreates it when missing (self-heal)", async () => {
+    const seed = await seedTerminalFixture(db);
+    const svc = missionService(db);
+    await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-07-01T00:10:00.000Z") });
+    const firstCards = await db.select({ requestKey: operatorDecisions.requestKey }).from(operatorDecisions)
+      .where(eq(operatorDecisions.companyId, seed.companyId));
+    expect(firstCards).toHaveLength(1);
+
+    // 반복 supervision — 이미 보고된 스냅샷이라도 카드는 1건 유지(중복 생성 없음).
+    await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-07-01T00:20:00.000Z") });
+    expect(await db.select({ id: operatorDecisions.id }).from(operatorDecisions)
+      .where(eq(operatorDecisions.companyId, seed.companyId))).toHaveLength(1);
+
+    // 카드 유실(예: 카드 브리지 없던 배포에서 발신된 라이브 스냅샷) → 같은 requestKey 로 재생성.
+    await db.delete(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId));
+    await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-07-01T00:30:00.000Z") });
+    const healed = await db.select({ requestKey: operatorDecisions.requestKey }).from(operatorDecisions)
+      .where(eq(operatorDecisions.companyId, seed.companyId));
+    expect(healed).toHaveLength(1);
+    expect(healed[0]!.requestKey).toBe(firstCards[0]!.requestKey);
+  });
+
+  it("records a card failure in activity instead of failing silently (fail-loud)", async () => {
+    const seed = await seedTerminalFixture(db);
+    const { ensureTerminalHumanInputDecisionCard } = await import("../services/missions/terminal-mission-human-operator-alert.js");
+    const decisionEventId = randomUUID();
+    await ensureTerminalHumanInputDecisionCard(db, {
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      decisionEventId,
+      // 해석 불가능한 앵커(빈 이슈 상태) → 빌더 422 → activity 에 에러 기록, 조용히 넘기지 않는다.
+      issue: { id: seed.ownerActionIssueId, status: "", title: "[Unblock] source", identifier: "T1", originId: seed.sourceIssueId },
+      ownerAgentId: seed.ownerAgentId,
+      reason: "terminal failure",
+      nextAction: "choose a recovery path",
+      evidence: "failed-runs=failed",
+    });
+    expect(await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId))).toHaveLength(0);
+    const failures = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, seed.companyId),
+      eq(activityLog.action, "mission.owner.human_input_card_failed"),
+    ));
+    expect(failures).toHaveLength(1);
+    const details = failures[0]!.details as { decisionEventId?: string; requestKey?: string; error?: string };
+    expect(details.decisionEventId).toBe(decisionEventId);
+    expect(details.requestKey).toBe(`moi1:${decisionEventId}`);
+    expect(details.error).toBeTruthy();
+  });
+
+  it("skips card assurance without error when the anchor issue is already terminal", async () => {
+    const seed = await seedTerminalFixture(db);
+    const { ensureTerminalHumanInputDecisionCard } = await import("../services/missions/terminal-mission-human-operator-alert.js");
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, seed.ownerActionIssueId));
+    const result = await ensureTerminalHumanInputDecisionCard(db, {
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      decisionEventId: randomUUID(),
+      issue: { id: seed.ownerActionIssueId, status: "done", title: "[Unblock] source", identifier: "T1", originId: seed.sourceIssueId },
+      ownerAgentId: seed.ownerAgentId,
+      reason: "terminal failure",
+      nextAction: "choose a recovery path",
+      evidence: "failed-runs=failed",
+    });
+    expect(result).toMatchObject({ ensured: false, reason: "anchor-issue-terminal" });
+    expect(await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId))).toHaveLength(0);
+    const failures = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, seed.companyId),
+      eq(activityLog.action, "mission.owner.human_input_card_failed"),
+    ));
+    expect(failures).toHaveLength(0);
   });
 
   it("prefers a QA-cap owner action even when it was inserted later", async () => {
