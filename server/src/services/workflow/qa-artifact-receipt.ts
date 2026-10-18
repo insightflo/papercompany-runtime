@@ -14,6 +14,14 @@ type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution" | "
   artifactExecution?: FrozenArtifactAttempt; internalPathRoots?: string[];
 };
 
+/** Server-verifier rejection, distinct from child diagnostics and invalid machine results. */
+export class QaArtifactRejectionError extends Error {
+  constructor(message: "qa_artifact_verdict_failed" | `qa_artifact_runtime_checks_failed:${string}`) {
+    super(message);
+    this.name = "QaArtifactRejectionError";
+  }
+}
+
 /** Declared files only, relative to the configured deployment root. */
 export async function toolDeploymentHashes(files: string[], cwd: string) {
   if (!files.length) throw new Error("qa_tool_deployment_unresolved");
@@ -36,14 +44,13 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
     resultSchemaVersion: legacyReceipt!.resultSchema, resultAdapter: "legacy-qa" as const };
   const bytes = await readArtifactBytes(s.root, contract.resultFileName, 1024 * 1024);
   const qa = adaptQaResult(JSON.parse(bytes.toString("utf8")), contract);
-  if (!qa.ok || qa.checks.some(c => !c.ok)) throw new Error("qa_artifact_verdict_failed");
   if ((s.input.mode ?? "content") !== (qa.inputDigest.mode ?? "content")) throw new Error("qa_artifact_input_mode_mismatch");
   const normalize = (a: { fileName: string; sha256: string; byteSize: number }[]) => [...a].sort((a, b) => a.fileName.localeCompare(b.fileName));
   if (s.input.mode === "html" && !isDeepStrictEqual(normalize(qa.ancillaryManifest ?? []),
     normalize(s.input.ancillaryManifest ?? []))) throw new Error("qa_artifact_ancillary_digest_mismatch");
   if (qa.inputDigest.sha256 !== s.input.sha256 || !isDeepStrictEqual(normalize(qa.assetManifest ?? []),
     normalize(s.input.assetManifest))) throw new Error("qa_artifact_input_digest_mismatch");
-  let runtimeChecks;
+  let document: { html: string } | { json: unknown } | undefined;
   if (frozen) {
     const source = await readArtifactBytes(s.root, `input/${path.basename(s.input.path)}`, 8 * 1024 * 1024);
     if (digest(source) !== s.input.sha256 || source.length !== s.input.byteSize) throw new Error("qa_artifact_input_changed");
@@ -52,9 +59,20 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
       const data = await readArtifactBytes(s.root, `input/${asset.prefix}/${asset.fileName}`, 16 * 1024 * 1024);
       if (digest(data) !== asset.sha256 || data.length !== asset.byteSize) throw new Error("qa_artifact_asset_changed");
     }
+    document = s.input.mode === "html" ? { html: source.toString("utf8") } : { json: JSON.parse(source.toString("utf8")) };
+  }
+  const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
+  const receipt = toolArtifactReceiptSchema.parse({ ...scope,
+    schemaVersion: frozen ? "workflow.tool-artifact.v2" : "workflow.tool-artifact.v1", role: "qa",
+    relativePath: contract.resultFileName, resultSchema: contract.resultSchemaVersion, sha256: digest(bytes), byteSize: bytes.length,
+    toolId: tool.id, toolName: tool.name, toolDeployment,
+    ...(frozen ? { contractHash: frozen.contractHash, qaConfigHash: frozen.qaConfigHash, pluginChecks: qa.checks } : {}) });
+  // Only a result bound to valid request data and intact captured bytes can request content rework.
+  if (!qa.ok || qa.checks.some(c => !c.ok)) throw new QaArtifactRejectionError("qa_artifact_verdict_failed");
+  let runtimeChecks;
+  if (frozen) {
     const evaluated = await evaluateQaRules({ config: frozen.qaConfig, provenanceValid: true, resultValid: true,
-      ...(s.input.mode === "html" ? { html: source.toString("utf8") } : { json: JSON.parse(source.toString("utf8")) }),
-      assetManifest: s.input.assetManifest,
+      ...document, assetManifest: s.input.assetManifest,
       internalPathRoots: await resolveQaInternalPathRoots([s.outputRoot, s.root.path, ...(s.internalPathRoots ?? [])]) });
     if (!evaluated.ok) {
       // ids stay first (whitelist + id-only consumers); string details (e.g. violating links) ride
@@ -62,17 +80,11 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
       const failed = evaluated.checks.filter(c => !c.ok);
       const details = failed.flatMap(c => (typeof c.detail === "string" && c.detail.length > 0) ? [c.detail] : [])
         .join(" ").slice(0, 300);
-      throw new Error(`qa_artifact_runtime_checks_failed:${failed.map(c => c.id).join(",")}${details ? ` ${details}` : ""}`);
+      throw new QaArtifactRejectionError(`qa_artifact_runtime_checks_failed:${failed.map(c => c.id).join(",")}${details ? ` ${details}` : ""}`);
     }
     runtimeChecks = evaluated.checks;
   }
-  const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
-  const receipt = toolArtifactReceiptSchema.parse({ ...scope,
-    schemaVersion: frozen ? "workflow.tool-artifact.v2" : "workflow.tool-artifact.v1", role: "qa",
-    relativePath: contract.resultFileName, resultSchema: contract.resultSchemaVersion, sha256: digest(bytes), byteSize: bytes.length,
-    toolId: tool.id, toolName: tool.name, toolDeployment,
-    ...(frozen ? { contractHash: frozen.contractHash, qaConfigHash: frozen.qaConfigHash, runtimeChecks, pluginChecks: qa.checks } : {}) });
-  return { receipt, qa };
+  return { receipt: runtimeChecks ? toolArtifactReceiptSchema.parse({ ...receipt, runtimeChecks }) : receipt, qa };
 }
 
 /** Completion rechecks durable request + frozen contract, never stdout or supplied artifactPath. */

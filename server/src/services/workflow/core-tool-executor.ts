@@ -9,7 +9,7 @@ import { writeArtifactFile } from "./artifact-writer.js";
 import { loadArtifactAttempt, type FrozenArtifactAttempt } from "./artifact-contract-runtime.js";
 import { captureQaDispatch } from "./qa-dispatch-guard.js";
 import { prepareQaArtifactRequest } from "./qa-artifact-request.js";
-import { toolDeploymentHashes, verifyQaArtifact } from "./qa-artifact-receipt.js";
+import { QaArtifactRejectionError, toolDeploymentHashes, verifyQaArtifact } from "./qa-artifact-receipt.js";
 import type { ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
@@ -253,7 +253,7 @@ export async function executeCoreWorkflowTool(input: {
     const stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
     const code = typed.code === undefined ? "" : ` (exit: ${String(typed.code)})`;
     const status = (error instanceof ToolProgressError && error.status === 422) || typed.message.startsWith("artifact_contract_") ? 422 : 500;
-    const message = adapterConfig.progress !== undefined && !(error instanceof ToolProgressError) && !typed.message.startsWith("artifact_contract_")
+    const message = adapterConfig.progress !== undefined && !(error instanceof ToolProgressError) && !(error instanceof QaArtifactRejectionError) && !typed.message.startsWith("artifact_contract_")
       ? "tool_progress_execution_failed" : typed.message;
     return { status, body: { error: `${message}${code}`, data: { stdout }, stderr, tool: input.toolName, source: "core", invocationProvenance } };
   }
