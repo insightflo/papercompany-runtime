@@ -93,7 +93,9 @@ it("never adopts legacy parent identity from current issue/context", async () =>
     status: "failed", contextSnapshot: { workflowRunId: f.workflowRunId, workflowStepRunId: f.stepRunId } }).returning();
   const queued = await enqueue(f, parent, false), child = await claimHeartbeatWithRecoveryGuard(db, queued, new Date());
   expect(child).toMatchObject({ workflowStepRunId: null, workflowExecutionGeneration: null });
-  expect((await f.register(child!.id))?.metadata.workflowProducer).toBeUndefined();
+  // 2026-10-17 계약: 채택 없음은 유지되며, 스텝 바인딩 이슈의 미연결 신원 등록은 봉인 없는 독 기록을
+  //   만들므로 거부된다(회복은 연결된 재디스패치로).
+  await expect(f.register(child!.id)).rejects.toThrow("workproduct_producer_unlinked_registration");
 });
 it.each(["foreign", "cycle", "missing", "old-iteration", "forged-key"])("rejects %s ancestor instead of borrowing retry proof", async kind => {
   await flag(false); const f = await fixture(), db = database(), parent = await start(f);

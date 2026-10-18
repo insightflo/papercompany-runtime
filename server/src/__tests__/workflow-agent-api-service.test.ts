@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   heartbeatRuns,
   issueComments,
@@ -157,6 +158,10 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
     const agentId = randomUUID();
     const runId = randomUUID();
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, issue.id));
+    if (!stepRun) throw new Error("seed step run missing");
+    // 실제 디스패치와 동일한 자격: typed 웨이크(시도증명 포함) + 연결된 하트비트.
+    //   2026-10-17 계약 변경 — 스텝 바인딩 이슈의 미연결 신원 등록은 거부된다.
     await db.insert(agents).values({
       id: agentId,
       companyId: issue.companyId,
@@ -168,6 +173,46 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       runtimeConfig: {},
       permissions: {},
     });
+    const wakeId = randomUUID();
+    const attemptProof = {
+      schemaVersion: 1 as const,
+      companyId: issue.companyId,
+      agentId,
+      issueId: issue.id,
+      missionId: null,
+      workflowRunId: stepRun.workflowRunId,
+      stepRunId: stepRun.id,
+      executionGeneration: stepRun.executionGeneration,
+      retryCount: stepRun.retryCount,
+      iterationIndex: stepRun.iterationIndex,
+      wakeupRequestId: wakeId,
+      parentHeartbeatRunId: null,
+    };
+    await db.insert(agentWakeupRequests).values({
+      id: wakeId,
+      companyId: issue.companyId,
+      agentId,
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "workflow_step_runnable",
+      requestKind: "workflow_step_runnable",
+      issueId: issue.id,
+      missionId: null,
+      workflowRunId: stepRun.workflowRunId,
+      workflowStepRunId: stepRun.id,
+      workflowExecutionGeneration: stepRun.executionGeneration,
+      status: "claimed",
+      runId,
+      requestedAt: new Date("2026-07-06T00:00:01.500Z"),
+      requestedByActorType: "system",
+      requestedByActorId: "test-seed",
+      payload: {
+        issueId: issue.id,
+        workflowRunId: stepRun.workflowRunId,
+        workflowStepRunId: stepRun.id,
+        __paperclipWorkflowProducerAttempt: attemptProof,
+      },
+    });
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId: issue.companyId,
@@ -175,6 +220,9 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       issueId: issue.id,
       status: "running",
       startedAt: new Date("2026-07-06T00:00:02.000Z"),
+      wakeupRequestId: wakeId,
+      workflowStepRunId: stepRun.id,
+      workflowExecutionGeneration: stepRun.executionGeneration,
     });
     await db.update(issues).set({ assigneeAgentId: agentId, checkoutRunId: runId }).where(eq(issues.id, issue.id));
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));

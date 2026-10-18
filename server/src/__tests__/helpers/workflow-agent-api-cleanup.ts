@@ -1,5 +1,5 @@
 import {
-  activityLog, agents, assets, companies, heartbeatRuns, issueComments, issueWorkProducts,
+  activityLog, agentWakeupRequests, agents, assets, companies, heartbeatRuns, issueComments, issueWorkProducts,
   issues, missionPlanArtifacts, missionPlanQaVerdicts, missions, workflowDefinitions,
   workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
@@ -13,6 +13,7 @@ export async function clearWorkflowAgentApiTestDb(db: Db) {
   await db.delete(issueComments);
   await db.delete(missionPlanQaVerdicts);
   await db.delete(heartbeatRuns);
+  await db.delete(agentWakeupRequests);
   await db.delete(workflowStepRuns);
   await db.delete(workflowRuns);
   await db.delete(workflowDefinitions);
