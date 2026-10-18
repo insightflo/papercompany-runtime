@@ -50,16 +50,15 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
     normalize(s.input.ancillaryManifest ?? []))) throw new Error("qa_artifact_ancillary_digest_mismatch");
   if (qa.inputDigest.sha256 !== s.input.sha256 || !isDeepStrictEqual(normalize(qa.assetManifest ?? []),
     normalize(s.input.assetManifest))) throw new Error("qa_artifact_input_digest_mismatch");
-  let document: { html: string } | { json: unknown } | undefined;
+  let source: Buffer | undefined;
   if (frozen) {
-    const source = await readArtifactBytes(s.root, `input/${path.basename(s.input.path)}`, 8 * 1024 * 1024);
+    source = await readArtifactBytes(s.root, `input/${path.basename(s.input.path)}`, 8 * 1024 * 1024);
     if (digest(source) !== s.input.sha256 || source.length !== s.input.byteSize) throw new Error("qa_artifact_input_changed");
     for (const asset of [...s.input.assetManifest.map(a => ({ ...a, prefix: 'assets' })),
       ...(s.input.ancillaryManifest ?? []).map(a => ({ ...a, prefix: 'ancillary' }))]) {
       const data = await readArtifactBytes(s.root, `input/${asset.prefix}/${asset.fileName}`, 16 * 1024 * 1024);
       if (digest(data) !== asset.sha256 || data.length !== asset.byteSize) throw new Error("qa_artifact_asset_changed");
     }
-    document = s.input.mode === "html" ? { html: source.toString("utf8") } : { json: JSON.parse(source.toString("utf8")) };
   }
   const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
   const receipt = toolArtifactReceiptSchema.parse({ ...scope,
@@ -71,6 +70,8 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
   if (!qa.ok || qa.checks.some(c => !c.ok)) throw new QaArtifactRejectionError("qa_artifact_verdict_failed");
   let runtimeChecks;
   if (frozen) {
+    const document = s.input.mode === "html" ? { html: source!.toString("utf8") }
+      : { json: JSON.parse(source!.toString("utf8")) };
     const evaluated = await evaluateQaRules({ config: frozen.qaConfig, provenanceValid: true, resultValid: true,
       ...document, assetManifest: s.input.assetManifest,
       internalPathRoots: await resolveQaInternalPathRoots([s.outputRoot, s.root.path, ...(s.internalPathRoots ?? [])]) });

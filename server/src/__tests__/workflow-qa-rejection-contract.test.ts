@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { toolDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { captureArtifactRoot, digest } from "../services/workflow/artifact-files.js";
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
-import { verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
+import { QaArtifactRejectionError, verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
 import { deriveMechanicalQaRejection } from "../services/workflow/control-flow/edge-condition.js";
 import { persistFailedToolDispatch } from "../services/workflow/tool-dispatch-failure.js";
 import { database, fixture } from "./helpers/qa-receipt-fixture.js";
@@ -79,9 +79,9 @@ it("a failed plugin check remains a rejection even when the top-level verdict is
 
 it.each(["mode", "input-hash", "asset-hash", "asset-size", "ancillary-hash", "result-schema",
   "ok-type", "check-type", "contract-hash", "contract-scope", "receipt-scope", "captured-input",
-  "captured-size", "captured-asset", "captured-ancillary", "missing-input", "invalid-content-json"])(
+  "captured-size", "captured-asset", "captured-ancillary", "missing-input"])(
   "a negative result with invalid %s cannot authorize rework", async fault => {
-    const f = await receiptFixture(fault !== "invalid-content-json");
+    const f = await receiptFixture(true);
     switch (fault) {
       case "mode": f.raw.inputDigest.mode = "content"; break;
       case "input-hash": f.raw.inputDigest.sha256 = "0".repeat(64); break;
@@ -99,18 +99,30 @@ it.each(["mode", "input-hash", "asset-hash", "asset-size", "ancillary-hash", "re
       case "captured-asset": await writeFile(path.join(f.dir, "input", "assets", "hero.png"), "changed"); break;
       case "captured-ancillary": await writeFile(path.join(f.dir, "input", "ancillary", "capture.json"), "changed"); break;
       case "missing-input": await rm(path.join(f.dir, "input", f.file)); break;
-      case "invalid-content-json": {
-        const bytes = Buffer.from("{invalid json");
-        await writeFile(path.join(f.dir, "input", f.file), bytes);
-        f.snapshot.input.sha256 = f.raw.inputDigest.sha256 = digest(bytes);
-        f.snapshot.input.byteSize = bytes.length;
-        break;
-      }
     }
     await f.writeResult();
     const error = await failure(f.verify());
     expect(reworkFor(error.message), error.message).toBe(false);
   });
+
+// C01 preserves the baseline: malformed content may be rejected by a valid QA result.
+it("a valid negative result for malformed content still authorizes rework", async () => {
+  const f = await receiptFixture(false, "{invalid json");
+  await f.writeResult();
+  const error = await failure(f.verify());
+  expect(error).toBeInstanceOf(QaArtifactRejectionError);
+  expect(error.message).toBe("qa_artifact_verdict_failed");
+  expect(reworkFor(error.message)).toBe(true);
+});
+
+it("malformed machine-result JSON cannot authorize rework", async () => {
+  const f = await receiptFixture();
+  await writeFile(path.join(f.dir, "inspection.json"), "{invalid json");
+  const error = await failure(f.verify());
+  expect(error).toBeInstanceOf(SyntaxError);
+  expect(error).not.toBeInstanceOf(QaArtifactRejectionError);
+  expect(reworkFor(error.message)).toBe(false);
+});
 
 it.each([false, true])("valid passes retain byte receipts and separated checks (html=%s)", async html => {
   const f = await receiptFixture(html);
