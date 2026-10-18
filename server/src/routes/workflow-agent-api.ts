@@ -18,7 +18,9 @@ import {
 import { validate } from "../middleware/validate.js";
 import { hermesOpsMutationGuard } from "../middleware/hermes-ops-mutation-guard.js";
 import { ownerSelfReplacementSchema, type OwnerSelfReplacement } from "@paperclipai/shared/validators/workflow-replacement";
+import { ownerExecuteApiSchema, type OwnerExecuteApi } from "@paperclipai/shared/validators/mission-owner-authority";
 import { ownerSelfReplacement } from "../services/workflow/owner-self-replacement.js";
+import { ownerExecuteDecisionWindow } from "../services/missions/owner-execute-decision-window.js";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -323,6 +325,36 @@ export function workflowAgentApiRoutes(db: Db) {
     });
     res.status(201).json({ approvalId: result.approval.id, status: result.approval.status,
       targetRunId: result.targetRunId, replay: result.replay });
+  });
+
+  // 오너 결정 API 창구로 mission_owner_execute 오퍼레이션을 제출한다. 오너액션 이슈 웨이크 런에는
+  // 스텝이 없어 런 도구 계약(플러그인 도구 라우트)이 만들어지지 않으므로(2026-10-17 사고, 403),
+  // 같은 owner-recovery 인가 체인의 API 창구가 기존 executeMissionOwnerAction 검증·펜스·원장을
+  // 그대로 재사용해 실행한다. 응답은 실행 결과 투영이라 신규·replay 모두 200 이다.
+  router.post("/issues/:id/owner-recovery/execute", hermesOpsMutationGuard("owner_recovery.execute.submit"), validate(ownerExecuteApiSchema), async (req, res) => {
+    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    assertCompanyAccess(req, issue.companyId);
+    const actor = getActorInfo(req);
+    const data: OwnerExecuteApi = req.body;
+    const submitted = await ownerExecuteDecisionWindow(db, { issueId: issue.id, actor, request: data });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.owner_recovery_execute_submitted",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        operation: submitted.result.operation,
+        actionId: submitted.result.actionId,
+        state: submitted.result.state,
+        reasonCode: submitted.result.reasonCode,
+      },
+    });
+    res.status(200).json(submitted.result);
   });
 
   return router;
