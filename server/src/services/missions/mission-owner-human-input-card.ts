@@ -43,6 +43,9 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly ownerActionIssueStatus: string;
   /** 미션 오너 에이전트 — 카드 requestedByAgentId(resolve 웨이크 수신자). */
   readonly requestedByAgentId: string;
+  /** 발신 주체 — 시스템 경로(terminal supervise 등)는 "system". system+escalate 는
+   *  nextAction 의 복구 경로 열거에서 선택지를 파생한다(오너 에이전트 제출은 기본 3옵션 유지). */
+  readonly actorType?: "agent" | "system";
   readonly reason?: string;
   readonly nextAction?: string;
   readonly evidence?: string;
@@ -84,6 +87,70 @@ function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefin
     description: option.description ?? null,
     facts: [],
     evidenceRefs: [],
+  }));
+  return {
+    options,
+    actions: [{ id: "submit", label: "선택 제출", outcome: "submit", tone: "primary", requiresSelection: true }],
+    selection: { min: 1, max: 1 },
+    comment: { mode: "optional", label: "결정 사유", placeholder: "선택 이유나 오너에게 전달할 지시를 남겨 주세요", maxLength: 2_000 },
+    approvedScope: ["operator_decision.resolve"],
+    forbiddenScope: ["agent_substitute_submission", "auto_execution"],
+  };
+}
+
+const DERIVED_PATH_OPTION_MIN = 2;
+const DERIVED_PATH_OPTION_MAX = 6;
+const DERIVED_PATH_LABEL_MAX = 160;
+
+// [일반 파생 규칙] escalate nextAction 이 사람에게 복구 경로 후보를 열거하면(괄호 열거 "(a, b, c,
+//   or d)" 또는 한글 "…a, b, c 중 …") 그 항목들을 그대로 선택지로 만든다 — 시스템 에스컬레이션의
+//   "재시도/재계획/재할당/취소 중 선택" 요청에 approve/hold/reject 는 질문에 답하지 못한다.
+//   특정 문구 하드코딩 없이 nextAction 텍스트에서 파생하며, 열거를 해석할 수 없으면 null(기본 선택지).
+export function deriveRecoveryPathOptionsFromNextAction(nextAction: string | undefined): { id: string; label: string }[] | null {
+  const text = present(nextAction);
+  if (!text) return null;
+  const candidates: string[] = [];
+  for (const group of text.matchAll(/\(([^()]{3,400})\)/g)) {
+    if (group[1]?.includes(",")) candidates.push(group[1]);
+  }
+  for (const group of text.matchAll(/([^()\n.!?]{3,240})\s*중/g)) {
+    if (group[1]?.includes(",")) candidates.push(group[1]);
+  }
+  for (const candidate of candidates) {
+    const items = candidate
+      .split(/,|,|\s+or\s+/i)
+      .map((item) => item.trim().replace(/[.;]+$/, "").trim())
+      .filter((item) => item.length >= 1 && item.length <= DERIVED_PATH_LABEL_MAX);
+    if (items.length < DERIVED_PATH_OPTION_MIN || items.length > DERIVED_PATH_OPTION_MAX) continue;
+    const usedIds = new Set<string>();
+    const options: { id: string; label: string }[] = [];
+    for (const [index, item] of items.entries()) {
+      const slug = item
+        .normalize("NFKD")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 60);
+      let id = /^[a-z0-9]/.test(slug) ? slug : `path-${index + 1}`;
+      while (usedIds.has(id)) id = `${id}-x`;
+      usedIds.add(id);
+      options.push({ id, label: item });
+    }
+    if (options.length === items.length) return options;
+  }
+  return null;
+}
+
+function buildDerivedRecoveryPathDefinition(
+  paths: { id: string; label: string }[],
+  evidenceRefs: { label: string; href: string }[],
+): OperatorDecisionDefinition {
+  const options = paths.map((path) => ({
+    id: path.id,
+    label: path.label,
+    description: "에스컬레이션이 제시한 복구 경로 후보입니다. 선택하면 이 방향이 미션 오너에게 전달됩니다.",
+    facts: [],
+    evidenceRefs,
   }));
   return {
     options,
@@ -170,9 +237,17 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     });
   }
   const evidenceOptionRefs = evidence.map((ref) => ({ label: ref.label, href: ref.href }));
+  // [선택지 파생 순서] 구조화 options(생산자 직접 지정) > system escalate nextAction 의 복구 경로
+  //   열거 > 기본 approve/hold/reject. 오너 에이전트 제출(actorType 없음/agent)은 항상 기본값이라
+  //   기존 제출 경로 동작이 바뀌지 않는다.
+  const derivedPaths = input.actorType === "system" && input.decision === "escalate"
+    ? deriveRecoveryPathOptionsFromNextAction(input.nextAction)
+    : null;
   const definition = input.structuredOptions !== undefined
     ? buildStructuredDefinition(input.structuredOptions)
-    : buildDefaultDefinition(evidenceOptionRefs);
+    : derivedPaths
+      ? buildDerivedRecoveryPathDefinition(derivedPaths, evidenceOptionRefs)
+      : buildDefaultDefinition(evidenceOptionRefs);
   const summaryLines = [
     `요청 사유: ${present(input.reason) ?? "(미제출)"}`,
     `요청된 다음 단계: ${present(input.nextAction) ?? "(미제출)"}`,
