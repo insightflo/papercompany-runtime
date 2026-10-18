@@ -8,6 +8,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { errorHandler } from "../middleware/index.js";
 import { operatorDecisionRoutes } from "../routes/operator-decisions.js";
 import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -62,9 +63,14 @@ describeDb("operator decision routes", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("operator-decision-routes-");
     db = createDb(tempDb.connectionString);
   }, 60_000);
-  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
+  afterAll(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
+    await db.$client.end({ timeout: 5 });
+    await tempDb?.cleanup();
+  });
 
   beforeEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
     // resolve route의 즉시 웨이크업이 남기는 heartbeat_runs·agent_wakeup_requests·
     // agent_runtime_state/agent_task_sessions(웨이크업 경로가 agents 참조 행을 만듦)·
     // company_skills(웨이크업 실행 준비가 번들 스킬을 upsert)·
@@ -189,19 +195,9 @@ describeDb("operator decision routes", () => {
       .where(eq(agentWakeupRequests.idempotencyKey, `operator-decision-resolved:${decisionId}`));
   }
 
-  // 즉시 깨움이 만든 비동기 실행 체인(번들 스킬 upsert 포함)이 다음 beforeEach 정리와
-  // 경합하지 않도록 깨움 요청이 종료 상태가 될 때까지 기다린다(위 FIXME 경합과 같은 원인).
-  async function waitForWakeupToSettle(decisionId: string) {
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      const [row] = await db
-        .select({ status: agentWakeupRequests.status })
-        .from(agentWakeupRequests)
-        .where(eq(agentWakeupRequests.idempotencyKey, `operator-decision-resolved:${decisionId}`));
-      if (!row || !["queued", "claimed", "deferred_issue_execution"].includes(row.status)) return;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    throw new Error(`immediate wakeup for ${decisionId} did not settle within 10s`);
+  // 즉시 깨움의 후처리까지 끝난 뒤 다음 beforeEach 정리를 허용한다.
+  async function waitForWakeupToSettle(_decisionId: string) {
+    await waitForHeartbeatExecutionsToDrain(db);
   }
 
   it("immediately wakes only the requesting agent when the requester differs from the assignee", async () => {

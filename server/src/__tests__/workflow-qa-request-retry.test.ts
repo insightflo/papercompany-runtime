@@ -2,10 +2,9 @@ import { spawn } from "node:child_process";
 import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { missions, workflowRuns, workflowStepRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
+import { createDb, missions, workflowRuns, workflowStepRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import { expect, it, vi } from "vitest";
-import { fixture, database } from "./helpers/qa-receipt-fixture.js";
+import { fixture, database, databaseConnectionString } from "./helpers/qa-receipt-fixture.js";
 import type { ArtifactRoot } from "../services/workflow/artifact-files.js";
 import { prepareQaArtifactRequest } from "../services/workflow/qa-artifact-request.js";
 import { assertQaReceiptScope, readQaReceiptBytes, verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
@@ -20,8 +19,18 @@ vi.mock("node:child_process", async importOriginal => {
 // These tests do not establish production content quality or live mission completion.
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function peer() {
-  const connection = await database().$client.reserve();
-  return { db: drizzle(connection, { schema: database()._.fullSchema }), close: () => connection.release() };
+  const db = createDb(databaseConnectionString());
+  try {
+    const [[primary], [secondary]] = await Promise.all([
+      database().$client<{ pid: number }[]>`select pg_backend_pid() as pid`,
+      db.$client<{ pid: number }[]>`select pg_backend_pid() as pid`,
+    ]);
+    expect(secondary.pid).not.toBe(primary.pid);
+    return { db, close: () => db.$client.end() };
+  } catch (error) {
+    await db.$client.end();
+    throw error;
+  }
 }
 async function step(f: Fixture, db: Db) {
   const [value] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.qaId));
@@ -107,7 +116,7 @@ it.each(["content", "asset", "directory-sync"])("retries the same database/gener
     expect(Buffer.from(envelope.content.base64, "base64")).toEqual(await readFile(f.content));
     expect(Buffer.from(envelope.assets[0].base64, "base64")).toEqual(await readFile(path.join(f.assetsDir, "hero.png")));
     expect((await readdir(path.dirname(ready.snapshot.outputRoot))).length).toBeGreaterThanOrEqual(2);
-  } finally { restore(); other.close(); }
+  } finally { restore(); await other.close(); }
 }, 30000);
 
 it("converges concurrent preparation on the first authority and preserves its result and receipt", async () => {
@@ -152,7 +161,7 @@ it("converges concurrent preparation on the first authority and preserves its re
       stepRunId: f.qaId, stepId: "qa", requestId: f.requestId, toolName: "local-qa", success: true,
       toolArtifactReceipt: receipt, data: result.body.data });
     expect((await readQaReceiptBytes(other.db, { companyId: f.companyId, workflowRunId: f.runId, stepId: "qa" })).receipt).toEqual(receipt);
-  } finally { await held.close(); other.close(); }
+  } finally { await held.close(); await other.close(); }
 }, 30000);
 
 it("rejects another input for the same concurrent request without replacing the first snapshot", async () => {
@@ -167,7 +176,7 @@ it("rejects another input for the same concurrent request without replacing the 
     await expect(second).rejects.toThrow("qa_artifact_request_conflict");
     expect((await step(f, other.db)).metadata.toolArtifactRequest).toEqual(authority.snapshot);
     expect(await readFile(String(authority.parameters.content))).toEqual(original);
-  } finally { await held.close(); other.close(); }
+  } finally { await held.close(); await other.close(); }
 }, 30000);
 
 it.each(["generation", "retry", "iteration", "dispatch", "mission", "run", "step", "pin", "contract"])(
@@ -190,7 +199,7 @@ it.each(["generation", "retry", "iteration", "dispatch", "mission", "run", "step
       held.gates[0].release.resolve(undefined);
       await expect(pending).rejects.toThrow();
       expect((await step(f, other.db)).metadata.toolArtifactRequest).toBeUndefined();
-    } finally { await held.close(); other.close(); }
+    } finally { await held.close(); await other.close(); }
   }, 30000,
 );
 it.each(["content", "asset"])("rejects damaged authoritative %s bytes without replacing the snapshot", async kind => {
@@ -203,5 +212,5 @@ it.each(["content", "asset"])("rejects damaged authoritative %s bytes without re
     await expect(prepare(f)).rejects.toThrow("qa_artifact_input_changed");
     expect((await step(f, other.db)).metadata.toolArtifactRequest).toEqual(authority.snapshot);
     expect(await readFile(file, "utf8")).toBe("damaged");
-  } finally { other.close(); }
+  } finally { await other.close(); }
 }, 30000);
