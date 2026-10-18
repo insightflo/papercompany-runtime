@@ -72,9 +72,11 @@ fs.writeFileSync(4,JSON.stringify(q));console.log('diagnostic only');`);
 
 type Kind = "negative" | "negative-zero" | "pass" | "positive-exit1" | "wrong-input" | "wrong-type"
   | "malformed" | "missing" | "stdout-only" | "crash" | "exit2" | "signal" | "timeout"
-  | "negative-then-throw" | "overflow" | "output-overflow" | "bad-progress" | "runtime-pass-zero" | "runtime-pass-exit1";
+  | "negative-then-throw" | "overflow" | "output-overflow" | "bad-progress" | "runtime-pass-zero" | "runtime-pass-exit1"
+  | "negative-then-async" | "negative-then-rejection" | "negative-exit-throw" | "negative-masked-throw"
+  | "guard-malformed" | "guard-duplicate" | "guard-overflow" | "negative-eof" | "inherited-timeout" | "cancel";
 
-async function invokeCase(progress: boolean, kind: Kind) {
+async function invokeCase(progress: boolean, kind: Kind, boundary = "direct") {
   const f = await fixture(), db = database();
   const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
   const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run.workflowId));
@@ -115,6 +117,19 @@ else if(kind!=='missing'&&kind!=='crash'){
  writeFileSync(4,payload.subarray(-1));
 }
 if(kind==='crash'||kind==='negative-then-throw')throw new Error('qa_fixture_crash');
+if(kind==='negative-then-async')setImmediate(()=>{throw Error('qa_fixture_crash')});
+if(kind==='negative-then-rejection')Promise.reject(Error('qa_fixture_crash'));
+if(kind==='negative-exit-throw')process.on('exit',()=>{throw Error('qa_fixture_crash')});
+if(kind==='negative-masked-throw'){process.on('exit',()=>{process.exitCode=0});throw Error('qa_fixture_crash')}
+if(kind==='guard-malformed')writeFileSync(5,'{bad}'+String.fromCharCode(10));
+if(kind==='guard-duplicate')writeFileSync(5,'{"version":1,"kind":"ready"}'+String.fromCharCode(10));
+if(kind==='guard-overflow')writeFileSync(5,'x'.repeat(129));
+if(kind==='negative-eof')(await import('node:fs')).closeSync(5);
+if(kind==='inherited-timeout'){
+ const{spawn}=await import('node:child_process');
+ const child=spawn(process.execPath,['-e','setTimeout(()=>{},9000)'],{stdio:['ignore',1,2,progress?3:'ignore',4,5]});
+ writeFileSync(new URL(import.meta.url+'.descendant'),String(child.pid));child.unref();
+}
 if(kind==='output-overflow'){
  let remaining=10*1024*1024+1;
  const chunk=Buffer.alloc(64*1024,120);
@@ -126,14 +141,35 @@ if(kind==='output-overflow'){
 }
 if(kind==='bad-progress')writeFileSync(3,'{bad}'+String.fromCharCode(10));
 if(kind==='signal')process.kill(process.pid,'SIGTERM');
-if(kind==='timeout')setInterval(()=>{},1000);
+if(kind==='timeout'||kind==='cancel')setInterval(()=>{},1000);
 `;
   expect(original).toContain("writeFileSync(4,JSON.stringify(q));");
   await writeFile(script, original.replace("writeFileSync(4,JSON.stringify(q));", emission));
-  await db.update(toolDefinitions).set({ adapterConfig: { ...f.adapterConfig, timeoutMs: kind === "timeout" ? 1000 : 15000,
-    ...(progress ? { progress: kind === "timeout" ? { ...progressPolicy, idleTimeoutMs: 1000, maxDurationMs: 1000 } : progressPolicy } : {}) } })
+  let command = f.adapterConfig.command;
+  if (boundary === "option") command = `${process.execPath} --unhandled-rejections=warn ${script} qa`;
+  if (boundary === "preload") command = `${process.execPath} --import data:text/javascript,void%200 ${script} qa`;
+  if (boundary === "wrapper") {
+    await writeFile(script + ".wrapper.mjs", `import ${JSON.stringify("./" + path.basename(script))};`);
+    command = `${process.execPath} ${script}.wrapper.mjs qa`;
+  }
+  await db.update(toolDefinitions).set({ adapterConfig: { ...f.adapterConfig, command,
+    env: { NODE_OPTIONS: boundary === "node-options" ? "--unhandled-rejections=warn" : "" },
+    timeoutMs: kind.endsWith("timeout") ? 1000 : 15000,
+    ...(progress ? { progress: kind.endsWith("timeout") ? { ...progressPolicy, idleTimeoutMs: 1000, maxDurationMs: 1000 } : progressPolicy } : {}) } })
     .where(eq(toolDefinitions.id, f.toolId));
-  const result = await f.invoke();
+  const started = Date.now(), pending = f.invoke();
+  if (kind === "cancel") await vi.waitFor(async () => {
+    expect(await readFile(script + ".ran", "utf8")).toBe(kind);
+    const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
+    await db.update(toolExecutionHeartbeats).set({ state: "cancelled", reason: "tool_progress_cancelled" })
+      .where(eq(toolExecutionHeartbeats.id, heartbeat.id));
+  }, { timeout: 5000 });
+  const result = await pending.finally(async () => {
+    if (kind !== "inherited-timeout") return;
+    const pid = Number(await readFile(script + ".descendant", "utf8"));
+    try { process.kill(pid, "SIGTERM"); } catch { /* Finite fixture may have already exited. */ }
+  });
+  if (kind === "inherited-timeout") expect(Date.now() - started).toBeLessThan(5000);
   expect(await readFile(script + ".ran", "utf8")).toBe(kind);
   return { f, producer, result };
 }
@@ -141,11 +177,13 @@ if(kind==='timeout')setInterval(()=>{},1000);
 // C01 defines the oracle: current negative evidence costs one producer iteration;
 // process/transport/contract failures cost zero, and positive exit-one is never success.
 const cases: Kind[] = ["negative", "negative-zero", "pass", "positive-exit1", "wrong-input", "wrong-type",
-  "malformed", "missing", "stdout-only", "crash", "negative-then-throw", "exit2", "signal", "timeout", "overflow", "output-overflow", "runtime-pass-zero", "runtime-pass-exit1"];
-it.each([false, true].flatMap(progress => cases.map(kind => ({ progress, kind }))))
+  "malformed", "missing", "stdout-only", "crash", "negative-then-throw", "exit2", "signal", "timeout", "overflow", "output-overflow", "runtime-pass-zero", "runtime-pass-exit1",
+  "negative-then-async", "negative-then-rejection", "negative-exit-throw", "negative-masked-throw",
+  "guard-malformed", "guard-duplicate", "guard-overflow", "negative-eof", "inherited-timeout", "cancel"];
+it.each([false, true].flatMap(progress => cases.filter(kind => progress || kind !== "cancel").map(kind => ({ progress, kind }))))
   ("real QA exit/FD result reaches completion and bounded rework ($progress, $kind)", async ({ progress, kind }) => {
     const { f, producer: before, result } = await invokeCase(progress, kind), db = database();
-    const rejection = kind === "negative" || kind === "negative-zero" || kind === "runtime-pass-zero";
+    const rejection = kind === "negative" || kind === "negative-zero" || kind === "negative-eof" || kind === "runtime-pass-zero";
     // C01: inspect real completion and persisted rework before error classification can fail.
     await completeWorkflowToolStepFromResult(db, { companyId: f.companyId, workflowRunId: f.runId,
       stepRunId: f.qaId, stepId: "qa", requestId: f.requestId, toolName: "local-qa",
@@ -194,7 +232,7 @@ it.each([false, true].flatMap(progress => cases.map(kind => ({ progress, kind })
     if (progress) {
       const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
       expect(heartbeat.state).toBe(kind === "pass" || kind === "negative-zero" || kind === "runtime-pass-zero" ? "succeeded"
-        : kind === "timeout" ? "timed_out" : "failed");
+        : kind === "cancel" ? "cancelled" : kind.endsWith("timeout") ? "timed_out" : "failed");
     }
   }, 20000);
 
@@ -208,6 +246,20 @@ it("valid negative FD4 bytes cannot override malformed progress or consume rewor
   expect(after.iterationIndex).toBe(producer.iterationIndex);
   expect(readAttempts(after.metadata)).toEqual(readAttempts(producer.metadata));
 });
+
+// C01: options/preloads or an undeclared wrapper cannot supply crash evidence.
+// The same unsupported command must retain its previous exit-zero success path.
+it.each([false, true].flatMap(progress => ["option", "preload", "node-options", "wrapper"].map(boundary => ({ progress, boundary }))))(
+  "unsupported Node call retains exit-zero only ($progress, $boundary)", async ({ progress, boundary }) => {
+    const { f, producer, result } = await invokeCase(progress, "negative", boundary), db = database();
+    expect(result.status).toBe(500);
+    expect(result.body.error).not.toMatch(/^qa_artifact_(verdict_failed|runtime_checks_failed:)/);
+    await completeWorkflowToolStepFromResult(db, { companyId: f.companyId, stepRunId: f.qaId,
+      requestId: f.requestId, success: false, error: result.body.error });
+    const [after] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, producer.id));
+    expect(after.iterationIndex).toBe(producer.iterationIndex);
+    expect((await invokeCase(progress, "pass", boundary)).result.status).toBe(200);
+  }, 20000);
 
 // Transport alone never treats bytes as content authority. The opt-in belongs to the QA caller,
 // so publication/non-QA users retain nonzero failure even with a populated result channel.

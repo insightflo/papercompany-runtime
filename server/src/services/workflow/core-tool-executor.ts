@@ -1,4 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import path from "node:path";
 import { executeAgentArtifactTool } from './agent-artifact-tool.js';
 import { captureToolCallProvenance, recordToolCallProvenance, type ToolCallProvenance } from "./tool-call-provenance.js";
 import { prepareQaConsumer } from "./qa-artifact-consumer.js";
@@ -182,7 +184,7 @@ export async function executeCoreWorkflowTool(input: {
     const consumerRoot = "resultRoot" in prepared ? prepared.resultRoot : undefined;
     const publicationScope = "publicationScope" in prepared ? prepared.publicationScope : undefined;
     const policy = readToolProgressPolicy(adapterConfig);
-    const env = { ...inheritedEnv, ...resolvedEnv,
+    const env: NodeJS.ProcessEnv = { ...inheritedEnv, ...resolvedEnv,
       PAPERCLIP_COMPANY_ID: input.companyId,
       ...(agentId ? { PAPERCLIP_AGENT_ID: agentId } : {}),
       ...(input.issueId ? { PAPERCLIP_TASK_ID: input.issueId } : {}), ...(input.stepEnv ?? {}),
@@ -202,6 +204,24 @@ export async function executeCoreWorkflowTool(input: {
     };
     invocationProvenance = await captureToolCallProvenance({ ...input, toolId: tool.id, commandParts, cwd, env, deploymentFiles });
     if (invocationProvenance?.executable.sha256) executable = invocationProvenance.executable.path;
+    // Only a deployed JS entrypoint on this known Node binary, without preceding
+    // options/preloads, can opt into guarded exit-one. Other calls keep exit-zero.
+    const node = invocationProvenance?.core;
+    const entrypoint = qaRequest && commandParts[1] && !commandParts[1].startsWith("-")
+      ? await realpath(path.resolve(cwd, commandParts[1])).catch(() => null) : null;
+    const nodeFile = node?.files.find(file => file.path === node.executablePath);
+    const acceptQaExit1 = !!(qaRequest && artifactExecution?.contract.role === "qa" && deployment?.length
+      && node?.nodeVersion.startsWith("v24.") && !env.NODE_OPTIONS?.trim()
+      && invocationProvenance?.executable.path === node.executablePath && nodeFile?.sha256
+      && invocationProvenance.executable.sha256 === nodeFile.sha256
+      && invocationProvenance.interpreter.path === invocationProvenance.executable.path
+      && invocationProvenance.interpreter.sha256 === nodeFile.sha256
+      && entrypoint && /\.(mjs|cjs|js)$/.test(entrypoint)
+      && invocationProvenance.toolFiles.some(file => file.path === entrypoint && file.sha256)
+      && deploymentFiles?.every((file, index) => {
+        const observed = invocationProvenance?.toolFiles[index], pinned = deployment.find(item => item.fileName === file);
+        return !!pinned && !!observed?.sha256 && observed.sha256 === pinned.sha256 && observed.byteSize === pinned.byteSize;
+      }));
     await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
     // Fence owner-execute-linked attempts right before the real child process launch;
     // unrelated tools pass through with existing behavior.
@@ -211,8 +231,8 @@ export async function executeCoreWorkflowTool(input: {
       () => policy
       ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
-        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1: !!qaRequest })
-      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1: !!qaRequest, timeoutMs })
+        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1 })
+      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1, timeoutMs })
       : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }));
     const result = await (dispatch && !policy ? (await dispatch.launch(invocation)).result : invocation());
     await recordToolCallProvenance(input.db, invocationProvenance, "returned");
