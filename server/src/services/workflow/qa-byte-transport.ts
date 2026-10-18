@@ -51,7 +51,7 @@ export function executeQaByteTool(input: { executable: string; args: string[]; c
     };
     const fail = (error: Error) => { failure ??= error; child.kill("SIGKILL"); releasePipes(); };
     const result = wireQaTransport(child, input.inputBytes, input.qaResult, fail);
-    guard = guarded ? collectQaProcessGuard(child.stdio[QA_PROCESS_GUARD_FD] as Readable, fail) : undefined;
+    guard = guarded ? collectQaProcessGuard(child.stdio.at(QA_PROCESS_GUARD_FD) as Readable | null | undefined, fail) : undefined;
     const output = ["", ""];
     [child.stdout!, child.stderr!].forEach((s, i) => s.on("data", chunk => {
       output[i] += chunk; if (Buffer.byteLength(output[i]) > 10 * 1024 * 1024) fail(new Error("tool_output_overflow"));

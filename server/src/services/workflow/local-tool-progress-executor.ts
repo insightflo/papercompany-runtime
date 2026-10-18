@@ -81,7 +81,7 @@ export async function executeLocalToolWithProgress(input: {
       };
       const fail = (error: Error) => { childError ??= error; terminate(); };
       const qaResult = wireQaTransport(child, input.inputBytes, !!input.qaResult, fail);
-      guard = guarded ? collectQaProcessGuard(child.stdio[QA_PROCESS_GUARD_FD] as Readable, fail) : undefined;
+      guard = guarded ? collectQaProcessGuard(child.stdio.at(QA_PROCESS_GUARD_FD) as Readable | null | undefined, fail) : undefined;
       const collected: Buffer[][] = [[], []];
       const sizes = [0, 0];
       [child.stdout!, child.stderr!].forEach((stream, index) => {

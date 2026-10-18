@@ -8,6 +8,7 @@ import { completeWorkflowToolStepFromResult, syncWorkflowRunState, type Workflow
 import { executeQaByteTool } from "../services/workflow/qa-byte-transport.js";
 import { executeLocalToolWithProgress } from "../services/workflow/local-tool-progress-executor.js";
 import { readAttempts } from "../services/workflow/control-flow/verdict-store.js";
+import { createToolProgressStore } from "../services/tools/progress-store.js";
 
 // Keep real child/FD, verifier, completion and rework DB paths; seal unrelated agent execution.
 const { wakeup } = vi.hoisted(() => ({ wakeup: vi.fn(async () => null) }));
@@ -158,12 +159,17 @@ if(kind==='timeout'||kind==='cancel')setInterval(()=>{},1000);
     ...(progress ? { progress: kind.endsWith("timeout") ? { ...progressPolicy, idleTimeoutMs: 1000, maxDurationMs: 1000 } : progressPolicy } : {}) } })
     .where(eq(toolDefinitions.id, f.toolId));
   const started = Date.now(), pending = f.invoke();
-  if (kind === "cancel") await vi.waitFor(async () => {
-    expect(await readFile(script + ".ran", "utf8")).toBe(kind);
-    const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
-    await db.update(toolExecutionHeartbeats).set({ state: "cancelled", reason: "tool_progress_cancelled" })
-      .where(eq(toolExecutionHeartbeats.id, heartbeat.id));
-  }, { timeout: 5000 });
+  if (kind === "cancel") {
+    const heartbeat = await vi.waitFor(async () => {
+      expect(await readFile(script + ".ran", "utf8")).toBe(kind);
+      const [current] = await db.select().from(toolExecutionHeartbeats).where(and(
+        eq(toolExecutionHeartbeats.companyId, f.companyId), eq(toolExecutionHeartbeats.toolId, f.toolId),
+        eq(toolExecutionHeartbeats.requestId, f.requestId)));
+      expect(current).toMatchObject({ state: "active", sequence: 1 });
+      return current;
+    }, { timeout: 5000 });
+    await createToolProgressStore(db).finish(f.companyId, heartbeat.id, "failed", "tool_progress_cancelled");
+  }
   const result = await pending.finally(async () => {
     if (kind !== "inherited-timeout") return;
     const pid = Number(await readFile(script + ".descendant", "utf8"));
@@ -232,7 +238,9 @@ it.each([false, true].flatMap(progress => cases.filter(kind => progress || kind 
     if (progress) {
       const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
       expect(heartbeat.state).toBe(kind === "pass" || kind === "negative-zero" || kind === "runtime-pass-zero" ? "succeeded"
-        : kind === "cancel" ? "cancelled" : kind.endsWith("timeout") ? "timed_out" : "failed");
+        : kind.endsWith("timeout") ? "timed_out" : "failed");
+      if (kind === "cancel") expect({ reason: heartbeat.reason, error: result.body.error })
+        .toEqual({ reason: "tool_progress_cancelled", error: "tool_progress_cancelled" });
     }
   }, 20000);
 
