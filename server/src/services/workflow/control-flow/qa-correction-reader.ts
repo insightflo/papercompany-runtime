@@ -44,8 +44,9 @@ type Scope = { companyId: string; workflowRunId: string; appliedEventId: string 
 type Event = typeof workflowTransitionEvents.$inferSelect;
 
 function productFile(product: typeof issueWorkProducts.$inferSelect): string {
-  const ref = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
+  const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
     .map(key => product.metadata?.[key]).find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  const ref = typeof selected === "string" ? selected.trim() : null;
   const file = resolveWorkProductLocalFilePath(product) ?? (typeof ref === "string" && path.isAbsolute(ref) ? ref : null);
   requireQaCorrection(file && path.isAbsolute(file), "source");
   return path.resolve(file);
@@ -62,7 +63,7 @@ function inside(file: string, directory: string) {
 
 /** Shared by new-issuance validation and history. No branch confers ordinary selector authority. */
 export async function readQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectionPreparation,
-  current: boolean, ancestors = new Set<string>()): Promise<QaCorrectionSourceRead[]> {
+  current: boolean, ancestors = new Set<string>(), sourceMeasured?: QaCorrectionSourceMeasured): Promise<QaCorrectionSourceRead[]> {
   const sources: QaCorrectionSourceRead[] = [];
   for (const source of p.sources) {
     const [product] = await db.select().from(issueWorkProducts).where(and(
@@ -82,6 +83,17 @@ export async function readQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectio
         && prior.preparation.producer.stepRunId === p.producer.stepRunId
         && prior.preparation.producer.issueId === p.producer.issueId
         && new Date(prior.applied.appliedAt) <= new Date(p.preparedAt), "lineage");
+      // Current preparation has no measurement yet; history must match the actual prior output.
+      if (!current) {
+        const measured = sourceMeasured?.sources.find(s => s.productId === product.id);
+        const previousFiles = new Map(revision.files.map(f => [f.relativePath, f]));
+        requireQaCorrection(measured && measured.files.length === previousFiles.size
+          && measured.files.every(file => {
+            const previous = previousFiles.get(file.relativePath);
+            return previous && previous.role === file.role && previous.sha256 === file.sha256
+              && previous.byteSize === file.byteSize;
+          }), "lineage");
+      }
       origin = prior.sources.find(s => s.product.id === revision.sourceProductId)!.origin;
     } else {
       requireQaCorrection(!Object.hasOwn(product.metadata ?? {}, "qaCorrection"), "source");
@@ -89,8 +101,9 @@ export async function readQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectio
       if (provenance.kind === "registered_legacy") {
         requireQaCorrection(!present, "source");
         // Preserve the existing registration boundary, which requires an absolute registered ref.
-        const ref = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
+        const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
           .map(key => product.metadata?.[key]).find(value => typeof value === "string" && value.trim());
+        const ref = typeof selected === "string" ? selected.trim() : null;
         requireQaCorrection(typeof ref === "string" && path.isAbsolute(ref) && path.resolve(ref) === file, "source");
       } else {
         const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
@@ -222,7 +235,7 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, ancestors: Set<strin
     requireQaCorrection(fact.event.createdAt <= preparedRow.createdAt, "verdict");
   }
   await readQaCorrectionQuality(db, p, false, new Date(a.appliedAt));
-  const sources = await readQaCorrectionSources(db, p, false, visited);
+  const sources = await readQaCorrectionSources(db, p, false, visited, m);
   for (const revision of a.revisions) {
     const [product] = await db.select().from(issueWorkProducts).where(and(
       eq(issueWorkProducts.id, revision.workProductId), eq(issueWorkProducts.companyId, p.companyId)));

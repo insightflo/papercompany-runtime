@@ -9,7 +9,7 @@ import type { SourceAttempt, WorkflowQaRemediations } from "@paperclipai/shared"
 import { recordWorkflowValidationVerdict } from "../../services/workflow/validation-verdict-ledger.js";
 import { hashContract } from "../../services/quality/contract.js";
 import {
-  hashQaCorrectionPayload, qaCorrectionAppliedKey, qaCorrectionFollowupKey,
+  hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionAppliedKey, qaCorrectionFollowupKey,
   qaCorrectionPreparationKey, qaCorrectionSourceMeasuredKey,
   type QaCorrectionApplied, type QaCorrectionAttempt, type QaCorrectionFollowup,
   type QaCorrectionPreparation, type QaCorrectionSourceMeasured,
@@ -140,15 +140,28 @@ export async function issueQaCorrectionFixture(db: Db, fixture: CorrectionFixtur
   const at = Date.parse(p.preparedAt), measuredId = randomUUID(), appliedId = randomUUID(), followupId = randomUUID();
   const revisionId = randomUUID(), workProductId = randomUUID(), sourceId = p.sources[0]!.productId;
   const root = `/qa-correction-fixture/${p.companyId}/${revisionId}`;
+  let sourceFiles: QaCorrectionSourceMeasured["sources"][number]["files"] = [
+    { role: "main", relativePath: "report.html", sha256: beforeSha256, byteSize: 3 },
+  ];
+  const provenance = p.sources[0]!.provenance;
+  if (provenance.kind === "prior_correction") {
+    const [row] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, provenance.appliedEventId));
+    if (!row || row.eventType !== "qa_remediation_applied") throw new Error("fixture prior application");
+    const prior = parseQaCorrectionEventPayload("qa_remediation_applied", row.payload);
+    const revision = prior.revisions.find(r => r.workProductId === sourceId);
+    if (!revision) throw new Error("fixture prior revision");
+    sourceFiles = revision.files.map(({ role, relativePath, sha256, byteSize }) => ({ role, relativePath, sha256, byteSize }));
+  }
   const m: QaCorrectionSourceMeasured = { schemaVersion: "workflow.qa-correction.source-measured.v1",
     preparationEventId: p.correctionId, preparationHash: hashQaCorrectionPayload(p),
-    sources: [{ productId: sourceId, files: [{ role: "main", relativePath: "report.html", sha256: beforeSha256, byteSize: 3 }] }],
+    sources: [{ productId: sourceId, files: sourceFiles }],
     measuredAt: new Date(at + 1).toISOString() };
   const a: QaCorrectionApplied = { schemaVersion: "workflow.qa-correction.applied.v1", correctionId: p.correctionId,
     preparationEventId: p.correctionId, preparationHash: hashQaCorrectionPayload(p), sourceMeasuredEventId: measuredId,
     sourceMeasuredHash: hashQaCorrectionPayload(m), revisions: [{ revisionId, sourceProductId: sourceId, workProductId,
-      root, mainRelativePath: "report.html", files: [{ role: "main", relativePath: "report.html",
-        beforeSha256, sha256: afterSha256, byteSize: 3 }] }], bindingChanges: p.bindings.map(b => ({
+      root, mainRelativePath: "report.html", files: sourceFiles.map(file => ({ ...file,
+        beforeSha256: file.sha256, sha256: file.role === "main" ? afterSha256 : file.sha256 })) }],
+    bindingChanges: p.bindings.map(b => ({
       bindingId: b.bindingId, fromProductId: b.expectedProductId, toProductId: workProductId })),
     qualityUseEvidenceRefId: null, followupEventIds: [followupId], appliedAt: new Date(at + 2).toISOString() };
   if (p.authority.kind === "quality_current_output") {

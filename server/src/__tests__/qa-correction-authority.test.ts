@@ -7,11 +7,11 @@ import {
 } from "@paperclipai/db";
 import { validateQaCorrectionAuthority } from "../services/workflow/control-flow/qa-correction-authority.js";
 import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
-import { hashQaCorrectionPayload, type QaCorrectionPreparation } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { assertQaCorrectionEventLinks, hashQaCorrectionPayload, type QaCorrectionPreparation } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { legacyHtmlManualContract } from "./helpers/legacy-html-manual.js";
 import {
-  appendQaVerdict, createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection,
+  afterSha256, appendQaVerdict, beforeSha256, createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection,
 } from "./helpers/qa-correction-fixture.js";
 
 // Oracle: C03/C12 and c03-contract-compatibility-addendum.txt. Fixture event inserts are reader
@@ -32,6 +32,22 @@ describe("QA correction SELECT authority and historical issuance", () => {
     const issued = await issueQaCorrectionFixture(owned.db, f);
     expect((await readIssuedQaCorrection(owned.db, issued.scope)).applied.revisions[0]!.workProductId).toBe(issued.workProductId);
   });
+
+  it.each(["absolute whitespace", "relative whitespace", "file URL", "url priority", "externalId priority", "empty url priority"])(
+    "preserves the registered legacy ref boundary: %s", async kind => {
+      const f = await seedQaCorrection(owned.db), absolute = f.remediations.items[0]!.file;
+      await owned.db.update(issueWorkProducts).set({
+        url: kind === "file URL" ? `file://${absolute}` : kind === "url priority" ? " relative.html " : kind === "empty url priority" ? "" : null,
+        externalId: kind === "externalId priority" ? " relative.html " : null,
+        metadata: { path: kind === "relative whitespace" ? " report.html " : ` ${absolute} ` },
+      }).where(eq(issueWorkProducts.id, f.productId));
+      if (kind === "absolute whitespace") {
+        const result = await validateQaCorrectionAuthority(owned.db, f.preparation);
+        expect(result.sources[0]!.file).toBe(absolute);
+        const issued = await issueQaCorrectionFixture(owned.db, f);
+        expect((await readIssuedQaCorrection(owned.db, issued.scope)).sources[0]!.file).toBe(absolute);
+      } else await expect(validateQaCorrectionAuthority(owned.db, f.preparation)).rejects.toThrow();
+    });
 
   const invalidAuthorities: Array<[string, (p: QaCorrectionPreparation) => void]> = [
     ["foreign run", p => { p.workflowRunId = randomUUID(); }],
@@ -109,10 +125,65 @@ describe("QA correction SELECT authority and historical issuance", () => {
     next.authority.verdicts = [verdict];
     next.sources = [{ productId: b.workProductId, provenance: { kind: "prior_correction", appliedEventId: b.appliedId } }];
     next.bindings[0]!.expectedProductId = b.workProductId;
+    // C03 inter-correction integrity: C measures B's output ("new"), not the original A ("old").
+    await expect(validateQaCorrectionAuthority(owned.db, next)).resolves.toMatchObject({ status: "authority_validated" });
     const c = await issueQaCorrectionFixture(owned.db, f, next);
+    expect(b.applied.revisions[0]!.files[0]!.sha256).toBe(afterSha256);
+    expect(c.measured.sources[0]!.files).toEqual([
+      { role: "main", relativePath: "report.html", sha256: afterSha256, byteSize: 3 },
+    ]);
+    expect(c.measured.sources[0]!.files[0]!.sha256).not.toBe(beforeSha256);
+    expect(c.applied.revisions[0]!.files[0]!.beforeSha256).toBe(b.applied.revisions[0]!.files[0]!.sha256);
     expect((await readIssuedQaCorrection(owned.db, b.scope)).applied.revisions[0]!.workProductId).toBe(b.workProductId);
     expect((await readIssuedQaCorrection(owned.db, c.scope)).sources[0]!.origin).toBe("registered_legacy");
   });
+
+  it.each(["reordered", "hash", "size", "missing", "extra", "duplicate", "role", "path"])(
+    "compares the entire prior output by relativePath: %s", async problem => {
+      const f = await seedQaCorrection(owned.db), b = await issueQaCorrectionFixture(owned.db, f);
+      const asset = { role: "asset" as const, relativePath: "assets/chart.svg", sha256: "ab".repeat(32), byteSize: 7 };
+      b.measured.sources[0]!.files.push(asset);
+      b.applied.revisions[0]!.files.push({ ...asset, beforeSha256: asset.sha256 });
+      b.applied.sourceMeasuredHash = hashQaCorrectionPayload(b.measured);
+      await owned.db.update(workflowTransitionEvents).set({ payload: b.measured }).where(eq(workflowTransitionEvents.id, b.measuredId));
+      await owned.db.update(workflowTransitionEvents).set({ payload: b.applied }).where(eq(workflowTransitionEvents.id, b.appliedId));
+      const verdict = await appendQaVerdict(owned.db, f, "request_changes", { items: [
+        { op: "string_replace", file: `${b.applied.revisions[0]!.root}/report.html`, find: "new", replace: "next" },
+      ] });
+      const next = structuredClone(f.preparation);
+      next.correctionId = randomUUID(); next.preparedAt = new Date(Date.now() + 2000).toISOString();
+      next.authority.verdicts = [verdict];
+      next.sources = [{ productId: b.workProductId, provenance: { kind: "prior_correction", appliedEventId: b.appliedId } }];
+      next.bindings[0]!.expectedProductId = b.workProductId;
+      const c = await issueQaCorrectionFixture(owned.db, f, next);
+      // Read the actual B record, including its asset; keep C's own links valid in every cross-chain counterexample.
+      expect(c.measured.sources[0]!.files).toEqual([
+        { role: "main", relativePath: "report.html", sha256: afterSha256, byteSize: 3 }, asset,
+      ]);
+      const measured = structuredClone(c.measured), applied = structuredClone(c.applied), files = measured.sources[0]!.files;
+      if (problem === "reordered") files.reverse();
+      if (problem === "hash") files[0]!.sha256 = "ff".repeat(32);
+      if (problem === "size") files[0]!.byteSize += 1;
+      if (problem === "missing") files.splice(1, 1);
+      if (problem === "extra") files.push({ ...asset, relativePath: "extra.svg" });
+      if (problem === "duplicate") files.push({ ...asset });
+      if (problem === "role") files[1]!.role = "ancillary";
+      if (problem === "path") files[1]!.relativePath = "assets/other.svg";
+      applied.sourceMeasuredHash = hashQaCorrectionPayload(measured);
+      applied.revisions[0]!.files = files.map(file => ({ ...file, beforeSha256: file.sha256 }));
+      const links = () => assertQaCorrectionEventLinks({ preparation: next,
+        sourceMeasured: { eventId: c.measuredId, payload: measured }, applied: { eventId: c.appliedId, payload: applied },
+        followups: [{ eventId: c.followupId, payload: c.followup }] });
+      if (problem === "duplicate") expect(links).toThrow();
+      else expect(links).not.toThrow();
+      await owned.db.update(workflowTransitionEvents).set({ payload: measured }).where(eq(workflowTransitionEvents.id, c.measuredId));
+      await owned.db.update(workflowTransitionEvents).set({ payload: applied }).where(eq(workflowTransitionEvents.id, c.appliedId));
+      if (problem === "reordered") {
+        expect((await readIssuedQaCorrection(owned.db, c.scope)).sourceMeasured.sources[0]!.files).toEqual(files);
+        expect((await readIssuedQaCorrection(owned.db, b.scope)).applied.revisions[0]!.workProductId).toBe(b.workProductId);
+      } else if (problem === "duplicate") await expect(readIssuedQaCorrection(owned.db, c.scope)).rejects.toThrow();
+      else await expect(readIssuedQaCorrection(owned.db, c.scope)).rejects.toMatchObject({ reason: "lineage" });
+    });
 
   it.each(["missing measurement", "key", "hash", "row scope", "followup", "before hash", "binding", "B registration"])(
     "rejects broken historical %s", async problem => {
