@@ -10,22 +10,15 @@
 // [입장] 신규 런 생성·admission 은 기존 admitReplacement 경로만 사용한다. 이 서비스는
 //   approval( approved )과 targetRunId 를 반환하고 오너가 replacementIntent 로 런을 트리거한다.
 import { and, eq, sql } from "drizzle-orm";
-import { approvals, activityLog, heartbeatRuns, issues, missions, type Db } from "@paperclipai/db";
+import { approvals, activityLog, type Db } from "@paperclipai/db";
 import { replacementApprovalPayloadSchema, ownerSelfReplacementSchema, type OwnerSelfReplacement } from "@paperclipai/shared/validators/workflow-replacement";
-import { conflict, forbidden, unauthorized } from "../../errors.js";
+import { conflict, forbidden } from "../../errors.js";
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import { lockReplacementScope, lockReplacementDefinition } from "./replacement-scope.js";
 import { replacementDefinitionHash } from "./replacement-definition.js";
 import { normalizeWorkflowRunInputs } from "./run-input-normalization.js";
-import { issueService } from "../issues.js";
 import type { OwnerRecoveryApiActor } from "../missions/mission-owner-recovery-agent-api.js";
-import {
-  ownerRecoveryActorFailure,
-  ownerRecoveryIdentityMatches,
-  ownerRecoveryIssueFailure,
-  ownerRecoveryOwnerMatches,
-  ownerRecoverySourceMatches,
-} from "../missions/owner-recovery-submission-guards.js";
+import { authorizeOwnerRecoveryWindow } from "../missions/owner-recovery-window-auth.js";
 
 export type OwnerSelfReplacementResult = {
   readonly approval: typeof approvals.$inferSelect;
@@ -34,38 +27,8 @@ export type OwnerSelfReplacementResult = {
 };
 
 // owner-recovery 결정 API 의 비-결정 인가 체인(미션 오너·이슈 종류·소스 이슈·heartbeat
-// identity·체크아웃)을 동일 순서로 적용한다. 결정 본문 검증은 이 경로의 입력이 아니므로 제외.
-async function authorizeOwnerSelfReplacement(db: Db, issueId: string, actor: OwnerRecoveryApiActor) {
-  const actorFailure = ownerRecoveryActorFailure(actor);
-  if (actorFailure === "agent_required") throw forbidden("Agent authentication required");
-  if (actorFailure === "run_required" || !actor.runId) throw unauthorized("Agent run id required");
-  if (!actor.agentId) throw forbidden("Agent authentication required");
-  const [issue] = await db.select({ id: issues.id, companyId: issues.companyId, missionId: issues.missionId,
-    originKind: issues.originKind, originId: issues.originId }).from(issues).where(eq(issues.id, issueId)).limit(1);
-  if (!issue) throw conflict("Owner-recovery replacement API can only be used for mission-owner unblock issues");
-  const issueFailure = ownerRecoveryIssueFailure(issue);
-  if (issueFailure === "unblock_required") throw conflict("Owner-recovery replacement API can only be used for mission-owner unblock issues");
-  if (issueFailure === "mission_required") throw conflict("Owner-recovery replacement API requires a mission-scoped owner-action issue");
-  const [mission] = await db.select({ ownerAgentId: missions.ownerAgentId }).from(missions)
-    .where(and(eq(missions.id, issue.missionId!), eq(missions.companyId, issue.companyId))).limit(1).for("update");
-  if (!ownerRecoveryOwnerMatches(mission, actor.agentId)) throw forbidden("Only the mission owner agent may submit owner-recovery decisions");
-  const sourceIssueId = issue.originId;
-  if (!sourceIssueId) throw conflict("Owner-recovery replacement API requires a source issue in the same company and mission");
-  const [sourceIssue] = await db.select({ missionId: issues.missionId }).from(issues)
-    .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId))).limit(1).for("share");
-  if (!ownerRecoverySourceMatches(sourceIssue, issue.missionId)) {
-    throw conflict("Owner-recovery replacement API requires a source issue in the same company and mission");
-  }
-  const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, actor.runId)).limit(1).for("share");
-  const [currentIssue] = await db.select().from(issues).where(eq(issues.id, issue.id)).limit(1).for("update");
-  if (!ownerRecoveryIdentityMatches({ heartbeat, issue, currentIssue, agentId: actor.agentId })) {
-    throw conflict("Owner-recovery submission requires the same company, agent and owner-action heartbeat", {
-      reason: "owner_recovery_submission_identity_mismatch",
-    });
-  }
-  await issueService(db).assertCheckoutOwner(issue.id, actor.agentId, actor.runId);
-  return { issue };
-}
+// identity·체크아웃)은 owner-recovery-window-auth.ts 로 추출됐다 — 결정·자가교체·mission_owner_execute
+// 실행 창구가 같은 체인을 공유한다(메시지 계약 보존을 위해 label 만 파라미터화).
 
 export async function ownerSelfReplacement(db: Db, input: {
   readonly issueId: string;
@@ -75,7 +38,7 @@ export async function ownerSelfReplacement(db: Db, input: {
   const body = ownerSelfReplacementSchema.parse(input.request);
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
-    const { issue } = await authorizeOwnerSelfReplacement(t, input.issueId, input.actor);
+    const { issue } = await authorizeOwnerRecoveryWindow(t, input.issueId, input.actor, "replacement");
     // 멱등 replay 는 스코프 잠금 앞에서 판정한다 — 이미 기록된 자가 승인 행 자체가 증거다.
     // ( admission 이 이미 소비된 뒤의 재요청도 scope 잠금 없이 동일 승인을 반환한다. )
     const [existing] = await tx.select().from(approvals).where(and(eq(approvals.companyId, issue.companyId),

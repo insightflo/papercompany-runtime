@@ -55,6 +55,11 @@ export const missionOwnerExecuteSchema = z.object({
   actionRequestId: uuid, expectedIntentEventId: uuid.nullable(),
   ownerDecisionEventId: uuid.nullable(), action,
 }).strict();
+// 오너 결정 API 창구(POST /issues/:id/owner-recovery/execute) 전용 입력 — ownerActionIssueId 는
+//   경로 파라미터가 공급하고 본문 제공은 strict 거부된다. 나머지 계약은 플러그인 도구 라우트와
+//   동일한 missionOwnerExecuteSchema 를 재사용한다(새 권한 경로가 아니라 같은 서비스 진입점).
+export const ownerExecuteApiSchema = missionOwnerExecuteSchema.omit({ ownerActionIssueId: true });
+export type OwnerExecuteApi = z.input<typeof ownerExecuteApiSchema>;
 export const missionOwnerGetResultSchema = z.object({
   schemaVersion: z.literal(1), missionId: uuid, actionId: uuid,
 }).strict();
