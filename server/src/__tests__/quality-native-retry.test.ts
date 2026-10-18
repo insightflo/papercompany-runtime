@@ -10,6 +10,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   qualityActionGroups,
+  qualityActions,
   qualityPolicyUsage,
   workflowRuns,
   workflowStepRuns,
@@ -18,6 +19,9 @@ import {
 import { createQualityTestDb, describeQualityDb, type QualityTestDb } from "./helpers/quality-db.js";
 import { seedQualityFixture } from "./helpers/quality-fixture.js";
 import { qualityWakeKey } from "../services/quality/native-wake.js";
+import {
+  lockQualityAttemptBudget, reserveQualityRetryUsage, type QualityAttemptBudgetLock,
+} from "../services/quality/retry-budget.js";
 import { ensureCanonicalQualityExecution } from "../services/quality/native-records.js";
 import { scheduleWorkflowStepRetry } from "../services/workflow/step-retry-scheduler.js";
 import { wakeIssueBackedRetryAndMarkDispatching } from "../services/workflow/retry-launch-dispatch.js";
@@ -109,6 +113,68 @@ describeQualityDb("Quality native bounded retry", () => {
     const [usage] = await db.select().from(qualityPolicyUsage)
       .where(and(eq(qualityPolicyUsage.companyId, s.companyId), eq(qualityPolicyUsage.policyVersionId, s.policyVersionId)));
     expect(usage).toBeUndefined();
+    const [group] = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    expect(group!.usage).toEqual({});
+    expect(group!.revision).toBe(1);
+    const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.stepRunId));
+    expect(step!.status).toBe("failed");
+    expect(step!.executionGeneration).toBe(2);
+    const events = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowStepRunId, s.stepRunId),
+      eq(workflowTransitionEvents.eventType, "workflow_step_retry_scheduled"),
+    ));
+    expect(events).toHaveLength(0);
+  });
+
+  // C03/C12: event re-delivery is not another attempt, including at the last available slot.
+  it.each([4, 1])("does not consume again on duplicate delivery with a %i-attempt envelope", async (maxExecutorAttempts) => {
+    const db = owned.db;
+    const s = await seedFailedQualityStep(db);
+    const [action] = await db.select().from(qualityActions).where(eq(qualityActions.id, s.actionId));
+    await db.update(qualityActions).set({ retryEnvelope: { ...action!.retryEnvelope, maxExecutorAttempts } })
+      .where(eq(qualityActions.id, s.actionId));
+    const input = await retryInput(db, s);
+    expect((await scheduleWorkflowStepRetry(db, input)).result).toBe("scheduled");
+    const usageBefore = await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId));
+    const groupBefore = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    const runBefore = await db.select().from(workflowRuns).where(eq(workflowRuns.id, s.workflowRunId));
+    expect(usageBefore).toHaveLength(1);
+    expect(usageBefore[0]!.executionAttempts).toBe(1);
+    expect(groupBefore[0]!.usage.executionAttempts).toBe(1);
+    expect((await scheduleWorkflowStepRetry(db, input)).result).toBe("already_changed");
+    expect(await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId))).toEqual(usageBefore);
+    expect(await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId))).toEqual(groupBefore);
+    expect(await db.select().from(workflowRuns).where(eq(workflowRuns.id, s.workflowRunId))).toEqual(runBefore);
+    const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.stepRunId));
+    expect(step!.executionGeneration).toBe(3);
+    expect(step!.retryCount).toBe(1);
+    const events = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowStepRunId, s.stepRunId),
+      eq(workflowTransitionEvents.eventType, "workflow_step_retry_scheduled"),
+    ));
+    expect(events).toHaveLength(1);
+  });
+
+  it("rejects forged and foreign-transaction locks and rolls back lock-only zero rows", async () => {
+    const db = owned.db;
+    const s = await seedQualityFixture(db);
+    const input = { companyId: s.companyId, actionId: s.actionId, now: new Date() };
+    await expect(db.transaction(tx => reserveQualityRetryUsage(tx, input, {} as QualityAttemptBudgetLock)))
+      .rejects.toThrow("quality_budget_lock_invalid");
+    let expired!: QualityAttemptBudgetLock;
+    await expect(db.transaction(async tx => {
+      expired = await lockQualityAttemptBudget(tx, input);
+      await expect(db.transaction(other => reserveQualityRetryUsage(other, input, expired)))
+        .rejects.toThrow("quality_budget_lock_invalid");
+      // Wrong scope must also fail even on the transaction that really owns the lock.
+      await reserveQualityRetryUsage(tx, { ...input, actionId: randomUUID() }, expired);
+    })).rejects.toThrow("quality_budget_lock_invalid");
+    await expect(db.transaction(tx => reserveQualityRetryUsage(tx, input, expired)))
+      .rejects.toThrow("quality_budget_lock_invalid");
+    expect(await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId))).toHaveLength(0);
+    const [group] = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    expect(group!.usage).toEqual({});
+    expect(group!.revision).toBe(1);
   });
 
   it("dispatches a new technical attempt under a fresh quality wake key, not the generic retry key", async () => {
