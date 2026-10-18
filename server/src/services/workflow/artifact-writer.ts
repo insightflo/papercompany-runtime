@@ -10,10 +10,70 @@ type Directory = { name: string; exclusive: boolean; readonly: boolean; target: 
 // mkdir/open/chmod never traverse an unpinned ancestor (including on macOS,
 // where Node exposes neither mkdirat nor fchdir). No chmod-based trust boundary.
 const writer = `
-const fs = require('node:fs'), cp = require('node:child_process'), c = fs.constants;
+const fs = require('node:fs'), cp = require('node:child_process'), crypto = require('node:crypto'), c = fs.constants;
 const {node, dev, ino, program} = JSON.parse(fs.readFileSync(0, 'utf8'));
 const base = fs.statSync('.');
 if (base.dev !== dev || base.ino !== ino) throw Error('artifact_root_replaced');
+const sameInode = (a, b) => a.dev === b.dev && a.ino === b.ino;
+function verify(fd, bytes) {
+  const before = fs.fstatSync(fd);
+  if (!before.isFile() || before.size !== bytes.length) throw Error('artifact_file_conflict');
+  const actual = Buffer.alloc(bytes.length + 1);
+  let size = 0;
+  while (size < actual.length) {
+    const count = fs.readSync(fd, actual, size, actual.length - size, size);
+    if (!count) break;
+    size += count;
+  }
+  const after = fs.fstatSync(fd);
+  if (!sameInode(before, after) || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+      || size !== bytes.length || !actual.subarray(0, size).equals(bytes)) throw Error('artifact_file_conflict');
+}
+function reuse(name, bytes) {
+  let fd;
+  try { fd = fs.openSync(name, c.O_RDONLY | c.O_NONBLOCK | c.O_NOFOLLOW); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  try { verify(fd, bytes); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  return true;
+}
+function persist(file) {
+  const bytes = Buffer.from(file.base64, 'base64');
+  if (reuse(file.name, bytes)) return;
+  let temporary, fd;
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const name = '.artifact-' + crypto.randomBytes(24).toString('hex') + '.tmp';
+    try {
+      fd = fs.openSync(name, c.O_RDWR | c.O_CREAT | c.O_EXCL | c.O_NOFOLLOW, 0o400);
+      temporary = name;
+      break;
+    } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
+  if (fd === undefined) throw Error('artifact_temporary_collision');
+  const owned = fs.fstatSync(fd);
+  let failure;
+  try {
+    fs.writeFileSync(fd, bytes);
+    verify(fd, bytes);
+    fs.fsyncSync(fd);
+    const current = fs.lstatSync(temporary);
+    if (!current.isFile() || !sameInode(current, owned)) throw Error('artifact_temporary_replaced');
+    try { fs.linkSync(temporary, file.name); }
+    catch (error) {
+      if (error.code !== 'EEXIST' || !reuse(file.name, bytes)) throw error;
+    }
+  } catch (error) { failure = error; }
+  finally {
+    try { fs.closeSync(fd); } catch (error) { failure ??= error; }
+    try {
+      const current = fs.lstatSync(temporary);
+      if (!current.isFile() || !sameInode(current, owned)) throw Error('artifact_temporary_replaced');
+      fs.unlinkSync(temporary);
+    } catch (error) { if (error.code !== 'ENOENT') failure ??= error; }
+  }
+  if (failure) throw failure;
+}
 let target = node.target ? {dev: base.dev, ino: base.ino} : null;
 for (const child of node.directories) {
   try { fs.mkdirSync(child.name, {mode: 0o700}); }
@@ -28,14 +88,14 @@ for (const child of node.directories) {
     const value = JSON.parse(result.stdout); if (value) target = value;
   } finally { fs.closeSync(fd); }
 }
-for (const file of node.files) {
-  const fd = fs.openSync(file.name, c.O_WRONLY | c.O_CREAT | c.O_EXCL | c.O_NOFOLLOW, 0o400);
-  try { fs.writeFileSync(fd, Buffer.from(file.base64, 'base64')); } finally { fs.closeSync(fd); }
-}
-if (node.readonly) {
-  const fd = fs.openSync('.', c.O_RDONLY | c.O_DIRECTORY);
-  try { fs.fchmodSync(fd, 0o500); } finally { fs.closeSync(fd); }
-}
+for (const file of node.files) persist(file);
+const directoryFd = fs.openSync('.', c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW);
+try {
+  if (node.readonly) fs.fchmodSync(directoryFd, 0o500);
+  // Every child syncs itself; unwinding also syncs every parent directory link.
+  // Reuse repeats both file and directory sync after an interrupted publication.
+  fs.fsyncSync(directoryFd);
+} finally { fs.closeSync(directoryFd); }
 process.stdout.write(JSON.stringify(target));
 `;
 
@@ -63,9 +123,11 @@ export async function createArtifactDirectory(root: ArtifactRoot, relative: stri
   return { path: path.join(root.path, relative), ...result };
 }
 
-/** Exclusively persist a machine result under the captured inode, not its display path. */
+/** Persist exact bytes without replacing an existing result under the captured inode. */
 export async function writeArtifactFile(root: ArtifactRoot, name: string, bytes: Buffer) {
-  if (path.basename(name) !== name || [".", ".."].includes(name)) throw new Error("artifact_path_invalid");
+  if (!name || name.includes("\\") || name.includes("\0") || path.basename(name) !== name || [".", ".."].includes(name)) {
+    throw new Error("artifact_path_invalid");
+  }
   await runWriter(root, { name: ".", exclusive: false, readonly: false, target: true,
     directories: [], files: [{ name, base64: bytes.toString("base64") }] });
 }
