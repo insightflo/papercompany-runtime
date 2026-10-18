@@ -91,9 +91,11 @@ async function qaWorld(options: { findings: Array<{ id: string; summary: string;
     { id: qaStepRunId, workflowRunId, stepId: "qa-validate", issueId: qaIssueId, status: "failed", startedAt: new Date(Date.now() - 45_000), completedAt: new Date(Date.now() - 30_000) }]);
   if (options.terminalDecision) await db.insert(workflowTerminalDecisions).values({ companyId, workflowRunId, decidedAuthorityVersion: 0, decision: "failed", policyCause: "recovery_deadline_hard", discoveryPath: "stuck_diagnostic", origin: "reconciler" });
   // 완료된 생산자의 등록 산출물 — graphWorkProductRequired 게이트가 completed 를 지키게 한다.
-  // 등록 provenance 는 생산자 이슈 스코프 heartbeat 여야 한다(producer-provenance 게이트).
+  // 등록 provenance 는 생산자 이슈 스코프의 연결된 디스패치 하트비트여야 한다(2026-10-17 계약:
+  //   스텝 바인딩 이슈의 미연결 신원 등록은 거부 — 실제 승입 경로와 동일하게 시드한다).
   const seedHeartbeatId = randomUUID();
-  await db.insert(heartbeatRuns).values({ id: seedHeartbeatId, companyId, agentId: ownerAgentId, issueId: producerIssueId, status: "succeeded" });
+  const seeded = await admittedProducer(db, { companyId, agentId: ownerAgentId, issueId: producerIssueId, stepRunId: producerStepRunId, heartbeatId: seedHeartbeatId });
+  await db.update(agentWakeupRequests).set({ status: "completed", finishedAt: new Date() }).where(eq(agentWakeupRequests.id, seeded.wakeId));
   const seedArtifact = path.join(root, "missions", missionId, "seed", "content.json"), seedBytes = Buffer.from('{"blocks":["seed"]}');
   await mkdir(path.dirname(seedArtifact), { recursive: true }); await writeFile(seedArtifact, seedBytes);
   await workProductService(db).createForIssue(producerIssueId, companyId, { provider: "local_file", type: "document",
@@ -136,8 +138,8 @@ it("[①GREEN] artifact finding reworks the real producer and resolves only via 
   const producer = await w.row(w.producerStepRunId);
   expect(producer.status).toBe("pending"); // 재작업 리셋 — cap 1 소모
   expect(producer.iterationIndex).toBe(1);
-  const [wake] = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, w.companyId), eq(agentWakeupRequests.issueId, w.producerIssueId)));
-  expect(wake).toBeTruthy();
+  const [wake] = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, w.companyId), eq(agentWakeupRequests.issueId, w.producerIssueId), eq(agentWakeupRequests.reason, "workflow_step_runnable")));
+  expect(wake).toBeTruthy(); // 시드 승입 웨이크(reason=null)와 구분된 실제 재작업 웨이크
   // 생산자 실재실행: 승인 입장 → 새 산출물 등록 → 이슈 완료 → 엔진 동기화가 완료를 소유
   await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date() }).where(eq(workflowStepRuns.id, w.producerStepRunId));
   const producerHeartbeat = randomUUID();
@@ -242,6 +244,9 @@ it("[⑦GREEN] a duplicate request during rework connects to the current attempt
 
 it("[⑧RED] an artifact finding on a failed run blocks with the stage-4 resume handoff", async () => {
   const w = await qaWorld({ findings: FINDING_ARTIFACT, runStatus: "failed", terminalDecision: true });
+  const producerWakes = () => db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.companyId, w.companyId), eq(agentWakeupRequests.issueId, w.producerIssueId)));
+  const wakesBefore = await producerWakes(); // 시드 승입 웨이크 — 호출 전 상태
   const result = await w.call({ operation: "delegate_fix", producerTarget: w.producerTarget, qaVerdictEventId: w.verdictEventId, findingIds: ["chart-wrong"] });
   expect(result.status).toBe(200);
   expect(pendingResult(result)).toMatchObject({ state: "blocked", reasonCode: "run_failed_requires_resume", requiredAction: null }); // stage 4(resume_run) 이관 — 자동 재개 없음
@@ -249,8 +254,7 @@ it("[⑧RED] an artifact finding on a failed run blocks with the stage-4 resume 
   expect(producer.status).toBe("completed"); // 부작용 0 — reset·cap 소모 없음
   expect(producer.iterationIndex).toBe(0);
   expect(producer.metadata).not.toHaveProperty("workflowReworkContract");
-  expect(await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
-    eq(agentWakeupRequests.companyId, w.companyId), eq(agentWakeupRequests.issueId, w.producerIssueId)))).toEqual([]); // 재작업 wake 없음
+  expect(await producerWakes()).toEqual(wakesBefore); // 재작업 wake 없음 — 호출 부작용 0
   expect(await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, w.companyId), eq(workflowTransitionEvents.eventType, "owner_execute_applied_v1"),
     eq(workflowTransitionEvents.correlationId, pendingResult(result).actionId)))).toEqual([]); // applied 영수증 없음

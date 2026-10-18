@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { and, desc, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import {
-  agentToolGrants, agents, companies, heartbeatRuns, issueWorkProducts, issues, missions,
+  agentToolGrants, agentWakeupRequests, agents, companies, heartbeatRuns, issueWorkProducts, issues, missions,
   toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTerminalDecisions,
   workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
@@ -113,8 +113,21 @@ export async function authorityWorld(db: Db, root: string, options: AuthorityWor
   if (options.terminal) { const [row] = await db.insert(workflowTerminalDecisions).values({ companyId: ids.companyId, workflowRunId: ids.workflowRunId,
     decidedAuthorityVersion: 0, decision: options.terminal.decision ?? "failed", policyCause: options.terminal.policyCause, discoveryPath: "stuck_diagnostic", origin: "reconciler" }).returning(); terminalDecisionId = row!.id; }
   if (!options.skipSeedArtifact) { // 완료된 생산자의 등록 산출물(옛 증거 — evidenceAfter 이전이라 현재 시도 증거가 되지 않는다)
-    const seedHeartbeatId = randomUUID();
-    await db.insert(heartbeatRuns).values({ id: seedHeartbeatId, companyId: ids.companyId, agentId: ids.ownerAgentId, issueId: ids.producerIssueId, status: "succeeded" });
+    // [2026-10-18 미봉인 등록 거부 대응] 스텝 바인딩 이슈의 등록은 이제 연결 신원(하트비트+웨이크 시도증명)만
+    //   통과한다(workproduct_producer_unlinked_registration). 시드를 실제 디스패치와 동일한
+    //   연결 신원으로 만든다 — 세대·시도는 producerStepRun 기본값(0/0/0)과 일치.
+    const seedHeartbeatId = randomUUID(), seedWakeId = randomUUID();
+    await db.insert(agentWakeupRequests).values({ id: seedWakeId, companyId: ids.companyId, agentId: ids.ownerAgentId,
+      source: "automation", requestedByActorType: "system", requestKind: "workflow_dispatch",
+      missionId: ids.missionId,
+      issueId: ids.producerIssueId, workflowRunId: ids.workflowRunId, workflowStepRunId: ids.producerStepRunId,
+      workflowExecutionGeneration: 0, runId: seedHeartbeatId, status: "delivered",
+      payload: { __paperclipWorkflowProducerAttempt: { schemaVersion: 1, companyId: ids.companyId, agentId: ids.ownerAgentId,
+        issueId: ids.producerIssueId, missionId: ids.missionId, workflowRunId: ids.workflowRunId, stepRunId: ids.producerStepRunId,
+        executionGeneration: 0, retryCount: 0, iterationIndex: 0, wakeupRequestId: seedWakeId, parentHeartbeatRunId: null } } });
+    await db.insert(heartbeatRuns).values({ id: seedHeartbeatId, companyId: ids.companyId, agentId: ids.ownerAgentId, issueId: ids.producerIssueId,
+      wakeupRequestId: seedWakeId, workflowStepRunId: ids.producerStepRunId, workflowExecutionGeneration: 0,
+      startedAt: new Date(), status: "succeeded" });
     const seedArtifact = path.join(root, "missions", ids.missionId, "seed", "content.json"), seedBytes = Buffer.from('{"blocks":["seed"]}');
     await mkdir(path.dirname(seedArtifact), { recursive: true }); await writeFile(seedArtifact, seedBytes);
     await workProductService(db).createForIssue(ids.producerIssueId, ids.companyId, { provider: "local_file", type: "document", title: "content.json",

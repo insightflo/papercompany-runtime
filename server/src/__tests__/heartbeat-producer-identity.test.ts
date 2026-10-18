@@ -74,7 +74,8 @@ it("legacy NULL wake is not retroactively typed; nonworkflow claim and OFF capac
     status: "queued", wakeupRequestId: wake.id }).returning();
   const claimed = await claimHeartbeatWithRecoveryGuard(db, run, new Date());
   expect(claimed).toMatchObject({ status: "running", workflowStepRunId: null, workflowExecutionGeneration: null, finalizationVersion: 0 });
-  expect((await f.register(run.id))?.metadata.workflowProducer).toBeUndefined();
+  // 2026-10-17 계약: 스텝 바인딩 이슈에서 미연결 신원의 등록은 봉인 없는 독 기록을 만들므로 거부된다.
+  await expect(f.register(run.id)).rejects.toThrow("workproduct_producer_unlinked_registration");
   for (let n = 0; n < 2; n++) await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
     status: "failed", finalizationVersion: 1, settledAt: null, errorCode: "process_lost" });
   const clause = await lifecycleActiveClause(db);
