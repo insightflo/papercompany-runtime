@@ -37,12 +37,12 @@ export async function executeLocalToolWithProgress(input: {
   db: Db; scope: ProgressScope; policy: ToolProgressPolicy;
   executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
   launch?: <T>(start: () => T) => Promise<{ result: T }>;
-  inputBytes?: Buffer; qaResult?: boolean;
-}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer }> {
+  inputBytes?: Buffer; qaResult?: boolean; acceptQaExit1?: boolean;
+}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }> {
   const store = createToolProgressStore(input.db);
   const heartbeat = await store.start(input.scope, input.policy);
   let cleanup: (() => Promise<void>) | undefined;
-  return withToolProgress({ store, heartbeat, succeeded: () => true, cleanup: async () => { await cleanup?.(); },
+  return withToolProgress<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }>({ store, heartbeat, succeeded: value => value.exitCode === 0, cleanup: async () => { await cleanup?.(); },
     operation: async (signal) => {
       const start = async () => {
       signal.throwIfAborted();
@@ -95,7 +95,10 @@ export async function executeLocalToolWithProgress(input: {
         });
         child.once("exit", (code) => {
           ownedExit();
-          if (code !== 0) fail(Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code }));
+          // Keep candidate QA exit-one pipes open until close and progress intake have drained.
+          if (code !== 0 && !(input.qaResult && input.acceptQaExit1 && code === 1)) {
+            fail(Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code }));
+          }
         });
         child.once("close", (code) => {
           closed = true; clearTimeout(killTimer); signal.removeEventListener("abort", terminate); resolve(code);
@@ -114,9 +117,12 @@ export async function executeLocalToolWithProgress(input: {
       signal.throwIfAborted();
       const stdout = Buffer.concat(collected[0]).toString("utf8");
       const stderr = Buffer.concat(collected[1]).toString("utf8");
-      if (childError) throw Object.assign(childError, { stdout, stderr });
-      if (code !== 0) throw Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code, stdout, stderr });
-      return { stdout, stderr, qaResultBytes: input.qaResult ? qaResult() : undefined };
+      const qaResultBytes = input.qaResult ? qaResult() : undefined;
+      if (childError) throw Object.assign(childError, { stdout, stderr, qaResultBytes });
+      if (code !== 0 && !(input.qaResult && input.acceptQaExit1 && code === 1)) {
+        throw Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code, stdout, stderr, qaResultBytes });
+      }
+      return { stdout, stderr, qaResultBytes, exitCode: code! };
       };
       return input.launch ? (await input.launch(start)).result : start();
     },

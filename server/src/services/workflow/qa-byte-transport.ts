@@ -33,8 +33,8 @@ export function wireQaTransport(child: ChildProcess, input: Buffer | undefined,
 }
 
 export function executeQaByteTool(input: { executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
-  inputBytes: Buffer; qaResult: boolean; timeoutMs: number }) {
-  return new Promise<{ stdout: string; stderr: string; qaResultBytes: Buffer }>((resolve, reject) => {
+  inputBytes: Buffer; qaResult: boolean; acceptQaExit1?: boolean; timeoutMs: number }) {
+  return new Promise<{ stdout: string; stderr: string; qaResultBytes: Buffer; exitCode: number }>((resolve, reject) => {
     const child = spawn(input.executable, input.args, { cwd: input.cwd, env: input.env,
       stdio: ["pipe", "pipe", "pipe", "ignore", input.qaResult ? "pipe" : "ignore"] });
     let failure: Error | undefined;
@@ -43,13 +43,16 @@ export function executeQaByteTool(input: { executable: string; args: string[]; c
     const output = ["", ""];
     [child.stdout!, child.stderr!].forEach((s, i) => s.on("data", chunk => {
       output[i] += chunk; if (Buffer.byteLength(output[i]) > 10 * 1024 * 1024) fail(new Error("tool_output_overflow"));
-    }));
+    }).on("error", fail));
     const timer = setTimeout(() => fail(new Error("tool_timeout")), input.timeoutMs);
     child.on("error", fail);
-    child.on("close", code => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      if (failure || code !== 0) reject(Object.assign(failure ?? new Error("qa_tool_failed"), { code, stdout: output[0], stderr: output[1] }));
-      else resolve({ stdout: output[0], stderr: output[1], qaResultBytes: result() });
+      const qaResultBytes = result();
+      // Exit one is only a candidate for the caller to verify, never a QA verdict here.
+      if (failure || signal || (code !== 0 && !(input.qaResult && input.acceptQaExit1 && code === 1))) {
+        reject(Object.assign(failure ?? new Error("qa_tool_failed"), { code, signal, stdout: output[0], stderr: output[1], qaResultBytes }));
+      } else resolve({ stdout: output[0], stderr: output[1], qaResultBytes, exitCode: code! });
     });
   });
 }

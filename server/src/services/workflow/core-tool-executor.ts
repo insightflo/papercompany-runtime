@@ -205,14 +205,14 @@ export async function executeCoreWorkflowTool(input: {
     await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
     // Fence owner-execute-linked attempts right before the real child process launch;
     // unrelated tools pass through with existing behavior.
-    const invocation = () => withCurrentOwnerToolAttempt<{ stdout: string; stderr: string; qaResultBytes?: Buffer }>(
+    const invocation = () => withCurrentOwnerToolAttempt<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode?: number }>(
       { db: input.db, companyId: input.companyId, requestId: input.requestId,
         workflowRunId: input.workflowRunId ?? null, stepRunId: input.stepRunId ?? null },
       () => policy
       ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
-        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot) })
-      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), timeoutMs })
+        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1: !!qaRequest })
+      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1: !!qaRequest, timeoutMs })
       : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }));
     const result = await (dispatch && !policy ? (await dispatch.launch(invocation)).result : invocation());
     await recordToolCallProvenance(input.db, invocationProvenance, "returned");
@@ -222,7 +222,17 @@ export async function executeCoreWorkflowTool(input: {
       if (!bytes?.length) throw new Error("qa_result_transport_missing");
       await writeArtifactFile(qaRequest.snapshot.root, qaRequest.snapshot.artifactExecution.contract.resultFileName, bytes);
       if (JSON.stringify(deployment) !== JSON.stringify(await toolDeploymentHashes(deploymentFiles!, cwd))) throw new Error("qa_tool_deployment_changed");
-      const verified = await verifyQaArtifact(qaRequest, tool, deployment);
+      const exitCode = result.exitCode ?? 0;
+      const exitFailure = () => Object.assign(new Error("qa_tool_failed"), { code: exitCode, stdout, stderr });
+      const verified = await verifyQaArtifact(qaRequest, tool, deployment).catch((error: unknown) => {
+        if (exitCode !== 0) {
+          // A positive plugin result with a failed process cannot become server-rule rework.
+          if (error instanceof QaArtifactRejectionError && error.message !== "qa_artifact_verdict_failed") throw exitFailure();
+          if (error instanceof Error) Object.assign(error, { exitCode, stdout, stderr });
+        }
+        throw error;
+      });
+      if (exitCode !== 0) throw exitFailure();
       return { status: 200, toolArtifactReceipt: verified.receipt,
         body: { content: stdout.trim(), stderr: stderr.trim(), data: { ...verified.qa, verdict: "pass" }, tool: input.toolName, source: "core", invocationProvenance } };
     }
@@ -248,13 +258,13 @@ export async function executeCoreWorkflowTool(input: {
       stderr: trimmedStderr, tool: input.toolName, source: "core", invocationProvenance } };
   } catch (error) {
     if (invocationProvenance?.phase === "prepared") await recordToolCallProvenance(input.db, invocationProvenance, "threw");
-    const typed = error as Error & { code?: string | number; stdout?: unknown; stderr?: unknown };
+    const typed = error as Error & { code?: string | number; exitCode?: number; stdout?: unknown; stderr?: unknown };
     const stdout = typeof typed.stdout === "string" ? typed.stdout.trim() : "";
     const stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
     const code = typed.code === undefined ? "" : ` (exit: ${String(typed.code)})`;
     const status = (error instanceof ToolProgressError && error.status === 422) || typed.message.startsWith("artifact_contract_") ? 422 : 500;
     const message = adapterConfig.progress !== undefined && !(error instanceof ToolProgressError) && !(error instanceof QaArtifactRejectionError) && !typed.message.startsWith("artifact_contract_")
       ? "tool_progress_execution_failed" : typed.message;
-    return { status, body: { error: `${message}${code}`, data: { stdout }, stderr, tool: input.toolName, source: "core", invocationProvenance } };
+    return { status, body: { error: `${message}${code}`, data: { stdout, ...(typed.exitCode === undefined ? {} : { exitCode: typed.exitCode }) }, stderr, tool: input.toolName, source: "core", invocationProvenance } };
   }
 }
