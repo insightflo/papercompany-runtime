@@ -7,6 +7,7 @@ import { database, fixture } from "./helpers/qa-receipt-fixture.js";
 import { completeWorkflowToolStepFromResult, syncWorkflowRunState, type WorkflowStep } from "../services/workflow/dag-engine.js";
 import { executeQaByteTool } from "../services/workflow/qa-byte-transport.js";
 import { executeLocalToolWithProgress } from "../services/workflow/local-tool-progress-executor.js";
+import { readAttempts } from "../services/workflow/control-flow/verdict-store.js";
 
 // Keep real child/FD, verifier, completion and rework DB paths; seal unrelated agent execution.
 const { wakeup } = vi.hoisted(() => ({ wakeup: vi.fn(async () => null) }));
@@ -71,7 +72,7 @@ fs.writeFileSync(4,JSON.stringify(q));console.log('diagnostic only');`);
 
 type Kind = "negative" | "negative-zero" | "pass" | "positive-exit1" | "wrong-input" | "wrong-type"
   | "malformed" | "missing" | "stdout-only" | "crash" | "exit2" | "signal" | "timeout"
-  | "overflow" | "output-overflow" | "bad-progress" | "runtime-pass-zero" | "runtime-pass-exit1";
+  | "negative-then-throw" | "overflow" | "output-overflow" | "bad-progress" | "runtime-pass-zero" | "runtime-pass-exit1";
 
 async function invokeCase(progress: boolean, kind: Kind) {
   const f = await fixture(), db = database();
@@ -82,11 +83,13 @@ async function invokeCase(progress: boolean, kind: Kind) {
       { stepId: "qa", when: "qa_request_changes" as const, isBackEdge: true, maxIterations: 2 }] }
     : { ...step, qaType: "action" as const });
   await db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, definition.id));
-  await db.update(workflowStepRuns).set({ completedAt: new Date(Date.now() - 1000) }).where(and(
+  const producerCompletedAt = new Date(Date.now() - 1000);
+  await db.update(workflowStepRuns).set({ completedAt: producerCompletedAt }).where(and(
     eq(workflowStepRuns.workflowRunId, f.runId), eq(workflowStepRuns.stepId, "write")));
   const [producer] = await db.select().from(workflowStepRuns).where(and(
     eq(workflowStepRuns.workflowRunId, f.runId), eq(workflowStepRuns.stepId, "write")));
-  await db.update(issues).set({ assigneeAgentId: steps[0].agentId }).where(eq(issues.id, producer.issueId!));
+  await db.update(issues).set({ assigneeAgentId: steps[0].agentId, completedAt: producerCompletedAt })
+    .where(eq(issues.id, producer.issueId!));
   const script = path.join(f.adapterConfig.workingDirectory, f.adapterConfig.artifactContract.deploymentFiles[0]);
   if (kind.startsWith("runtime-pass-")) {
     const content = JSON.parse(await readFile(f.content, "utf8"));
@@ -111,7 +114,16 @@ else if(kind!=='missing'&&kind!=='crash'){
  writeFileSync(4,payload.subarray(0,-1));
  writeFileSync(4,payload.subarray(-1));
 }
-if(kind==='output-overflow')writeFileSync(1,Buffer.alloc(10*1024*1024+1,120));
+if(kind==='crash'||kind==='negative-then-throw')throw new Error('qa_fixture_crash');
+if(kind==='output-overflow'){
+ let remaining=10*1024*1024+1;
+ const chunk=Buffer.alloc(64*1024,120);
+ while(remaining>0){
+  const part=chunk.subarray(0,Math.min(chunk.length,remaining));
+  if(!process.stdout.write(part))await new Promise(resolve=>process.stdout.once('drain',resolve));
+  remaining-=part.length;
+ }
+}
 if(kind==='bad-progress')writeFileSync(3,'{bad}'+String.fromCharCode(10));
 if(kind==='signal')process.kill(process.pid,'SIGTERM');
 if(kind==='timeout')setInterval(()=>{},1000);
@@ -129,25 +141,12 @@ if(kind==='timeout')setInterval(()=>{},1000);
 // C01 defines the oracle: current negative evidence costs one producer iteration;
 // process/transport/contract failures cost zero, and positive exit-one is never success.
 const cases: Kind[] = ["negative", "negative-zero", "pass", "positive-exit1", "wrong-input", "wrong-type",
-  "malformed", "missing", "stdout-only", "crash", "exit2", "signal", "timeout", "overflow", "output-overflow", "runtime-pass-zero", "runtime-pass-exit1"];
+  "malformed", "missing", "stdout-only", "crash", "negative-then-throw", "exit2", "signal", "timeout", "overflow", "output-overflow", "runtime-pass-zero", "runtime-pass-exit1"];
 it.each([false, true].flatMap(progress => cases.map(kind => ({ progress, kind }))))
   ("real QA exit/FD result reaches completion and bounded rework ($progress, $kind)", async ({ progress, kind }) => {
     const { f, producer: before, result } = await invokeCase(progress, kind), db = database();
     const rejection = kind === "negative" || kind === "negative-zero" || kind === "runtime-pass-zero";
-    expect(result.status, JSON.stringify(result.body).slice(0, 1000)).toBe(kind === "pass" ? 200 : 500);
-    if (rejection) {
-      if (kind === "runtime-pass-zero") expect(result.body.error).toMatch(/^qa_artifact_runtime_checks_failed:https-links /);
-      else expect(result.body.error).toBe("qa_artifact_verdict_failed");
-      if (kind === "negative") expect(result.body.data).toMatchObject({ exitCode: 1 });
-    } else if (kind !== "pass") {
-      expect(result.body.error).not.toMatch(/^qa_artifact_(verdict_failed|runtime_checks_failed:)/);
-    }
-    expect(!!result.toolArtifactReceipt).toBe(kind === "pass");
-    if (progress) {
-      const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
-      expect(heartbeat.state).toBe(kind === "pass" || kind === "negative-zero" || kind === "runtime-pass-zero" ? "succeeded"
-        : kind === "timeout" ? "timed_out" : "failed");
-    }
+    // C01: inspect real completion and persisted rework before error classification can fail.
     await completeWorkflowToolStepFromResult(db, { companyId: f.companyId, workflowRunId: f.runId,
       stepRunId: f.qaId, stepId: "qa", requestId: f.requestId, toolName: "local-qa",
       success: result.status === 200, data: result.body.data, stdout: result.body.content,
@@ -157,22 +156,46 @@ it.each([false, true].flatMap(progress => cases.map(kind => ({ progress, kind })
       return { producer: rows.find(row => row.stepId === "write")!, qa: rows.find(row => row.id === f.qaId)! };
     };
     const after = await read();
-    expect(after.producer.iterationIndex).toBe(before.iterationIndex + (rejection ? 1 : 0));
+    const resets = await db.select().from(activityLog).where(and(eq(activityLog.entityId, before.id),
+      eq(activityLog.action, "workflow.rework_reset")));
+    await syncWorkflowRunState(db, f.runId);
+    const resynced = await read();
+    expect({
+      iterationIndex: after.producer.iterationIndex,
+      reworkResets: resets.length,
+      resyncedIterationIndex: resynced.producer.iterationIndex,
+    }).toEqual({
+      iterationIndex: before.iterationIndex + (rejection ? 1 : 0),
+      reworkResets: rejection ? 1 : 0,
+      resyncedIterationIndex: after.producer.iterationIndex,
+    });
     if (rejection) {
       expect(["pending", "running"]).toContain(after.producer.status);
-      expect(after.producer.metadata.attempts).toHaveLength(1);
+      expect(readAttempts(after.producer.metadata)).toHaveLength(1);
       expect(after.qa.status).toBe("pending");
       expect(after.qa.lastDispatchRequestId).toBeNull();
       expect(after.qa.metadata.toolArtifactReceipt).toBeUndefined();
     } else {
-      expect(after.producer.metadata.attempts).toEqual(before.metadata.attempts);
+      expect(readAttempts(after.producer.metadata)).toEqual(readAttempts(before.metadata));
       expect(after.qa.status).toBe(kind === "pass" ? "completed" : "failed");
     }
-    const resets = await db.select().from(activityLog).where(and(eq(activityLog.entityId, before.id),
-      eq(activityLog.action, "workflow.rework_reset")));
-    expect(resets).toHaveLength(rejection ? 1 : 0);
-    await syncWorkflowRunState(db, f.runId);
-    expect((await read()).producer.iterationIndex).toBe(after.producer.iterationIndex);
+    expect(result.status, JSON.stringify(result.body).slice(0, 1000)).toBe(kind === "pass" ? 200 : 500);
+    if (rejection) {
+      if (kind === "runtime-pass-zero") expect(result.body.error).toMatch(/^qa_artifact_runtime_checks_failed:https-links /);
+      else expect(result.body.error).toBe("qa_artifact_verdict_failed");
+      if (kind === "negative") expect(result.body.data).toMatchObject({ exitCode: 1 });
+    } else if (kind !== "pass") {
+      expect(result.body.error).not.toMatch(/^qa_artifact_(verdict_failed|runtime_checks_failed:)/);
+    }
+    if (kind === "output-overflow") {
+      expect(result.body.error).toContain(progress ? "tool_progress_output_overflow" : "tool_output_overflow");
+    }
+    expect(!!result.toolArtifactReceipt).toBe(kind === "pass");
+    if (progress) {
+      const [heartbeat] = await db.select().from(toolExecutionHeartbeats).where(eq(toolExecutionHeartbeats.toolId, f.toolId));
+      expect(heartbeat.state).toBe(kind === "pass" || kind === "negative-zero" || kind === "runtime-pass-zero" ? "succeeded"
+        : kind === "timeout" ? "timed_out" : "failed");
+    }
   }, 20000);
 
 it("valid negative FD4 bytes cannot override malformed progress or consume rework", async () => {
@@ -183,7 +206,7 @@ it("valid negative FD4 bytes cannot override malformed progress or consume rewor
     requestId: f.requestId, success: false, error: result.body.error });
   const [after] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, producer.id));
   expect(after.iterationIndex).toBe(producer.iterationIndex);
-  expect(after.metadata.attempts).toEqual(producer.metadata.attempts);
+  expect(readAttempts(after.metadata)).toEqual(readAttempts(producer.metadata));
 });
 
 // Transport alone never treats bytes as content authority. The opt-in belongs to the QA caller,
