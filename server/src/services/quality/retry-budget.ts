@@ -2,7 +2,7 @@
 // only the event winner consumes. All failures must escape the owning transaction.
 // Order: usage(windowStart, id) -> group -> action -> policy -> caller's mission/run.
 // Company-period totals still span policy versions; cross-policy serialization is outside this boundary.
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { qualityActionGroups, qualityActions, qualityPolicyUsage, qualityPolicyVersions } from "@paperclipai/db";
 import { qualityPolicySchema, retryEnvelopeSchema } from "@paperclipai/shared";
@@ -16,6 +16,7 @@ declare const budgetLockBrand: unique symbol;
 export type QualityAttemptBudgetLock = { readonly [budgetLockBrand]: true };
 type LockedBudget = {
   tx: Tx;
+  xid: string;
   companyId: string;
   action: typeof qualityActions.$inferSelect;
   group: typeof qualityActionGroups.$inferSelect;
@@ -25,8 +26,17 @@ type LockedBudget = {
   windowStart: Date;
   windowEnd: Date;
 };
-// Opaque, single-use receipts carry no caller-editable authority. Identity binds them to this tx.
+// Opaque, single-use receipts bind both the tx object and its actual database transaction.
 const lockedBudgets = new WeakMap<QualityAttemptBudgetLock, LockedBudget>();
+
+async function readBudgetTransactionId(tx: Tx): Promise<string> {
+  const [row] = await tx.execute(sql`SELECT txid_current()::text AS xid`);
+  const xid = row?.xid;
+  if (typeof xid !== "string" || !/^[1-9][0-9]*$/.test(xid)) {
+    throw new Error("quality_budget_lock_invalid");
+  }
+  return xid;
+}
 
 export function readQualityStepActionId(metadata: unknown): string | null {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
@@ -81,8 +91,9 @@ export async function lockQualityAttemptBudget(tx: Tx, input: BudgetInput): Prom
   if (envelope.groupId !== action.groupId || envelope.policyVersionId !== action.policyVersionId) {
     throw new Error("quality_action_contract_mismatch");
   }
+  const xid = await readBudgetTransactionId(tx);
   const receipt = Object.freeze({}) as QualityAttemptBudgetLock;
-  lockedBudgets.set(receipt, { tx, companyId: input.companyId, action, group, usage, policy, envelope, windowStart, windowEnd });
+  lockedBudgets.set(receipt, { tx, xid, companyId: input.companyId, action, group, usage, policy, envelope, windowStart, windowEnd });
   return receipt;
 }
 
@@ -95,7 +106,11 @@ export async function reserveQualityRetryUsage(
   if (!locked || locked.tx !== tx || locked.companyId !== input.companyId || locked.action.id !== input.actionId) {
     throw new Error("quality_budget_lock_invalid");
   }
+  // Consume before awaiting the identity check so concurrent consumers cannot reuse the receipt.
   lockedBudgets.delete(token);
+  if (await readBudgetTransactionId(tx) !== locked.xid) {
+    throw new Error("quality_budget_lock_invalid");
+  }
   // Re-read even under our locks: a caller may have changed a revision earlier in this tx.
   const [groupRow] = await tx.select().from(qualityActionGroups)
     .where(and(eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, locked.group.id)));

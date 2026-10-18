@@ -155,6 +155,57 @@ describeQualityDb("Quality native bounded retry", () => {
     expect(events).toHaveLength(1);
   });
 
+  // C03/C12: a receipt is valid across statements only while its real transaction owns the locks.
+  it("reserves once in the same transaction after an intervening SELECT and INSERT", async () => {
+    const db = owned.db;
+    const s = await seedFailedQualityStep(db);
+    const input = { companyId: s.companyId, actionId: s.actionId, now: new Date() };
+    const eventId = randomUUID();
+    await db.transaction(async tx => {
+      const receipt = await lockQualityAttemptBudget(tx, input);
+      const [action] = await tx.select().from(qualityActions).where(eq(qualityActions.id, s.actionId));
+      expect(action!.id).toBe(s.actionId);
+      await tx.insert(workflowTransitionEvents).values({
+        id: eventId, companyId: s.companyId, workflowRunId: s.workflowRunId,
+        workflowStepRunId: s.stepRunId, eventType: "quality_budget_test_interleaving", layer: "step",
+      });
+      await reserveQualityRetryUsage(tx, input, receipt);
+      await expect(reserveQualityRetryUsage(tx, input, receipt)).rejects.toThrow(/^quality_budget_lock_invalid$/);
+    });
+    const usage = await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId));
+    expect(usage).toHaveLength(1);
+    expect(usage[0]!.executionAttempts).toBe(1);
+    const [group] = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    expect(group!.usage.executionAttempts).toBe(1);
+    expect(await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, eventId))).toHaveLength(1);
+  });
+
+  // C03/C12 revision 14: commit releases the locks even if the driver still accepts this tx object.
+  it("rejects the same committed transaction object and receipt without changing budget rows", async () => {
+    const db = owned.db;
+    const s = await seedQualityFixture(db);
+    const input = { companyId: s.companyId, actionId: s.actionId, now: new Date() };
+    let expiredTx!: Parameters<Parameters<Db["transaction"]>[0]>[0];
+    let receipt!: QualityAttemptBudgetLock;
+    await db.transaction(async tx => {
+      expiredTx = tx;
+      receipt = await lockQualityAttemptBudget(tx, input);
+    });
+    const usageBefore = await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId));
+    const groupBefore = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    expect(usageBefore).toHaveLength(1);
+    expect(usageBefore[0]!.executionAttempts).toBe(0);
+    expect(groupBefore).toHaveLength(1);
+    expect(groupBefore[0]!.usage).toEqual({});
+    await expect(reserveQualityRetryUsage(expiredTx, input, receipt)).rejects.toThrow(/^quality_budget_lock_invalid$/);
+    const usageAfter = await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, s.companyId));
+    const groupAfter = await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.id, s.groupId));
+    expect(usageAfter).toEqual(usageBefore);
+    expect(groupAfter).toEqual(groupBefore);
+    expect(usageAfter[0]!.executionAttempts).toBe(0);
+    expect(groupAfter[0]!.usage.executionAttempts ?? 0).toBe(0);
+  });
+
   it("rejects forged and foreign-transaction locks and rolls back lock-only zero rows", async () => {
     const db = owned.db;
     const s = await seedQualityFixture(db);
