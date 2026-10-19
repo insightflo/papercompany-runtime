@@ -155,7 +155,7 @@ describe("C03 candidate bytes and quality evidence preparation", () => {
       }
       if (fault === "preparation") {
         const body = qaCorrectionCommitDetails(token).preparation; body.dispatchAuthorityVersion++;
-        await owned.db.update(workflowTransitionEvents).set({ payload: body })
+        await owned.db.update(workflowTransitionEvents).set({ payload: { ...body } })
           .where(eq(workflowTransitionEvents.id, stored.preparationEventId));
       }
       const before = await state(s, stored);
@@ -222,7 +222,7 @@ describe("C03 candidate bytes and quality evidence preparation", () => {
       })).rejects.toBe(rollback);
     }
     await expect(owned.db.transaction(tx => useEvidence.linkPreparedQaCorrectionUseEvidence(tx,
-      { token: prepared.token, expected })).rejects.toMatchObject({ message: "quality_evidence_token_invalid" });
+      { token: prepared.token, expected }))).rejects.toMatchObject({ message: "quality_evidence_token_invalid" });
     expect(remove).not.toHaveBeenCalled(); expect(await state(s, stored)).toEqual(before);
   }, 20000);
 
