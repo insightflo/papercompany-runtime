@@ -9,7 +9,7 @@ import { lockQualityAttemptBudget, reserveQualityRetryUsage } from "../../qualit
 import { loadExecutionDefinition } from "../execution-definition.js";
 import { assertRunNotReplaced } from "../run-replacement-guard.js";
 import {
-  QaCorrectionReadError, parseQaCorrectionPreparationRow, readQaCorrectionScope,
+  QaCorrectionReadError, parseQaCorrectionPreparationRow, readQaCorrectionReservation, readQaCorrectionScope,
   readQaCorrectionVerdict, requireQaCorrection, validateQaCorrectionAuthority, type QaCorrectionDb,
 } from "./qa-correction-authority.js";
 import {
@@ -208,6 +208,53 @@ export async function beginQaCorrection(db: Db, candidate: unknown): Promise<Beg
     });
   } catch (error) {
     if (error instanceof RollbackResult) return error.result;
+    throw error;
+  }
+}
+
+/** C03/C12: each call owns a fresh transaction; a returned handle never carries locks. */
+export async function withCurrentQaCorrectionPreparation<T>(
+  db: Db,
+  expected: Handle,
+  body: (tx: Tx, preparation: Handle) => Promise<{ effect: "write" | "noop"; value: T }>,
+): Promise<
+  | { status: "current"; effect: "write" | "noop"; value: T }
+  | { status: "stopped"; result: BeginQaCorrectionResult }
+> {
+  let p: QaCorrectionPreparation;
+  try { p = parseQaCorrectionEventPayload("qa_correction_prepared", expected.preparation); }
+  catch { throw new QaCorrectionReadError("record"); }
+  const proof = { preparationEventId: expected.preparationEventId, preparationHash: expected.preparationHash };
+  await readQaCorrectionReservation(db, p, proof);
+  const history = await appliedHistory(db, { ...proof, preparation: p });
+  if (history) return { status: "stopped", result: history };
+  const rollback: { noop?: { error: RollbackResult; value: T } } = {};
+  try {
+    return await db.transaction(async tx => {
+      if (p.authority.kind === "quality_current_output") await lockQualityAttemptBudget(tx, {
+        companyId: p.companyId, actionId: p.authority.actionId, now: new Date(),
+      });
+      await lockPreparationRows(tx, p);
+      const existing = await storedPreparation(tx, p);
+      requireQaCorrection(existing, "record");
+      await readQaCorrectionReservation(tx, existing.preparation, proof);
+      const applied = await appliedHistory(tx, existing);
+      if (applied) stop(applied);
+      await currentEligibility(tx, existing.preparation, existing);
+      await checkQaHistory(tx, existing.preparation, true);
+      const result = await body(tx, existing);
+      if (result.effect === "noop") {
+        const error = new RollbackResult({ status: "waiting", detail: "qa_correction_noop" });
+        rollback.noop = { error, value: result.value };
+        throw error;
+      }
+      return { status: "current" as const, ...result };
+    });
+  } catch (error) {
+    if (rollback.noop && error === rollback.noop.error) {
+      return { status: "current", effect: "noop", value: rollback.noop.value };
+    }
+    if (error instanceof RollbackResult) return { status: "stopped", result: error.result };
     throw error;
   }
 }
