@@ -20,6 +20,9 @@ export type HumanOperatorRequest = {
   title: string;
   summary: string;
   timestamp: string;
+  /** [표시 통합 2026-10-18] 같은 (missionId, issueId, decision 종류) 반복 행 수. 표시 전용 값이며
+ *  없는(예전 직렬화) 행은 소비자가 1로 해석한다. 활동 로그·집계에는 영향이 없다. */
+  count: number;
   severity?: GovernanceThreadEvent["severity"];
   event: GovernanceThreadEvent;
 };
@@ -125,7 +128,12 @@ export async function listCompanyHumanOperatorRequests(
   ));
   const sourceIssuesById = await loadSourceIssueRows(db, input.companyId, sourceIssueIds);
 
-  const requests: HumanOperatorRequest[] = [];
+  // [표시 통합 2026-10-18] 같은 (missionId, issueId, decision 종류)의 반복 행을 하나로 묶는다 —
+  // 같은 건이 시차를 두고 5행씩 쌓이는 라이브 문제 대응. 대표 행은 최신 타임스탬프 행(후보가
+  // createdAt desc 로 정렬돼 있어 그룹 첫 등장 행)이고 count 로 총 행수를 노출한다. 표시 전용
+  // 변경이다: 행 삭제·활동 로그·집계 로직은 건드리지 않고, 유형/이슈가 다른 행은 별도 그룹으로
+  // 유지된다(과소 병합으로 실제로 봐야 할 건을 숨기지 않는다).
+  const grouped = new Map<string, { request: HumanOperatorRequest; count: number }>();
   for (const { row, payload } of parsed) {
     const ownerOpen = isOpenIssueStatus(row.issueStatus);
     const sourceRow = payload.sourceIssueId ? sourceIssuesById.get(payload.sourceIssueId) ?? null : null;
@@ -137,6 +145,12 @@ export async function listCompanyHumanOperatorRequests(
     if (!ownerOpen && !sourceOpen) continue;
 
     const targetIssueId = sourceOpen && sourceRow ? sourceRow.id : row.issueId;
+    const groupKey = `${row.missionId}|${targetIssueId}|${payload.decision}`;
+    const existingGroup = grouped.get(groupKey);
+    if (existingGroup) {
+      existingGroup.count += 1;
+      continue;
+    }
     const title = payload.decision === "request_input" ? "Human/operator input requested" : "Mission blocker escalated";
     const timestamp = row.activityCreatedAt.toISOString();
     const actor = payload.actorType
@@ -160,21 +174,27 @@ export async function listCompanyHumanOperatorRequests(
       suggestedResumeTarget: { action: "request_human_input", issueId: targetIssueId },
       rawAvailable: true,
     };
-    requests.push({
-      id: `${row.missionId}:${row.activityId}`,
-      companyId: input.companyId,
-      missionId: row.missionId,
-      missionTitle: row.missionTitle,
-      missionStatus: row.missionStatus,
-      issueId: targetIssueId,
-      title,
-      summary: event.summary,
-      timestamp,
-      severity: event.severity,
-      event,
+    grouped.set(groupKey, {
+      request: {
+        id: `${row.missionId}:${row.activityId}`,
+        companyId: input.companyId,
+        missionId: row.missionId,
+        missionTitle: row.missionTitle,
+        missionStatus: row.missionStatus,
+        issueId: targetIssueId,
+        title,
+        summary: event.summary,
+        timestamp,
+        count: 1,
+        severity: event.severity,
+        event,
+      },
+      count: 1,
     });
-    if (requests.length >= requestLimit) break;
   }
 
-  return requests;
+  // 삽입 순서 = 그룹 최신 타임스탬프 내림차순(후보 정렬 상속) — 상위 requestLimit 개 그룹만 반환한다.
+  return Array.from(grouped.values())
+    .slice(0, requestLimit)
+    .map((group) => ({ ...group.request, count: group.count }));
 }

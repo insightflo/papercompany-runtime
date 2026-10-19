@@ -291,6 +291,21 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(humanAlertPublishes()).toHaveLength(1);
   });
 
+  it("keeps every event/alert row while merging the repeat into one card (no suppression)", async () => {
+    const s = await seedOversight();
+    await submit(s, { decision: "request_input", reason: "Need approval." });
+    await submit(s, { decision: "request_input", reason: "Still need approval, second event." });
+    // 원장·인박스 행·알림은 매 이벤트마다 그대로 기록된다(발화 억제 금지).
+    const activityRows = await db.select().from(activityLog).where(eq(activityLog.entityId, s.issueId));
+    expect(activityRows).toHaveLength(2);
+    expect(humanAlertPublishes()).toHaveLength(2);
+    // 카드 계층만 병합된다 — 1장 + repeatCount.
+    const cards = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, s.companyId));
+    expect(cards).toHaveLength(1);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
+  });
+
   it("fails closed 5xx when post-commit card creation fails, keeps the ledger, and recreates via requestKey on resubmission", async () => {
     const s = await seedOversight();
     const data = { decision: "request_input", reason: "Need approval." };
@@ -335,5 +350,119 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(card).toMatchObject({ requestKey: `moi1:${result.eventId}`, status: "pending", requestedByAgentId: s.ownerId });
     const definition = card!.definition as { humanReview?: { decisionSubject: string } };
     expect(definition.humanReview!.decisionSubject).toContain("escalate");
+  });
+});
+
+// ---------- Part C: pending duplicate merge (카드 생성 계층 병합, 2026-10-18) ----------
+// 계약: 같은 (companyId, missionId, 앵커 issueId, decision 종류)의 pending 카드가 있으면 새 생성 대신
+// 기존 카드를 최신화(updatedAt+repeatCount)하고 반환한다. 발화/이벤트/원장은 억제하지 않는다.
+// 대조 실패·종결 카드·유형/앵커 불일치는 모두 신규 생성(fail-open) — 잘못된 중복체크로 카드 발화를
+// 막는 방향으로는 절대 작동하지 않는다.
+
+describeEP("mission owner human input card duplicate merge", () => {
+  let dedupDb!: ReturnType<typeof createDb>;
+  beforeAll(() => { dedupDb = createDb(tempDb!.connectionString); });
+  afterEach(async () => {
+    vi.clearAllMocks();
+    await dedupDb.delete(activityLog);
+    await dedupDb.delete(operatorDecisions);
+    await dedupDb.delete(issues);
+    await dedupDb.delete(missions);
+    await dedupDb.delete(agents);
+    await dedupDb.delete(companies);
+  });
+
+  async function seedDedupCase() {
+    const companyId = randomUUID(), ownerId = randomUUID(), missionId = randomUUID(), issueId = randomUUID();
+    await dedupDb.insert(companies).values({ id: companyId, name: "Dedup", issuePrefix: `CD${companyId.slice(0, 4)}`, requireBoardApprovalForNewAgents: false });
+    await dedupDb.insert(agents).values({ id: ownerId, companyId, name: "owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await dedupDb.insert(missions).values({ id: missionId, companyId, ownerAgentId: ownerId, title: "Dedup mission", status: "active" });
+    await dedupDb.insert(issues).values({ id: issueId, companyId, missionId, title: "Owner oversight", status: "in_progress", originKind: "mission_main_executor_oversight", assigneeAgentId: ownerId });
+    return { companyId, ownerId, missionId, issueId };
+  }
+
+  const dedupSpec = (s: Awaited<ReturnType<typeof seedDedupCase>>, overrides: Partial<MissionOwnerHumanInputCardSpec> = {}): MissionOwnerHumanInputCardSpec => ({
+    companyId: s.companyId,
+    missionId: s.missionId,
+    decisionEventId: randomUUID(),
+    decision: "request_input",
+    ownerActionIssueId: s.issueId,
+    ownerActionIssueStatus: "in_progress",
+    requestedByAgentId: s.ownerId,
+    reason: "사람 승인이 필요합니다",
+    ...overrides,
+  });
+
+  const cardsOf = (companyId: string) => dedupDb.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, companyId));
+
+  it("merges a repeat submission into the pending card with repeatCount instead of a second card", async () => {
+    const s = await seedDedupCase();
+    const first = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    const before = (await cardsOf(s.companyId))[0]!;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { reason: "여전히 승인이 필요합니다" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.id).toBe(first.decision.id);
+    expect(cards[0]!.sourceId).toBe(cards[0]!.sourceId); // 대표 카드는 첫 이벤트 그대로
+    expect(second.decision.id).toBe(first.decision.id); // 병합 결과 = 기존 카드 반환
+    expect(second.replayed).toBe(true);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number; lastSeenDecisionEventId?: string } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
+    expect(cards[0]!.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime()); // 최신화
+    // 제목·선택지·humanReview 는 기존 카드 유지 — 병합은 updatedAt/메타데이터만 만진다.
+    expect(cards[0]!.title).toBe(before.title);
+    expect(cards[0]!.definition).toEqual(before.definition);
+  });
+
+  it("keeps separate cards when the decision kind differs (request_input vs escalate)", async () => {
+    const s = await seedDedupCase();
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "request_input" }));
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "escalate" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((card) => card.title))).toHaveLength(2);
+  });
+
+  it("keeps separate cards when the anchor issue differs", async () => {
+    const s = await seedDedupCase();
+    const otherIssueId = randomUUID();
+    await dedupDb.insert(issues).values({ id: otherIssueId, companyId: s.companyId, missionId: s.missionId, title: "다른 앵커 이슈", status: "in_progress", originKind: "mission_main_executor_unblock", assigneeAgentId: s.ownerId });
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((card) => card.issueId))).toHaveLength(2);
+  });
+
+  it("creates a fresh card when the previous card is no longer pending", async () => {
+    const s = await seedDedupCase();
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    const [firstCard] = await cardsOf(s.companyId);
+    await dedupDb.update(operatorDecisions).set({
+      status: "resolved",
+      result: { actionId: "approve", outcome: "approve", selectedOptionIds: ["approve"], comment: "테스트 종결" },
+      resolvedByUserId: "test-user",
+      resolvedAt: new Date(),
+    }).where(eq(operatorDecisions.id, firstCard!.id));
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { reason: "다시 승인이 필요합니다" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(second.decision.id).not.toBe(firstCard!.id);
+    expect(cards.filter((card) => card.status === "pending")) .toHaveLength(1);
+  });
+
+  it("replay of the same decision event keeps the single card without bumping repeatCount", async () => {
+    const s = await seedDedupCase();
+    const spec = dedupSpec(s);
+    const first = await createMissionOwnerHumanInputDecisionCard(dedupDb, spec);
+    const replay = await createMissionOwnerHumanInputDecisionCard(dedupDb, spec);
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(1);
+    expect(replay.decision.id).toBe(first.decision.id);
+    expect(replay.replayed).toBe(true);
+    expect(cards[0]!.requestKey).toBe(`moi1:${spec.decisionEventId}`);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput).toBeUndefined(); // 멱등 replay 는 repeat 로 세지 않는다
   });
 });
