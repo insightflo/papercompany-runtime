@@ -88,7 +88,9 @@ export async function issueNextC02(previous: C02Case) {
  * Reader INPUT ONLY: durable schema/relations, deliberately not stage12/13 atomic writers or byte QA.
  * The verdict branch uses the existing official writer; the tool branch seeds a stored receipt.
  */
-export async function storeC02ConsumptionInput(c: C02Case, kind: "workflow_verdict" | "tool_qa") {
+type ConsumptionInputCase = Pick<C02Case, "s" | "peer" | "ref" | "followup" | "followupRow">
+  & { stored: Pick<C02Case["applied"], "revisions"> };
+export async function storeC02ConsumptionInput(c: ConsumptionInputCase, kind: "workflow_verdict" | "tool_qa") {
   const { s, peer, ref, followup, followupRow } = c, t = followup.target, at = new Date();
   const common = { companyId: ref.companyId, missionId: s.p.missionId, workflowRunId: ref.workflowRunId,
     workflowStepRunId: t.stepRunId, issueId: t.issueId, executionGeneration: t.executionGeneration,
@@ -124,8 +126,18 @@ export async function storeC02ConsumptionInput(c: C02Case, kind: "workflow_verdi
     request.input.workProductId = r.workProductId; request.input.path = path.join(r.root, r.mainRelativePath);
     request.input.sha256 = facts.find(f => f.role === "main")!.sha256;
     request.input.byteSize = facts.find(f => f.role === "main")!.byteSize;
+    request.input.assetManifest = facts.filter(f => f.role === "asset").map(f => ({
+      fileName: path.posix.relative("assets", f.relativePath), sha256: f.sha256, byteSize: f.byteSize }));
+    if (request.input.mode === "html") {
+      const manifest = facts.find(f => f.relativePath === "bundle-index.json")!;
+      const notes = facts.find(f => f.relativePath === "source-notes.txt")!;
+      request.input.htmlManifest = { path: path.join(r.root, manifest.relativePath),
+        sha256: manifest.sha256, byteSize: manifest.byteSize };
+      // Independent fixture bundle declares source-notes.txt as research; never derive it from a reader.
+      request.input.ancillaryManifest = [{ fileName: "research", sha256: notes.sha256, byteSize: notes.byteSize }];
+    }
     request.qaCorrectionFollowup = ref;
-    // This branch uses content-only cases; a DB receipt is not evidence of file verification.
+    // A stored DB receipt is not evidence of file verification.
     const receipt = toolArtifactReceiptSchema.parse({ schemaVersion: "workflow.tool-artifact.v2", role: "qa",
       companyId: ref.companyId, missionId: s.p.missionId, workflowRunId: ref.workflowRunId,
       stepRunId: t.stepRunId, stepId: t.stepId, executionGeneration: t.executionGeneration,

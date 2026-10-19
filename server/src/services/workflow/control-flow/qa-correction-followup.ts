@@ -278,6 +278,15 @@ export async function readQaCorrectionFollowupConsumption(db: QaCorrectionDb, re
       const manifest = r.files.find(f => f.relativePath === r.bundleManifestRelativePath);
       requireFollowup(manifest && input.htmlManifest && input.htmlManifest.path === path.join(r.root, manifest.relativePath)
         && input.htmlManifest.sha256 === manifest.sha256 && input.htmlManifest.byteSize === manifest.byteSize, "consumption");
+      // Issued parsing already guarantees unique roles/paths and coverage excluding the bundle manifest.
+      requireFollowup(r.ancillaryRoleBindings !== undefined && input.ancillaryManifest, "consumption");
+      const ancillary = r.ancillaryRoleBindings.map(binding => {
+        const file = r.files.find(f => f.role === "ancillary" && f.relativePath !== r.bundleManifestRelativePath
+          && f.relativePath === binding.relativePath);
+        requireFollowup(file, "consumption");
+        return { fileName: binding.role, sha256: file.sha256, byteSize: file.byteSize };
+      });
+      requireFollowup(same(sorted(input.ancillaryManifest), sorted(ancillary)), "consumption");
     } else requireFollowup(r.bundleManifestRelativePath === null && input.assetsRoot ===
       (r.assetsRelativeRoot === null ? "" : path.join(r.root, r.assetsRelativeRoot!)), "consumption");
   }

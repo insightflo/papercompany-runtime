@@ -10,8 +10,9 @@ import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-cor
 import { readIssuedQaCorrectionFollowup, observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup,
   readQaCorrectionFollowupDb, readQaCorrectionFollowupConsumption } from "../services/workflow/control-flow/qa-correction-followup.js";
 import { qaCorrectionConsumptionSchema } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { toolArtifactReceiptSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { appendQaVerdict } from "./helpers/qa-correction-fixture.js";
-import { commitDbState } from "./qa-correction-commit-fixture.js";
+import { commitDbState, makeCommitSource, makeCommitPrior } from "./qa-correction-commit-fixture.js";
 import { commitBuffers, commitFacts, createCommitSourceHarness, issueC02, issueNextC02,
   storeC02ConsumptionInput, type C02Case } from "./helpers/c02-fixture.js";
 
@@ -182,6 +183,68 @@ describe("C02 stage7 issued followup readers", () => {
       status: "db_consumption_relation_only", consumed: input.consumed, eventId: input.row.id });
     if (input.consumed.evidence.kind === "tool_qa") expect(input.consumed.evidence.requestId).toContain("tool-qa:opaque:");
   }, 20000);
+
+  describe("C02 stage7R-B HTML ancillary consumption input", () => {
+    it("accepts actual B with the independent research role and complete file facts", async () => {
+      const c = await issueC02(owned), input = await storeC02ConsumptionInput(c, "tool_qa");
+      const [step] = await c.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, c.s.f.qa.id));
+      const receipt = toolArtifactReceiptSchema.parse(step!.metadata.toolArtifactReceipt);
+      const notes = commitFacts(commitBuffers("html", "new")).find(f => f.relativePath === "source-notes.txt")!;
+      expect(c.applied.revisions[0]!.ancillaryRoleBindings).toEqual([{ role: "research", relativePath: "source-notes.txt" }]);
+      expect(receipt.input.ancillaryManifest).toEqual([{ fileName: "research", sha256: notes.sha256, byteSize: notes.byteSize }]);
+      const before = await state(c);
+      vi.spyOn(artifactFiles, "captureArtifactRoot").mockRejectedValue(Error("DB relation must not read files"));
+      vi.spyOn(artifactFiles, "readArtifactBytes").mockRejectedValue(Error("DB relation must not read files"));
+      expect(await readQaCorrectionFollowupConsumption(c.peer, c.ref, readIssuedQaCorrection)).toEqual({
+        status: "db_consumption_relation_only", consumed: input.consumed, eventId: input.row.id });
+      expect(await state(c)).toEqual(before);
+    }, 20000);
+
+    it.each(["omitted", "hash", "physical-name", "size", "extra", "duplicate"] as const)(
+      "rejects matching request/receipt ancillary tampering: %s", async kind => {
+        const c = await issueC02(owned);
+        await storeC02ConsumptionInput(c, "tool_qa");
+        const [step] = await c.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, c.s.f.qa.id));
+        const request = structuredClone(step!.metadata.toolArtifactRequest as typeof c.s.request);
+        const receipt = toolArtifactReceiptSchema.parse(step!.metadata.toolArtifactReceipt);
+        const ancillary = structuredClone(receipt.input.ancillaryManifest), first = ancillary?.[0];
+        if (!ancillary || !first) throw Error("independent HTML ancillary input required");
+        if (kind === "omitted") ancillary.length = 0;
+        if (kind === "hash") first.sha256 = "ff".repeat(32);
+        if (kind === "physical-name") first.fileName = "source-notes.txt";
+        if (kind === "size") first.byteSize++;
+        if (kind === "extra") ancillary.push({ ...first, fileName: "extra" });
+        if (kind === "duplicate") ancillary.push({ ...first });
+        request.input.ancillaryManifest = structuredClone(ancillary);
+        receipt.input.ancillaryManifest = structuredClone(ancillary);
+        expect(request.input).toEqual(receipt.input);
+        expect(toolArtifactReceiptSchema.safeParse(receipt).success).toBe(true);
+        await c.peer.update(workflowStepRuns).set({ metadata: { ...step!.metadata,
+          toolArtifactRequest: request, toolArtifactReceipt: receipt } }).where(eq(workflowStepRuns.id, step!.id));
+        await expect(readQaCorrectionFollowupConsumption(c.peer, c.ref, readIssuedQaCorrection))
+          .rejects.toThrow("qa_correction_followup_consumption");
+      }, 20000);
+
+    it.each(["tool_qa", "workflow_verdict"] as const)(
+      "preserves explicit historical HTML input without roles, consumption=%s", async kind => {
+        // Existing historical reader INPUT fixture, not a claim of successful issuance by the current writer.
+        const s = await makeCommitPrior(await makeCommitSource(owned.db, owned.root, "html")), old = s.history;
+        if (!old) throw Error("historical input required");
+        const peer = owned.connect(), ref = { ...old.scope, requestId: old.followup.requestId };
+        const [followupRow] = await peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, old.followupId));
+        if (!followupRow) throw Error("historical followup input required");
+        const c = { s, peer, ref, followup: old.followup, followupRow, stored: { revisions: old.applied.revisions } };
+        const before = await readIssuedQaCorrectionFollowup(peer, ref, readIssuedQaCorrection);
+        expect(before.revisions[0]!.revision).not.toHaveProperty("ancillaryRoleBindings");
+        expect(before.revisions[0]!.revision.bundleManifestRelativePath).toBe("bundle-index.json");
+        const input = await storeC02ConsumptionInput(c, kind);
+        const relation = readQaCorrectionFollowupConsumption(peer, ref, readIssuedQaCorrection);
+        if (kind === "tool_qa") await expect(relation).rejects.toThrow("qa_correction_followup_consumption");
+        else expect(await relation).toEqual({
+          status: "db_consumption_relation_only", consumed: input.consumed, eventId: input.row.id });
+        expect(await readIssuedQaCorrectionFollowup(peer, ref, readIssuedQaCorrection)).toEqual(before);
+      }, 20000);
+  });
 
   it.each(["workflow_verdict", "tool_qa"] as const)("rejects unrelated %s evidence despite a valid consumption schema", async kind => {
     const c = await issueC02(owned, { mode: "content-only" }), input = await storeC02ConsumptionInput(c, kind);
