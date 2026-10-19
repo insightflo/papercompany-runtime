@@ -2,6 +2,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { activityLog, agents, agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
+import { logger } from "../middleware/logger.js";
 import { resolveNextDispatchGeneration } from "./effect-envelope.js";
 import { normalizeAgentNameKey, readNonEmptyString } from "./heartbeat-run-context.js";
 import {
@@ -9,6 +10,72 @@ import {
   nextPlanQaResubmissionExecutionEpoch,
   planQaResubmissionPromotionAcceptancePatch,
 } from "./quality/heartbeat-admission.js";
+
+
+/** Pure HB insertion; each caller retains its own session, clock and acceptance semantics. */
+export async function insertQueuedHeartbeat(db: Db, input: {
+  agent: AgentRow; issueId: string | null; source: FollowupContextInput["source"]; triggerDetail: string | null;
+  wakeupRequestId: string; contextSnapshot: Record<string, unknown>; taskKey: string | null;
+  sessionBefore: string | null; executionEpoch?: number;
+}) {
+  const { agent, issueId, source, triggerDetail, wakeupRequestId, contextSnapshot, taskKey, sessionBefore, executionEpoch } = input;
+  return db.insert(heartbeatRuns).values({
+    companyId: agent.companyId, agentId: agent.id, issueId, invocationSource: source, triggerDetail,
+    status: "queued", wakeupRequestId, sessionIdBefore: sessionBefore,
+    contextSnapshot: { ...contextSnapshot,
+      dispatchGeneration: await resolveNextDispatchGeneration(db, { agentId: agent.id, issueId, taskKey }) },
+    ...(executionEpoch !== undefined ? { executionEpoch } : {}),
+  }).returning().then(rows => rows[0]);
+}
+
+async function startLinkedIssue(deps: HeartbeatFollowupPromotionDeps, tx: FollowupTx, input: {
+  agent: AgentRow; issue: Pick<IssueRow, "id" | "companyId" | "status">; run: typeof heartbeatRuns.$inferSelect;
+  now: Date; allowDone: boolean; reason: "queued_wakeup_promoted" | "issue_linked_run_started";
+}) {
+  const { agent, issue, run, now, allowDone, reason } = input;
+  const statuses = allowDone ? [...deps.issueRunStartStatuses, "done"] : deps.issueRunStartStatuses;
+  const started = await tx.update(issues).set({
+    executionRunId: run.id, checkoutRunId: run.id, status: "in_progress", startedAt: now,
+    completedAt: null, cancelledAt: null, executionAgentNameKey: normalizeAgentNameKey(agent.name),
+    executionLockedAt: now, updatedAt: now,
+  }).where(and(eq(issues.id, issue.id), inArray(issues.status, statuses)))
+    .returning({ id: issues.id }).then(rows => rows[0] ?? null);
+  if (started) {
+    await tx.insert(activityLog).values({
+      companyId: issue.companyId, actorType: "system", actorId: "heartbeat", action: "issue.execution_started",
+      entityType: "issue", entityId: issue.id, agentId: agent.id, runId: run.id,
+      details: { previousStatus: issue.status, nextStatus: "in_progress", reason },
+    });
+  } else if (reason === "issue_linked_run_started") {
+    // Preserve ordinary post-terminal admission: a missed checkout CAS is diagnostic, not a refusal.
+    logger.debug(
+      { issueId: issue.id, issueStatus: issue.status, runId: run.id, agentId: agent.id },
+      "issue checkout CAS matched no row: run admitted without execution lock (post-terminal wake)",
+    );
+  }
+}
+
+export async function insertInitialWakeupRun(deps: HeartbeatFollowupPromotionDeps, tx: FollowupTx, input: {
+  agent: AgentRow; request: WakeRow; contextSnapshot: Record<string, unknown>; taskKey: string | null;
+  sessionBefore: string | null; issue: Pick<IssueRow, "id" | "companyId" | "status"> | null; isWorkflowStepResume: boolean;
+}) {
+  const { agent, request, contextSnapshot, taskKey, sessionBefore, issue, isWorkflowStepResume } = input;
+  const run = await insertQueuedHeartbeat(tx as unknown as Db, {
+    agent, issueId: request.issueId, source: request.source as FollowupContextInput["source"],
+    triggerDetail: request.triggerDetail, wakeupRequestId: request.id, contextSnapshot, taskKey, sessionBefore,
+  });
+  await tx.update(agentWakeupRequests).set({
+    runId: run.id, updatedAt: new Date(),
+    ...(issue ? await buildQualityWakeAcceptancePatch(tx as unknown as Db, {
+      companyId: agent.companyId, agentId: agent.id, issueId: issue.id, workflowRunId: request.workflowRunId,
+      idempotencyKey: request.idempotencyKey, runId: run.id, acceptedAt: new Date(),
+    }) : {}),
+  }).where(eq(agentWakeupRequests.id, request.id));
+  if (issue) await startLinkedIssue(deps, tx, {
+    agent, issue, run, now: new Date(), allowDone: isWorkflowStepResume, reason: "issue_linked_run_started",
+  });
+  return run;
+}
 
 type AgentRow = typeof agents.$inferSelect;
 type WakeRow = typeof agentWakeupRequests.$inferSelect;
@@ -52,7 +119,7 @@ export type QueuedWakeupPromotionInput = {
 export async function promoteQueuedWakeupRequest(
   deps: HeartbeatFollowupPromotionDeps, tx: FollowupTx, input: QueuedWakeupPromotionInput,
 ) {
-  const { resolveSessionBeforeForWakeup, issueRunStartStatuses: ISSUE_RUN_START_STATUSES } = deps;
+  const { resolveSessionBeforeForWakeup } = deps;
   const {
     agent, request, promotedContextSnapshot, promotedSource, promotedTriggerDetail,
     promotedIssueId, promotedTaskKey, missionIdForWake, promotedIssue,
@@ -66,29 +133,11 @@ export async function promoteQueuedWakeupRequest(
     idempotencyKey: request.idempotencyKey, companyId: agent.companyId, issueId: promotedIssueId,
   });
   const now = new Date();
-  const newRun = await tx
-    .insert(heartbeatRuns)
-    .values({
-      companyId: agent.companyId,
-      agentId: agent.id,
-      issueId: promotedIssueId,
-      invocationSource: promotedSource,
-      triggerDetail: promotedTriggerDetail,
-      status: "queued",
-      wakeupRequestId: request.id,
-      contextSnapshot: {
-        ...promotedContextSnapshot,
-        dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-          agentId: agent.id,
-          issueId: promotedIssueId,
-          taskKey: promotedTaskKey,
-        }),
-      },
-      sessionIdBefore: sessionBefore,
-      ...(resubmissionExecutionEpoch !== null ? { executionEpoch: resubmissionExecutionEpoch } : {}),
-    })
-    .returning()
-    .then((rows) => rows[0]);
+  const newRun = await insertQueuedHeartbeat(tx as unknown as Db, {
+    agent, issueId: promotedIssueId, source: promotedSource, triggerDetail: promotedTriggerDetail,
+    wakeupRequestId: request.id, contextSnapshot: promotedContextSnapshot, taskKey: promotedTaskKey,
+    sessionBefore, ...(resubmissionExecutionEpoch !== null ? { executionEpoch: resubmissionExecutionEpoch } : {}),
+  });
 
   await tx
     .update(agentWakeupRequests)
@@ -112,46 +161,10 @@ export async function promoteQueuedWakeupRequest(
     })
     .where(eq(agentWakeupRequests.id, request.id));
 
-  if (promotedIssue) {
-    const issueStartStatuses = (isWorkflowStepResume || isPlanReworkPromotion)
-
-      ? [...ISSUE_RUN_START_STATUSES, "done"]
-      : ISSUE_RUN_START_STATUSES;
-    const startedIssue = await tx
-      .update(issues)
-      .set({
-        executionRunId: newRun.id,
-        checkoutRunId: newRun.id,
-        status: "in_progress",
-        startedAt: now,
-        completedAt: null,
-        cancelledAt: null,
-        executionAgentNameKey: normalizeAgentNameKey(agent.name),
-        executionLockedAt: now,
-        updatedAt: now,
-      })
-      .where(and(eq(issues.id, promotedIssue.id), inArray(issues.status, issueStartStatuses)))
-      .returning({ id: issues.id })
-      .then((rows) => rows[0] ?? null);
-
-    if (startedIssue) {
-      await tx.insert(activityLog).values({
-        companyId: promotedIssue.companyId,
-        actorType: "system",
-        actorId: "heartbeat",
-        action: "issue.execution_started",
-        entityType: "issue",
-        entityId: promotedIssue.id,
-        agentId: agent.id,
-        runId: newRun.id,
-        details: {
-          previousStatus: promotedIssue.status,
-          nextStatus: "in_progress",
-          reason: "queued_wakeup_promoted",
-        },
-      });
-    }
-  }
+  if (promotedIssue) await startLinkedIssue(deps, tx, {
+    agent, issue: promotedIssue, run: newRun, now,
+    allowDone: isWorkflowStepResume || isPlanReworkPromotion, reason: "queued_wakeup_promoted",
+  });
 
   return newRun;
 }
@@ -189,28 +202,10 @@ export async function promoteDeferredWakeupRequest(
     missionId: readNonEmptyString(promotedContextSnapshot.missionId),
   });
   const now = new Date();
-  const newRun = await tx
-    .insert(heartbeatRuns)
-    .values({
-      companyId: deferredAgent.companyId,
-      agentId: deferredAgent.id,
-      issueId: issue.id,
-      invocationSource: promotedSource,
-      triggerDetail: promotedTriggerDetail,
-      status: "queued",
-      wakeupRequestId: deferred.id,
-      contextSnapshot: {
-        ...promotedContextSnapshot,
-        dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-          agentId: deferredAgent.id,
-          issueId: issue.id,
-          taskKey: promotedTaskKey,
-        }),
-      },
-      sessionIdBefore: sessionBefore,
-    })
-    .returning()
-    .then((rows) => rows[0]);
+  const newRun = await insertQueuedHeartbeat(tx as unknown as Db, {
+    agent: deferredAgent, issueId: issue.id, source: promotedSource, triggerDetail: promotedTriggerDetail,
+    wakeupRequestId: deferred.id, contextSnapshot: promotedContextSnapshot, taskKey: promotedTaskKey, sessionBefore,
+  });
 
   await tx
     .update(agentWakeupRequests)

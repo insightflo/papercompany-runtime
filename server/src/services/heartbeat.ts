@@ -3,7 +3,8 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, is, isNotNull, isNull, lt, lte, not, notLike, or, sql } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import { withTxTimeout } from "@paperclipai/db";
 import type { BillingType, HeartbeatRunStatus } from "@paperclipai/shared";
@@ -44,7 +45,6 @@ import { mergeAgentConfig } from "./agents.js";
 import {
   executeFencedEffect,
   HEARTBEAT_ADAPTER_EXECUTE_EFFECT_KIND,
-  resolveNextDispatchGeneration,
 } from "./effect-envelope.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
@@ -213,8 +213,14 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
-import { promoteQueuedWakeupRequestsForAgent, selectDeferredWakeupRequest, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
-import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
+import { promoteQueuedWakeupRequestsForAgent, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
+import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
+import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
+import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
+import { assertDeliveryInput, assertDeliveryScope, assertDeliverySignature, assertDeliveryWake, readDeliveryWakeCandidates,
+  findDeliveryEvent, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
+import { readIssuedQaCorrectionFollowupForAttempt } from "./workflow/control-flow/qa-correction-reader.js";
+import { QaCorrectionRootOwnerRequired, isQaCorrectionRootOwnerRequired, registerQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -4731,6 +4737,7 @@ export function heartbeatService(db: Db) {
     if (run.status !== "queued") return run;
     const claimedAt = new Date();
     const claimed = await claimHeartbeatWithRecoveryGuard(db, run, claimedAt).catch(async (err) => {
+      if (isQaCorrectionRootOwnerRequired(err)) throw err;
       await cancelRunInternal(run.id, err instanceof Error ? err.message : "Heartbeat claim refused", false);
       return null;
     });
@@ -6009,17 +6016,7 @@ export function heartbeatService(db: Db) {
       if (remainingSlots > 0) {
         const promotedRuns = await promoteQueuedWakeupRequestsForAgent(followupQueueDeps, agent, remainingSlots);
         for (const promotedRun of promotedRuns) {
-          publishLiveEvent({
-            companyId: promotedRun.companyId,
-            type: "heartbeat.run.queued",
-            payload: {
-              runId: promotedRun.id,
-              agentId: promotedRun.agentId,
-              invocationSource: promotedRun.invocationSource,
-              triggerDetail: promotedRun.triggerDetail,
-              wakeupRequestId: promotedRun.wakeupRequestId,
-            },
-          });
+          publishQueuedRun(promotedRun);
           const claimed = await claimQueuedRun(promotedRun);
           if (claimed) claimedRuns.push(claimed);
         }
@@ -6051,7 +6048,98 @@ export function heartbeatService(db: Db) {
     isWorkflowStepResumeWake,
     getInvocationBlock: budgets.getInvocationBlock,
     promote: (tx, input) => promoteQueuedWakeupRequest(followupPromotionDeps, tx, input),
+    deliverCorrection: connectCorrectionDelivery,
   };
+
+  // Stored requests carry a server proof and reserved context; neither is caller payload.
+  async function connectCorrectionDelivery(candidate: CorrectionDeliveryInput | { wakeupRequestId: string },
+    transactionProfile: "public_callback" | "recovery_skip_locked"):
+    Promise<{ kind: CorrectionDeliveryResult["kind"] | "nested_pending"; run: typeof heartbeatRuns.$inferSelect | null }> {
+    let input: CorrectionDeliveryInput;
+    if ("wakeupRequestId" in candidate) {
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, candidate.wakeupRequestId));
+      requireDelivery(wake, "candidate");
+      const ref = readQaCorrectionWakeRef(wake);
+      const clean = withoutWorkflowAttemptProof(wake.payload) ?? {};
+      const saved = clean[DEFERRED_WAKE_CONTEXT_KEY];
+      requireDelivery(ref && saved && typeof saved === "object" && !Array.isArray(saved), "context");
+      delete clean[DEFERRED_WAKE_CONTEXT_KEY];
+      const contextSnapshot = saved as Record<string, unknown>;
+      const deferredReason = (wake.status === "deferred_issue_execution" && wake.runId === null
+        && wake.reason === "issue_execution_deferred") || (wake.runId !== null && wake.reason === "issue_execution_promoted");
+      requireDelivery(wake.issueId && wake.missionId && wake.workflowRunId && wake.workflowStepRunId
+        && wake.workflowExecutionGeneration !== null, "scope");
+      input = { mode: wake.status === "deferred_issue_execution" ? "deferred" : "queued", ref,
+        companyId: wake.companyId, agentId: wake.agentId, issueId: wake.issueId, missionId: wake.missionId,
+        workflowRunId: wake.workflowRunId, workflowStepRunId: wake.workflowStepRunId,
+        workflowExecutionGeneration: wake.workflowExecutionGeneration, candidateWakeupRequestId: wake.id,
+        request: { idempotencyKey: wake.idempotencyKey!, source: wake.source, triggerDetail: wake.triggerDetail,
+          reason: deferredReason ? contextSnapshot.wakeReason as string | null : wake.reason,
+          requestKind: wake.requestKind, requestedByActorType: wake.requestedByActorType,
+          requestedByActorId: wake.requestedByActorId, payload: clean, contextSnapshot } };
+    } else input = candidate;
+    assertDeliveryInput(input);
+    if (is(db, PgTransaction)) {
+      const history = await readIssuedQaCorrectionFollowupForAttempt(db, input.ref);
+      await assertDeliveryScope(db, input, history);
+      const pending = await readDeliveryWakeCandidates(db, input);
+      if (!pending.length) throw new QaCorrectionRootOwnerRequired();
+      requireDelivery(pending.length === 1, "duplicate_wake");
+      const wake = pending[0]!;
+      requireDelivery((!input.candidateWakeupRequestId || wake.id === input.candidateWakeupRequestId)
+        && ["queued", "deferred_issue_execution"].includes(wake.status) && wake.runId === null
+        && wake.claimedAt === null && wake.finishedAt === null && wake.error === null, "pending");
+      await assertDeliveryWake(db, input, history, wake);
+      assertDeliverySignature(input, wake, false);
+      requireDelivery(!(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+        .where(eq(heartbeatRuns.wakeupRequestId, wake.id))).length && !await findDeliveryEvent(db, input), "pending");
+      registerQaCorrectionRootDrain(db, input.agentId);
+      return { kind: "nested_pending", run: null };
+    }
+    const r = input.request, contextSnapshot = r.contextSnapshot, taskKey = deriveTaskKey(contextSnapshot, r.payload);
+    const mention = r.reason === "issue_comment_mentioned" || contextSnapshot.wakeReason === "issue_comment_mentioned";
+    const result = await withCorrectionDeliveryRoot(db, input, async (tx, wake) => {
+      const [currentAgent] = await tx.select().from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)));
+      const [issue] = await tx.select().from(issues).where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)));
+      requireDelivery(currentAgent && issue, "scope");
+      if (input.mode === "deferred") return promoteDeferredWakeupRequest(followupPromotionDeps, tx, { deferred: wake, deferredAgent: currentAgent, issue });
+      const isWorkflowStepResume = isWorkflowStepResumeWake({ ...r, contextSnapshot });
+      if (input.mode === "initial") {
+        const sessionBefore = await resolveSessionBeforeForWakeup(
+          currentAgent, mention ? `mission:${input.missionId}` : taskKey, { missionId: input.missionId },
+        );
+        return insertInitialWakeupRun(followupPromotionDeps, tx, {
+          agent: currentAgent, request: wake, contextSnapshot, taskKey, sessionBefore,
+          issue: mention ? null : issue, isWorkflowStepResume,
+        });
+      }
+      return promoteQueuedWakeupRequest(followupPromotionDeps, tx, {
+        agent: currentAgent, request: wake, promotedContextSnapshot: contextSnapshot,
+        promotedSource: wake.source as WakeupOptions["source"], promotedTriggerDetail: wake.triggerDetail,
+        promotedIssueId: issue.id, promotedTaskKey: taskKey, missionIdForWake: input.missionId, promotedIssue: issue,
+        isWorkflowStepResume, isPlanReworkPromotion: r.reason === "mission_owner_plan_rework_requested" && issue.originKind === "mission_main_executor_plan",
+      });
+    }, { transactionProfile });
+    if (result.kind === "waiting") return { kind: result.kind, run: null };
+    const run = await getRun(result.heartbeatRunId);
+    requireDelivery(run && run.wakeupRequestId === result.wakeupRequestId && run.companyId === input.companyId
+      && run.agentId === input.agentId && (result.kind !== "new_delivery" || result.startRunId === run.id), "writer_link");
+    return { kind: result.kind, run };
+  }
+
+  async function isCorrectionRun(execDb: Db, run: typeof heartbeatRuns.$inferSelect) {
+    if (!run.wakeupRequestId) return false;
+    const [wake] = await execDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
+    return !!wake && !!readQaCorrectionWakeRef(wake);
+  }
+
+  function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+    publishLiveEvent({
+      companyId: run.companyId, type: "heartbeat.run.queued",
+      payload: { runId: run.id, agentId: run.agentId, invocationSource: run.invocationSource,
+        triggerDetail: run.triggerDetail, wakeupRequestId: run.wakeupRequestId },
+    });
+  }
 
   async function executeRun(runId: string) {
     let run = await getRun(runId);
@@ -9276,6 +9364,9 @@ export function heartbeatService(db: Db) {
         const candidate = await selectDeferredWakeupRequest(tx, issue);
         if (!candidate) return null;
         const { request: deferred, agent: deferredAgent } = candidate;
+        if (readQaCorrectionWakeRef(deferred)) {
+          return { promotedRun: null, correctionCandidate: { wakeupRequestId: deferred.id } };
+        }
 
         if (
           !deferredAgent ||
@@ -9284,15 +9375,7 @@ export function heartbeatService(db: Db) {
           deferredAgent.status === "terminated" ||
           deferredAgent.status === "pending_approval"
         ) {
-          await tx
-            .update(agentWakeupRequests)
-            .set({
-              status: "failed",
-              finishedAt: new Date(),
-              error: "Deferred wake could not be promoted: agent is not invokable",
-              updatedAt: new Date(),
-            })
-            .where(eq(agentWakeupRequests.id, deferred.id));
+          await failFollowupWake(tx, deferred.id, "Deferred wake could not be promoted: agent is not invokable");
           continue;
         }
 
@@ -9314,7 +9397,7 @@ export function heartbeatService(db: Db) {
     //   / recordMissionOwnerPlanDecisionAfterComment was intentionally removed (655e889). Do not
     //   restore NL comment parsing as plan-decision control-plane authority.
     const hasPromotedRunField = !!transactionObject && "promotedRun" in transactionObject;
-    const promotedRun = (
+    let promotedRun = (
       hasPromotedRunField || hasPostTransactionRequestChangesOwnerAction
         ? transactionRecord?.promotedRun
         : transactionResult
@@ -9484,19 +9567,16 @@ export function heartbeatService(db: Db) {
       });
     }
 
+    if (transactionObject && "correctionCandidate" in transactionObject) {
+      const result = await connectCorrectionDelivery(
+        transactionRecord!.correctionCandidate as { wakeupRequestId: string },
+        options.skipLocked === true ? "recovery_skip_locked" : "public_callback",
+      );
+      promotedRun = result.kind === "new_delivery" ? result.run : null;
+    }
     if (!promotedRun) return;
 
-    publishLiveEvent({
-      companyId: promotedRun.companyId,
-      type: "heartbeat.run.queued",
-      payload: {
-        runId: promotedRun.id,
-        agentId: promotedRun.agentId,
-        invocationSource: promotedRun.invocationSource,
-        triggerDetail: promotedRun.triggerDetail,
-        wakeupRequestId: promotedRun.wakeupRequestId,
-      },
-    });
+    publishQueuedRun(promotedRun);
 
     if (options.resumeQueue !== false) await startNextQueuedRunForAgent(promotedRun.agentId);
   }
@@ -9606,6 +9686,38 @@ export function heartbeatService(db: Db) {
       workflowRunId: workflowRunIdForWake,
       workflowStepRunId: workflowStepRunIdForWake,
       ...(workflowExecutionGeneration !== null ? { workflowExecutionGeneration } : {}),
+    };
+    const correctionRef = readQaCorrectionWakeRef({
+      payload, idempotencyKey: opts.idempotencyKey ?? null,
+    } as typeof agentWakeupRequests.$inferSelect);
+    if (correctionRef) {
+      requireDelivery(issueId && missionIdForWake && workflowRunIdForWake && workflowStepRunIdForWake
+        && workflowExecutionGeneration !== null, "scope");
+      const result = await connectCorrectionDelivery({
+        mode: "initial", ref: correctionRef, companyId: agent.companyId, agentId, issueId,
+        missionId: missionIdForWake, workflowRunId: workflowRunIdForWake, workflowStepRunId: workflowStepRunIdForWake,
+        workflowExecutionGeneration, candidateWakeupRequestId: null,
+        request: { source, triggerDetail, reason, payload, contextSnapshot: enrichedContextSnapshot,
+          idempotencyKey: opts.idempotencyKey!, requestKind: typedQueueColumns.requestKind,
+          requestedByActorType: opts.requestedByActorType ?? null, requestedByActorId: opts.requestedByActorId ?? null },
+      }, "public_callback");
+      if (result.kind === "new_delivery" && result.run) {
+        await recordQueueTransitionEvent({
+          companyId: agent.companyId, missionId: missionIdForWake, issueId,
+          wakeupRequestId: result.run.wakeupRequestId, heartbeatRunId: result.run.id,
+          eventType: "queue_accepted", layer: "queue", decision: "accepted",
+          reason: "heartbeat_run_created", reasonCode: "heartbeat_run_created",
+          idempotencyKey: `queue-accepted:${result.run.wakeupRequestId ?? "no-wake"}:${result.run.id}`,
+        });
+        publishQueuedRun(result.run);
+        await startNextQueuedRunForAgent(agent.id);
+      }
+      return result.run;
+    }
+    const wakeDefaults = {
+      companyId: agent.companyId, agentId, source, triggerDetail, reason, payload, ...typedQueueColumns,
+      status: "queued", requestedByActorType: opts.requestedByActorType ?? null,
+      requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null,
     };
     const queuePausedAgentWakeup = () => queuePausedAgentWakeupRequest(db, {
       companyId: agent.companyId,
@@ -9863,17 +9975,7 @@ export function heartbeatService(db: Db) {
                 .where(eq(agentWakeupRequests.id, existingQueuedPlanRework.id));
             } else {
               await insertWorkflowWakeRequest(tx as unknown as Db, {
-                companyId: agent.companyId,
-                agentId,
-                source,
-                triggerDetail,
-                reason,
-                payload: planReworkQueuedPayload,
-                ...typedQueueColumns,
-                status: "queued",
-                requestedByActorType: opts.requestedByActorType ?? null,
-                requestedByActorId: opts.requestedByActorId ?? null,
-                idempotencyKey: opts.idempotencyKey,
+                ...wakeDefaults, payload: planReworkQueuedPayload,
               });
             }
             return { kind: "deferred" as const };
@@ -9896,7 +9998,8 @@ export function heartbeatService(db: Db) {
 
           // [T4 quality] quality wake 는 다른 실행(동일 이름의 다른 agent 포함)에 절대
           // 병합·coalesce 되지 않는다 — 아래 deferred 경로로 별도 대기시킨다.
-          if (isSameExecutionAgent && !shouldQueueFollowupForCommentWake && !isBoundedExecutionWakeKey(opts.idempotencyKey)) {
+          if (isSameExecutionAgent && !shouldQueueFollowupForCommentWake && !isBoundedExecutionWakeKey(opts.idempotencyKey)
+            && !correctionRef && !await isCorrectionRun(tx as unknown as Db, activeExecutionRun)) {
             const mergedContextSnapshot = mergeCoalescedContextSnapshot(
               activeExecutionRun.contextSnapshot,
               enrichedContextSnapshot,
@@ -9985,17 +10088,7 @@ export function heartbeatService(db: Db) {
           }
 
           await insertWorkflowWakeRequest(tx as unknown as Db, {
-            companyId: agent.companyId,
-            agentId,
-            source,
-            triggerDetail,
-            reason: "issue_execution_deferred",
-            payload: deferredPayload,
-            ...typedQueueColumns,
-            status: "deferred_issue_execution",
-            requestedByActorType: opts.requestedByActorType ?? null,
-            requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
+            ...wakeDefaults, reason: "issue_execution_deferred", payload: deferredPayload, status: "deferred_issue_execution",
           });
 
           return { kind: "deferred" as const };
@@ -10075,129 +10168,18 @@ export function heartbeatService(db: Db) {
             }
 
             await insertWorkflowWakeRequest(tx as unknown as Db, {
-              companyId: agent.companyId,
-              agentId,
-              source,
-              triggerDetail,
-              reason,
-              payload: queuedPayload,
-              ...typedQueueColumns,
-              status: "queued",
-              requestedByActorType: opts.requestedByActorType ?? null,
-              requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
+              ...wakeDefaults, payload: queuedPayload,
             });
             return { kind: "deferred" as const };
           }
         }
 
-        const wakeupRequest = await insertWorkflowWakeRequest(tx as unknown as Db, {
-            companyId: agent.companyId,
-            agentId,
-            source,
-            triggerDetail,
-            reason,
-            payload,
-            ...typedQueueColumns,
-            status: "queued",
-            requestedByActorType: opts.requestedByActorType ?? null,
-            requestedByActorId: opts.requestedByActorId ?? null,
-            idempotencyKey: opts.idempotencyKey ?? null,
-          }).then((rows) => rows[0]);
+        const wakeupRequest = await insertWorkflowWakeRequest(tx as unknown as Db, wakeDefaults).then((rows) => rows[0]);
 
-        const newRun = await tx
-          .insert(heartbeatRuns)
-          .values({
-            companyId: agent.companyId,
-            agentId,
-            issueId,
-            invocationSource: source,
-            triggerDetail,
-            status: "queued",
-            wakeupRequestId: wakeupRequest.id,
-            contextSnapshot: {
-              ...enrichedContextSnapshot,
-              dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-                agentId: agentId,
-                issueId,
-                taskKey,
-              }),
-            },
-            sessionIdBefore: sessionBefore,
-          })
-          .returning()
-          .then((rows) => rows[0]);
-
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            runId: newRun.id,
-            updatedAt: new Date(),
-            // [T4 quality] 수락 원문은 이 admission tx 안에 기록된다(§3.1). quality 키가
-            // 아니면 patch 가 null 이 되어 아무 변화가 없다.
-            ...(await buildQualityWakeAcceptancePatch(tx as unknown as Db, {
-              companyId: agent.companyId,
-              agentId,
-              issueId,
-              workflowRunId: typedQueueColumns.workflowRunId,
-              idempotencyKey: opts.idempotencyKey ?? null,
-              runId: newRun.id,
-              acceptedAt: new Date(),
-            })),
-          })
-          .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-
-        const issueRunStartedAt = new Date();
-        const issueStartStatuses = isWorkflowStepResume
-          ? [...ISSUE_RUN_START_STATUSES, "done"]
-          : ISSUE_RUN_START_STATUSES;
-        const startedIssue = await tx
-          .update(issues)
-          .set({
-            executionRunId: newRun.id,
-            checkoutRunId: newRun.id,
-            status: "in_progress",
-            startedAt: issueRunStartedAt,
-            completedAt: null,
-            cancelledAt: null,
-            executionAgentNameKey: agentNameKey,
-            executionLockedAt: issueRunStartedAt,
-            updatedAt: issueRunStartedAt,
-          })
-          .where(and(eq(issues.id, issue.id), inArray(issues.status, issueStartStatuses)))
-          .returning({ id: issues.id })
-          .then((rows) => rows[0] ?? null);
-
-        if (startedIssue) {
-          await tx.insert(activityLog).values({
-            companyId: issue.companyId,
-            actorType: "system",
-            actorId: "heartbeat",
-            action: "issue.execution_started",
-            entityType: "issue",
-            entityId: issue.id,
-            agentId,
-            runId: newRun.id,
-            details: {
-              previousStatus: issue.status,
-              nextStatus: "in_progress",
-              reason: "issue_linked_run_started",
-            },
-          });
-        }
-
-        // [checkout CAS 미적용 — 정상 경로(2026-09-28 검토 확정)] 이슈 상태가
-        //   ISSUE_RUN_START_STATUSES 밖(done/cancelled — 종단 후 깨움)이면 위 CAS 는 0행
-        //   처리되고 런은 실행락 없이 입장한다. 실측(A1 14일): 재할당(874)·워크플로 재개(180)·
-        //   종결 마무리(92)·회수/재시도·오너 결정 등 의도적 운영 경로로 일 평균 ~130건 —
-        //   거부 전환은 운영 규손이라 기각. 락은 진행 중 실행 직렬화용이며 종단 후 깨움은
-        //   락 없이 실행이 설계다. debug 로그만 남겨 진단 표면을 유지한다.
-        if (!startedIssue) {
-          logger.debug(
-            { issueId: issue.id, issueStatus: issue.status, runId: newRun.id, agentId },
-            "issue checkout CAS matched no row: run admitted without execution lock (post-terminal wake)",
-          );
-        }
+        const newRun = await insertInitialWakeupRun(followupPromotionDeps, tx, {
+          agent, request: wakeupRequest, contextSnapshot: enrichedContextSnapshot, taskKey,
+          sessionBefore, issue, isWorkflowStepResume,
+        });
 
         return { kind: "queued" as const, run: newRun };
       });
@@ -10236,17 +10218,7 @@ export function heartbeatService(db: Db) {
       if (outcome.kind === "coalesced") return outcome.run;
 
       const newRun = outcome.run;
-      publishLiveEvent({
-        companyId: newRun.companyId,
-        type: "heartbeat.run.queued",
-        payload: {
-          runId: newRun.id,
-          agentId: newRun.agentId,
-          invocationSource: newRun.invocationSource,
-          triggerDetail: newRun.triggerDetail,
-          wakeupRequestId: newRun.wakeupRequestId,
-        },
-      });
+      publishQueuedRun(newRun);
 
       await startNextQueuedRunForAgent(agent.id);
       return newRun;
@@ -10261,10 +10233,14 @@ export function heartbeatService(db: Db) {
         .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
         .orderBy(desc(heartbeatRuns.createdAt));
 
-      const sameScopeQueuedRun = activeRuns.find(
+      const mergeableRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      for (const candidate of activeRuns) {
+        if (!correctionRef && !await isCorrectionRun(execDb, candidate)) mergeableRuns.push(candidate);
+      }
+      const sameScopeQueuedRun = mergeableRuns.find(
         (candidate) => candidate.status === "queued" && isSameTaskScope(runTaskKey(candidate), taskKey),
       );
-      const sameScopeRunningRun = activeRuns.find(
+      const sameScopeRunningRun = mergeableRuns.find(
         (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
       );
       const shouldQueueFollowupForCommentWake =
@@ -10309,19 +10285,7 @@ export function heartbeatService(db: Db) {
         return { run: mergedRun, coalesced: true };
       }
 
-      const wakeupRequest = await insertWorkflowWakeRequest(execDb, {
-          companyId: agent.companyId,
-          agentId,
-          source,
-          triggerDetail,
-          reason,
-          payload,
-          ...typedQueueColumns,
-          status: "queued",
-          requestedByActorType: opts.requestedByActorType ?? null,
-          requestedByActorId: opts.requestedByActorId ?? null,
-          idempotencyKey: opts.idempotencyKey ?? null,
-        }).then((rows) => rows[0]);
+      const wakeupRequest = await insertWorkflowWakeRequest(execDb, wakeDefaults).then((rows) => rows[0]);
 
       const wakeupMissionId = readNonEmptyString(enrichedContextSnapshot.missionId);
       const wakeupEffectiveTaskKey = wakeupMissionId ? `mission:${wakeupMissionId}` : taskKey;
@@ -10329,28 +10293,10 @@ export function heartbeatService(db: Db) {
         missionId: wakeupMissionId,
       });
 
-      const newRun = await execDb
-        .insert(heartbeatRuns)
-        .values({
-          companyId: agent.companyId,
-          agentId,
-          issueId,
-          invocationSource: source,
-          triggerDetail,
-          status: "queued",
-          wakeupRequestId: wakeupRequest.id,
-          contextSnapshot: {
-            ...enrichedContextSnapshot,
-            dispatchGeneration: await resolveNextDispatchGeneration(execDb, {
-              agentId: agentId,
-              issueId,
-              taskKey,
-            }),
-          },
-          sessionIdBefore: sessionBefore,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+      const newRun = await insertQueuedHeartbeat(execDb, {
+        agent, issueId, source, triggerDetail, wakeupRequestId: wakeupRequest.id,
+        contextSnapshot: enrichedContextSnapshot, taskKey, sessionBefore,
+      });
 
       await execDb
         .update(agentWakeupRequests)
@@ -10394,17 +10340,7 @@ export function heartbeatService(db: Db) {
         );
 
     if (!admission.coalesced) {
-      publishLiveEvent({
-        companyId: admission.run.companyId,
-        type: "heartbeat.run.queued",
-        payload: {
-          runId: admission.run.id,
-          agentId: admission.run.agentId,
-          invocationSource: admission.run.invocationSource,
-          triggerDetail: admission.run.triggerDetail,
-          wakeupRequestId: admission.run.wakeupRequestId,
-        },
-      });
+      publishQueuedRun(admission.run);
 
       await startNextQueuedRunForAgent(agent.id);
     }

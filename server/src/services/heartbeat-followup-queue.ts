@@ -2,6 +2,9 @@
 import { and, eq, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, workflowTransitionEvents, withTxTimeout, type Db } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
+import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
+import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
+import type { CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
 import { logger } from "../middleware/logger.js";
 import type { budgetService } from "./budgets.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
@@ -13,6 +16,13 @@ import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-mana
 import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, QueuedWakeupPromotionInput } from "./heartbeat-followup-promotion.js";
 import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
+/** Only the identical unconditional rejection update; callers keep their own continue/return. */
+export async function failFollowupWake(tx: FollowupTx, id: string, error: string) {
+  await tx.update(agentWakeupRequests).set({
+    status: "failed", finishedAt: new Date(), error, updatedAt: new Date(),
+  }).where(eq(agentWakeupRequests.id, id));
+  return null;
+}
 type AgentRow = typeof agents.$inferSelect;
 type RunRow = typeof heartbeatRuns.$inferSelect;
 export type HeartbeatFollowupQueueDeps = {
@@ -23,6 +33,8 @@ export type HeartbeatFollowupQueueDeps = {
   isWorkflowStepResumeWake: (input: { requestKind?: unknown; reason?: unknown; payload?: unknown; contextSnapshot?: unknown }) => boolean;
   getInvocationBlock: ReturnType<typeof budgetService>["getInvocationBlock"];
   promote: (tx: FollowupTx, input: QueuedWakeupPromotionInput) => Promise<RunRow>;
+  deliverCorrection?: (candidate: { wakeupRequestId: string }, profile: "public_callback") =>
+    Promise<{ kind: CorrectionDeliveryResult["kind"] | "nested_pending"; run: RunRow | null }>;
 };
 export async function promoteQueuedWakeupRequestsForAgent(
   deps: HeartbeatFollowupQueueDeps,
@@ -50,12 +62,22 @@ async function promoteQueuedWakeupRequest(
     promotedRejectIssueStatuses: PROMOTED_REJECT_ISSUE_STATUSES,
     enrichWakeContextSnapshot, isWorkflowStepResumeWake, getInvocationBlock,
   } = deps;
+  const [candidate] = await db.select().from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
+    eq(agentWakeupRequests.agentId, agent.id),
+  ));
+  if (candidate && readQaCorrectionWakeRef(candidate)) {
+    if (!deps.deliverCorrection) throw new Error("qa_correction_delivery_connector_required");
+    const result = await deps.deliverCorrection({ wakeupRequestId }, "public_callback");
+    return result.kind === "new_delivery" ? result.run : null;
+  }
   return withTxTimeout(db, async (tx) => {
     const [observed] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
     if (!observed) return null;
     try {
       await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...observed, contextSnapshot: parseObject(observed.payload)[DEFERRED_WAKE_CONTEXT_KEY] });
     } catch (err) {
+      if (isQaCorrectionRootOwnerRequired(err)) throw err;
       await tx.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date(), error: err instanceof Error ? err.message : "Recovery admission refused", updatedAt: new Date() })
         .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
       return null;
@@ -75,11 +97,7 @@ async function promoteQueuedWakeupRequest(
     if (!request) return null;
     // [거절] agent 가 실행 불가 상태면 run 도 만들지 않고 request 를 terminal-fail.
     if (agent.status === "terminated" || agent.status === "paused" || agent.status === "pending_approval") {
-      await tx
-        .update(agentWakeupRequests)
-        .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: agent not runnable (status=${agent.status})`, updatedAt: new Date() })
-        .where(eq(agentWakeupRequests.id, request.id));
-      return null;
+      return failFollowupWake(tx, request.id, `Queued wakeup rejected: agent not runnable (status=${agent.status})`);
     }
     const requestPayload = parseObject(request.payload);
     const queuedContext = parseObject(requestPayload[DEFERRED_WAKE_CONTEXT_KEY]);
@@ -126,16 +144,7 @@ async function promoteQueuedWakeupRequest(
       promotedReason === "mission_owner_plan_rework_requested" &&
       promotedIssue?.originKind === "mission_main_executor_plan";
     if (promotedIssueId && !promotedIssue) {
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          status: "failed",
-          finishedAt: new Date(),
-          error: "Queued wakeup could not be promoted: issue not found",
-          updatedAt: new Date(),
-        })
-        .where(eq(agentWakeupRequests.id, request.id));
-      return null;
+      return failFollowupWake(tx, request.id, "Queued wakeup could not be promoted: issue not found");
     }
     // [거절] issue 가 이미 terminal 이면 재실행 무의미 → request terminal-fail.
     if (
@@ -144,11 +153,7 @@ async function promoteQueuedWakeupRequest(
       !(isWorkflowStepResume && promotedIssue.status === "done") &&
       !(isPlanReworkPromotion && promotedIssue.status === "done")
     ) {
-      await tx
-        .update(agentWakeupRequests)
-        .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
-        .where(eq(agentWakeupRequests.id, request.id));
-      return null;
+      return failFollowupWake(tx, request.id, `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`);
     }
     // [P4 consume-side oversight no-op] mission_owner_retry_source_issue(twin) wakeup 이
     //   source/owner action 의 QA recovery chain 이 live/stalled 면 no-op(guard 이전 큐 stale/race 회수, req 2).
@@ -230,16 +235,7 @@ async function promoteQueuedWakeupRequest(
           missionId: missionIdForWake,
         });
       } catch (err) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: "failed",
-            finishedAt: new Date(),
-            error: err instanceof Error ? err.message : "Queued wakeup could not be promoted: mission is terminal",
-            updatedAt: new Date(),
-          })
-          .where(eq(agentWakeupRequests.id, request.id));
-        return null;
+        return failFollowupWake(tx, request.id, err instanceof Error ? err.message : "Queued wakeup could not be promoted: mission is terminal");
       }
     }
     const budgetBlock = await getInvocationBlock(agent.companyId, agent.id, {
@@ -247,16 +243,7 @@ async function promoteQueuedWakeupRequest(
       projectId: promotedIssue?.projectId ?? readNonEmptyString(promotedContextSnapshot.projectId),
     });
     if (budgetBlock) {
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          status: "failed",
-          finishedAt: new Date(),
-          error: budgetBlock.reason,
-          updatedAt: new Date(),
-        })
-        .where(eq(agentWakeupRequests.id, request.id));
-      return null;
+      return failFollowupWake(tx, request.id, budgetBlock.reason);
     }
     return deps.promote(tx, {
       agent, request, promotedContextSnapshot, promotedSource, promotedTriggerDetail,
