@@ -101,9 +101,15 @@ export const qaCorrectionSourceMeasuredSchema = z.object({
 }).strict().refine(m => unique(m.sources, s => s.productId), "qa_correction_duplicate_source");
 const revisionSchema = z.object({
   revisionId: uuid, sourceProductId: uuid, workProductId: uuid, root: text, mainRelativePath: artifactRelativePathSchema,
+  bundleManifestRelativePath: artifactRelativePathSchema.nullable().optional(),
+  assetsRelativeRoot: artifactRelativePathSchema.nullable().optional(),
   files: z.array(z.object({ ...fileFields, beforeSha256: sha256 }).strict()).min(1),
 }).strict().refine(r => r.sourceProductId !== r.workProductId && completeFiles(r.files)
-  && r.files.some(f => f.role === "main" && f.relativePath === r.mainRelativePath), "qa_correction_revision_manifest");
+  && r.files.some(f => f.role === "main" && f.relativePath === r.mainRelativePath), "qa_correction_revision_manifest")
+  .refine(r => typeof r.bundleManifestRelativePath !== "string"
+    || r.files.some(f => f.role === "ancillary" && f.relativePath === r.bundleManifestRelativePath), "qa_correction_bundle_manifest")
+  .refine(r => r.assetsRelativeRoot === undefined || r.files.every(f => f.role !== "asset"
+    || (typeof r.assetsRelativeRoot === "string" && f.relativePath.startsWith(r.assetsRelativeRoot + "/"))), "qa_correction_assets_root");
 export const qaCorrectionAppliedSchema = z.object({
   schemaVersion: z.literal("workflow.qa-correction.applied.v1"), correctionId: uuid,
   preparationEventId: uuid, preparationHash: sha256, sourceMeasuredEventId: uuid, sourceMeasuredHash: sha256,

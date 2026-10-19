@@ -229,3 +229,72 @@ it("uses stable lifetime keys and different keys for different authorities and t
   expect(() => qaCorrectionAppliedKey("bad")).toThrow();
   expect(() => qaCorrectionFollowupKey("bad", target)).toThrow();
 });
+// Oracle: C03/C12 adopted format-preservation contract; these are syntax/link checks, not issuance proof.
+it("C03/C12 preserves legacy format absence and its canonical hash", () => {
+  const legacy = fixture().applied.payload, parsed = parseQaCorrectionEventPayload("qa_remediation_applied", legacy);
+  expect(parsed).toEqual(legacy);
+  expect(parsed.revisions[0]!).not.toHaveProperty("bundleManifestRelativePath");
+  expect(parsed.revisions[0]!).not.toHaveProperty("assetsRelativeRoot");
+  expect(hashQaCorrectionPayload(parsed)).toBe(hashQaCorrectionPayload(legacy));
+});
+it("C03/C12 distinguishes absent, independently null and declared format fields in hashes", () => {
+  const legacy = fixture().applied.payload, hashes = [hashQaCorrectionPayload(legacy)];
+  for (const format of [{ bundleManifestRelativePath: null }, { assetsRelativeRoot: null },
+    { bundleManifestRelativePath: null, assetsRelativeRoot: null }, { assetsRelativeRoot: "assets" }]) {
+    const payload = { ...legacy, revisions: [{ ...legacy.revisions[0]!, ...format }] };
+    const parsed = parseQaCorrectionEventPayload("qa_remediation_applied", payload);
+    expect(parsed).toEqual(payload);
+    hashes.push(hashQaCorrectionPayload(parsed));
+  }
+  expect(new Set(hashes).size).toBe(hashes.length);
+});
+it("C03 accepts exact ancillary manifests and normal, nested or empty asset roots independently", () => {
+  const applied = fixture().applied.payload, revision = applied.revisions[0]!;
+  const manifest = { ...revision.files[0]!, role: "ancillary" as const, relativePath: "bundle/custom.json" };
+  for (const [root, paths] of [["assets", ["assets/image.png", "assets/nested/icon.svg"]],
+    ["bundle/assets", ["bundle/assets/icons/logo.svg"]], ["assets", []], [null, []]] as const) {
+    const files = [...revision.files, manifest, ...paths.map(relativePath => ({ ...revision.files[0]!, role: "asset" as const, relativePath }))];
+    for (const format of [{ assetsRelativeRoot: root }, { bundleManifestRelativePath: manifest.relativePath },
+      { bundleManifestRelativePath: manifest.relativePath, assetsRelativeRoot: root }, { bundleManifestRelativePath: null, assetsRelativeRoot: root }]) {
+      const payload = { ...applied, revisions: [{ ...revision, files, ...format }] };
+      expect(parseQaCorrectionEventPayload("qa_remediation_applied", payload)).toEqual(payload);
+      expect(hashQaCorrectionPayload(payload)).not.toBe(hashQaCorrectionPayload({ ...applied, revisions: [{ ...revision, files }] }));
+    }
+  }
+});
+it("C03 rejects missing or non-ancillary manifests and invalid format types or paths", () => {
+  const applied = fixture().applied.payload, revision = applied.revisions[0]!;
+  const asset = { ...revision.files[0]!, role: "asset" as const, relativePath: "assets/image.png" };
+  const files = [...revision.files, asset];
+  for (const value of ["missing.json", revision.mainRelativePath, asset.relativePath, "Report.json",
+    "", ".", "..", "../bundle.json", "/bundle.json", "bundle//manifest.json", "bundle\\manifest.json", 7, false, [], {}]) {
+    expect(() => parseQaCorrectionEventPayload("qa_remediation_applied", { ...applied,
+      revisions: [{ ...revision, files, bundleManifestRelativePath: value }] })).toThrow();
+  }
+  for (const value of [null, "outside", "assets2", "assets/image.png", "", ".", "..", "../assets",
+    "/assets", "assets/", "assets//nested", "assets\\nested", 7, false, [], {}]) {
+    expect(() => parseQaCorrectionEventPayload("qa_remediation_applied", { ...applied,
+      revisions: [{ ...revision, files, assetsRelativeRoot: value }] })).toThrow();
+  }
+  expect(() => parseQaCorrectionEventPayload("qa_remediation_applied", { ...applied, revisions: [{ ...revision,
+    files: [...revision.files, { ...asset, relativePath: "assets2/image.png" }], assetsRelativeRoot: "assets" }] })).toThrow();
+});
+it.each([...brokenLinks,
+  ["source product set", (c: Fixture) => { c.applied.payload.revisions[0]!.sourceProductId = id(99); }],
+  ["file count", (c: Fixture) => { set(c.applied.payload, "revisions.0.files.2",
+    { ...c.applied.payload.revisions[0]!.files[0]!, role: "ancillary", relativePath: "extra.json" }); }],
+  ["file role", (c: Fixture) => { set(c.sourceMeasured.payload, "sources.0.files.1.role", "asset"); }],
+  ["file path", (c: Fixture) => { set(c.sourceMeasured.payload, "sources.0.files.1.relativePath", "assets/other.json"); }],
+] as [string, (c: Fixture) => void][])("C03/C12 preserves %s checks with format fields", (_name, breakLink) => {
+  const c = fixture(), revision = c.applied.payload.revisions[0]!;
+  set(c.sourceMeasured.payload, "sources.0.files.1",
+    { ...c.sourceMeasured.payload.sources[0]!.files[0]!, role: "ancillary", relativePath: "assets/details.json" });
+  set(c.applied.payload, "revisions.0.files.1", { ...revision.files[0]!, role: "ancillary", relativePath: "assets/details.json" });
+  set(c.applied.payload, "revisions.0.bundleManifestRelativePath", "assets/details.json");
+  set(c.applied.payload, "revisions.0.assetsRelativeRoot", "assets");
+  c.applied.payload.sourceMeasuredHash = hashQaCorrectionPayload(c.sourceMeasured.payload);
+  expect(() => assertQaCorrectionEventLinks(c)).not.toThrow();
+  breakLink(c);
+  c.applied.payload.sourceMeasuredHash = hashQaCorrectionPayload(c.sourceMeasured.payload);
+  expect(() => assertQaCorrectionEventLinks(c)).toThrow();
+});
