@@ -132,6 +132,13 @@ export async function readSourceEvidence(db: QualityDb, input: {
   return verifiedBytes(input.companyId, asset, input.maxBytes);
 }
 
+/** Bytes only: verifies the configured provider, company path, size and SHA before caller TX. */
+export async function readVerifiedEvidenceUpload(companyId: string, uploaded: PutFileResult): Promise<Buffer> {
+  parseEvidence(uuidSchema, companyId);
+  const copied = { ...uploaded };
+  return verifiedBytes(companyId, copied, copied.byteSize);
+}
+
 async function verifiedBytes(companyId: string, object: { provider: string; objectKey: string; byteSize: number; sha256: string }, maxBytes: number) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) evidenceError("quality_evidence_invalid_contract");
   if (!Number.isSafeInteger(object.byteSize) || object.byteSize < 1) evidenceError("quality_evidence_invalid_contract");
