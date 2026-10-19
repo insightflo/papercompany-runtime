@@ -10,13 +10,16 @@
 //   오너가 증거와 함께 재제출하게 한다. 카드 생성 자체의 실패는 호출부(agent api)의 post-commit
 //   5xx 계약(D4)을 따른다.
 import type { Db } from "@paperclipai/db";
+import { operatorDecisions } from "@paperclipai/db";
 import type {
   CreateOperatorDecisionInput,
   OperatorDecisionDefinition,
 } from "@paperclipai/shared/types/operator-decision";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { unprocessable } from "../../errors.js";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
+import { operatorDecisionReadService } from "../operator-decisions-read.js";
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
@@ -309,8 +312,71 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
 /**
  * [D4] 카드 생성은 자체 트랜잭션(write.create)에서 실행되므로 결정 ledger 트랜잭션 밖(post-commit)에서
  *   호출해야 한다. replay(동일 companyId+requestKey+requestHash)면 기존 카드를 반환한다.
+ *
+ * [중복 병합 2026-10-18] 생성 직전 같은 (companyId, missionId, 앵커 issueId, decision 종류)의 pending
+ *   카드가 있으면 새 생성 대신 기존 카드를 최신화(updatedAt=now, sourceContext.missionOwnerHumanInput.
+ *   repeatCount 증가)하고 기존 카드를 반환한다 — 같은 건이 계류 중인데 시차를 두고 카드가 반복
+ *   쌓이는 라이브 문제(2026-10-18 operator inbox) 대응. 병합은 카드 생성·표시 계층만의 동작이며
+ *   발화·감사 이벤트·원장 기록은 억제하지 않는다(호출부는 매 이벤트마다 그대로 기록한다).
+ *   안전 방향 설계: decision 종류가 다르거나(제목이 결정 종류별로 결정적이라 제목 동등성으로 대조)
+ *   앵커 이슈가 다르거나, 기존이 pending 이 아니면(resolved/cancelled), 대조 쿼리가 실패하면
+ *   전부 신규 생성(fail-open) — 잘못된 중복판정으로 띄워야 할 카드를 발화 못 시키는 일은 없다.
+ *   같은 eventId 멱등 replay 는 기존 requestKey 규약을 그대로 따른다(갱신 없이 기존 카드 반환).
  */
 export async function createMissionOwnerHumanInputDecisionCard(db: Db, spec: MissionOwnerHumanInputCardSpec) {
   const cardInput = buildMissionOwnerHumanInputDecisionCard(spec);
+  const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
+  if (merged) return merged;
   return operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+}
+
+// [중복 병합] 병합 대조 키 전체가 일치하는 pending 카드 1건(여러 장이면 최신)을 찾는다. 제목은
+//   buildMissionOwnerHumanInputDecisionCard 가 decision 종류별로 결정적으로 만들므로 동등성
+//   비교가 곧 종류 비교다(제목 형식이 바뀌면 매칭이 실패해 신규 생성되는 fail-open 방향).
+async function tryMergePendingHumanInputCard(
+  db: Db,
+  spec: MissionOwnerHumanInputCardSpec,
+  cardInput: CreateOperatorDecisionInput,
+) {
+  try {
+    const [existing] = await db.select({
+      id: operatorDecisions.id,
+      requestKey: operatorDecisions.requestKey,
+      sourceContext: operatorDecisions.sourceContext,
+    }).from(operatorDecisions).where(and(
+      eq(operatorDecisions.companyId, spec.companyId),
+      eq(operatorDecisions.status, "pending"),
+      eq(operatorDecisions.sourceType, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE),
+      eq(operatorDecisions.issueId, spec.ownerActionIssueId),
+      eq(operatorDecisions.title, cardInput.title),
+      sql`${operatorDecisions.sourceContext}->>'missionId' = ${spec.missionId}`,
+    )).orderBy(desc(operatorDecisions.createdAt)).limit(1);
+    if (!existing) return null;
+    // 같은 eventId 멱등 replay — 기존 requestKey 규약 그대로 갱신 없이 반환한다.
+    if (existing.requestKey === cardInput.requestKey) {
+      return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
+    }
+    const previous = existing.sourceContext?.missionOwnerHumanInput?.repeatCount;
+    const repeatCount = (typeof previous === "number" && Number.isFinite(previous) && previous >= 0 ? previous : 0) + 1;
+    const now = new Date();
+    // CAS on pending — 대조 후 결·취소로 바뀌었으면 병합하지 않고 신규 생성으로 돌아간다.
+    const [updated] = await db.update(operatorDecisions).set({
+      updatedAt: now,
+      sourceContext: {
+        ...existing.sourceContext,
+        missionOwnerHumanInput: {
+          repeatCount,
+          lastSeenDecisionEventId: spec.decisionEventId,
+        },
+      },
+    }).where(and(
+      eq(operatorDecisions.id, existing.id),
+      eq(operatorDecisions.status, "pending"),
+    )).returning({ id: operatorDecisions.id });
+    if (!updated) return null;
+    return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
+  } catch {
+    // fail-open — 대조/갱신에 실패하면 최악이 현행과 동일한 중복 생성이다(발화 누락은 없다).
+    return null;
+  }
 }

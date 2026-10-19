@@ -45,6 +45,13 @@ export interface OperatorDecisionSourceContextJson {
   workflowId: string | null;
   workflowRunId: string | null;
   artifactRefs: Array<{ label: string; uri: string }>;
+  /** [중복 병합 2026-10-18] mission_owner_human_input pending 카드 병합 전용 메타데이터. create 시점
+ *  zod 스키마(strict)에는 없어 신규 생성 카드는 이 키를 갖지 않고, 병합 경로의 갱신으로만
+ *  쓰인다(발화·원장 억제 없이 카드 계층에서만 repeatCount 를 센다). */
+  missionOwnerHumanInput?: {
+    repeatCount: number;
+    lastSeenDecisionEventId?: string;
+  } | null;
 }
 
 export const operatorDecisions = pgTable(
