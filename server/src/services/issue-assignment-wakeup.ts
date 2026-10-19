@@ -1,4 +1,59 @@
+import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+
+export class QaCorrectionRootOwnerRequired extends Error {
+  readonly code = "qa_correction_root_owner_required";
+
+  constructor() {
+    super("qa_correction_root_owner_required");
+    this.name = "QaCorrectionRootOwnerRequired";
+  }
+}
+
+export function isQaCorrectionRootOwnerRequired(error: unknown): boolean {
+  const visited = new Set<object>();
+  let current = error;
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    if (current instanceof QaCorrectionRootOwnerRequired) return true;
+    visited.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+export type ReplacementRootNotifications = { readonly agentIds: Set<string> };
+
+// Exact DB identity carries notifications only; it does not establish execution authority.
+const rootNotifications = new WeakMap<Db, ReplacementRootNotifications>();
+
+export function createReplacementRootNotifications(): ReplacementRootNotifications {
+  return { agentIds: new Set<string>() };
+}
+
+export function currentReplacementRootNotifications(actualDb: Db): ReplacementRootNotifications | null {
+  return rootNotifications.get(actualDb) ?? null;
+}
+
+export function registerQaCorrectionRootDrain(actualDb: Db, agentId: string): void {
+  const notifications = currentReplacementRootNotifications(actualDb);
+  if (!notifications) throw new QaCorrectionRootOwnerRequired();
+  notifications.agentIds.add(agentId);
+}
+
+export async function withReplacementRootNotificationDb<T>(
+  actualDb: Db,
+  notifications: ReplacementRootNotifications,
+  work: () => Promise<T>,
+): Promise<T> {
+  const previous = rootNotifications.get(actualDb);
+  rootNotifications.set(actualDb, notifications);
+  try {
+    return await work();
+  } finally {
+    if (previous) rootNotifications.set(actualDb, previous);
+    else rootNotifications.delete(actualDb);
+  }
+}
 
 type WakeupTriggerDetail = "manual" | "ping" | "callback" | "system";
 type WakeupSource = "timer" | "assignment" | "on_demand" | "automation";
@@ -67,7 +122,7 @@ export function queueIssueAssignmentWakeup(input: {
     })
     .catch((err) => {
       logger.warn({ err, issueId: input.issue.id }, "failed to wake assignee on issue assignment");
-      if (input.rethrowOnError) throw err;
+      if (input.rethrowOnError || isQaCorrectionRootOwnerRequired(err)) throw err;
       return null;
     });
 }
