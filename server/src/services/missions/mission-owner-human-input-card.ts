@@ -59,6 +59,10 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly workflowRunId?: string | null;
   /** [D3] payload 구조화 options(선택적 — 없으면 기본 approve/hold/reject). */
   readonly structuredOptions?: unknown;
+  /** [요청자 추천] 카드 선택지 중 추천할 옵션 id(선택). 대응 옵션이 없으면 무시된다(fail-open). */
+  readonly recommendedOptionId?: string | null;
+  /** 추천 사유 — recommended 옵션에만 붙는다(스키마 최대 1,000자로 잘린다). */
+  readonly recommendationReason?: string | null;
 };
 
 const clip = (value: string, max: number) => value.length > max ? value.slice(0, max) : value;
@@ -144,6 +148,27 @@ export function deriveRecoveryPathOptionsFromNextAction(nextAction: string | und
   return null;
 }
 
+// [선택지별 결과 설명] 표준 복구 동사에는 그 선택이 무엇으로 이어지는지 명시한다 — 사람이
+//   선택지를 볼 때 결과를 몰라도 고르게 두지 않는다(2026-10-19 사용자 지적). 동사 매칭은
+//   일반 규칙(한/영 키워드)이고 미매칭은 기존 안내 문구 유지(fail-open).
+const RECOVERY_PATH_CONSEQUENCES: { match: RegExp; consequence: string }[] = [
+  { match: /replan|계획\s*변경|계획\s*재|재기획/, consequence: "기존 계획을 폐기하고 새 계획으로 다시 시작합니다. 기존 산출물은 보존되지만 이후 실행은 새 계획에 따라 다시 진행됩니다." },
+  { match: /revised|수정\s*후\s*재시도|입력\s*수정/, consequence: "같은 계획 아래 입력을 수정해 실행을 다시 시도합니다. 수정할 입력값은 오너가 결정·전달합니다." },
+  { match: /different.{0,12}(source|live)|다른\s*(소스|출처)/, consequence: "현재 소스를 버리고 다른 소스에서 수집부터 다시 시작합니다." },
+  { match: /explicit.{0,12}target|recovery\s*target|대상\s*(지정|기록)/, consequence: "닿힌 재시도 대상 대신 유효한 대상을 지정해 복구를 이어갑니다." },
+  { match: /reassign|담당자\s*변경|재할당/, consequence: "다른 담당자에게 작업을 넘겨 진행합니다." },
+  { match: /cancel|취소/, consequence: "이 복구를 중단합니다. 미션은 미완료 방향으로 정리될 수 있습니다." },
+  { match: /wait|보류|대기/, consequence: "지금은 행동하지 않고 다음 상황을 다시 관찰합니다." },
+  { match: /retry|재시도/, consequence: "같은 조건으로 실행을 다시 시도합니다." },
+];
+
+function recoveryPathConsequence(label: string): string | null {
+  for (const entry of RECOVERY_PATH_CONSEQUENCES) {
+    if (entry.match.test(label)) return entry.consequence;
+  }
+  return null;
+}
+
 function buildDerivedRecoveryPathDefinition(
   paths: { id: string; label: string }[],
   evidenceRefs: { label: string; href: string }[],
@@ -151,7 +176,8 @@ function buildDerivedRecoveryPathDefinition(
   const options = paths.map((path) => ({
     id: path.id,
     label: path.label,
-    description: "에스컬레이션이 제시한 복구 경로 후보입니다. 선택하면 이 방향이 미션 오너에게 전달됩니다.",
+    description: recoveryPathConsequence(path.label)
+      ?? "에스컬레이션이 제시한 복구 경로 후보입니다. 선택하면 이 방향이 미션 오너에게 전달됩니다.",
     facts: [],
     evidenceRefs,
   }));
@@ -251,6 +277,17 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     : derivedPaths
       ? buildDerivedRecoveryPathDefinition(derivedPaths, evidenceOptionRefs)
       : buildDefaultDefinition(evidenceOptionRefs);
+  // [요청자 추천] 선택지를 넘기는 요청은 근거와 함께 추천도 제시한다 — 판단 부담만 사람에게 넘기지
+  //   않는다. 대응 옵션이 없는 optionId 는 조용히 무시한다(fail-open: 발화 누락 방지 계약 유지).
+  //   최종 정의는 입력에 결정적이므로 requestKey 멱등 replay 규약도 그대로다.
+  const recommendedId = present(input.recommendedOptionId);
+  const recommendationReason = present(input.recommendationReason);
+  const options = recommendedId
+    ? definition.options.map((option) => option.id === recommendedId
+      ? { ...option, recommended: true, ...(recommendationReason ? { recommendationReason: clip(recommendationReason, 1_000) } : {}) }
+      : option)
+    : definition.options;
+  const recommendedDefinition = { ...definition, options };
   const summaryLines = [
     `요청 사유: ${present(input.reason) ?? "(미제출)"}`,
     `요청된 다음 단계: ${present(input.nextAction) ?? "(미제출)"}`,
@@ -284,7 +321,7 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       },
     },
     definition: {
-      ...definition,
+      ...recommendedDefinition,
       humanReview: {
         schemaVersion: "human-review-v1",
         decisionSubject: clip(`미션 오너의 사람 결정 요청 — ${decisionLabel} 승인 여부`, 300),

@@ -251,6 +251,9 @@ export async function submitMissionOwnerDecision(input: {
           issueIdentifier: humanPayload.issueIdentifier ?? null,
           sourceIssueId: humanPayload.sourceIssueId ?? null,
           workflowRunId: verifiedRunId,
+          // [요청자 추천] 선택지와 함께 오너가 제출한 추천+사유 — 카드 옵션 id 가 일치할 때만 반영.
+          recommendedOptionId: input.data.recommendedOptionId ?? null,
+          recommendationReason: input.data.recommendationReason ?? null,
         };
       }
     }

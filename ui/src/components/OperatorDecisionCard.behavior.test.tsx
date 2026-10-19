@@ -214,6 +214,50 @@ describe("OperatorDecisionCard behavior", () => {
     expect(host.textContent).toContain("What needs deciding?");
   });
 
+  it("shows the requester's recommendation badge and reason on the matching option only", async () => {
+    await renderCard();
+    expect(host.querySelector("[data-operator-decision-recommended]")).toBeNull();
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")).toBeNull();
+    const onResolve = vi.fn().mockResolvedValue(undefined);
+    await renderCard({
+      ...baseDecision,
+      definition: {
+        ...baseDecision.definition,
+        options: [
+          { id: "one", label: "One", description: "First", facts: [], evidenceRefs: [], recommended: true, recommendationReason: "Cheapest path with verified evidence" },
+          { id: "two", label: "Two", description: null, facts: [], evidenceRefs: [] },
+        ],
+      },
+    }, onResolve);
+    const badge = host.querySelector("[data-operator-decision-recommended]")!;
+    expect(badge).toBeTruthy();
+    expect(badge.textContent).toBe("Recommended");
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")?.textContent).toContain("Cheapest path with verified evidence");
+    expect([...host.querySelectorAll("label")].filter((label) => label.querySelector("[data-operator-decision-recommended]"))).toHaveLength(1);
+    // resolve 동작 불변 — 배지는 표시일 뿐 선택 구조를 바꾸지 않는다.
+    click(host.querySelector('input[value="one"]')!);
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
+    expect(onResolve).toHaveBeenCalledWith("decision-1", {
+      actionId: "choose", selectedOptionIds: ["one"], comment: null,
+    });
+  });
+
+  it("localizes the recommendation badge to Korean", async () => {
+    const decision = {
+      ...baseDecision,
+      definition: {
+        ...baseDecision.definition,
+        options: [
+          { id: "one", label: "One", description: null, facts: [], evidenceRefs: [], recommended: true, recommendationReason: "검증된 증거가 있는 최저 비용 경로" },
+          { id: "two", label: "Two", description: null, facts: [], evidenceRefs: [] },
+        ],
+      },
+    };
+    await act(async () => root.render(<CompanyContext.Provider value={koCompanyContext}><OperatorDecisionCard decision={decision} onResolve={vi.fn()} /></CompanyContext.Provider>));
+    expect(host.querySelector("[data-operator-decision-recommended]")?.textContent).toBe("추천");
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")?.textContent).toContain("추천 사유: 검증된 증거가 있는 최저 비용 경로");
+  });
+
   it("shows shared facts once and preserves unique, unknown and long facts", async () => {
     const shared = [
       { label: "Source", value: "source sentinel", status: "known" as const },

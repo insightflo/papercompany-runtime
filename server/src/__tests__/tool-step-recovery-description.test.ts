@@ -59,6 +59,28 @@ describe("tool step recovery description", () => {
     expect(description).toContain("submit `request_input` or `escalate`");
   });
 
+  it("tells owners to state a grounded recommendation when handing a choice to a human", () => {
+    const description = buildToolStepRecoveryDescription({
+      marker: "tool-step-recovery:run-1:qa-gate",
+      missionTitle: "Daily dashboard",
+      workflowName: "gazua-morning",
+      workflowRunId: "run-1",
+      stepId: "qa-gate",
+      displayStepName: "QA gate",
+      toolNames: ["gazua.qa"],
+      classification: {
+        className: "side_effect_risk",
+        retryPolicy: "manual_owner_decision_required",
+        rationale: "External side effect risk.",
+        requiredAction: "Owner must decide whether retry is safe.",
+        evidence: [],
+      },
+    });
+    expect(description).toContain("recommendedOptionId");
+    expect(description).toContain("recommendationReason");
+    expect(description).toContain("state which option you recommend and why");
+  });
+
   it("keeps toolInvocationArgs evidence visible (empty-args definition defects) with secrets redacted", () => {
     const build = (evidence: string[]) => buildToolStepRecoveryDescription({
       marker: "m", missionTitle: "t", workflowName: "w", workflowRunId: "run-1", stepId: "s",

@@ -196,6 +196,12 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
       issueTitle: anchor.title,
       issueIdentifier: anchor.identifier,
       sourceIssueId: input.sourceIssueId,
+      // [추천 주입] 차단 시점 내부 진단은 같은 죽은 대상 재시도의 무한 no-op 순환을 지적하며
+      //   request_replan 권고를 남긴다(supervision addRecommendation) — 카드 파생 선택지의
+      //   "replan the mission" 항목에 추천+사유(진단 문구)로 반영한다. nextAction 파생 slug 가
+      //   바뀌 이 옵션이 없으면 카드 빌더가 무시한다(fail-open).
+      recommendedOptionId: "replan-the-mission",
+      recommendationReason: input.reason.slice(0, 1_000),
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {

@@ -43,6 +43,9 @@ const optionSchema = z.object({
   description: nullableNormalized(1, 1_000),
   facts: z.array(factSchema).max(12),
   evidenceRefs: z.array(evidenceRefSchema).max(10),
+  // [요청자 추천] 선택적 — 정의당 최대 1개 옵션, 사유는 recommended 옵션에만 허용(아래 superRefine).
+  recommended: z.boolean().optional(),
+  recommendationReason: nullableNormalized(1, 1_000).optional(),
 }).strict();
 
 const actionSchema = z.object({
@@ -98,6 +101,13 @@ export const operatorDecisionDefinitionSchema = z.object({
 }).strict().superRefine((definition, ctx) => {
   if (!unique(definition.options.map((item) => item.id))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Option IDs must be unique", path: ["options"] });
+  }
+  const recommendedOptions = definition.options.filter((item) => item.recommended === true);
+  if (recommendedOptions.length > 1) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "At most one option may be recommended", path: ["options"] });
+  }
+  if (definition.options.some((item) => item.recommendationReason != null && item.recommended !== true)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "recommendationReason is only allowed on the recommended option", path: ["options"] });
   }
   if (!unique(definition.actions.map((item) => item.id))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Action IDs must be unique", path: ["actions"] });
