@@ -2,7 +2,7 @@ import { isDeepStrictEqual as same } from "node:util";
 import { and, asc, eq, inArray, is, or, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { agentWakeupRequests, heartbeatRuns, issues, issueWorkProducts, missions, workflowRuns,
-  workflowStepRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
+  workflowStepRuns, workflowStepOutputBindings, withTxTimeout, DEFAULT_TX_TIMEOUT_MS, type Db } from "@paperclipai/db";
 import { asBoolean, parseObject } from "../../../adapters/utils.js";
 import { budgetService } from "../../budgets.js";
 import { lifecycleInFlightClause } from "../../heartbeat-finalization/lifecycle-active.js";
@@ -18,6 +18,9 @@ import { assertDeliveryInput, assertDeliveryScope, assertDeliverySignature, asse
 
 export type { CorrectionDeliveryInput, CorrectionDeliveryResult };
 export type WriteLinkedCorrectionRun = (tx: DeliveryTx, wake: DeliveryWake) => Promise<unknown>;
+export type CorrectionDeliveryOptions = {
+  transactionProfile?: "public_callback" | "recovery_skip_locked";
+};
 class ReceiptAppeared extends Error {}
 class PendingAppeared extends Error {}
 // Private control flow only: neither signal proves authority or a successful historical relation.
@@ -143,18 +146,33 @@ function uniqueReceipt(error: unknown): boolean {
  * Callers connect only the supplied TX/wake to an existing promotion writer; they start only startRunId after commit.
  */
 export async function withCorrectionDeliveryRoot(db: Db, input: CorrectionDeliveryInput,
-  writeLinkedRun: WriteLinkedCorrectionRun): Promise<CorrectionDeliveryResult> {
+  writeLinkedRun: WriteLinkedCorrectionRun, options: CorrectionDeliveryOptions = {}): Promise<CorrectionDeliveryResult> {
   requireDelivery(!is(db, PgTransaction), "root_required");
   const i = structuredClone(input);
   assertDeliveryInput(i);
-  const historical = () => db.transaction(tx => readQaCorrectionDelivery(tx, i),
+  const profile = options.transactionProfile;
+  const transaction = <T>(work: (tx: DeliveryTx) => Promise<T>, config: Parameters<Db["transaction"]>[1]) => {
+    const factory = {
+      transaction: <R>(callback: (tx: DeliveryTx) => Promise<R>) => db.transaction(callback, config),
+    };
+    if (profile === undefined) return factory.transaction(work);
+    // The timeout rejects the actual owning callback so Drizzle rolls this transaction back.
+    return withTxTimeout<DeliveryTx, T>(factory, async tx => {
+      if (profile === "recovery_skip_locked") {
+        await tx.execute(sql`SET LOCAL lock_timeout='8s'`);
+        await tx.execute(sql`SET LOCAL statement_timeout='30s'`);
+      }
+      return work(tx);
+    }, { timeoutMs: DEFAULT_TX_TIMEOUT_MS, label: "qa-correction-delivery-root" });
+  };
+  const historical = () => transaction(tx => readQaCorrectionDelivery(tx, i),
     { isolationLevel: "repeatable read", accessMode: "read only" });
   const previous = await historical();
   if (previous) return previous;
   for (let attempt = 0; attempt < 2; attempt++) {
     const o = await observe(db, i);
     try {
-      return await db.transaction<CorrectionDeliveryResult>(async tx => {
+      return await transaction<CorrectionDeliveryResult>(async tx => {
         await lockPrefix(tx, i, o);
         const h = await readCurrentQaCorrectionFollowup(tx, i.ref, o.token, readIssuedQaCorrection);
         requireDelivery(h.followup.target.executionGeneration === i.workflowExecutionGeneration, "generation");
