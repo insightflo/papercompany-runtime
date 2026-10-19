@@ -17,10 +17,11 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { completeWorkflowToolStepFromResult } from "../services/workflow/dag-engine.js";
+import { cancelWorkflowRunWithCleanup, completeWorkflowToolStepFromResult } from "../services/workflow/dag-engine.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
-type AdapterResult = ReturnType<typeof successfulAdapterResult>;
+const adapterResult = { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
+type AdapterResult = typeof adapterResult;
 const adapterGate = vi.hoisted(() => ({
   execute: vi.fn<() => Promise<AdapterResult>>(),
   releases: [] as Array<(result: AdapterResult) => void>,
@@ -29,10 +30,6 @@ vi.mock("../adapters/index.js", () => ({
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: adapterGate.execute }),
   runningProcesses: new Map(),
 }));
-
-function successfulAdapterResult() {
-  return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
-}
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEP = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -48,6 +45,7 @@ describeEP("hybrid QA — structural gate integration", () => {
   let companyId: string;
   let agentId: string;
   let missionId: string;
+  let activeWorkflowRunId: string | undefined;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("hybrid-qa-struct-");
@@ -67,16 +65,16 @@ describeEP("hybrid QA — structural gate integration", () => {
   }, 60_000);
 
   beforeEach(() => {
-    adapterGate.releases.length = 0;
+    activeWorkflowRunId = undefined;
     adapterGate.execute.mockImplementation(() => new Promise<AdapterResult>((resolve) => {
       adapterGate.releases.push(resolve);
     }));
   });
 
   afterEach(async () => {
-    const result = successfulAdapterResult();
-    adapterGate.execute.mockResolvedValue(result);
-    for (const release of adapterGate.releases) release(result);
+    if (activeWorkflowRunId) await cancelWorkflowRunWithCleanup(db, activeWorkflowRunId, companyId);
+    adapterGate.execute.mockResolvedValue(adapterResult);
+    for (const release of adapterGate.releases.splice(0)) release(adapterResult);
     await waitForHeartbeatExecutionsToDrain(db);
     await db.delete(issueComments);
     await db.delete(workflowTransitionEvents);
@@ -113,6 +111,7 @@ describeEP("hybrid QA — structural gate integration", () => {
   async function seedWorkflowWithStructuralGate() {
     const wfId = randomUUID();
     const runId = randomUUID();
+    activeWorkflowRunId = runId;
     const producerStepId = `action-1-${randomUUID().slice(0, 8)}`;
     const gateStepId = `qa-1-${randomUUID().slice(0, 8)}`;
     const semanticQaStepId = `qa-2-${randomUUID().slice(0, 8)}`;
