@@ -172,6 +172,41 @@ describe("mission owner human input decision card builder", () => {
     ]);
   });
 
+  // ---------- 파생 선택지별 결과(영향) 설명 — 표준 복구 동사 매칭, 미매칭은 기존 안내 ----------
+
+  it("fills per-option consequences for standard recovery verbs (EN)", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    const byId = new Map(card.definition.options.map((option) => [option.id, option.description ?? ""]));
+    expect(byId.get("retry-with-revised-input")).toContain("입력을 수정해");
+    expect(byId.get("replan")).toContain("기존 계획을 폐기");
+    expect(byId.get("reassign")).toContain("다른 담당자");
+    expect(byId.get("cancel")).toContain("복구를 중단");
+  });
+
+  it("fills per-option consequences for standard recovery verbs (KO)", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
+    }));
+    const labels = new Map(card.definition.options.map((option) => [option.label, option.description ?? ""]));
+    expect(labels.get("계획 변경")).toContain("기존 계획을 폐기");
+    expect(labels.get("취소")).toContain("복구를 중단");
+  });
+
+  it("keeps the generic guidance for unmatched path labels", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system",
+      nextAction: "Pick one (defrost the moonrock, repaint the observatory, or cancel).",
+    }));
+    expect(card.definition.options.length).toBeGreaterThan(1);
+    const byId = new Map(card.definition.options.map((option) => [option.id, option.description]));
+    expect(byId.get("cancel")).toContain("복구를 중단");
+    for (const [id, description] of byId) {
+      if (id !== "cancel") expect(description).toContain("복구 경로 후보");
+    }
+  });
+
   it("keeps the default approve/hold/reject for agent submissions even with an enumerated nextAction", () => {
     const card = buildMissionOwnerHumanInputDecisionCard(spec({
       decision: "escalate", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
