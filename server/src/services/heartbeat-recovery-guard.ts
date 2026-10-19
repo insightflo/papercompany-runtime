@@ -1,5 +1,8 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, is, or } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
+import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { conflict } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
@@ -76,10 +79,8 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
 }
 
 /** Claim and replacement admission serialize on the same mission/source-run locks. */
-export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
-  return db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    await assertHeartbeatRecoveryAdmission(t, run);
+async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
+  return withQaCorrectionClaimRoot(db, run, t => assertHeartbeatRecoveryAdmission(t, run), async t => {
     const [agent] = await t.select().from(agents).where(eq(agents.id, run.agentId));
     if (!agent || ["paused", "terminated", "pending_approval"].includes(agent.status)) throw conflict("Cancelled because the agent is not invokable");
     const context = record(run.contextSnapshot);
@@ -91,21 +92,24 @@ export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartb
   });
 }
 
+/** Preserve the existing direct claim API; public queue callers also distinguish registered deferral. */
+export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
+  const outcome = await guardedClaim(db, run, claimedAt);
+  return outcome.kind === "performed" ? outcome.value : null;
+}
+
 function executionIdentity(run: typeof heartbeatRuns.$inferSelect) {
   const context = record(run.contextSnapshot);
   return JSON.stringify([run.agentId, run.issueId, run.wakeupRequestId, run.workflowStepRunId,
-    run.workflowExecutionGeneration, context.issueId, context.workflowRunId, context.workflowStepRunId]);
+    run.workflowExecutionGeneration, run.retryOfRunId, context.issueId, context.workflowRunId, context.workflowStepRunId]);
 }
 
 /** Start the adapter under the lock, but never hold a DB transaction for its lifetime.
  * The returned box prevents Promise assimilation until after the transaction commits.
  */
 export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof heartbeatRuns.$inferSelect, execute: () => Promise<T>): Promise<T> {
-  const started = await db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    await assertHeartbeatRecoveryAdmission(t, run).catch((error) => {
-      throw Object.assign(error, { code: "heartbeat_recovery_blocked" });
-    });
+  const started = await withQaCorrectionClaimRoot(db, run,
+    t => assertHeartbeatRecoveryAdmission(t, run), async t => {
     const [current] = await t.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).for("share");
     if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(run)) {
       throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });
@@ -114,6 +118,110 @@ export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof h
     // Attach immediately so an adapter's synchronous rejection cannot be unhandled while committing.
     void result.catch(() => {});
     return { result };
+  }).catch(error => {
+    throw Object.assign(error, { code: "heartbeat_recovery_blocked" });
   });
-  return started.result;
+  if (started.kind !== "performed") {
+    throw Object.assign(conflict("heartbeat_execution_deferred"), { code: "heartbeat_recovery_blocked" });
+  }
+  return started.value.result;
+}
+
+type Run = typeof heartbeatRuns.$inferSelect;
+export type ClaimOutcome =
+  | { kind: "claimed"; run: Run }
+  | { kind: "not_claimed" }
+  | { kind: "root_deferred" }
+  | { kind: "correction_rejected" };
+type ClaimEffects = {
+  db: Db;
+  cancelRun: (id: string, reason: string, resumeQueue: false) => Promise<unknown>;
+  recordQueueTransitionEvent: (event: Parameters<typeof import("./heartbeat.js").recordHeartbeatQueueTransitionEvent>[1]) => Promise<void>;
+  publishLiveEvent: typeof import("./live-events.js").publishLiveEvent;
+  setWakeupStatus: (id: string | null, status: "claimed", patch: { claimedAt: Date }) => Promise<unknown>;
+};
+
+/** Cancellation is awaited after root rollback; only a real correction rejection enables queue refresh. */
+export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: Run): Promise<ClaimOutcome> {
+  if (run.status !== "queued") return { kind: "claimed", run };
+  const claimedAt = new Date();
+  let outcome: Awaited<ReturnType<typeof guardedClaim>>;
+  try { outcome = await guardedClaim(deps.db, run, claimedAt); }
+  catch (error) {
+    if (isQaCorrectionRootOwnerRequired(error)
+      || (is(deps.db, PgTransaction) && error instanceof QaCorrectionClaimRejected)) throw error;
+    await deps.cancelRun(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
+    return { kind: error instanceof QaCorrectionClaimRejected ? "correction_rejected" : "not_claimed" };
+  }
+  if (outcome.kind !== "performed") return outcome;
+  const claimed = outcome.value;
+  if (!claimed) return { kind: "not_claimed" };
+  // [Task 6C] queue_run_started event (queued→running transition)
+  await deps.recordQueueTransitionEvent({
+    companyId: claimed.companyId,
+    heartbeatRunId: claimed.id,
+    wakeupRequestId: claimed.wakeupRequestId,
+    issueId: claimed.issueId,
+    eventType: "queue_run_started",
+    layer: "heartbeat",
+    decision: "running",
+    reason: "claim_succeeded",
+    reasonCode: "claim_succeeded",
+    idempotencyKey: `queue-run-started:${claimed.id}`,
+  });
+
+  deps.publishLiveEvent({
+    companyId: claimed.companyId,
+    type: "heartbeat.run.status",
+    payload: {
+      runId: claimed.id,
+      agentId: claimed.agentId,
+      status: claimed.status,
+      invocationSource: claimed.invocationSource,
+      triggerDetail: claimed.triggerDetail,
+      error: claimed.error ?? null,
+      errorCode: claimed.errorCode ?? null,
+      startedAt: claimed.startedAt ? new Date(claimed.startedAt).toISOString() : null,
+      finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
+    },
+  });
+
+  await deps.setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
+  return { kind: "claimed", run: claimed };
+}
+
+type QueueClaims = {
+  select: (slots: number, attempted: string[]) => Promise<Run[]>;
+  promote: (slots: number) => Promise<Run[]>;
+  claim: (run: Run) => Promise<ClaimOutcome>;
+  publish: (run: Run) => void;
+};
+/** Caller holds the existing agent-start lock. Removed rejected rows, rather than a new limit, bound progress. */
+export async function claimAvailableHeartbeatRuns(deps: QueueClaims, slots: number): Promise<Run[]> {
+  const claimed: Run[] = [], attempted = new Set<string>();
+  const take = async (runs: Run[]) => {
+    let rejected = false;
+    for (const run of runs) {
+      if (attempted.has(run.id)) continue;
+      attempted.add(run.id);
+      const result = await deps.claim(run);
+      if (result.kind === "claimed") claimed.push(result.run);
+      if (result.kind === "correction_rejected") rejected = true;
+    }
+    return rejected;
+  };
+  let queued = await deps.select(slots, []);
+  for (;;) {
+    const rejected = await take(queued);
+    if (claimed.length >= slots) break;
+    if (rejected) {
+      queued = await deps.select(slots - claimed.length, [...attempted]);
+      if (queued.length) continue;
+    }
+    const promoted = await deps.promote(slots - claimed.length);
+    for (const run of promoted) deps.publish(run);
+    if (!await take(promoted) || claimed.length >= slots) break;
+    queued = await deps.select(slots - claimed.length, [...attempted]);
+  }
+  return claimed;
 }

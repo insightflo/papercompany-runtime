@@ -194,7 +194,7 @@ import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetry
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
 import { preserveWorkflowAttemptProof, withoutWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
-import { assertHeartbeatRecoveryAdmission, claimHeartbeatWithRecoveryGuard, executeHeartbeatWithRecoveryGuard } from "./heartbeat-recovery-guard.js";
+import { assertHeartbeatRecoveryAdmission, claimQueuedRunWithRecoveryGuard, claimAvailableHeartbeatRuns, executeHeartbeatWithRecoveryGuard } from "./heartbeat-recovery-guard.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
 import {
   SHUTDOWN_INTERRUPTED_ERROR_CODE,
@@ -4731,48 +4731,10 @@ export function heartbeatService(db: Db) {
     return Number(count ?? 0);
   }
 
-  async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
-    if (run.status !== "queued") return run;
-    const claimedAt = new Date();
-    const claimed = await claimHeartbeatWithRecoveryGuard(db, run, claimedAt).catch(async (err) => {
-      if (isQaCorrectionRootOwnerRequired(err)) throw err;
-      await cancelRunInternal(run.id, err instanceof Error ? err.message : "Heartbeat claim refused", false);
-      return null;
-    });
-    if (!claimed) return null;
-
-    // [Task 6C] queue_run_started event (queued→running transition)
-    await recordQueueTransitionEvent({
-      companyId: claimed.companyId,
-      heartbeatRunId: claimed.id,
-      wakeupRequestId: claimed.wakeupRequestId,
-      issueId: claimed.issueId,
-      eventType: "queue_run_started",
-      layer: "heartbeat",
-      decision: "running",
-      reason: "claim_succeeded",
-      reasonCode: "claim_succeeded",
-      idempotencyKey: `queue-run-started:${claimed.id}`,
-    });
-
-    publishLiveEvent({
-      companyId: claimed.companyId,
-      type: "heartbeat.run.status",
-      payload: {
-        runId: claimed.id,
-        agentId: claimed.agentId,
-        status: claimed.status,
-        invocationSource: claimed.invocationSource,
-        triggerDetail: claimed.triggerDetail,
-        error: claimed.error ?? null,
-        errorCode: claimed.errorCode ?? null,
-        startedAt: claimed.startedAt ? new Date(claimed.startedAt).toISOString() : null,
-        finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
-      },
-    });
-
-    await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
-    return claimed;
+  function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+    return claimQueuedRunWithRecoveryGuard({
+      db, cancelRun: cancelRunInternal, recordQueueTransitionEvent, publishLiveEvent, setWakeupStatus,
+    }, run);
   }
 
   async function pauseAgentForReauthRequired(
@@ -5997,28 +5959,15 @@ export function heartbeatService(db: Db) {
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
-      const queuedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt))
-        .limit(availableSlots);
-
-      const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of queuedRuns) {
-        const claimed = await claimQueuedRun(queuedRun);
-        if (claimed) claimedRuns.push(claimed);
-      }
-
-      const remainingSlots = availableSlots - claimedRuns.length;
-      if (remainingSlots > 0) {
-        const promotedRuns = await promoteQueuedWakeupRequestsForAgent(followupQueueDeps, agent, remainingSlots);
-        for (const promotedRun of promotedRuns) {
-          publishQueuedRun(promotedRun);
-          const claimed = await claimQueuedRun(promotedRun);
-          if (claimed) claimedRuns.push(claimed);
-        }
-      }
+      const claimedRuns = await claimAvailableHeartbeatRuns({
+        select: (slots, attempted) => db.select().from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued"),
+            attempted.length ? not(inArray(heartbeatRuns.id, attempted)) : undefined))
+          .orderBy(asc(heartbeatRuns.createdAt)).limit(slots),
+        claim: claimQueuedRun,
+        promote: slots => promoteQueuedWakeupRequestsForAgent(followupQueueDeps, agent, slots),
+        publish: publishQueuedRun,
+      }, availableSlots);
 
       if (claimedRuns.length === 0) return [];
 
@@ -6140,12 +6089,9 @@ export function heartbeatService(db: Db) {
     if (run.status !== "queued" && run.status !== "running") return;
 
     if (run.status === "queued") {
-      const claimed = await claimQueuedRun(run);
-      if (!claimed) {
-        // Another worker has already claimed or finalized this run.
-        return;
-      }
-      run = claimed;
+      const outcome = await claimQueuedRun(run);
+      if (outcome.kind !== "claimed") return;
+      run = outcome.run;
     }
 
     activeRunExecutions.add(run.id);
