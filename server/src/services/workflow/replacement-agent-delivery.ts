@@ -101,8 +101,11 @@ export async function applyWorkflowIssueCreatedSideEffects(input: CreatedInput) 
 // Registration deduplicates notifications, not execution; native queue claims remain authoritative.
 export async function drainReplacementRootNotifications(rootDb: Db, notifications: ReplacementRootNotifications): Promise<void> {
   if (is(rootDb, PgTransaction)) throw new QaCorrectionRootOwnerRequired();
-  if (notifications.agentIds.size === 0) return;
+  if (notifications.correctionWakeupRequestIds.size === 0 && notifications.agentIds.size === 0) return;
   const heartbeat = heartbeatService(rootDb);
+  for (const wakeupRequestId of notifications.correctionWakeupRequestIds) {
+    await heartbeat.resumeQaCorrectionWake(wakeupRequestId);
+  }
   for (const agentId of [...notifications.agentIds].sort()) {
     await heartbeat.resumeQueuedRuns(agentId);
   }

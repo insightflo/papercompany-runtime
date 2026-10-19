@@ -1,4 +1,9 @@
-import type { Db } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { heartbeatRuns, type Db } from "@paperclipai/db";
+import type { CorrectionDeliveryInput } from "./workflow/control-flow/qa-correction-delivery-root.js";
+import { assertDeliveryScope, assertDeliverySignature, assertDeliveryWake, readDeliveryWakeCandidates,
+  findDeliveryEvent, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
+import { readIssuedQaCorrectionFollowupForAttempt } from "./workflow/control-flow/qa-correction-reader.js";
 import { logger } from "../middleware/logger.js";
 
 export class QaCorrectionRootOwnerRequired extends Error {
@@ -21,13 +26,16 @@ export function isQaCorrectionRootOwnerRequired(error: unknown): boolean {
   return false;
 }
 
-export type ReplacementRootNotifications = { readonly agentIds: Set<string> };
+export type ReplacementRootNotifications = {
+  readonly agentIds: Set<string>;
+  readonly correctionWakeupRequestIds: Set<string>;
+};
 
 // Exact DB identity carries notifications only; it does not establish execution authority.
 const rootNotifications = new WeakMap<Db, ReplacementRootNotifications>();
 
 export function createReplacementRootNotifications(): ReplacementRootNotifications {
-  return { agentIds: new Set<string>() };
+  return { agentIds: new Set<string>(), correctionWakeupRequestIds: new Set<string>() };
 }
 
 export function currentReplacementRootNotifications(actualDb: Db): ReplacementRootNotifications | null {
@@ -38,6 +46,25 @@ export function registerQaCorrectionRootDrain(actualDb: Db, agentId: string): vo
   const notifications = currentReplacementRootNotifications(actualDb);
   if (!notifications) throw new QaCorrectionRootOwnerRequired();
   notifications.agentIds.add(agentId);
+}
+
+export async function validateAndRegisterQaCorrectionRootDrain(actualDb: Db, input: CorrectionDeliveryInput): Promise<void> {
+  const history = await readIssuedQaCorrectionFollowupForAttempt(actualDb, input.ref);
+  await assertDeliveryScope(actualDb, input, history);
+  const pending = await readDeliveryWakeCandidates(actualDb, input);
+  if (!pending.length) throw new QaCorrectionRootOwnerRequired();
+  requireDelivery(pending.length === 1, "duplicate_wake");
+  const wake = pending[0]!;
+  requireDelivery((!input.candidateWakeupRequestId || wake.id === input.candidateWakeupRequestId)
+    && ["queued", "deferred_issue_execution"].includes(wake.status) && wake.runId === null
+    && wake.claimedAt === null && wake.finishedAt === null && wake.error === null, "pending");
+  await assertDeliveryWake(actualDb, input, history, wake);
+  assertDeliverySignature(input, wake, false);
+  requireDelivery(!(await actualDb.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .where(eq(heartbeatRuns.wakeupRequestId, wake.id))).length && !await findDeliveryEvent(actualDb, input), "pending");
+  const notifications = currentReplacementRootNotifications(actualDb);
+  if (!notifications) throw new QaCorrectionRootOwnerRequired();
+  notifications.correctionWakeupRequestIds.add(wake.id);
 }
 
 export async function withReplacementRootNotificationDb<T>(

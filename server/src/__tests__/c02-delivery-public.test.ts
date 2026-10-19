@@ -249,14 +249,15 @@ it.each(["active", "mention"] as const)("%s merge keeps both directions isolated
     expect((await correctionRows(reverse.c)).heartbeats).toEqual(before.heartbeats);
   } finally { held.release(); await drain(); }
 }, 60000);
-it("nested public pending validates DB only, rolls back failures and drains the exact wake after the outer commit", async () => {
-  const w = await world(), row = await pending(w), s = await seedReplacement(owned.db);
+it.each(["queued", "deferred"] as const)("%s nested public pending validates DB only, rolls back failures and drains the exact wake after the outer commit", async mode => {
+  const w = await world(), busy = mode === "deferred" ? await owner(w) : null;
+  const row = await pending(w, !!busy), s = await seedReplacement(owned.db);
   extraRoots.push(s.tempRoot);
   const target = (await admitReplacement(owned.db, s.input, s.actor)).run;
   expect(await claimPlainWorkflowStart(owned.db, target.id, { activateMission: activatePlanningMissionForWorkflowRun } as never)).toBe("started");
   const before = await state(w);
   await expect(owned.db.transaction(tx => wake(w, track(tx as unknown as Db)))).rejects.toBeInstanceOf(QaCorrectionRootOwnerRequired);
-  await expect(owned.db.transaction(tx => heartbeatService(track(tx as unknown as Db)).resumeQueuedRuns(w.i.agentId)))
+  if (!busy) await expect(owned.db.transaction(tx => heartbeatService(track(tx as unknown as Db)).resumeQueuedRuns(w.i.agentId)))
     .rejects.toBeInstanceOf(QaCorrectionRootOwnerRequired);
   const missing = await world(), missingState = await state(missing);
   await expect(withReplacementFirstDelivery(owned.db, target.id, tx => wake(missing, track(tx))))
@@ -274,8 +275,8 @@ it("nested public pending validates DB only, rolls back failures and drains the 
       if (fault === "proof") payload.__paperclipWorkflowProducerAttempt = {};
       if (fault === "context") payload._paperclipWakeContext = {};
       if (fault === "proof" || fault === "context") await tx.update(agentWakeupRequests).set({ payload }).where(eq(agentWakeupRequests.id, row.id));
-      const result = await wake(w, track(tx), changed);
-      expect(result).toBeNull();
+      if (busy && fault === "rollback") await heartbeatService(track(tx)).cancelRun(busy.id);
+      expect(await wake(w, track(tx), changed)).toBeNull();
       throw new Error(fault === "rollback" ? "rollback sentinel" : "unexpected nested acceptance");
     })).rejects.toThrow(fault === "rollback" ? "rollback sentinel" : /qa_correction_delivery|workproduct_producer_attempt_unproven/);
     expect(await state(w)).toEqual(before);
@@ -285,6 +286,7 @@ it("nested public pending validates DB only, rolls back failures and drains the 
   const g = gate(), io = observations.mock.calls.length;
   try {
     await withReplacementFirstDelivery(owned.db, target.id, async tx => {
+      if (busy) await heartbeatService(track(tx)).cancelRun(busy.id);
       expect(await wake(w, track(tx))).toBeNull();
       expect(await heartbeatService(track(tx)).resumeQueuedRuns(w.i.agentId)).toBeUndefined();
       expect(await state(w)).toEqual(before);

@@ -217,10 +217,8 @@ import { promoteQueuedWakeupRequestsForAgent, selectDeferredWakeupRequest, failF
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
-import { assertDeliveryInput, assertDeliveryScope, assertDeliverySignature, assertDeliveryWake, readDeliveryWakeCandidates,
-  findDeliveryEvent, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
-import { readIssuedQaCorrectionFollowupForAttempt } from "./workflow/control-flow/qa-correction-reader.js";
-import { QaCorrectionRootOwnerRequired, isQaCorrectionRootOwnerRequired, registerQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
+import { assertDeliveryInput, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
+import { isQaCorrectionRootOwnerRequired, validateAndRegisterQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -6080,20 +6078,7 @@ export function heartbeatService(db: Db) {
     } else input = candidate;
     assertDeliveryInput(input);
     if (is(db, PgTransaction)) {
-      const history = await readIssuedQaCorrectionFollowupForAttempt(db, input.ref);
-      await assertDeliveryScope(db, input, history);
-      const pending = await readDeliveryWakeCandidates(db, input);
-      if (!pending.length) throw new QaCorrectionRootOwnerRequired();
-      requireDelivery(pending.length === 1, "duplicate_wake");
-      const wake = pending[0]!;
-      requireDelivery((!input.candidateWakeupRequestId || wake.id === input.candidateWakeupRequestId)
-        && ["queued", "deferred_issue_execution"].includes(wake.status) && wake.runId === null
-        && wake.claimedAt === null && wake.finishedAt === null && wake.error === null, "pending");
-      await assertDeliveryWake(db, input, history, wake);
-      assertDeliverySignature(input, wake, false);
-      requireDelivery(!(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
-        .where(eq(heartbeatRuns.wakeupRequestId, wake.id))).length && !await findDeliveryEvent(db, input), "pending");
-      registerQaCorrectionRootDrain(db, input.agentId);
+      await validateAndRegisterQaCorrectionRootDrain(db, input);
       return { kind: "nested_pending", run: null };
     }
     const r = input.request, contextSnapshot = r.contextSnapshot, taskKey = deriveTaskKey(contextSnapshot, r.payload);
@@ -6131,6 +6116,14 @@ export function heartbeatService(db: Db) {
     if (!run.wakeupRequestId) return false;
     const [wake] = await execDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
     return !!wake && !!readQaCorrectionWakeRef(wake);
+  }
+
+  async function deliverStoredQaCorrectionWake(wakeupRequestId: string,
+    transactionProfile: "public_callback" | "recovery_skip_locked", resumeQueue: boolean) {
+    const result = await connectCorrectionDelivery({ wakeupRequestId }, transactionProfile);
+    if (result.kind !== "new_delivery" || !result.run) return;
+    publishQueuedRun(result.run);
+    if (resumeQueue) await startNextQueuedRunForAgent(result.run.agentId);
   }
 
   function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
@@ -9568,11 +9561,11 @@ export function heartbeatService(db: Db) {
     }
 
     if (transactionObject && "correctionCandidate" in transactionObject) {
-      const result = await connectCorrectionDelivery(
-        transactionRecord!.correctionCandidate as { wakeupRequestId: string },
+      return deliverStoredQaCorrectionWake(
+        (transactionRecord!.correctionCandidate as { wakeupRequestId: string }).wakeupRequestId,
         options.skipLocked === true ? "recovery_skip_locked" : "public_callback",
+        options.resumeQueue !== false,
       );
-      promotedRun = result.kind === "new_delivery" ? result.run : null;
     }
     if (!promotedRun) return;
 
@@ -10748,6 +10741,8 @@ export function heartbeatService(db: Db) {
     reapStalledIssueExecutionLocks,
 
     resumeQueuedRuns,
+    resumeQaCorrectionWake: (wakeupRequestId: string) =>
+      deliverStoredQaCorrectionWake(wakeupRequestId, "public_callback", true),
 
     tickTimers: async (now = new Date()) => {
       const allAgents = await db.select().from(agents);
