@@ -96,7 +96,23 @@ describe("C03 commit races and rollback", () => {
         const [holder] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`); release.release();
         await waits(observer, Number(holder!.pid));
         second = Promise.allSettled([commitQaCorrection(owned.connect(), other)]) as never;
-        await waits(observer, Number(holder!.pid), 2);
+        // The second writer can queue behind the first, so follow both actual wait chains.
+        const deadline = Date.now() + 5000;
+        for (;;) {
+          const rows = await observer.execute(sql`SELECT pid, query, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+            WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'`);
+          const reachesHolder = (pid: number, seen = new Set<number>()): boolean => {
+            if (pid === Number(holder!.pid)) return true;
+            if (seen.has(pid)) return false;
+            const row = rows.find(r => Number(r.pid) === pid);
+            return !!row && (row.blockers as number[]).some(next => reachesHolder(Number(next), new Set(seen).add(pid)));
+          };
+          const waiting = rows.filter(r => /\bfrom\s+"?missions"?\s/i.test(String(r.query))
+            && /\bfor\s+no\s+key\s+update\b/i.test(String(r.query)) && reachesHolder(Number(r.pid)));
+          if (waiting.length === 2 && new Set(waiting.map(r => Number(r.pid))).size === 2) break;
+          if (Date.now() >= deadline) throw Error("two real mission lock waits not observed");
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
       });
       const [a] = await first, [b] = await (second as unknown as typeof first);
       expect(a.status).toBe("fulfilled"); expect(b.status).toBe("fulfilled");
