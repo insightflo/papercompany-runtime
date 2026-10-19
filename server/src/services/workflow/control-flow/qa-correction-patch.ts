@@ -57,7 +57,12 @@ export function patchQaCorrectionSources(sources: readonly QaCorrectionSourceByt
     requireQaCorrection(first !== -1 && text.indexOf(item.find, first + 1) === -1, "source");
     file.bytes = Buffer.from(text.slice(0, first) + item.replace + text.slice(first + item.find.length));
   }
-  const generated = new Map<string, Buffer>();
+  type Reference = { entry: z.infer<typeof asset>; sourcePath: string };
+  type Definition = {
+    changed: Manifest; mainPath: string; assets: Reference[]; ancillary: Reference[];
+  };
+  const definitions = new Map<string, Definition[]>();
+  // Collect and validate every layout before resolving any generated dependency.
   for (const source of sources) {
     const layout = productLayouts.find(l => l.productId === source.productId);
     requireQaCorrection(layout, "source");
@@ -77,29 +82,68 @@ export function patchQaCorrectionSources(sources: readonly QaCorrectionSourceByt
       && new Set(original.ancillary.map(a => a.fileName)).size === original.ancillary.length
       && new Set(original.ancillary.map(a => a.role)).size === original.ancillary.length, "source");
     const referenced = [main.relativePath, manifest.relativePath];
-    const update = (entry: z.infer<typeof asset>, relativePath: string, role: "asset" | "ancillary", alias?: string) => {
+    const link = (entry: z.infer<typeof asset>, relativePath: string, role: "asset" | "ancillary", alias?: string): Reference => {
       const file = source.files.find(f => f.relativePath === relativePath && f.role === role);
       requireQaCorrection(file && file.sha256 === entry.sha256 && file.byteSize === entry.byteSize
         && (file.ancillaryRole === undefined || file.ancillaryRole === alias), "source");
       referenced.push(relativePath);
-      const bytes = held.get(file.sourcePath)!.bytes;
-      return { ...entry, sha256: digest(bytes), byteSize: bytes.length };
+      return { entry, sourcePath: file.sourcePath };
     };
-    const assets = original.assets.map(a => update(a, layout.assetsRelativeRoot + "/" + a.fileName, "asset"));
-    const ancillary = original.ancillary.map(a => ({
-      ...update(a, a.fileName, "ancillary", a.role), role: a.role,
-    }));
+    const assets = original.assets.map(a => link(a, layout.assetsRelativeRoot + "/" + a.fileName, "asset"));
+    const ancillary = original.ancillary.map(a => link(a, a.fileName, "ancillary", a.role));
     requireQaCorrection(referenced.length === source.files.length
       && new Set(referenced).size === referenced.length, "source");
-    const bytes = Buffer.from(JSON.stringify({ ...changed, htmlSha256: digest(held.get(main.sourcePath)!.bytes),
-      assets, ancillary }));
-    const previous = generated.get(manifest.sourcePath);
-    requireQaCorrection(!previous || previous.equals(bytes), "source");
-    generated.set(manifest.sourcePath, bytes);
+    const definition = { changed, mainPath: main.sourcePath, assets, ancillary };
+    const previous = definitions.get(manifest.sourcePath);
+    if (previous) previous.push(definition);
+    else definitions.set(manifest.sourcePath, [definition]);
+  }
+  const generated = new Map<string, Buffer>(), visiting = new Set<string>();
+  const finalBytes = (sourcePath: string): Buffer => {
+    const cached = generated.get(sourcePath);
+    if (cached) return cached;
+    const file = held.get(sourcePath)!;
+    const layouts = definitions.get(sourcePath);
+    // Close a back edge once with held bytes; the final readback below must prove it valid.
+    if (!layouts || visiting.has(sourcePath)) return file.bytes;
+    visiting.add(sourcePath);
+    const update = (reference: Reference) => {
+      const bytes = finalBytes(reference.sourcePath);
+      return { ...reference.entry, sha256: digest(bytes), byteSize: bytes.length };
+    };
+    let result: Buffer | undefined;
+    for (const definition of layouts) {
+      const bytes = Buffer.from(JSON.stringify({
+        ...definition.changed, htmlSha256: digest(finalBytes(definition.mainPath)),
+        assets: definition.assets.map(update), ancillary: definition.ancillary.map(update),
+      }));
+      // A physical manifest may serve multiple layouts only when their final bytes agree.
+      requireQaCorrection(!result || result.equals(bytes), "source");
+      result = bytes;
+    }
+    visiting.delete(sourcePath);
+    requireQaCorrection(result, "source");
+    generated.set(sourcePath, result);
+    return result;
+  };
+  for (const sourcePath of definitions.keys()) finalBytes(sourcePath);
+  // Check declarations against the actual final referenced Buffers, independently of rendering.
+  for (const [sourcePath, layouts] of definitions) {
+    const manifest = parseManifest(finalBytes(sourcePath));
+    const matches = (entry: z.infer<typeof asset>, reference: Reference) => {
+      const bytes = finalBytes(reference.sourcePath);
+      return entry.sha256 === digest(bytes) && entry.byteSize === bytes.length;
+    };
+    for (const definition of layouts) {
+      requireQaCorrection(isDeepStrictEqual(structure(manifest), structure(definition.changed))
+        && manifest.htmlSha256 === digest(finalBytes(definition.mainPath))
+        && manifest.assets.every((entry, i) => matches(entry, definition.assets[i]!))
+        && manifest.ancillary.every((entry, i) => matches(entry, definition.ancillary[i]!)), "source");
+    }
   }
   return sources.map(source => ({ sourceProductId: source.productId, mainRelativePath: source.mainRelativePath,
     files: source.files.map(file => {
-      const bytes = Buffer.from(generated.get(file.sourcePath) ?? held.get(file.sourcePath)!.bytes);
+      const bytes = Buffer.from(finalBytes(file.sourcePath));
       return { role: file.role, relativePath: file.relativePath, bytes,
         beforeSha256: file.sha256, sha256: digest(bytes), byteSize: bytes.length };
     }) }));
