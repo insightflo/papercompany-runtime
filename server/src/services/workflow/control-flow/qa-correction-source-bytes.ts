@@ -5,6 +5,7 @@ import { workflowStepOutputBindings } from "@paperclipai/db";
 import { artifactRelativePathSchema, selectArtifactValues } from "@paperclipai/shared/validators/artifact-contract";
 import { toolArtifactContractSchema, toolArtifactReceiptSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { readFrozenArtifactAttempt } from "../artifact-contract-runtime.js";
+import { readObject } from "../core-tool-context.js";
 import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } from "../artifact-files.js";
 import { readHtmlBundle } from "../qa-html-input.js";
 import { loadExecutionDefinition } from "../execution-definition.js";
@@ -20,8 +21,6 @@ export type QaCorrectionSourceBytes = {
   productId: string; root: ArtifactRoot; mainRelativePath: string; assetsRoot: string | null; files: FileBytes[];
 };
 const inputSchema = toolArtifactReceiptSchema.options[0].shape.input;
-const object = (v: unknown): Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const inside = (file: string, root: string) => {
   const relative = path.relative(root, file);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
@@ -43,14 +42,15 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
     const { qa } = await readQaCorrectionVerdict(db, p, v, true);
     const definition = execution.steps.find(s => s.id === qa.stepId);
     requireQaCorrection(definition, "tool");
-    const declared = definition.toolArtifactContract !== undefined
+    const declaration = readObject(definition).toolArtifactContract;
+    const declared = declaration !== undefined
       || Object.hasOwn(qa.metadata, "artifactExecution") || Object.hasOwn(qa.metadata, "toolArtifactRequest");
     if (!declared) continue;
     // A present but malformed/stale declaration must never become a legacy single-file input.
-    const contract = toolArtifactContractSchema.parse(definition.toolArtifactContract);
+    const contract = toolArtifactContractSchema.parse(declaration);
     const frozen = readFrozenArtifactAttempt(qa.metadata.artifactExecution,
       { executionGeneration: qa.executionGeneration, requestId: qa.lastDispatchRequestId ?? "" });
-    const request = object(qa.metadata.toolArtifactRequest), input = inputSchema.parse(request.input);
+    const request = readObject(qa.metadata.toolArtifactRequest), input = inputSchema.parse(request.input);
     requireQaCorrection(contract.role === "qa" && frozen.contract.role === "qa"
       && contract.schemaVersion === frozen.contract.resultSchemaVersion && contract.inputStepId === p.producer.stepId
       && request.companyId === p.companyId && request.missionId === p.missionId
@@ -76,14 +76,15 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
     const qaPaths = buildMissionWorkProductPaths({ workProductRoot: paths.workProductRoot,
       missionId: p.missionId, workflowRunId: p.workflowRunId, stepId: qa.stepId });
     const requestPath = path.join(qaPaths.stepOutputDir!, "attempts", String(qa.executionGeneration), digest(qa.lastDispatchRequestId!));
-    const root = object(request.root);
+    const root = readObject(request.root);
     requireQaCorrection(typeof root.path === "string" && path.isAbsolute(root.path)
       && path.resolve(root.path) === root.path && (root.path === requestPath || path.dirname(root.path) === requestPath)
       && Number.isSafeInteger(root.dev) && Number.isSafeInteger(root.ino) && root.path === request.outputRoot
       && request.outputRootHash === digest(JSON.stringify({ path: root.path, dev: root.dev, ino: root.ino })), "tool");
-    if (input.mode !== "html") requireQaCorrection(typeof input.assetsRoot === "string"
-      && path.isAbsolute(input.assetsRoot) && path.resolve(input.assetsRoot) === input.assetsRoot
-      && inside(input.assetsRoot, paths.missionOutputDir), "source");
+    if (input.mode !== "html") requireQaCorrection(frozen.contract.inputParams.assetsDir !== undefined
+      ? typeof input.assetsRoot === "string" && path.isAbsolute(input.assetsRoot)
+        && path.resolve(input.assetsRoot) === input.assetsRoot && inside(input.assetsRoot, paths.missionOutputDir)
+      : input.assetsRoot === "", "source");
     const previous = declarations.find(d => d.input.workProductId === input.workProductId);
     requireQaCorrection(!previous || isDeepStrictEqual(previous.input, input), "source");
     declarations.push({ qa, definition, request, frozen, input, pin });
@@ -166,11 +167,14 @@ export async function readQaCorrectionSourceBytes(p: QaCorrectionPreparation, ob
         }
         current.push(manifest);
       } else {
-        const names = new Set<string>();
-        const draft: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(main.bytes));
-        for (const value of selectArtifactValues(draft, d.frozen.contract.assetDiscovery ?? []).flatMap(v => Array.isArray(v) ? v : [v])) {
-          names.add(artifactRelativePathSchema.parse(value));
+        const names = new Set<string>(), pointers = d.frozen.contract.assetDiscovery ?? [];
+        if (pointers.length) {
+          const draft: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(main.bytes));
+          for (const value of selectArtifactValues(draft, pointers).flatMap(v => Array.isArray(v) ? v : [v])) {
+            names.add(artifactRelativePathSchema.parse(value));
+          }
         }
+        requireQaCorrection(!names.size || input.assetsRoot !== "", "source");
         assetsRoot = input.assetsRoot;
         const assets = [];
         for (const fileName of [...names].sort()) {

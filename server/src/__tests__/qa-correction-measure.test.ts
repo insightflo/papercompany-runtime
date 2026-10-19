@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, realpath, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
@@ -52,12 +52,14 @@ describe("C03/C12 first complete source measurement", () => {
   }
   async function prepare(f: CorrectionFixture) { const r = await beginQaCorrection(owned.db, f.preparation);
     if (r.status !== "prepared") throw Error("actual first begin required: " + r.status); return r; }
-  async function declared(html = false) {
-    const s = await seed("identity"), { f, file, dir } = s, p = f.preparation, assetsRoot = path.join(dir, "assets");
-    await mkdir(assetsRoot); const names = Array.from({ length: html ? 1 : 9 }, (_, i) => `img-${i}.png`);
+  async function declared(html = false, noAssets?: "content-only" | "invalid-json") {
+    const s = await seed("identity", noAssets !== undefined), { f, file, dir } = s, p = f.preparation, assetsRoot = path.join(dir, "assets");
+    await owned.db.update(issueWorkProducts).set({ type: "artifact" }).where(eq(issueWorkProducts.id, f.productId));
+    await mkdir(assetsRoot); const names = noAssets ? [] : Array.from({ length: html ? 1 : 9 }, (_, i) => `img-${i}.png`);
     for (const name of names) await writeFile(path.join(assetsRoot, name), name);
-    const bytes = html ? Buffer.from("<p>old</p>") : Buffer.from(JSON.stringify({ schemaVersion: "ContentV1", title: "old", summary: "Draft", tags: ["fixture"],
-      blocks: names.map(assetFile => ({ type: "image", assetFile })) }));
+    const bytes = noAssets ? Buffer.from(noAssets === "content-only" ? '{"title":"old"}' : '{"title":"old"')
+      : html ? Buffer.from("<p>old</p>") : Buffer.from(JSON.stringify({ schemaVersion: "ContentV1", title: "old", summary: "Draft", tags: ["fixture"],
+        blocks: names.map(assetFile => ({ type: "image", assetFile })) }));
     await writeFile(file, bytes);
     if (html) {
       await writeFile(path.join(dir, "source-notes.txt"), "notes");
@@ -67,14 +69,15 @@ describe("C03/C12 first complete source measurement", () => {
     }
     const contract = { role: "qa" as const, resultFileName: "qa.json", resultSchemaVersion: "workflow.qa-result.v1",
       resultAdapter: "generic" as const, inputParams: html ? { html: "html", manifest: "manifest", out: "out" }
-        : { content: "content", assetsDir: "assets", out: "out" }, deploymentFiles: ["qa.mjs"], inputEnvelopeVersion: "workflow.artifact-input.v1",
+        : noAssets === "content-only" ? { content: "content" } : { content: "content", assetsDir: "assets", out: "out" },
+      deploymentFiles: ["qa.mjs"], inputEnvelopeVersion: "workflow.artifact-input.v1",
       ...(html ? { bundleManifest: { fileName: "manifest.json", schemaVersion: "bundle.v1", ancillaryRoles: ["research"] } }
-        : { assetDiscovery: ["/blocks/*/assetFile"] }) };
+        : { assetDiscovery: noAssets ? [] : ["/blocks/*/assetFile"] }) };
     const [run] = await owned.db.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId));
     const [definition] = await owned.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
     const steps = (definition!.stepsJson as { id: string; [key: string]: unknown }[]).map(step => step.id !== f.qa.stepId ? step : { ...step,
       toolArtifactContract: { role: "qa", schemaVersion: contract.resultSchemaVersion, inputStepId: "produce" },
-      workProductSelectors: { produce: { type: "file", title: "report" } } });
+      workProductSelectors: { produce: { type: "artifact", title: "report" } } });
     await owned.db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, definition!.id));
     const requestId = randomUUID(), artifactExecution = freezeArtifactAttempt({ adapterConfig: { artifactContract: contract },
       step: steps.find(step => step.id === f.qa.stepId), executionGeneration: f.qa.executionGeneration, requestId });
@@ -82,10 +85,11 @@ describe("C03/C12 first complete source measurement", () => {
     // Real request writer captures the frozen declaration and every selected file.
     const request = await prepareQaArtifactRequest({ db: owned.db, companyId: p.companyId, workflowRunId: p.workflowRunId,
       stepRunId: f.qa.id, stepId: f.qa.stepId, requestId, parameters: html
-        ? { html: file, manifest: path.join(dir, "manifest.json") } : { content: file, assets: assetsRoot } });
+        ? { html: file, manifest: path.join(dir, "manifest.json") }
+        : { content: file, ...(noAssets === "content-only" ? {} : { assets: assetsRoot }) } });
     expect(request).not.toBeNull();
     await owned.db.update(workflowStepRuns).set({ status: "failed" }).where(eq(workflowStepRuns.id, f.qa.id));
-    return { ...s, names, request: request!.snapshot };
+    return { ...s, names, bytes, request: request!.snapshot };
   }
   it.each(["registered_legacy", "identity", "sealed"] as const)("preserves %s; actual begin, retry +0, one preparation and measurement", async mode => {
     const { f, file } = await seed(mode, true), r = await prepare(f), before = await state(f);
@@ -110,6 +114,23 @@ describe("C03/C12 first complete source measurement", () => {
       expect(file.sha256).toBe(files.digest(bytes)); expect(file.byteSize).toBe(bytes.length); }
     expect(measured.filter(x => x.role === "asset")).toHaveLength(html ? 1 : 9);
     if (html) expect(measured.filter(x => x.role === "ancillary").map(x => x.relativePath).sort()).toEqual(["manifest.json", "source-notes.txt"]);
+  }, 20000);
+  // C12: the request writer supports both inputs; C01 keeps malformed rejected content eligible for rework.
+  it.each(["content-only", "invalid-json"] as const)("measures supported %s without asset discovery or extra effects", async mode => {
+    const { f, file, bytes, request } = await declared(false, mode), initial = await state(f);
+    expect(request.input).toMatchObject({ assetsRoot: mode === "content-only" ? "" : path.join(path.dirname(file), "assets"), assetManifest: [] });
+    expect(request.artifactExecution.contract.assetDiscovery).toEqual([]);
+    const r = await prepare(f), before = await state(f), a = await measureQaCorrectionSources(owned.db, ref(r));
+    expect(a.sourceMeasured.sources).toEqual([{ productId: f.productId, files: [
+      { role: "main", relativePath: "report.html", sha256: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.length }] }]);
+    expect(await measureQaCorrectionSources(owned.db, ref(r))).toEqual(a);
+    const after = await state(f);
+    expect(after.events.filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(1);
+    expect(after.events.filter(e => e.eventType === "qa_correction_source_measured")).toHaveLength(1);
+    expect({ ...after, events: before.events }).toEqual(before);
+    expect({ ...after, events: initial.events, usage: initial.usage, groups: initial.groups }).toEqual(initial);
+    expect(after.usage[0]!.executionAttempts).toBe(1); expect(after.groups[0]!.usage.executionAttempts).toBe(1);
+    expect(await readFile(file)).toEqual(bytes);
   }, 20000);
   it.each(["missing", "scope", "root", "product", "seal", "assets", "frozen"] as const)("rejects a declared %s mismatch with no legacy fallback", async kind => {
     const { f, request, dir } = await declared(), r = await prepare(f);
