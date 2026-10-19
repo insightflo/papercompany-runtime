@@ -4,11 +4,15 @@ import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  agentWakeupRequests,
+  heartbeatRuns,
+  issues,
   issueWorkProducts,
   workflowDefinitions,
   workflowRuns,
   workflowStepOutputBindings,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import type { QaRequest } from "../services/workflow/qa-artifact-request.js";
@@ -16,7 +20,14 @@ import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args
 import { database, fixture } from "./helpers/qa-receipt-fixture.js";
 import { PgSelectBase } from "drizzle-orm/pg-core";
 import { selectOfficialWorkProduct } from "../services/workflow/workproduct-selector.js";
-import { commitDbState } from "./qa-correction-commit-fixture.js";
+import { commitDbState, commitFileState, makeCommitSource } from "./qa-correction-commit-fixture.js";
+import { attempt } from "./helpers/qa-correction-fixture.js";
+import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
+import { hashQaCorrectionPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { beginQaCorrection } from "../services/workflow/control-flow/qa-correction-prepare.js";
+import { measureQaCorrectionSources } from "../services/workflow/control-flow/qa-correction-measure.js";
+import { storeQaCorrection } from "../services/workflow/control-flow/qa-correction-storage.js";
+import { commitQaCorrection } from "../services/workflow/control-flow/qa-correction-commit.js";
 import { commitBuffers, commitFacts, createCommitSourceHarness, issueC02, issueNextC02,
   type C02Case } from "./helpers/c02-fixture.js";
 
@@ -142,14 +153,15 @@ describe("C02 corrected selected inputs", () => {
   }, 120000);
   afterEach(() => { vi.restoreAllMocks(); });
   afterAll(async () => { try { await owned?.close(); } finally { vi.unstubAllEnvs(); } }, 120000);
-  const scope = (c: C02Case, pinnedId?: string) => ({ companyId: c.s.p.companyId,
+  const scope = (c: Pick<C02Case, "s">, pinnedId?: string) => ({ companyId: c.s.p.companyId,
     workflowRunId: c.s.p.workflowRunId, stepId: "produce", selector: { type: "artifact", title: "report" }, pinnedId });
-  const state = (c: C02Case) => commitDbState({ ...c.s, db: c.peer });
-  async function args(c: C02Case, db = c.peer, consumerStepRunId = c.s.f.qa.id) {
+  const state = (c: Pick<C02Case, "s" | "peer">) => commitDbState({ ...c.s, db: c.peer });
+  async function args(c: Pick<C02Case, "s" | "peer">, db = c.peer, consumerStepRunId = c.s.f.qa.id) {
     const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, c.s.p.workflowRunId));
     const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
     const workflowSteps = definition!.stepsJson as Parameters<typeof resolveWorkflowToolStepArgs>[0]["workflowSteps"];
-    const qa = workflowSteps.find(s => s.id === c.s.f.qa.stepId)!;
+    const [consumer] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, consumerStepRunId));
+    const qa = workflowSteps.find(s => s.id === consumer!.stepId)!;
     return resolveWorkflowToolStepArgs({ db, run: run!, consumerStepRunId, workflowSteps,
       step: { ...qa, workProductSelectors: { produce: scope(c).selector },
         toolArgs: { content: "{$steps.produce.workProductPath}" } } });
@@ -224,6 +236,55 @@ describe("C02 corrected selected inputs", () => {
     expect(locks).not.toHaveBeenCalled();
     await expect(args(c, c.peer, c.s.f.producer.id)).rejects.toThrow();
     expect(await state(c)).toEqual(before);
+  }, 20000);
+  it("keeps QA1 on issued B when only QA2 retries, and rejects QA2 without side effects", async () => {
+    const s = await makeCommitSource(owned.db, owned.root, "content-only"), p = s.p;
+    const c = { s, peer: owned.connect() }, [run] = await owned.db.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId));
+    const [definition] = await owned.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
+    const [hb] = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, s.f.verdictHeartbeatId));
+    const [issue] = await owned.db.insert(issues).values({ companyId: p.companyId, missionId: p.missionId,
+      title: "[QA] Second", status: "todo", originKind: "workflow_execution" }).returning();
+    const [qa] = await owned.db.insert(workflowStepRuns).values({ workflowRunId: p.workflowRunId,
+      stepId: "qa-2", issueId: issue!.id, status: "failed" }).returning();
+    await owned.db.update(workflowDefinitions).set({ stepsJson: [...definition!.stepsJson,
+      { id: qa!.stepId, name: "Second QA", agentId: hb!.agentId, dependencies: ["produce"] }] })
+      .where(eq(workflowDefinitions.id, definition!.id));
+    const [wake] = await owned.db.insert(agentWakeupRequests).values({ companyId: p.companyId,
+      agentId: hb!.agentId, source: "workflow.dispatch", workflowStepRunId: qa!.id }).returning();
+    const [heartbeat] = await owned.db.insert(heartbeatRuns).values({ companyId: p.companyId,
+      agentId: hb!.agentId, issueId: issue!.id, wakeupRequestId: wake!.id, status: "succeeded" }).returning();
+    const remediations = { items: [{ op: "string_replace" as const, file: s.file, find: "Draft", replace: "Reviewed" }] };
+    await recordWorkflowValidationVerdict({ db: owned.db, issue: issue!, source: "workflow_api",
+      verdict: "request_changes", heartbeatRunId: heartbeat!.id, remediations });
+    const [event] = await owned.db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.heartbeatRunId, heartbeat!.id));
+    p.authority.verdicts.unshift({ eventId: event!.id, heartbeatRunId: heartbeat!.id, qa: attempt(qa!), remediationsHash: hashQaCorrectionPayload(remediations.items) });
+    const [pin] = await owned.db.insert(workflowStepOutputBindings).values({ companyId: p.companyId, workflowRunId: p.workflowRunId,
+      consumerStepRunId: qa!.id, referencedStepId: "produce", workProductId: s.productId,
+      sourceExecutionGeneration: s.producer.executionGeneration }).returning();
+    p.bindings.push({ bindingId: pin!.id, consumer: attempt(qa!), referencedStepId: "produce", expectedProductId: s.productId });
+    const originalPins = (await state(c)).pins, prepared = await beginQaCorrection(owned.db, p);
+    if (prepared.status !== "prepared") throw Error("real two-target preparation required: " + prepared.status);
+    const measured = await measureQaCorrectionSources(owned.db, {
+      preparationEventId: prepared.preparationEventId, preparationHash: prepared.preparationHash });
+    const stored = await storeQaCorrection(owned.db, measured), issued = await commitQaCorrection(owned.db, stored);
+    if (issued.status !== "committed") throw Error("real two-target issuance required: " + issued.status);
+    const r = issued.proof.applied.revisions[0]!;
+    expect(issued.proof.followups.map(f => f.target.stepRunId)).toEqual([qa!.id, s.f.qa.id]);
+    expect(new Set(issued.proof.followups.map(f => f.requestId)).size).toBe(2);
+    expect((await state(c)).pins).toEqual(originalPins.map(p => ({ ...p,
+      workProductId: r.workProductId, resolvedAt: expect.any(Date) })));
+    await owned.db.update(workflowStepRuns).set({ retryCount: qa!.retryCount + 1 }).where(eq(workflowStepRuns.id, qa!.id));
+    const files = new Map([["report.html", Buffer.from('{"schemaVersion":"ContentV1","title":"new","summary":"Reviewed","tags":["fixture"],"blocks":[]}')]]);
+    const snapshot = async () => ({ ...await state(c), steps: await c.peer.select().from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, p.workflowRunId)).orderBy(workflowStepRuns.id),
+      files: await commitFileState({ ...s, bundles: [...s.bundles, { directory: r.root, files }] }) });
+    const before = await snapshot();
+    expect(await args(c)).toEqual({ content: path.join(r.root, "report.html") });
+    await expect(args(c, c.peer, qa!.id)).rejects.toThrow("qa_correction_followup_attempt");
+    const selected = await selectOfficialWorkProduct(c.peer, scope(c));
+    expect(selected.product.id).toBe(r.workProductId);
+    expect(selected.producer).toEqual(s.producer);
+    expect(await snapshot()).toEqual(before);
   }, 20000);
   it("aborts when B changes to C between root classification and the transaction", async () => {
     const b = await issueC02(owned, { mode: "content-only" }), transaction = b.peer.transaction.bind(b.peer);

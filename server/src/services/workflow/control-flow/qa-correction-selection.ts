@@ -1,6 +1,6 @@
 import path from "node:path";
 import { isDeepStrictEqual as same } from "node:util";
-import { and, asc, eq, inArray, ne, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { heartbeatRuns, issues, issueWorkProducts, missions, workflowRuns, workflowStepRuns,
   workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import type { WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
@@ -8,10 +8,12 @@ import { resolveWorkProductLocalFilePath } from "../../work-products.js";
 import { lockQualityAttemptBudget } from "../../quality/retry-budget.js";
 import { qaCorrectionProductPointerSchema, readIssuedQaCorrection,
   type IssuedQaCorrection } from "./qa-correction-reader.js";
-import { readQaCorrectionFollowupDb } from "./qa-correction-followup.js";
+import { QaCorrectionFollowupReadError, readIssuedQaCorrectionFollowup,
+  readQaCorrectionFollowupDb } from "./qa-correction-followup.js";
 import type { QaCorrectionDb } from "./qa-correction-authority.js";
 
 type Product = typeof issueWorkProducts.$inferSelect;
+type Historical = Awaited<ReturnType<typeof readIssuedQaCorrectionFollowup>>;
 type Current = Awaited<ReturnType<typeof readQaCorrectionFollowupDb>>;
 type Producer = NonNullable<Current["revisions"][number]["workflowProducer"]>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -20,13 +22,18 @@ type Scope = { companyId: string; workflowRunId: string; stepId: string;
 export type QaCorrectionSelection = {
   issued: IssuedQaCorrection;
   revision: IssuedQaCorrection["applied"]["revisions"][number];
-  candidates: Current[];
+  candidates: Historical[];
 };
 export type CorrectionSelectedProduct = {
   product: Product; producer: Producer; file: string; correction?: QaCorrectionSelection;
 };
 function requireSelection(value: unknown, reason: string): asserts value {
   if (!value) throw new Error("workproduct_selector_correction_" + reason);
+}
+
+function sameIssuance(a: Historical, b: Historical) {
+  return same(a.ref, b.ref) && same(a.issued, b.issued) && same(a.followup, b.followup)
+    && a.followupEventId === b.followupEventId && same(a.revisions, b.revisions);
 }
 
 /** DB proof only. Candidate followups are not a choice of consumer or permission to execute. */
@@ -38,11 +45,11 @@ export async function readQaCorrectionSelectedProduct(db: QaCorrectionDb, scope:
   const revision = issued.applied.revisions.find(r => r.revisionId === pointer.data.revisionId
     && r.workProductId === product.id);
   requireSelection(revision && issued.preparation.producer.stepId === scope.stepId, "revision");
-  const candidates: Current[] = [];
+  const candidates: Historical[] = [];
   let producer: Producer | null = null;
   for (const followup of issued.followups.filter(f => f.revisionIds.includes(revision.revisionId))) {
-    // This public current reader also invokes readIssuedQaCorrectionFollowup and its original lineage reader.
-    const candidate = await readQaCorrectionFollowupDb(db, { companyId: scope.companyId,
+    // Validate every historical candidate and original lineage before testing currentness.
+    const candidate = await readIssuedQaCorrectionFollowup(db, { companyId: scope.companyId,
       workflowRunId: scope.workflowRunId, appliedEventId: pointer.data.appliedEventId,
       requestId: followup.requestId }, readIssuedQaCorrection);
     const proof = candidate.revisions.find(r => r.revision.revisionId === revision.revisionId);
@@ -54,7 +61,20 @@ export async function readQaCorrectionSelectedProduct(db: QaCorrectionDb, scope:
     candidates.push(candidate);
   }
   requireSelection(producer && candidates.length, "provenance");
-  const current = candidates.flatMap(c => c.database.products).find(p => p.id === product.id);
+  let witness: Current | undefined;
+  for (const candidate of candidates) {
+    try {
+      const current = await readQaCorrectionFollowupDb(db, candidate.ref, readIssuedQaCorrection);
+      requireSelection(sameIssuance(candidate, current), "provenance");
+      witness = current;
+      break;
+    } catch (error) {
+      if (!(error instanceof QaCorrectionFollowupReadError) || error.reason !== "attempt") throw error;
+    }
+  }
+  requireSelection(witness, "current");
+  // This witness proves common product/binding/quality currentness, never a consumer's permission.
+  const current = witness.database.products.find(p => p.id === product.id);
   const file = current && resolveWorkProductLocalFilePath(current);
   requireSelection(current && current.type === scope.selector.type && current.title === scope.selector.title
     && file && ["local", "local_file"].includes(current.provider)
@@ -63,7 +83,7 @@ export async function readQaCorrectionSelectedProduct(db: QaCorrectionDb, scope:
 }
 
 /** Only this consumer-aware boundary chooses an exact target and its existing C03 binding. */
-export function selectQaCorrectionConsumer(correction: QaCorrectionSelection,
+export async function selectQaCorrectionConsumer(db: QaCorrectionDb, correction: QaCorrectionSelection,
   consumerStepRunId: string, referencedStepId: string) {
   const matches = [];
   for (const candidate of correction.candidates) {
@@ -73,16 +93,21 @@ export function selectQaCorrectionConsumer(correction: QaCorrectionSelection,
         || !same(expected.consumer, candidate.followup.target)
         || expected.expectedProductId !== correction.revision.sourceProductId) continue;
       const change = correction.issued.applied.bindingChanges.find(b => b.bindingId === expected.bindingId);
-      const binding = candidate.database.bindings.find(b => b?.row.id === expected.bindingId);
       if (change?.fromProductId === correction.revision.sourceProductId
-        && change.toProductId === correction.revision.workProductId && binding
-        && binding.row.consumerStepRunId === consumerStepRunId
-        && binding.row.referencedStepId === referencedStepId
-        && binding.row.workProductId === correction.revision.workProductId) matches.push({ candidate, binding });
+        && change.toProductId === correction.revision.workProductId) matches.push({ candidate, expected });
     }
   }
   requireSelection(matches.length === 1, "consumer_binding");
-  return matches[0]!;
+  const historical = matches[0]!;
+  const candidate = await readQaCorrectionFollowupDb(db, historical.candidate.ref, readIssuedQaCorrection);
+  requireSelection(sameIssuance(historical.candidate, candidate), "provenance");
+  const bindings = candidate.database.bindings.filter(b => b?.row.id === historical.expected.bindingId);
+  requireSelection(bindings.length === 1, "consumer_binding");
+  const binding = bindings[0]!;
+  requireSelection(binding && binding.row.consumerStepRunId === consumerStepRunId
+    && binding.row.referencedStepId === referencedStepId
+    && binding.row.workProductId === correction.revision.workProductId, "consumer_binding");
+  return { candidate, binding };
 }
 
 type InputScope = { companyId: string; workflowRunId: string;
@@ -101,12 +126,13 @@ export async function readSelectedQaCorrections(db: QaCorrectionDb, scope: Input
       .innerJoin(issueWorkProducts, eq(issueWorkProducts.issueId, workflowStepRuns.issueId))
       .where(and(eq(workflowStepRuns.workflowRunId, scope.workflowRunId), eq(workflowStepRuns.stepId, stepId),
         eq(issueWorkProducts.companyId, scope.companyId), eq(issueWorkProducts.type, selector.type),
-        eq(issueWorkProducts.title, selector.title),
-        pin ? eq(issueWorkProducts.id, pin.workProductId) : ne(issueWorkProducts.status, "archived")));
-    if (rows.length !== 1 || !Object.hasOwn(rows[0]!.product.metadata ?? {}, "qaCorrection")) continue;
+        eq(issueWorkProducts.title, selector.title), eq(issueWorkProducts.status, "active")));
+    const corrections = rows.filter(({ product }) => Object.hasOwn(product.metadata ?? {}, "qaCorrection"));
+    if (!corrections.length) continue;
+    requireSelection(corrections.length === 1, "not_exactly_one");
     const selected = await readQaCorrectionSelectedProduct(db, { ...scope, stepId, selector,
-      pinnedId: pin?.workProductId }, rows[0]!.product);
-    const consumer = selectQaCorrectionConsumer(selected.correction, scope.consumerStepRunId, stepId);
+      pinnedId: pin?.workProductId }, corrections[0]!.product);
+    const consumer = await selectQaCorrectionConsumer(db, selected.correction, scope.consumerStepRunId, stepId);
     requireSelection(pin && consumer.binding.row.id === pin.id, "consumer_binding");
     result.push({ stepId, selected, consumer });
   }
