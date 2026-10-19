@@ -197,8 +197,24 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
                   aria-describedby={`${descriptionId} ${errorId}`}
                 />
                 <span>
-                  <span className="block text-sm font-medium">{option.label}</span>
+                  <span className="block text-sm font-medium">
+                    {option.label}
+                    {/* [요청자 추천] 배지+사유 한 줄 — 표시일 뿐이고 선택·resolve 구조는 바꾸지 않는다. */}
+                    {option.recommended === true && (
+                      <span
+                        data-operator-decision-recommended
+                        className="ml-1.5 align-middle border border-primary px-1.5 py-0.5 text-[11px] font-medium text-primary"
+                      >
+                        {L(lang, { en: "Recommended", ko: "추천" })}
+                      </span>
+                    )}
+                  </span>
                   {option.description && <span className="block text-xs text-muted-foreground">{option.description}</span>}
+                  {option.recommended === true && option.recommendationReason && (
+                    <span data-operator-decision-recommendation-reason className="mt-0.5 block text-xs text-muted-foreground">
+                      {L(lang, { en: `Recommended because: ${option.recommendationReason}`, ko: `추천 사유: ${option.recommendationReason}` })}
+                    </span>
+                  )}
                 </span>
               </span>
               <OperatorDecisionFacts facts={uniqueDecisionFacts(option.facts, commonFacts)} />
