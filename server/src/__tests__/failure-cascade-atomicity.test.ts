@@ -41,9 +41,12 @@ describe("C04B atomic failure cascade", () => {
   it.each(modes.flatMap(mode => ["retry", "raw-null", "missing", "extra"].map(change => ({ mode, change }))))(
     "$mode rejects $change observation loss", async ({ mode, change }) => {
       const world = await seedCascade(owned.db, mode.startsWith("hold"));
-      if (change === "raw-null") await owned.db.update(workflowStepRuns).set({ metadata: null })
+      if (change === "raw-null") await owned.db.update(workflowStepRuns).set({ metadata: sql`'null'::jsonb` })
         .where(eq(workflowStepRuns.id, world.stepRunIdsByStep.after!));
       const observed = await observe(owned.db, world, mode);
+      if (change === "raw-null") expect(
+        observed.steps.find(step => step.stepId === "after")?.metadata,
+      ).toBeNull();
       if (change === "retry" || change === "raw-null") await owned.peer.update(workflowStepRuns)
         .set({ metadata: change === "retry" ? retryMetadata("waiting", 1, 3, new Date(Date.now() + 3600000).toISOString()) : {} })
         .where(eq(workflowStepRuns.id, world.stepRunIdsByStep.after!));
@@ -54,7 +57,7 @@ describe("C04B atomic failure cascade", () => {
       expect(await snapshot(owned.peer, world)).toEqual(before);
     });
 
-  it.each(modes.flatMap(mode => ["cancelled", "paused", "authority", "mission", "mission-from-null", "company"].map(change => ({ mode, change }))))(
+  it.each(modes.flatMap(mode => ["cancelled", "pending", "authority", "mission", "mission-from-null", "company"].map(change => ({ mode, change }))))(
     "$mode yields without a prefix after $change", async ({ mode, change }) => {
       const world = await seedCascade(owned.db, mode.startsWith("hold"));
       if (change === "mission-from-null") await owned.db.update(workflowRuns).set({ missionId: null }).where(eq(workflowRuns.id, world.runId));
