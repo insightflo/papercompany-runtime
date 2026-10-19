@@ -228,11 +228,17 @@ describeEP("mission owner dead-target retry loop prevention", () => {
       expect.objectContaining({ type: "request_replan" }),
     ]));
     expect((await markers()).length).toBe(3);
-    const cards = await db.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
+    const cards = await db.select({ id: operatorDecisions.id, definition: operatorDecisions.definition }).from(operatorDecisions).where(and(
       eq(operatorDecisions.companyId, base.companyId),
       eq(operatorDecisions.sourceType, "mission_owner_human_input"),
     ));
     expect(cards).toHaveLength(1);
+    // [추천 주입] 차단기 카드는 내부 진단(request_replan)에 근거해 replan 선택지에 추천+사유를 표시한다.
+    const breakerOptions = (cards[0]!.definition as { options: { id: string; recommended?: boolean; recommendationReason?: string | null }[] }).options;
+    const replanOption = breakerOptions.find((option) => option.id === "replan-the-mission");
+    expect(replanOption?.recommended).toBe(true);
+    expect(replanOption?.recommendationReason).toContain("dead target");
+    expect(breakerOptions.filter((option) => option.id !== "replan-the-mission").every((option) => option.recommended !== true)).toBe(true);
 
     // 차단 후에도 owner 가 새 결정을 기록하면 새 eventId 로 즉시 다시 평가된다(수동 결정 자유 불변).
     const revived = await recordOwnerRetryDecision(db, base, ownerAction.id, source.id);

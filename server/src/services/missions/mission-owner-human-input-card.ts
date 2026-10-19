@@ -59,6 +59,10 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly workflowRunId?: string | null;
   /** [D3] payload 구조화 options(선택적 — 없으면 기본 approve/hold/reject). */
   readonly structuredOptions?: unknown;
+  /** [요청자 추천] 카드 선택지 중 추천할 옵션 id(선택). 대응 옵션이 없으면 무시된다(fail-open). */
+  readonly recommendedOptionId?: string | null;
+  /** 추천 사유 — recommended 옵션에만 붙는다(스키마 최대 1,000자로 잘린다). */
+  readonly recommendationReason?: string | null;
 };
 
 const clip = (value: string, max: number) => value.length > max ? value.slice(0, max) : value;
@@ -251,6 +255,17 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     : derivedPaths
       ? buildDerivedRecoveryPathDefinition(derivedPaths, evidenceOptionRefs)
       : buildDefaultDefinition(evidenceOptionRefs);
+  // [요청자 추천] 선택지를 넘기는 요청은 근거와 함께 추천도 제시한다 — 판단 부담만 사람에게 넘기지
+  //   않는다. 대응 옵션이 없는 optionId 는 조용히 무시한다(fail-open: 발화 누락 방지 계약 유지).
+  //   최종 정의는 입력에 결정적이므로 requestKey 멱등 replay 규약도 그대로다.
+  const recommendedId = present(input.recommendedOptionId);
+  const recommendationReason = present(input.recommendationReason);
+  const options = recommendedId
+    ? definition.options.map((option) => option.id === recommendedId
+      ? { ...option, recommended: true, ...(recommendationReason ? { recommendationReason: clip(recommendationReason, 1_000) } : {}) }
+      : option)
+    : definition.options;
+  const recommendedDefinition = { ...definition, options };
   const summaryLines = [
     `요청 사유: ${present(input.reason) ?? "(미제출)"}`,
     `요청된 다음 단계: ${present(input.nextAction) ?? "(미제출)"}`,
@@ -284,7 +299,7 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       },
     },
     definition: {
-      ...definition,
+      ...recommendedDefinition,
       humanReview: {
         schemaVersion: "human-review-v1",
         decisionSubject: clip(`미션 오너의 사람 결정 요청 — ${decisionLabel} 승인 여부`, 300),

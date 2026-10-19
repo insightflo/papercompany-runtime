@@ -28,7 +28,7 @@ import {
   MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
   type MissionOwnerHumanInputCardSpec,
 } from "../services/missions/mission-owner-human-input-card.js";
-import { createOperatorDecisionSchema } from "@paperclipai/shared/validators/operator-decision";
+import { createOperatorDecisionSchema, operatorDecisionDefinitionSchema } from "@paperclipai/shared/validators/operator-decision";
 import { publishLiveEvent } from "../services/live-events.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
@@ -190,6 +190,75 @@ describe("mission owner human input decision card builder", () => {
     }));
     expect(noEnumeration.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
   });
+
+  // ---------- 요청자 추천(recommended) 주입 — 선택지와 함께 추천+사유 제시 ----------
+
+  it("marks the submitted recommendation on the matching default option with its reason", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      recommendedOptionId: "approve",
+      recommendationReason: "내부 진단상 승인 후 진행이 안전합니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    const approve = card.definition.options.find((option) => option.id === "approve")!;
+    expect(approve.recommended).toBe(true);
+    expect(approve.recommendationReason).toBe("내부 진단상 승인 후 진행이 안전합니다");
+    for (const other of card.definition.options.filter((option) => option.id !== "approve")) {
+      expect(other.recommended).toBeUndefined();
+      expect(other.recommendationReason).toBeUndefined();
+    }
+  });
+
+  it("marks the recommendation on structured options by the submitter's option id", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      structuredOptions: [
+        { id: "alpha", label: "옵션 알파", description: "알파로 진행" },
+        { id: "beta", label: "옵션 베타", description: null },
+      ],
+      recommendedOptionId: "alpha",
+      recommendationReason: "알파가 비용·위험 모두 우세합니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.find((option) => option.id === "alpha")?.recommended).toBe(true);
+    expect(card.definition.options.find((option) => option.id === "beta")?.recommended).toBeUndefined();
+  });
+
+  it("marks the recommendation on a derived recovery-path option for system escalate", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+      recommendedOptionId: "replan",
+      recommendationReason: "재시도 대상이 죽어 있어 재계획만 실행 가능 경로입니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.find((option) => option.id === "replan")?.recommended).toBe(true);
+  });
+
+  it("ignores an unknown recommended option id (fail-open) and keeps cards without a recommendation unchanged", () => {
+    const unknown = buildMissionOwnerHumanInputDecisionCard(spec({ recommendedOptionId: "not-an-option", recommendationReason: "무시되어야 하는 사유" }));
+    expect(() => createOperatorDecisionSchema.parse(unknown)).not.toThrow();
+    expect(unknown.definition.options.every((option) => option.recommended !== true)).toBe(true);
+    expect(unknown.definition.options.every((option) => option.recommendationReason == null)).toBe(true);
+    const plain = buildMissionOwnerHumanInputDecisionCard(spec());
+    expect(() => createOperatorDecisionSchema.parse(plain)).not.toThrow();
+    expect(plain.definition.options.every((option) => option.recommended !== true)).toBe(true);
+    const derived = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(derived.definition.options.every((option) => option.recommended !== true)).toBe(true);
+  });
+
+  it("allows at most one recommended option and requires the reason to ride the recommended option", () => {
+    const base = JSON.parse(JSON.stringify(buildMissionOwnerHumanInputDecisionCard(spec()).definition));
+    const withOne = structuredClone(base);
+    withOne.options[0].recommended = true;
+    withOne.options[0].recommendationReason = "승인 추천 사유";
+    expect(() => operatorDecisionDefinitionSchema.parse(withOne)).not.toThrow();
+    const withTwo = structuredClone(withOne);
+    withTwo.options[1].recommended = true;
+    expect(() => operatorDecisionDefinitionSchema.parse(withTwo)).toThrow();
+    const orphanReason = structuredClone(base);
+    orphanReason.options[0].recommendationReason = "추천 없는 사유";
+    expect(() => operatorDecisionDefinitionSchema.parse(orphanReason)).toThrow();
+  });
 });
 
 // ---------- Part B: submission bridge (embedded Postgres) ----------
@@ -277,6 +346,23 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(humanAlertPublishes()).toHaveLength(1);
     const [activity] = await db.select().from(activityLog).where(eq(activityLog.entityId, s.issueId));
     expect(activity?.action).toBe("mission.owner.human_input_requested");
+  });
+
+  it("carries the owner's submitted recommendation onto the card option", async () => {
+    const s = await seedOversight();
+    await submit(s, {
+      decision: "request_input",
+      reason: "습인이 필요합니다",
+      nextAction: "운영자 승인 후 진행",
+      recommendedOptionId: "approve",
+      recommendationReason: "재시도는 이미 3회 실패해 승인 후 다음 단계 진행이 안전합니다",
+    });
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, s.companyId));
+    const options = (card!.definition as { options: { id: string; recommended?: boolean; recommendationReason?: string | null }[] }).options;
+    const approve = options.find((option) => option.id === "approve")!;
+    expect(approve.recommended).toBe(true);
+    expect(approve.recommendationReason).toBe("재시도는 이미 3회 실패해 승인 후 다음 단계 진행이 안전합니다");
+    expect(options.filter((option) => option.id !== "approve").every((option) => option.recommended !== true)).toBe(true);
   });
 
   it("reuses the same card on dedup replay of an identical resubmission", async () => {
