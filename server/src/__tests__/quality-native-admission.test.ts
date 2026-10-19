@@ -53,12 +53,12 @@ describeQualityDb("Quality native admission", () => {
     }).where(eq(agents.companyId, f.companyId));
   }, 180_000);
   afterAll(async () => {
-    if (originalHome === undefined) delete process.env.PAPERCLIP_HOME;
-    else process.env.PAPERCLIP_HOME = originalHome;
     if (owned) {
       await waitForHeartbeatExecutionsToDrain(owned.db);
       await owned.close();
     }
+    if (originalHome === undefined) delete process.env.PAPERCLIP_HOME;
+    else process.env.PAPERCLIP_HOME = originalHome;
     if (home) await rm(home, { recursive: true, force: true });
   });
 

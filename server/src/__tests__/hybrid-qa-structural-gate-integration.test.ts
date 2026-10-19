@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   companies,
@@ -17,10 +17,22 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import {
-  completeWorkflowToolStepFromResult,
-} from "../services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult } from "../services/workflow/dag-engine.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
+
+type AdapterResult = ReturnType<typeof successfulAdapterResult>;
+const adapterGate = vi.hoisted(() => ({
+  execute: vi.fn<() => Promise<AdapterResult>>(),
+  releases: [] as Array<(result: AdapterResult) => void>,
+}));
+vi.mock("../adapters/index.js", () => ({
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: adapterGate.execute }),
+  runningProcesses: new Map(),
+}));
+
+function successfulAdapterResult() {
+  return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
+}
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEP = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -54,7 +66,17 @@ describeEP("hybrid QA — structural gate integration", () => {
     });
   }, 60_000);
 
+  beforeEach(() => {
+    adapterGate.releases.length = 0;
+    adapterGate.execute.mockImplementation(() => new Promise<AdapterResult>((resolve) => {
+      adapterGate.releases.push(resolve);
+    }));
+  });
+
   afterEach(async () => {
+    const result = successfulAdapterResult();
+    adapterGate.execute.mockResolvedValue(result);
+    for (const release of adapterGate.releases) release(result);
     await waitForHeartbeatExecutionsToDrain(db);
     await db.delete(issueComments);
     await db.delete(workflowTransitionEvents);
@@ -75,6 +97,17 @@ describeEP("hybrid QA — structural gate integration", () => {
         eq(workflowTransitionEvents.workflowStepRunId, stepRunId),
         eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
       ));
+  }
+
+  function completeGate(
+    runId: string,
+    gateRun: { id: string; lastDispatchRequestId: string | null },
+    result: Pick<Parameters<typeof completeWorkflowToolStepFromResult>[1], "success" | "data" | "error">,
+    requestId = gateRun.lastDispatchRequestId!,
+  ) {
+    return completeWorkflowToolStepFromResult(db, {
+      companyId, stepRunId: gateRun.id, requestId, workflowRunId: runId, ...result,
+    });
   }
 
   async function seedWorkflowWithStructuralGate() {
@@ -151,12 +184,9 @@ describeEP("hybrid QA — structural gate integration", () => {
 
   it("(A) valid request_changes writes official verdict and producer iteration increments", async () => {
     const { runId, gateRun, producerRun } = await seedWorkflowWithStructuralGate();
-    const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { verdict: "request_changes", reason: "schema key missing", failedChecks: ["id"] },
+    await completeGate(runId, gateRun, {
+      success: true, data: { verdict: "request_changes", reason: "schema key missing", failedChecks: ["id"] },
     });
 
     // Official verdict should be in transition events (issueId=null, issue-less)
@@ -175,13 +205,8 @@ describeEP("hybrid QA — structural gate integration", () => {
 
   it("(B) transport failure writes no verdict and consumes no iteration", async () => {
     const { runId, gateRun } = await seedWorkflowWithStructuralGate();
-    const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: false,
-      requestId, workflowRunId: runId,
-      error: "connection refused",
-    });
+    await completeGate(runId, gateRun, { success: false, error: "connection refused" });
 
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));
     expect(updated.status).toBe("failed");
@@ -194,13 +219,8 @@ describeEP("hybrid QA — structural gate integration", () => {
 
   it("(B2) missing/invalid verdict is contract hard failure, no verdict event", async () => {
     const { runId, gateRun } = await seedWorkflowWithStructuralGate();
-    const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { /* no verdict field */ },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { /* no verdict field */ } });
 
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));
     expect(updated.status).toBe("failed");
@@ -212,13 +232,8 @@ describeEP("hybrid QA — structural gate integration", () => {
 
   it("(C) valid PASS completes the gate", async () => {
     const { runId, gateRun } = await seedWorkflowWithStructuralGate();
-    const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } });
 
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));
     expect(updated.status).toBe("completed");
@@ -232,18 +247,10 @@ describeEP("hybrid QA — structural gate integration", () => {
     const { runId, gateRun } = await seedWorkflowWithStructuralGate();
     const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } }, requestId);
 
     // Second call with same requestId should be a no-op (step already terminal)
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } }, requestId);
 
     const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(1);
@@ -254,11 +261,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     const oldRequestId = gateRun.lastDispatchRequestId!;
 
     // Complete with pass
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId: oldRequestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } }, oldRequestId);
 
     // Simulate gate reset (clear dispatch state)
     await db.update(workflowStepRuns).set({
@@ -272,11 +275,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     }).where(eq(workflowStepRuns.id, gateRun.id));
 
     // Late callback from old requestId should be rejected
-    const result = await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId: oldRequestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    const result = await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } }, oldRequestId);
 
     expect(result).toBeNull();
 
@@ -293,13 +292,8 @@ describeEP("hybrid QA — structural gate integration", () => {
 
   it("ledger write happens before step status update (fail-closed ordering)", async () => {
     const { runId, gateRun } = await seedWorkflowWithStructuralGate();
-    const requestId = gateRun.lastDispatchRequestId!;
 
-    await completeWorkflowToolStepFromResult(db, {
-      companyId, stepRunId: gateRun.id, success: true,
-      requestId, workflowRunId: runId,
-      data: { verdict: "pass" },
-    });
+    await completeGate(runId, gateRun, { success: true, data: { verdict: "pass" } });
 
     // Both the verdict event AND the step completion must exist.
     // If the ledger write had failed, the function would have thrown

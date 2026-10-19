@@ -16,13 +16,27 @@ import {
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+type AdapterResult = ReturnType<typeof successfulAdapterResult>;
+const adapterGate = vi.hoisted(() => ({
+  execute: vi.fn<() => Promise<AdapterResult>>(),
+  releases: [] as Array<(result: AdapterResult) => void>,
+}));
+vi.mock("../adapters/index.js", () => ({
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: adapterGate.execute }),
+  runningProcesses: new Map(),
+}));
+
+function successfulAdapterResult() {
+  return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
+}
 
 const sup = await getEmbeddedPostgresTestSupport();
 const describeEP = sup.supported ? describe : describe.skip;
@@ -74,8 +88,17 @@ async function seed(db: ReturnType<typeof createDb>, originIsQaGate: boolean) {
 describeEP("P4 oversight wakeup promote integration", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
-  beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-promote-"); db = createDb(tempDb.connectionString); }, 60_000);
+  beforeAll(async () => {
+    adapterGate.execute.mockImplementation(() => new Promise<AdapterResult>((resolve) => {
+      adapterGate.releases.push(resolve);
+    }));
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-promote-");
+    db = createDb(tempDb.connectionString);
+  }, 60_000);
   afterAll(async () => {
+    const result = successfulAdapterResult();
+    adapterGate.execute.mockResolvedValue(result);
+    for (const release of adapterGate.releases) release(result);
     await waitForHeartbeatExecutionsToDrain(db);
     await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
