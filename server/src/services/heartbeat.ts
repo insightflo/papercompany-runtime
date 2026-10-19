@@ -82,8 +82,6 @@ import {
   buildQualityWakeAcceptancePatch,
   findExistingQualityWakeRow,
   mergeableWakeupKeyCondition,
-  nextPlanQaResubmissionExecutionEpoch,
-  planQaResubmissionPromotionAcceptancePatch,
   queuePausedAgentWakeupRequest,
   writeSkippedWakeupRequest,
 } from "./quality/heartbeat-admission.js";
@@ -154,7 +152,6 @@ import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-plann
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
 import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
-import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import { listDefaultWorkflowPluginAgentTools } from "./workflow/plugin-agent-tools.js";
@@ -216,6 +213,8 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
+import { promoteQueuedWakeupRequestsForAgent, selectDeferredWakeupRequest, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
+import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -6008,7 +6007,7 @@ export function heartbeatService(db: Db) {
 
       const remainingSlots = availableSlots - claimedRuns.length;
       if (remainingSlots > 0) {
-        const promotedRuns = await promoteQueuedWakeupRequestsForAgent(agent, remainingSlots);
+        const promotedRuns = await promoteQueuedWakeupRequestsForAgent(followupQueueDeps, agent, remainingSlots);
         for (const promotedRun of promotedRuns) {
           publishLiveEvent({
             companyId: promotedRun.companyId,
@@ -6038,357 +6037,21 @@ export function heartbeatService(db: Db) {
     });
   }
 
-  async function promoteQueuedWakeupRequestsForAgent(
-    agent: typeof agents.$inferSelect,
-    limit: number,
-  ) {
-    if (limit <= 0) return [];
-    const pendingRequests = await db
-      .select({ id: agentWakeupRequests.id })
-      .from(agentWakeupRequests)
-      .where(and(
-        eq(agentWakeupRequests.companyId, agent.companyId),
-        eq(agentWakeupRequests.agentId, agent.id),
-        eq(agentWakeupRequests.status, "queued"),
-        sql`${agentWakeupRequests.runId} is null`,
-      ))
-      .orderBy(asc(agentWakeupRequests.requestedAt))
-      .limit(Math.max(limit * 4, limit));
-
-    const promotedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-    for (const pendingRequest of pendingRequests) {
-      if (promotedRuns.length >= limit) break;
-      const promoted = await promoteQueuedWakeupRequest(agent, pendingRequest.id);
-      if (promoted) promotedRuns.push(promoted);
-    }
-    return promotedRuns;
-  }
-
-  async function promoteQueuedWakeupRequest(
-    agent: typeof agents.$inferSelect,
-    wakeupRequestId: string,
-  ) {
-    return withTxTimeout(db, async (tx) => {
-      const [observed] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
-      if (!observed) return null;
-      try {
-        await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...observed, contextSnapshot: parseObject(observed.payload)[DEFERRED_WAKE_CONTEXT_KEY] });
-      } catch (err) {
-        await tx.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date(), error: err instanceof Error ? err.message : "Recovery admission refused", updatedAt: new Date() })
-          .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
-        return null;
-      }
-      await tx.execute(sql`select id from agent_wakeup_requests where id = ${wakeupRequestId} for update`);
-      const request = await tx
-        .select()
-        .from(agentWakeupRequests)
-        .where(and(
-          eq(agentWakeupRequests.id, wakeupRequestId),
-          eq(agentWakeupRequests.companyId, agent.companyId),
-          eq(agentWakeupRequests.agentId, agent.id),
-          eq(agentWakeupRequests.status, "queued"),
-          sql`${agentWakeupRequests.runId} is null`,
-        ))
-        .then((rows) => rows[0] ?? null);
-      if (!request) return null;
-
-      // [거절] agent 가 실행 불가 상태면 run 도 만들지 않고 request 를 terminal-fail.
-      if (agent.status === "terminated" || agent.status === "paused" || agent.status === "pending_approval") {
-        await tx
-          .update(agentWakeupRequests)
-          .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: agent not runnable (status=${agent.status})`, updatedAt: new Date() })
-          .where(eq(agentWakeupRequests.id, request.id));
-        return null;
-      }
-
-      const requestPayload = parseObject(request.payload);
-      const queuedContext = parseObject(requestPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-      const promotedPayload = { ...requestPayload };
-      delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
-
-      const promotedReason = readNonEmptyString(request.reason);
-      const promotedSource =
-        (readNonEmptyString(request.source) as WakeupOptions["source"]) ?? "automation";
-      const promotedTriggerDetail =
-        (readNonEmptyString(request.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
-
-      const {
-        contextSnapshot: promotedContextSnapshot,
-        issueIdFromPayload,
-        taskKey: promotedTaskKey,
-      } = enrichWakeContextSnapshot({
-        contextSnapshot: queuedContext,
-        reason: promotedReason,
-        source: promotedSource,
-        triggerDetail: promotedTriggerDetail,
-        payload: promotedPayload,
-      });
-      const isWorkflowStepResume = isWorkflowStepResumeWake({
-        requestKind: request.requestKind,
-        reason: request.reason,
-        payload: promotedPayload,
-        contextSnapshot: promotedContextSnapshot,
-      });
-      const promotedIssueId = readNonEmptyString(promotedContextSnapshot.issueId) ?? issueIdFromPayload;
-
-      const promotedIssue = promotedIssueId
-        ? await tx
-          .select({
-            id: issues.id,
-            companyId: issues.companyId,
-            projectId: issues.projectId,
-            missionId: issues.missionId,
-            originKind: issues.originKind,
-            status: issues.status,
-          })
-          .from(issues)
-          .where(and(eq(issues.id, promotedIssueId), eq(issues.companyId, agent.companyId)))
-          .then((rows) => rows[0] ?? null)
-        : null;
-      const isPlanReworkPromotion =
-        promotedReason === "mission_owner_plan_rework_requested" &&
-        promotedIssue?.originKind === "mission_main_executor_plan";
-
-
-      if (promotedIssueId && !promotedIssue) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: "failed",
-            finishedAt: new Date(),
-            error: "Queued wakeup could not be promoted: issue not found",
-            updatedAt: new Date(),
-          })
-          .where(eq(agentWakeupRequests.id, request.id));
-        return null;
-      }
-
-      // [거절] issue 가 이미 terminal 이면 재실행 무의미 → request terminal-fail.
-      if (
-        promotedIssue &&
-        PROMOTED_REJECT_ISSUE_STATUSES.has(promotedIssue.status) &&
-        !(isWorkflowStepResume && promotedIssue.status === "done") &&
-        !(isPlanReworkPromotion && promotedIssue.status === "done")
-
-      ) {
-
-        await tx
-          .update(agentWakeupRequests)
-          .set({ status: "failed", finishedAt: new Date(), error: `Queued wakeup rejected: issue terminal (status=${promotedIssue.status})`, updatedAt: new Date() })
-          .where(eq(agentWakeupRequests.id, request.id));
-        return null;
-      }
-
-      // [P4 consume-side oversight no-op] mission_owner_retry_source_issue(twin) wakeup 이
-      //   source/owner action 의 QA recovery chain 이 live/stalled 면 no-op(guard 이전 큐 stale/race 회수, req 2).
-      //   producer 대상이어도 payload.ownerActionIssueId → owner action origin(QA gate) chain 확인.
-      if (
-        promotedIssue?.missionId &&
-        (promotedReason === "mission_owner_retry_source_issue" || promotedReason === "mission_owner_decision_retry_source_issue")
-      ) {
-        const oversightNoOp = await shouldNoOpOversightWakeup(tx as unknown as Db, {
-          companyId: agent.companyId,
-          missionId: promotedIssue.missionId,
-          request: { id: request.id, reason: promotedReason, payload: promotedPayload },
-          promotedIssue: { id: promotedIssue.id, status: promotedIssue.status },
-        });
-        if (oversightNoOp.noOp) {
-          // 의도적 supersede → status=failed ❌(stale/deadlock logic 이 재실패로 해석 위험).
-          // terminal non-failure(completed) + 구조화 queue_oversight_noop transition event(codex P4 blocker).
-          await tx
-            .update(agentWakeupRequests)
-            .set({ status: "completed", finishedAt: new Date(), error: null, updatedAt: new Date() })
-            .where(eq(agentWakeupRequests.id, request.id));
-          await tx.insert(workflowTransitionEvents).values({
-            companyId: agent.companyId,
-            missionId: promotedIssue.missionId,
-            issueId: promotedIssue.id,
-            wakeupRequestId: request.id,
-            eventType: "queue_oversight_noop",
-            layer: "recovery_ownership",
-            reason: oversightNoOp.reason,
-            reasonCode: "qa_recovery_oversight_noop",
-            idempotencyKey: `queue-oversight-noop:${request.id}`,
-            payload: {
-              originalRequestId: request.id,
-              ownerActionIssueId: oversightNoOp.ownerActionIssueId,
-              qaSignal: oversightNoOp.qaSignal,
-              reason: oversightNoOp.reason,
-            },
-          }).onConflictDoNothing();
-          return null;
-        }
-      }
-
-      const missionIdForWake =
-        readNonEmptyString(promotedContextSnapshot.missionId) ??
-        readNonEmptyString(promotedPayload.missionId) ??
-        promotedIssue?.missionId ??
-        null;
-      if (missionIdForWake) {
-        const inFlightClause = await lifecycleInFlightClause(tx as unknown as Parameters<typeof lifecycleInFlightClause>[0]);
-        const existingMissionRun = await tx
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(and(
-            eq(heartbeatRuns.agentId, agent.id),
-            inFlightClause,
-            sql`heartbeat_runs.context_snapshot ->> 'missionId' = ${missionIdForWake}`,
-            // [oversight exemption] 정기 점검(리뷰) 실행은 같은 미션 단계 실행의 승격을 막지 않는다.
-            missionDedupExemptOversightReviewClause,
-          ))
-          .limit(1);
-        if (existingMissionRun.length > 0) {
-          // [B3] Previously this branch dropped the promotion silently: the request stayed
-          // `queued` with runId=NULL and no state change, so it was invisible until B1's
-          // stale-queued reap eventually fired. Record each block: bump coalescedCount (durable,
-          // tx-scoped counter) and warn so a request stuck behind a long-running same-mission
-          // run is observable long before it goes stale.
-          await tx
-            .update(agentWakeupRequests)
-            .set({ coalescedCount: sql`${agentWakeupRequests.coalescedCount} + 1`, updatedAt: new Date() })
-            .where(eq(agentWakeupRequests.id, request.id));
-          logger.warn(
-            { agentId: agent.id, wakeupRequestId: request.id, missionId: missionIdForWake, blockingRunId: existingMissionRun[0]?.id },
-            "queue_promotion_blocked_by_mission_dedup",
-          );
-          return null;
-        }
-
-        try {
-          await assertMissionRuntimeAcceptsWork(tx as unknown as Db, {
-            companyId: agent.companyId,
-            missionId: missionIdForWake,
-          });
-        } catch (err) {
-          await tx
-            .update(agentWakeupRequests)
-            .set({
-              status: "failed",
-              finishedAt: new Date(),
-              error: err instanceof Error ? err.message : "Queued wakeup could not be promoted: mission is terminal",
-              updatedAt: new Date(),
-            })
-            .where(eq(agentWakeupRequests.id, request.id));
-          return null;
-        }
-      }
-
-      const budgetBlock = await budgets.getInvocationBlock(agent.companyId, agent.id, {
-        issueId: promotedIssue?.id ?? promotedIssueId,
-        projectId: promotedIssue?.projectId ?? readNonEmptyString(promotedContextSnapshot.projectId),
-      });
-      if (budgetBlock) {
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: "failed",
-            finishedAt: new Date(),
-            error: budgetBlock.reason,
-            updatedAt: new Date(),
-          })
-          .where(eq(agentWakeupRequests.id, request.id));
-        return null;
-      }
-
-      const sessionBefore = await resolveSessionBeforeForWakeup(agent, promotedTaskKey, {
-        missionId: missionIdForWake,
-      });
-      // [T8 bounded resubmission] 재제출 승격 run 은 실제 새 execution epoch 로 시작한다(이전 시도 epoch 재사용 금지).
-      const resubmissionExecutionEpoch = await nextPlanQaResubmissionExecutionEpoch(tx as unknown as Db, {
-        idempotencyKey: request.idempotencyKey, companyId: agent.companyId, issueId: promotedIssueId,
-      });
-      const now = new Date();
-      const newRun = await tx
-        .insert(heartbeatRuns)
-        .values({
-          companyId: agent.companyId,
-          agentId: agent.id,
-          issueId: promotedIssueId,
-          invocationSource: promotedSource,
-          triggerDetail: promotedTriggerDetail,
-          status: "queued",
-          wakeupRequestId: request.id,
-          contextSnapshot: {
-            ...promotedContextSnapshot,
-            dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-              agentId: agent.id,
-              issueId: promotedIssueId,
-              taskKey: promotedTaskKey,
-            }),
-          },
-          sessionIdBefore: sessionBefore,
-          ...(resubmissionExecutionEpoch !== null ? { executionEpoch: resubmissionExecutionEpoch } : {}),
-        })
-        .returning()
-        .then((rows) => rows[0]);
-
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          runId: newRun.id,
-          claimedAt: null,
-          finishedAt: null,
-          error: null,
-          updatedAt: now,
-          // [T4 quality] 대기 행이 실행으로 승격되는 시점이 곧 수락 시점이다 —
-          // 승격 tx 안에서 수락 원문을 기록한다.
-          ...(await buildQualityWakeAcceptancePatch(tx as unknown as Db, {
-            companyId: agent.companyId,
-            agentId: agent.id,
-            issueId: promotedIssueId,
-            workflowRunId: request.workflowRunId,
-            idempotencyKey: request.idempotencyKey,
-            runId: newRun.id,
-            acceptedAt: now,
-          })),
-        })
-        .where(eq(agentWakeupRequests.id, request.id));
-
-      if (promotedIssue) {
-        const issueStartStatuses = (isWorkflowStepResume || isPlanReworkPromotion)
-
-          ? [...ISSUE_RUN_START_STATUSES, "done"]
-          : ISSUE_RUN_START_STATUSES;
-        const startedIssue = await tx
-          .update(issues)
-          .set({
-            executionRunId: newRun.id,
-            checkoutRunId: newRun.id,
-            status: "in_progress",
-            startedAt: now,
-            completedAt: null,
-            cancelledAt: null,
-            executionAgentNameKey: normalizeAgentNameKey(agent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(issues.id, promotedIssue.id), inArray(issues.status, issueStartStatuses)))
-          .returning({ id: issues.id })
-          .then((rows) => rows[0] ?? null);
-
-        if (startedIssue) {
-          await tx.insert(activityLog).values({
-            companyId: promotedIssue.companyId,
-            actorType: "system",
-            actorId: "heartbeat",
-            action: "issue.execution_started",
-            entityType: "issue",
-            entityId: promotedIssue.id,
-            agentId: agent.id,
-            runId: newRun.id,
-            details: {
-              previousStatus: promotedIssue.status,
-              nextStatus: "in_progress",
-              reason: "queued_wakeup_promoted",
-            },
-          });
-        }
-      }
-
-      return newRun;
-    });
-  }
+  const followupPromotionDeps: HeartbeatFollowupPromotionDeps = {
+    deferredWakeContextKey: DEFERRED_WAKE_CONTEXT_KEY,
+    issueRunStartStatuses: ISSUE_RUN_START_STATUSES,
+    enrichWakeContextSnapshot,
+    resolveSessionBeforeForWakeup,
+  };
+  const followupQueueDeps: HeartbeatFollowupQueueDeps = {
+    db,
+    deferredWakeContextKey: DEFERRED_WAKE_CONTEXT_KEY,
+    promotedRejectIssueStatuses: PROMOTED_REJECT_ISSUE_STATUSES,
+    enrichWakeContextSnapshot,
+    isWorkflowStepResumeWake,
+    getInvocationBlock: budgets.getInvocationBlock,
+    promote: (tx, input) => promoteQueuedWakeupRequest(followupPromotionDeps, tx, input),
+  };
 
   async function executeRun(runId: string) {
     let run = await getRun(runId);
@@ -9610,27 +9273,9 @@ export function heartbeatService(db: Db) {
           break;
         }
         deferredPromotionIterations += 1;
-        const deferred = await tx
-          .select()
-          .from(agentWakeupRequests)
-          .where(
-            and(
-              eq(agentWakeupRequests.companyId, issue.companyId),
-              eq(agentWakeupRequests.status, "deferred_issue_execution"),
-              sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
-            ),
-          )
-          .orderBy(asc(agentWakeupRequests.requestedAt))
-          .limit(1)
-          .then((rows) => rows[0] ?? null);
-
-        if (!deferred) return null;
-
-        const deferredAgent = await tx
-          .select()
-          .from(agents)
-          .where(eq(agents.id, deferred.agentId))
-          .then((rows) => rows[0] ?? null);
+        const candidate = await selectDeferredWakeupRequest(tx, issue);
+        if (!candidate) return null;
+        const { request: deferred, agent: deferredAgent } = candidate;
 
         if (
           !deferredAgent ||
@@ -9651,87 +9296,7 @@ export function heartbeatService(db: Db) {
           continue;
         }
 
-        const deferredPayload = parseObject(deferred.payload);
-        const deferredContextSeed = parseObject(deferredPayload[DEFERRED_WAKE_CONTEXT_KEY]);
-        const promotedContextSeed: Record<string, unknown> = { ...deferredContextSeed };
-        const promotedReason = readNonEmptyString(deferred.reason) ?? "issue_execution_promoted";
-        const promotedSource =
-          (readNonEmptyString(deferred.source) as WakeupOptions["source"]) ?? "automation";
-        const promotedTriggerDetail =
-          (readNonEmptyString(deferred.triggerDetail) as WakeupOptions["triggerDetail"]) ?? null;
-        const promotedPayload = deferredPayload;
-        delete promotedPayload[DEFERRED_WAKE_CONTEXT_KEY];
-
-        const {
-          contextSnapshot: promotedContextSnapshot,
-          taskKey: promotedTaskKey,
-        } = enrichWakeContextSnapshot({
-          contextSnapshot: promotedContextSeed,
-          reason: promotedReason,
-          source: promotedSource,
-          triggerDetail: promotedTriggerDetail,
-          payload: promotedPayload,
-        });
-
-        const sessionBefore = await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey, {
-          missionId: readNonEmptyString(promotedContextSnapshot.missionId),
-        });
-        const now = new Date();
-        const newRun = await tx
-          .insert(heartbeatRuns)
-          .values({
-            companyId: deferredAgent.companyId,
-            agentId: deferredAgent.id,
-            issueId: issue.id,
-            invocationSource: promotedSource,
-            triggerDetail: promotedTriggerDetail,
-            status: "queued",
-            wakeupRequestId: deferred.id,
-            contextSnapshot: {
-              ...promotedContextSnapshot,
-              dispatchGeneration: await resolveNextDispatchGeneration(tx as unknown as Db, {
-                agentId: deferredAgent.id,
-                issueId: issue.id,
-                taskKey: promotedTaskKey,
-              }),
-            },
-            sessionIdBefore: sessionBefore,
-          })
-          .returning()
-          .then((rows) => rows[0]);
-
-        await tx
-          .update(agentWakeupRequests)
-          .set({
-            status: "queued",
-            reason: "issue_execution_promoted",
-            runId: newRun.id,
-            claimedAt: null,
-            finishedAt: null,
-            error: null,
-            updatedAt: now,
-            // [T8 bounded resubmission] PLAN-QA 재제출 키는 대기 행이 실제 run 으로 승격되는
-            //   이 시점이 수락 시점이다 — admission 원문을 같은 tx 에 기록한다(품질 조치 키의
-            //   기존 deferred 동작은 의도적으로 변경하지 않는다).
-            ...(await planQaResubmissionPromotionAcceptancePatch(tx as unknown as Db, {
-              companyId: deferredAgent.companyId, agentId: deferredAgent.id, issueId: issue.id,
-              workflowRunId: deferred.workflowRunId, idempotencyKey: deferred.idempotencyKey,
-              runId: newRun.id, acceptedAt: now,
-            }) ?? {}),
-          })
-          .where(eq(agentWakeupRequests.id, deferred.id));
-
-        await tx
-          .update(issues)
-          .set({
-            executionRunId: newRun.id,
-            executionAgentNameKey: normalizeAgentNameKey(deferredAgent.name),
-            executionLockedAt: now,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
-
-        return newRun;
+        return promoteDeferredWakeupRequest(followupPromotionDeps, tx, { deferred, deferredAgent, issue });
       }
     });
 

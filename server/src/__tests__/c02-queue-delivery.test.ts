@@ -1,0 +1,136 @@
+import { and, eq } from "drizzle-orm";
+import { expect, it, vi } from "vitest";
+import { activityLog, agents, agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
+import { adapter, database, fixture, flag, stopped } from "./helpers/heartbeat-producer-fixture.js";
+import { DEFERRED_WAKE_CONTEXT_KEY, heartbeatService } from "../services/heartbeat.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
+
+// C02 단계4의 동작 보존 시험이다. 근거: doc/DATABASE.md의 원래 요청 신원·원자 선점
+// 계약과 heartbeat-producer-promotion.test.ts:8–48의 공개 queued/deferred 경로.
+// helper fixture가 파일별 임시 DB를 소유한다. 외부 adapter만 대기시키고 DB·서비스·선점은 실제 실행한다.
+// running/claimed는 전달·선점 증거이며 현재 입력의 QA 결과 소비 증거가 아니다.
+it.each([
+  { path: "queued", enabled: false },
+  { path: "queued", enabled: true },
+  { path: "deferred", enabled: false },
+  { path: "deferred", enabled: true },
+] as const)("C02 stage4 $path promotion preserves original wake, finalization=$enabled", async ({ path, enabled }) => {
+  const db = database();
+  await flag(enabled);
+  const f = await fixture();
+  const heartbeat = heartbeatService(db);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  adapter.mockReset().mockImplementation(async () => {
+    await held;
+    return stopped;
+  });
+  try {
+    let busyRunId: string | null = null;
+    if (path === "queued") {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
+    } else {
+      const [owner] = await db.insert(agents).values({
+        companyId: f.companyId, name: "Different owner", status: "paused",
+      }).returning();
+      const [busy] = await db.insert(heartbeatRuns).values({
+        companyId: f.companyId, agentId: owner.id, issueId: f.issueId,
+        status: "running", contextSnapshot: { issueId: f.issueId },
+      }).returning();
+      busyRunId = busy.id;
+      await db.update(issues).set({
+        executionRunId: busy.id, executionAgentNameKey: "different-owner", executionLockedAt: new Date(),
+      }).where(eq(issues.id, f.issueId));
+    }
+
+    const context = {
+      issueId: f.issueId, taskId: f.issueId,
+      workflowRunId: f.workflowRunId, workflowStepRunId: f.stepRunId,
+      forceFreshSession: true, queueExtractionProbe: { path, enabled },
+    };
+    await heartbeat.wakeup(f.agentId, {
+      source: "assignment", triggerDetail: "system", reason: "workflow_step_runnable",
+      // queued 승격도 기존 저장 문맥 키를 읽도록 공개 payload에 문맥을 함께 보관한다.
+      payload: { ...context, [DEFERRED_WAKE_CONTEXT_KEY]: context }, contextSnapshot: context,
+      requestedByActorType: "system", requestedByActorId: "c02-stage4",
+      idempotencyKey: `c02-stage4:${f.issueId}`,
+    });
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, f.companyId), eq(agentWakeupRequests.agentId, f.agentId),
+    ));
+    expect(wakes).toHaveLength(1);
+    const original = wakes[0]!;
+    expect(original).toMatchObject({
+      runId: null, claimedAt: null,
+      status: path === "queued" ? "queued" : "deferred_issue_execution",
+      companyId: f.companyId, agentId: f.agentId, issueId: f.issueId,
+      workflowRunId: f.workflowRunId, workflowStepRunId: f.stepRunId, workflowExecutionGeneration: 7,
+      source: "assignment", triggerDetail: "system",
+      requestedByActorType: "system", requestedByActorId: "c02-stage4",
+    });
+    const proof = original.payload?.__paperclipWorkflowProducerAttempt;
+    expect(proof).toMatchObject({
+      schemaVersion: 1, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId,
+      workflowRunId: f.workflowRunId, stepRunId: f.stepRunId, executionGeneration: 7,
+      retryCount: 0, iterationIndex: 0, wakeupRequestId: original.id, parentHeartbeatRunId: null,
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId))).toHaveLength(0);
+    expect(adapter).not.toHaveBeenCalled();
+
+    if (path === "queued") {
+      await db.update(agents).set({ status: "active" }).where(eq(agents.id, f.agentId));
+      await heartbeat.resumeQueuedRuns(f.agentId);
+    } else {
+      await heartbeat.cancelRun(busyRunId!);
+    }
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+
+    // helper 반환 대신 adapter가 대기하는 동안 DB의 실행과 원래 요청을 관측한다.
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId));
+    expect(runs).toHaveLength(1);
+    const run = runs[0]!;
+    expect(run).toMatchObject({
+      companyId: f.companyId, agentId: f.agentId, issueId: f.issueId,
+      wakeupRequestId: original.id, status: "running",
+      invocationSource: "assignment", triggerDetail: "system",
+      workflowStepRunId: f.stepRunId, workflowExecutionGeneration: 7,
+      finalizationVersion: enabled ? 1 : 0,
+      contextSnapshot: { ...context, taskKey: f.issueId, dispatchGeneration: 1 },
+    });
+    expect(run.startedAt).toBeInstanceOf(Date);
+    const [claimedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, original.id));
+    expect(claimedWake).toMatchObject({
+      runId: run.id, status: "claimed", finishedAt: null,
+      workflowRunId: f.workflowRunId, workflowStepRunId: f.stepRunId, workflowExecutionGeneration: 7,
+      requestedAt: original.requestedAt, idempotencyKey: original.idempotencyKey,
+      payload: { __paperclipWorkflowProducerAttempt: proof },
+    });
+    expect(claimedWake!.claimedAt).toBeInstanceOf(Date);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, original.id))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, f.agentId))).toHaveLength(1);
+
+    const [issue] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(issue).toMatchObject({
+      executionRunId: run.id, executionAgentNameKey: "writer",
+    });
+    expect(issue!.executionLockedAt).toBeInstanceOf(Date);
+    const starts = await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, f.issueId), eq(activityLog.action, "issue.execution_started"),
+    ));
+    if (path === "queued") {
+      expect(issue).toMatchObject({ checkoutRunId: run.id, status: "in_progress", completedAt: null, cancelledAt: null });
+      expect(issue!.startedAt).toBeInstanceOf(Date);
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toMatchObject({ runId: run.id, details: { reason: "queued_wakeup_promoted" } });
+    } else {
+      // deferred writer는 queued writer의 상태·checkout·시작 시각 갱신을 가져오지 않는다.
+      expect(issue).toMatchObject({ checkoutRunId: null, status: "todo", startedAt: null });
+      expect(starts).toHaveLength(0);
+      expect(await f.readRun(busyRunId!)).toMatchObject({ status: "cancelled" });
+    }
+  } finally {
+    release();
+    // 상태 관측과 실제 후처리 종료는 다르다. fixture의 DB 종료 전에 추적된 실행을 모두 기다린다.
+    await waitForHeartbeatExecutionsToDrain(db, 20_000);
+  }
+});
