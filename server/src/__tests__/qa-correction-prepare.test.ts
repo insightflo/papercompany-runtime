@@ -50,11 +50,11 @@ describe("QA correction prepare issuance", () => {
     a.retryEnvelopeHash = hashContract(retryEnvelope);
   }
   async function fresh(f: CorrectionFixture, verdict: "pass" | "request_changes" = "request_changes") {
-    const v = await appendQaVerdict(owned.db, f, verdict), at = new Date();
-    // appendQaVerdict's historical-reader fixture uses future timestamps. This issuer uses server time.
-    await owned.db.update(heartbeatRuns).set({ createdAt: at }).where(eq(heartbeatRuns.id, v.heartbeatRunId));
+    const v = await appendQaVerdict(owned.db, f, verdict), at = new Date(), a = f.preparation.authority;
+    const heartbeatPatch = a.kind === "quality_current_output" && verdict === "request_changes" ? { createdAt: at, executionEpoch: a.verifierEpoch, workflowStepRunId: v.qa.stepRunId, workflowExecutionGeneration: v.qa.executionGeneration } : { createdAt: at };
+    await owned.db.update(heartbeatRuns).set(heartbeatPatch).where(eq(heartbeatRuns.id, v.heartbeatRunId));
     await owned.db.update(workflowTransitionEvents).set({ createdAt: at }).where(eq(workflowTransitionEvents.id, v.eventId));
-    return v;
+    if (a.kind === "quality_current_output" && verdict === "request_changes") a.verifierRunId = v.heartbeatRunId; return v;
   }
   async function legacy(f: CorrectionFixture, outcome: "applied" | "write_failed" | "incomplete", same = false, qa = f.qa) {
     const p = f.preparation, v = p.authority.verdicts.find(v => v.qa.stepRunId === qa.id)!;
@@ -164,7 +164,7 @@ describe("QA correction prepare issuance", () => {
     await expect(beginQaCorrection(owned.db, f.preparation)).resolves.toMatchObject({ status: "existing" });
     await expect(readQaCorrectionQuality(owned.db, result.preparation, true, undefined, pointer(result))).resolves.not.toBeNull();
     await expect(readQaCorrectionQuality(owned.db, result.preparation, true)).rejects.toMatchObject({ reason: "budget" });
-    f.preparation.authority.verdicts = [await fresh(f)];
+    const verdict = await fresh(f); f.preparation.authority.verdicts = [verdict]; f.preparation.correctionId = randomUUID();
     await expect(beginQaCorrection(owned.db, f.preparation)).rejects.toMatchObject({ reason: "budget" });
     const after = await state(f);
     expect(after.usage).toEqual(before.usage); expect(after.groups).toEqual(before.groups);
@@ -223,7 +223,7 @@ describe("QA correction prepare issuance", () => {
     if (kind === "source epoch" || kind === "verifier epoch") await owned.db.update(heartbeatRuns).set({ executionEpoch: 2 }).where(eq(heartbeatRuns.id, kind === "source epoch" ? f.producerHeartbeatId : f.verdictHeartbeatId));
     if (kind === "generation" || kind === "QA generation") await owned.db.update(workflowStepRuns).set({ executionGeneration: 1 }).where(eq(workflowStepRuns.id, kind === "generation" ? f.producer.id : f.qa.id));
     if (kind === "disabled") await owned.db.update(qualityPolicyVersions).set({ disabledAt: new Date() }).where(eq(qualityPolicyVersions.id, a.policyVersionId));
-    if (kind === "approval") await owned.db.update(qualityPolicyVersions).set({ approvedAt: null }).where(eq(qualityPolicyVersions.id, a.policyVersionId));
+    if (kind === "approval") await owned.db.update(qualityPolicyVersions).set({ approvedAt: new Date("2100-01-01T00:00:00Z") }).where(eq(qualityPolicyVersions.id, a.policyVersionId));
     if (kind === "activation") await owned.db.update(qualityPolicyVersions).set({ enabledAt: null }).where(eq(qualityPolicyVersions.id, a.policyVersionId));
     if (kind === "period") {
       const [row] = await owned.db.select().from(qualityPolicyVersions).where(eq(qualityPolicyVersions.id, a.policyVersionId));
