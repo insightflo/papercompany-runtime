@@ -3,7 +3,7 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import {
   assets, heartbeatRuns, issueAttachments, issueWorkProducts, qualityEvidenceRefs,
-  workflowStepOutputBindings, workflowTransitionEvents,
+  workflowStepOutputBindings, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import { workProductProducerSchema } from "@paperclipai/shared";
 import { HttpError } from "../../../errors.js";
@@ -14,7 +14,7 @@ import {
   assertQaCorrectionEventLinks, hashQaCorrectionPayload, parseQaCorrectionEventPayload,
   qaCorrectionAppliedKey, qaCorrectionFollowupKey, qaCorrectionPreparationKey, qaCorrectionSourceMeasuredKey,
   type QaCorrectionApplied, type QaCorrectionAttempt, type QaCorrectionFollowup,
-  type QaCorrectionPreparation, type QaCorrectionSourceMeasured,
+  type QaCorrectionPreparation, type QaCorrectionSourceMeasured, type QaCorrectionFollowupRef,
 } from "./qa-correction-contract.js";
 import {
   QaCorrectionReadError, readQaCorrectionAttempt, readQaCorrectionQuality, readQaCorrectionScope,
@@ -259,4 +259,12 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, ancestors: Set<strin
 /** C03/C12 historical issuance only. New QA/PASS and B→C must not require the source verdict to stay latest. */
 export async function readIssuedQaCorrection(db: QaCorrectionDb, scope: Scope): Promise<IssuedQaCorrection> {
   return readIssued(db, scope, new Set(), true);
+}
+
+/** Original attempt history only: exclude current binding successors, retain every issuance proof. */
+export async function readIssuedQaCorrectionFollowupForAttempt(db: Pick<Db, "select">, ref: QaCorrectionFollowupRef) {
+  const { readIssuedQaCorrectionFollowup } = await import("./qa-correction-followup.js");
+  // This historical path is SELECT-only. The local type bridge grants no transaction or lock authority.
+  return readIssuedQaCorrectionFollowup(db as QaCorrectionDb, ref,
+    (connection, scope) => readIssued(connection, scope, new Set(), false));
 }

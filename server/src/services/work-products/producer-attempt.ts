@@ -1,17 +1,29 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { eq } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { qualityProducerRetryCount } from "./quality-producer-attempt.js";
 import { readWorkflowAttemptProof } from "../heartbeat-finalization/workflow-attempt-proof.js";
+import { readQaCorrectionProducerAttempt } from "./qa-correction-producer-attempt.js";
+
+// Separate from technical ancestry: history readers can reenter through a verdict on the same heartbeat.
+const activeAttempts = new AsyncLocalStorage<ReadonlySet<string>>();
 
 /** Read retry identity from the heartbeat's original server wake, never a later coalesced wake or step metadata. */
 export async function producerAttempt(db: Pick<Db, "select">, heartbeat: typeof heartbeatRuns.$inferSelect,
   step: typeof workflowStepRuns.$inferSelect, ancestors = new Set<string>(), claiming = false): Promise<{ retryCount: number; iterationIndex: number }> {
+  const active = activeAttempts.getStore();
+  if (active?.has(heartbeat.id)) throw conflict("workproduct_producer_attempt_unproven");
+  return activeAttempts.run(new Set([...(active ?? []), heartbeat.id]),
+    () => readProducerAttempt(db, heartbeat, step, ancestors, claiming));
+}
+
+async function readProducerAttempt(db: Pick<Db, "select">, heartbeat: typeof heartbeatRuns.$inferSelect,
+  step: typeof workflowStepRuns.$inferSelect, ancestors: Set<string>, claiming: boolean): Promise<{ retryCount: number; iterationIndex: number }> {
   const reject = () => { throw conflict("workproduct_producer_attempt_unproven"); };
   // ponytail: bounded ancestry (32); raise only if a supported retry policy legitimately exceeds it.
   if (ancestors.has(heartbeat.id) || ancestors.size >= 32) return reject();
   ancestors.add(heartbeat.id);
-  let retryCount = 0;
   if (!heartbeat.wakeupRequestId || (!claiming && !heartbeat.startedAt)) return reject();
   if (heartbeat.wakeupRequestId) {
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, heartbeat.wakeupRequestId));
@@ -23,6 +35,12 @@ export async function producerAttempt(db: Pick<Db, "select">, heartbeat: typeof 
     if (proof.parentHeartbeatRunId !== heartbeat.retryOfRunId || proof.retryCount !== step.retryCount
       || proof.iterationIndex !== step.iterationIndex || proof.executionGeneration !== step.executionGeneration
       || (heartbeat.startedAt && heartbeat.startedAt < wake.requestedAt)) return reject();
+    const correction = await readQaCorrectionProducerAttempt(db, wake, heartbeat, step, proof, async (connection, ref) => {
+      // Keep module initialization acyclic; the exported bridge is looked up on every correction read.
+      const reader = await import("../workflow/control-flow/qa-correction-reader.js");
+      return reader.readIssuedQaCorrectionFollowupForAttempt(connection, ref);
+    });
+    let retryCount: number;
     if (heartbeat.retryOfRunId) {
       if (wake.idempotencyKey !== null || !["process_lost_retry", "adapter_failed_retry", "adapter_fallback"].includes(wake.requestKind ?? "")
         || wake.reason !== wake.requestKind || wake.source !== "automation" || wake.requestedByActorType !== "system") return reject();
@@ -32,6 +50,8 @@ export async function producerAttempt(db: Pick<Db, "select">, heartbeat: typeof 
         || parent.workflowExecutionGeneration !== heartbeat.workflowExecutionGeneration
         || !parent.startedAt || parent.startedAt > (heartbeat.startedAt ?? heartbeat.createdAt)) return reject();
       retryCount = (await producerAttempt(db, parent, step, ancestors)).retryCount;
+    } else if (correction) {
+      retryCount = correction.retryCount;
     // This exact key format is emitted by retry-launch-dispatch, not agent-authored prose or JSON.
     } else if (wake.idempotencyKey?.startsWith("workflow-step-retry:")) {
       retryCount = Number(wake.idempotencyKey.split(":")[2]);
@@ -39,6 +59,8 @@ export async function producerAttempt(db: Pick<Db, "select">, heartbeat: typeof 
         || wake.idempotencyKey !== `workflow-step-retry:${step.id}:${retryCount}`) return reject();
     } else if (wake.idempotencyKey?.startsWith("quality-action-wake:")) {
       retryCount = await qualityProducerRetryCount(db, wake, heartbeat, step);
+    } else {
+      retryCount = 0;
     }
     if (retryCount !== proof.retryCount) return reject();
     // Checkout projects a later display start. Only the immutable original admission proves this attempt.
