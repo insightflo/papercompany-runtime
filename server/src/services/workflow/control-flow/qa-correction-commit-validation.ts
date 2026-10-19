@@ -9,7 +9,7 @@ import { readQaCorrectionVerdict, requireQaCorrection, type QaCorrectionDb } fro
 import { hashQaCorrectionPayload, qaCorrectionAppliedSchema, qaCorrectionSourceMeasuredSchema,
   type QaCorrectionPreparation } from "./qa-correction-contract.js";
 import { readMeasuredQaCorrection, type MeasuredRef } from "./qa-correction-measure.js";
-import { withCurrentQaCorrectionPreparation } from "./qa-correction-prepare.js";
+import { withCurrentQaCorrectionPreparation, type BeginQaCorrectionResult } from "./qa-correction-prepare.js";
 import { readIssuedQaCorrection } from "./qa-correction-reader.js";
 import { observeQaCorrectionSources, readQaCorrectionSourceBytes, qaCorrectionSourceFacts,
   type QaCorrectionSourceBytes } from "./qa-correction-source-bytes.js";
@@ -138,6 +138,9 @@ type Details = { stored: StoredCorrection; preparation: QaCorrectionPreparation;
   current: Facts; beforeHash: string; revisionHash: string };
 declare const validationBrand: unique symbol;
 export type ValidatedQaCorrectionCandidate = { readonly [validationBrand]: true };
+export type QaCorrectionCommitCandidateInspection =
+  | { status: "validated"; token: ValidatedQaCorrectionCandidate }
+  | { status: "stopped"; result: BeginQaCorrectionResult };
 const validations = new WeakMap<ValidatedQaCorrectionCandidate, { details: Details; original: QaCorrectionSourceBytes[] }>();
 function validated(token: ValidatedQaCorrectionCandidate) {
   const value = validations.get(token);
@@ -150,15 +153,15 @@ export function qaCorrectionCommitDetails(token: ValidatedQaCorrectionCandidate)
   return structuredClone(validated(token).details);
 }
 
-/** C03 stage 3 only: no writes, repairs, issuance, additional reservation or current authority token. */
-export async function validateQaCorrectionCommitCandidate(db: Db, input: StoredCorrection): Promise<ValidatedQaCorrectionCandidate> {
+/** C03 inspection only: preserve actual stops before IO; no issuance or additional reservation. */
+export async function inspectQaCorrectionCommitCandidate(db: Db, input: StoredCorrection): Promise<QaCorrectionCommitCandidateInspection> {
   requireQaCorrection(!is(db, PgTransaction), "record");
   const stored = candidate(input), ref = reference(stored);
   const { preparation } = await readMeasuredQaCorrection(db, ref);
   const checked = await withCurrentQaCorrectionPreparation(db, { preparationEventId: ref.preparationEventId,
     preparationHash: ref.preparationHash, preparation }, async tx =>
     ({ effect: "noop", value: await currentFacts(tx, preparation, ref) }));
-  requireQaCorrection(checked.status === "current", "stale");
+  if (checked.status === "stopped") return { status: "stopped", result: checked.result };
   const current = checked.value, original = await readQaCorrectionSourceBytes(preparation, current.observation);
   assertMeasured(original, ref);
   const productLayouts = layouts(original, current.observation);
@@ -195,7 +198,14 @@ export async function validateQaCorrectionCommitCandidate(db: Db, input: StoredC
   const token = Object.freeze({}) as ValidatedQaCorrectionCandidate;
   validations.set(token, { original, details: { stored, preparation, measured: ref, current,
     beforeHash: hashQaCorrectionPayload(ref.sourceMeasured.sources), revisionHash: hashQaCorrectionPayload(stored.revisions) } });
-  return token;
+  return { status: "validated", token };
+}
+
+/** Compatibility: existing callers still reject every preparation stop as stale. */
+export async function validateQaCorrectionCommitCandidate(db: Db, input: StoredCorrection): Promise<ValidatedQaCorrectionCandidate> {
+  const inspected = await inspectQaCorrectionCommitCandidate(db, input);
+  requireQaCorrection(inspected.status === "validated", "stale");
+  return inspected.token;
 }
 
 /** Outside TX, after quality upload/readback. Compare every A file and root with the first read. */
