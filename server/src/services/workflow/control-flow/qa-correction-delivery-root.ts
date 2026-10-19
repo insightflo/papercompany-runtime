@@ -104,7 +104,7 @@ async function waitingState(tx: DeliveryTx, i: CorrectionDeliveryInput,
   h: Awaited<ReturnType<typeof readCurrentQaCorrectionFollowup>>) {
   const { agent, issue } = await assertDeliveryScope(tx, i, h);
   requireDelivery(!["terminated", "pending_approval"].includes(agent.status)
-    && !["cancelled", "done"].includes(issue.status) && !issue.hiddenAt
+    && issue.status !== "cancelled" && (issue.status !== "done" || h.followup.operation === "recheck") && !issue.hiddenAt
     && !["paused", "completed", "cancelled"].includes(h.database.mission.status)
     && h.database.run.status !== "paused", "not_runnable");
   const block = await budgetService(tx as unknown as Db).getInvocationBlock(i.companyId, i.agentId,

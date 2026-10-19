@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import * as followups from "../services/workflow/control-flow/qa-correction-followup.js";
 import { readWorkflowAttemptProof } from "../services/heartbeat-finalization/workflow-attempt-proof.js";
-import { createCommitSourceHarness, issueC02, issueNextC02, deliveryInput, deliveryWriter, deliver,
+import { createCommitSourceHarness, issueC02, issueNextC02, issueDeliveryC02, deliveryInput, deliveryWriter, deliver,
   deliveryState, correctionRows, blockDelivery, waitForDeliveryLocks, invalidateDelivery, corruptDelivery, installReceiptCollision,
 } from "./helpers/c02-delivery-fixture.js";
 
@@ -25,15 +25,18 @@ describe("C02 correction delivery root", () => {
     finally { vi.unstubAllEnvs(); }
   }, 120000);
 
-  it("persists only the two identity columns after the real NULL-identity writer, with one receipt time", async () => {
-    const c = await issueC02(owned, { mode: "content-only", quality: true }), i = await deliveryInput(c);
+  it.each(["todo", "done"] as const)(
+    "%s QA persists only the two identity columns after the real NULL-identity writer, with one receipt time", async status => {
+    const c = await issueDeliveryC02(owned, status), i = await deliveryInput(c);
     i.request.payload!.__paperclipWorkflowProducerAttempt = { forged: true };
     const before = await deliveryState(c);
+    expect(before.issue).toMatchObject({ status, completedAt: status === "done" ? expect.any(Date) : null });
     let written: typeof heartbeatRuns.$inferSelect | undefined;
     const writer = vi.fn(deliveryWriter(c, async (_tx, _wake, hb) => { written = structuredClone(hb); }));
     const result = await deliver(c, i, c.s.db, writer), rows = await correctionRows(c);
     expect(result.kind).toBe("new_delivery");
     expect(result.startRunId).toBe(rows.heartbeats[0]!.id);
+    expect([c.s.f.verdictHeartbeatId, c.s.f.producerHeartbeatId]).not.toContain(result.startRunId);
     expect(writer).toHaveBeenCalledTimes(1);
     expect(rows.wakes).toHaveLength(1);
     expect(rows.heartbeats).toHaveLength(1);
@@ -48,6 +51,8 @@ describe("C02 correction delivery root", () => {
     expect(event).toMatchObject({ heartbeatRunId: hb.id, wakeupRequestId: w.id,
       payload: { ref: c.ref, followupEventId: c.followupRow.id, heartbeatRunId: hb.id, wakeupRequestId: w.id } });
     const after = await deliveryState(c);
+    expect(after.issue).toMatchObject({ status: "in_progress", checkoutRunId: hb.id, executionRunId: hb.id,
+      startedAt: expect.any(Date), completedAt: null });
     expect(after.usage).toEqual(before.usage);
     expect(after.groups).toEqual(before.groups);
     expect(after.receipts).toEqual(before.receipts);

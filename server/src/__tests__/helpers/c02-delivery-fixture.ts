@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual as same } from "node:util";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, missions, qualityActions, workflowRuns,
-  workflowStepOutputBindings, workflowTransitionEvents, type Db } from "@paperclipai/db";
+  workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { expect } from "vitest";
 import { parseObject } from "../../adapters/utils.js";
 import { promoteDeferredWakeupRequest, promoteQueuedWakeupRequest,
@@ -10,10 +11,52 @@ import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type Correcti
   type WriteLinkedCorrectionRun } from "../../services/workflow/control-flow/qa-correction-delivery-root.js";
 import type { DeliveryTx, DeliveryWake } from "../../services/workflow/control-flow/qa-correction-delivery-receipt.js";
 import { qaCorrectionWakeKey } from "../../services/work-products/qa-correction-producer-attempt.js";
-import { commitDbState } from "../qa-correction-commit-fixture.js";
+import { hashContract } from "../../services/quality/contract.js";
+import { beginQaCorrection } from "../../services/workflow/control-flow/qa-correction-prepare.js";
+import { measureQaCorrectionSources } from "../../services/workflow/control-flow/qa-correction-measure.js";
+import { storeQaCorrection } from "../../services/workflow/control-flow/qa-correction-storage.js";
+import { commitQaCorrection } from "../../services/workflow/control-flow/qa-correction-commit.js";
+import { parseQaCorrectionEventPayload } from "../../services/workflow/control-flow/qa-correction-contract.js";
+import { commitDbState, makeCommitSource } from "../qa-correction-commit-fixture.js";
 import { createCommitSourceHarness, issueC02, issueNextC02, type C02Case } from "./c02-fixture.js";
 
 export { createCommitSourceHarness, issueC02, issueNextC02 };
+
+/** Issue through the real C03 path with QA already completed; preserve the original todo input. */
+export async function issueDeliveryC02(owned: Awaited<ReturnType<typeof createCommitSourceHarness>>,
+  status: "todo" | "done"): Promise<C02Case> {
+  if (status === "todo") return issueC02(owned, { mode: "content-only", quality: true });
+  const s = await makeCommitSource(owned.db, owned.root, "content-only", false, true);
+  await s.db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, s.f.qa.issueId!));
+  // Match issueC02's nonzero target tuple and exhausted executor envelope before real issuance.
+  s.f.qa.retryCount = 1; s.f.qa.iterationIndex = 2;
+  for (const v of s.p.authority.verdicts) { v.qa.retryCount = 1; v.qa.iterationIndex = 2; }
+  for (const b of s.p.bindings) { b.consumer.retryCount = 1; b.consumer.iterationIndex = 2; }
+  s.request.retryCount = 1; s.request.iterationIndex = 2;
+  await s.db.update(workflowStepRuns).set({ retryCount: 1, iterationIndex: 2,
+    metadata: { artifactExecution: s.request.artifactExecution, toolArtifactRequest: s.request } }).where(eq(workflowStepRuns.id, s.f.qa.id));
+  if (s.p.authority.kind !== "quality_current_output") throw Error("quality fixture required");
+  const a = s.p.authority, [row] = await s.db.select().from(qualityActions).where(eq(qualityActions.id, a.actionId));
+  const retryEnvelope = { ...row!.retryEnvelope, maxExecutorAttempts: 1 };
+  a.retryEnvelopeHash = hashContract(retryEnvelope);
+  await s.db.update(qualityActions).set({ retryEnvelope }).where(eq(qualityActions.id, a.actionId));
+  const peer = owned.connect(), prepared = await beginQaCorrection(s.db, s.p);
+  if (prepared.status !== "prepared") throw Error("real C02 preparation required: " + prepared.status);
+  s.p = prepared.preparation;
+  const measured = await measureQaCorrectionSources(s.db, {
+    preparationEventId: prepared.preparationEventId, preparationHash: prepared.preparationHash });
+  const stored = await storeQaCorrection(s.db, measured), result = await commitQaCorrection(s.db, stored);
+  if (result.status !== "committed") throw Error("real C02 issuance required: " + result.status);
+  const [appliedRow] = await peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, result.appliedEventId));
+  if (!appliedRow) throw Error("peer cannot see committed application");
+  const applied = parseQaCorrectionEventPayload("qa_remediation_applied", appliedRow.payload);
+  const [followupRow] = await peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, applied.followupEventIds[0]!));
+  if (!followupRow) throw Error("peer cannot see committed followup");
+  const followup = parseQaCorrectionEventPayload("qa_correction_followup_requested", followupRow.payload);
+  return { s, peer, stored, appliedRow, applied, followupRow, followup,
+    ref: { companyId: s.p.companyId, workflowRunId: s.p.workflowRunId,
+      appliedEventId: appliedRow.id, requestId: followup.requestId } };
+}
 export async function deliveryInput(c: C02Case): Promise<CorrectionDeliveryInput> {
   const [origin] = await c.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, c.s.f.verdictHeartbeatId));
   if (!origin) throw Error("real QA origin required");
@@ -59,12 +102,19 @@ export function deliveryWriter(c: C02Case, onWritten?: (tx: DeliveryTx, wake: De
     const [agent] = await tx.select().from(agents).where(eq(agents.id, wake.agentId));
     const [issue] = await tx.select().from(issues).where(eq(issues.id, wake.issueId!));
     if (!agent || !issue) throw Error("real writer scope required");
+    const payload = parseObject(wake.payload), context = parseObject(payload._paperclipWakeContext);
+    const isWorkflowStepResume = c.followup.operation === "recheck"
+      && same(payload.qaCorrectionFollowup, c.ref)
+      && wake.reason === "workflow_step_runnable" && wake.requestKind === wake.reason
+      && context.wakeReason === wake.reason && payload.issueId === issue.id
+      && context.issueId === issue.id && context.missionId === c.s.p.missionId
+      && context.workflowRunId === c.ref.workflowRunId && context.workflowStepRunId === c.followup.target.stepRunId;
     const hb = wake.status === "deferred_issue_execution"
       ? await promoteDeferredWakeupRequest(deps, tx, { deferred: wake, deferredAgent: agent, issue })
       : await promoteQueuedWakeupRequest(deps, tx, { agent, request: wake,
-        promotedContextSnapshot: parseObject(wake.payload?._paperclipWakeContext), promotedSource: "automation",
+        promotedContextSnapshot: context, promotedSource: "automation",
         promotedTriggerDetail: wake.triggerDetail, promotedIssueId: issue.id, promotedTaskKey: issue.id,
-        missionIdForWake: issue.missionId, promotedIssue: issue, isWorkflowStepResume: false, isPlanReworkPromotion: false });
+        missionIdForWake: issue.missionId, promotedIssue: issue, isWorkflowStepResume, isPlanReworkPromotion: false });
     const [actual] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, hb.id));
     // The normal writer MUST leave NULLs. Root persistence, not fixture pre-seeding, is under test.
     expect(actual).toMatchObject({ workflowStepRunId: null, workflowExecutionGeneration: null, status: "queued" });
