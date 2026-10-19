@@ -1,5 +1,5 @@
 // 기존 입장 검사와 후보 선택을 보존한다. 실행 시작과 이벤트 발행은 호출자 책임이다.
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, workflowTransitionEvents, withTxTimeout, type Db } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
 import { logger } from "../middleware/logger.js";
@@ -11,6 +11,8 @@ import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-ded
 import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, QueuedWakeupPromotionInput } from "./heartbeat-followup-promotion.js";
+import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
+export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
 type AgentRow = typeof agents.$inferSelect;
 type RunRow = typeof heartbeatRuns.$inferSelect;
 export type HeartbeatFollowupQueueDeps = {
@@ -29,17 +31,7 @@ export async function promoteQueuedWakeupRequestsForAgent(
 ) {
   const { db } = deps;
   if (limit <= 0) return [];
-  const pendingRequests = await db
-    .select({ id: agentWakeupRequests.id })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.companyId, agent.companyId),
-      eq(agentWakeupRequests.agentId, agent.id),
-      eq(agentWakeupRequests.status, "queued"),
-      sql`${agentWakeupRequests.runId} is null`,
-    ))
-    .orderBy(asc(agentWakeupRequests.requestedAt))
-    .limit(Math.max(limit * 4, limit));
+  const pendingRequests = await selectQueuedWakeupRequestIds(db, agent, limit);
   const promotedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
   for (const pendingRequest of pendingRequests) {
     if (promotedRuns.length >= limit) break;
@@ -272,28 +264,4 @@ async function promoteQueuedWakeupRequest(
       isWorkflowStepResume, isPlanReworkPromotion,
     });
   });
-}
-export async function selectDeferredWakeupRequest(
-  tx: FollowupTx, issue: { companyId: string; id: string },
-) {
-  const deferred = await tx
-    .select()
-    .from(agentWakeupRequests)
-    .where(
-      and(
-        eq(agentWakeupRequests.companyId, issue.companyId),
-        eq(agentWakeupRequests.status, "deferred_issue_execution"),
-        sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
-      ),
-    )
-    .orderBy(asc(agentWakeupRequests.requestedAt))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!deferred) return null;
-  const deferredAgent = await tx
-    .select()
-    .from(agents)
-    .where(eq(agents.id, deferred.agentId))
-    .then((rows) => rows[0] ?? null);
-  return { request: deferred, agent: deferredAgent };
 }

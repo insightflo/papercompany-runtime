@@ -7,9 +7,11 @@
 // [authority] agent_wakeup_requests 행 + qualityAcceptance JSON. helper 의 true,
 //   행 존재, queued 문자열만으로 수락을 만들지 않는다.
 
-import { and, asc, eq, like } from "drizzle-orm";
+import { and, asc, eq, like, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agents, agentWakeupRequests } from "@paperclipai/db";
+import type { FollowupTx } from "../heartbeat-followup-promotion.js";
+import { QA_CORRECTION_WAKE_PREFIX } from "../work-products/qa-correction-producer-attempt.js";
 // [operator decision wake] 연산자 결정 후속 continuation wake. 활성 run 에 coalesce 되면 해당
 //   run 이 소비 없이 끝날 때 영구 유실되고 continuation 은 accepted 로 오판한다(2026-09-24
 //   CMP-199 사고) — 결정 반영은 authority 전달이므로 coalesce 금지 대상에 포함한다.
@@ -74,9 +76,15 @@ export function parsePlanQaResubmissionWakeKey(key: string | null | undefined): 
 // DAG remediation refires need a new QA execution; an active adapter never rereads merged DB context.
 export const QA_REMEDIATION_REFIRE_WAKE_PREFIX = "qa-remediation-refire:";
 
-/** 병합 금지: 품질 조치, PLAN-QA 재제출, 연산자 결정 continuation, QA remediation 재실행. */
+/** 격리 후보 분류일 뿐 발급·현재 실행 권한이 아니다. 잘못된 transport 접두 표시도 격리한다. */
+export function isQaCorrectionWakeKey(key: string | null | undefined): boolean {
+  return typeof key === "string" && key.startsWith(QA_CORRECTION_WAKE_PREFIX.slice(0, -1));
+}
+
+/** 병합 금지: 품질 조치, PLAN-QA 재제출, 연산자 결정 continuation, QA remediation·교정 재검사. */
 export function isBoundedExecutionWakeKey(key: string | null | undefined): boolean {
   return isQualityWakeKey(key)
+    || isQaCorrectionWakeKey(key)
     || (typeof key === "string" && key.startsWith(PLAN_QA_RESUBMIT_WAKE_PREFIX))
     || (typeof key === "string" && key.startsWith(OPERATOR_DECISION_WAKE_PREFIX))
     || (typeof key === "string" && key.startsWith(QA_REMEDIATION_REFIRE_WAKE_PREFIX));
@@ -150,4 +158,46 @@ export async function nextQualityRetryWakeKey(db: Db, input: {
     return parsed !== null && parsed.generation === input.generation;
   });
   return qualityWakeKey({ ...input, attempt: atGeneration.length + 1 });
+}
+
+/** 조회만 수행한다. 후보 여유와 순서는 기존 promotion 순회의 성공 개수 제한과 별개다. */
+export async function selectQueuedWakeupRequestIds(
+  db: Pick<Db, "select">, agent: Pick<typeof agents.$inferSelect, "companyId" | "id">, limit: number,
+): Promise<Array<{ id: string }>> {
+  return db
+    .select({ id: agentWakeupRequests.id })
+    .from(agentWakeupRequests)
+    .where(and(
+      eq(agentWakeupRequests.companyId, agent.companyId),
+      eq(agentWakeupRequests.agentId, agent.id),
+      eq(agentWakeupRequests.status, "queued"),
+      sql`${agentWakeupRequests.runId} is null`,
+    ))
+    .orderBy(asc(agentWakeupRequests.requestedAt))
+    .limit(Math.max(limit * 4, limit));
+}
+
+export async function selectDeferredWakeupRequest(
+  tx: FollowupTx, issue: { companyId: string; id: string },
+) {
+  const deferred = await tx
+    .select()
+    .from(agentWakeupRequests)
+    .where(
+      and(
+        eq(agentWakeupRequests.companyId, issue.companyId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+      ),
+    )
+    .orderBy(asc(agentWakeupRequests.requestedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!deferred) return null;
+  const deferredAgent = await tx
+    .select()
+    .from(agents)
+    .where(eq(agents.id, deferred.agentId))
+    .then((rows) => rows[0] ?? null);
+  return { request: deferred, agent: deferredAgent };
 }
