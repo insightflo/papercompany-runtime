@@ -74,19 +74,18 @@ export async function assertDeliveryScope(db: Pick<Db, "select">, input: Correct
 export function assertDeliverySignature(input: CorrectionDeliveryInput, wake: DeliveryWake, historical: boolean) {
   const r = input.request, clean = withoutWorkflowAttemptProof(wake.payload) ?? {};
   const caller = withoutWorkflowAttemptProof(r.payload) ?? {}, savedContext = clean[contextKey];
+  requireDelivery(Object.hasOwn(clean, contextKey) && record(savedContext)
+    && same(savedContext, withoutWorkflowAttemptProof({
+      [contextKey]: r.contextSnapshot })?.[contextKey]), "context");
   let reason = wake.reason;
   const deferred = !historical && wake.status === "deferred_issue_execution" && wake.runId === null
     && reason === "issue_execution_deferred";
   const promoted = historical && reason === "issue_execution_promoted";
   if (deferred || promoted) {
-    requireDelivery(record(savedContext) && Object.hasOwn(savedContext, "wakeReason"), "context");
+    requireDelivery(Object.hasOwn(savedContext, "wakeReason"), "context");
     reason = savedContext.wakeReason as string | null;
   }
-  if (Object.hasOwn(clean, contextKey)) {
-    requireDelivery(record(savedContext) && same(savedContext, withoutWorkflowAttemptProof({
-      [contextKey]: r.contextSnapshot })?.[contextKey]), "context");
-    delete clean[contextKey];
-  } else requireDelivery(!deferred && !promoted, "context");
+  delete clean[contextKey];
   // The server duplicates issueId only after the typed scope has been proven.
   if (!Object.hasOwn(caller, "issueId") && Object.hasOwn(clean, "issueId")) {
     requireDelivery(clean.issueId === input.issueId && wake.issueId === input.issueId, "scope");

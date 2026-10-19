@@ -213,6 +213,11 @@ export async function corruptDelivery(c: C02Case, fault: string) {
     const { id: _id, ...copy } = h;
     await c.peer.insert(heartbeatRuns).values(copy);
   }
+  if (fault === "missing_context" || fault === "missing_context_changed_task_key") {
+    const payload = { ...w.payload };
+    delete payload._paperclipWakeContext;
+    await c.peer.update(agentWakeupRequests).set({ payload }).where(eq(agentWakeupRequests.id, w.id));
+  }
   if (fault === "context") await c.peer.update(agentWakeupRequests).set({ reason: "issue_execution_promoted",
     payload: { ...w.payload, _paperclipWakeContext: {} } }).where(eq(agentWakeupRequests.id, w.id));
 }

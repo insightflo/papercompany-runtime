@@ -273,14 +273,20 @@ describe("C02 correction delivery root", () => {
     } finally { await remove(); }
   }, 30000);
 
-  it.each(["proof", "target", "backref", "time", "order", "context", "duplicate_wake", "duplicate_hb"] as const)(
+  it.each(["proof", "target", "backref", "time", "order", "context", "missing_context",
+    "missing_context_changed_task_key", "duplicate_wake", "duplicate_hb"] as const)(
     "rejects %s corruption of a real delivered result without another callback or file observation", async fault => {
       const c = await issueC02(owned, { mode: "content-only" }), i = await deliveryInput(c);
       const writer = vi.fn(deliveryWriter(c));
       await deliver(c, i, c.s.db, writer);
       await corruptDelivery(c, fault);
+      if (fault === "missing_context_changed_task_key") i.request.contextSnapshot.taskKey = "different_task_key";
       const before = await deliveryState(c), observation = vi.spyOn(followups, "observeQaCorrectionFollowup");
-      await expect(deliver(c, i, owned.connect(), writer)).rejects.toThrow();
+      const replay = deliver(c, i, owned.connect(), writer);
+      await expect(replay).rejects.toThrow();
+      if (fault === "missing_context" || fault === "missing_context_changed_task_key") {
+        await expect(replay).rejects.toMatchObject({ message: "qa_correction_delivery_context" });
+      }
       expect(writer).toHaveBeenCalledTimes(1);
       expect(observation).not.toHaveBeenCalled();
       expect(await deliveryState(c)).toEqual(before);
