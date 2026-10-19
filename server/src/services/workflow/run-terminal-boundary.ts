@@ -32,6 +32,7 @@ import {
 } from "./run-terminal-boundary-cause.js";
 import { evaluateRecoveryChannels, uniqueIssueIds } from "./run-terminal-recovery-gate.js";
 import { buildEffectIntentValues, captureStopTargets } from "./run-terminal-boundary-storage.js";
+import { deferRunForQaCorrection } from "./control-flow/qa-correction-liveness.js";
 
 // 지정된 공개 API 표면 — 내부 분할과 무관하게 본 모듈이 단일 진입점이다.
 export type {
@@ -109,6 +110,10 @@ export async function finalizeRunTerminal(db: TerminalBoundaryDb, input: Finaliz
     if (isTerminalRunStatus(locked.status)) {
       return await classifyExistingDecision(tx, input, locked);
     }
+
+    // 교정 보호는 gatePolicy와 독립이며 명시적 취소는 우선한다. 첫 쓰기 전에 재조회한다.
+    const correctionDeferred = await deferRunForQaCorrection(tx, locked, input.decision);
+    if (correctionDeferred) return correctionDeferred;
 
     // failed + defer 정책에서만 게이트가 종결을 막는다. 유예 시 그 외 어떤 행도 쓰지 않는다.
     let staleUnblockIssueIds: string[] = [];

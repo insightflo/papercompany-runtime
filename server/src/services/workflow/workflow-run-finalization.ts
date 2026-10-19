@@ -2,11 +2,12 @@
  * Existing run convergence and final writes; flag reads and post-finalization hooks stay in the DAG.
  * Branch order and terminal-effect ownership must remain unchanged when extending this boundary.
  */
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { workflowRuns, type Db, type workflowStepRuns } from "@paperclipai/db";
 import type { WorkflowExecutionContext } from "./dag-engine.js";
 import { isDynamicOwnerPlanWorkflowDefinition, type WorkflowDefinitionExecutionShape } from "./execution-steps.js";
-import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
+import { executeTerminalEffectIntents, finalizeRunTerminal, isTerminalRunStatus } from "./run-terminal-boundary.js";
+import { readQaCorrectionLiveness } from "./control-flow/qa-correction-liveness.js";
 import {
   logWorkflowRunFinalizationRefused,
   resolveWorkflowRunFinalizationGate,
@@ -162,9 +163,24 @@ export async function finalizeWorkflowRunState(
     });
     finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
   } else {
-    const [updatedRun] = await db.update(workflowRuns).set(patch)
-      .where(eq(workflowRuns.id, context.run.id)).returning();
-    finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
+    finalRun = await db.transaction(async tx => {
+      const scope = and(eq(workflowRuns.id, context.run.id), eq(workflowRuns.companyId, context.run.companyId));
+      const [locked] = await tx.select().from(workflowRuns).where(scope).for("update");
+      if (!locked) throw new Error(`workflow run not found: ${context.run.id}`);
+      // A stale recompute must not replace terminal authority or another run/mission generation.
+      if (isTerminalRunStatus(locked.status)
+        || locked.dispatchAuthorityVersion !== context.run.dispatchAuthorityVersion
+        || locked.missionId !== context.run.missionId) return locked;
+      if (nextStatus === "completed" || nextStatus === "failed") {
+        const correction = await readQaCorrectionLiveness(tx, locked);
+        if (correction.kind !== "clear") return locked;
+      }
+      const [updatedRun] = await tx.update(workflowRuns)
+        .set({ ...patch, startedAt: locked.startedAt ?? patch.startedAt })
+        .where(scope).returning();
+      if (!updatedRun) throw new Error(`workflow run not found: ${context.run.id}`);
+      return updatedRun;
+    });
   }
   const missionId = finalRun.missionId;
   const shouldStopMissionRuntimes = !boundaryHandledFinalization
