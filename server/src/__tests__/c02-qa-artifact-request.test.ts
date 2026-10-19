@@ -82,7 +82,33 @@ describe("C02 corrected QA request capture", () => {
     const r = c.applied.revisions[0]!, expected = commitBuffers(mode, "new"), facts = commitFacts(expected);
     const main = facts.find(f => f.role === "main")!, old = commitFacts(commitBuffers(mode, "old")).find(f => f.role === "main")!;
     const before = await preserved(c), beforeDb = await commitDbState({ ...c.s, db: c.peer });
-    const locks = vi.spyOn(PgSelectBase.prototype, "for"), result = await prepare(input);
+    const locks = vi.spyOn(PgSelectBase.prototype, "for");
+    let result: Awaited<ReturnType<typeof prepare>>;
+    if (mode === "html") {
+      const [[primary], [peer]] = await Promise.all([input.db.$client<{ pid: number }[]>`select pg_backend_pid() as pid`,
+        c.peer.$client<{ pid: number }[]>`select pg_backend_pid() as pid`]);
+      expect(peer!.pid).not.toBe(primary!.pid);
+      const actual = followups.observeQaCorrectionFollowup;
+      let observations = 0, release!: () => void;
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      const observer = vi.spyOn(followups, "observeQaCorrectionFollowup").mockImplementation(async (...args) => {
+        const token = await actual(...args).finally(() => {
+          if (++observations === 2) release();
+        });
+        await barrier;
+        return token;
+      });
+      try {
+        const [first, second] = await Promise.allSettled([prepare(input), prepare({ ...input, db: c.peer })]);
+        if (first.status === "rejected") throw first.reason;
+        if (second.status === "rejected") throw second.reason;
+        result = first.value;
+        expect(second.value.snapshot).toEqual(result.snapshot);
+        expect(second.value.snapshot.outputRoot).toBe(result.snapshot.outputRoot);
+        expect(second.value.snapshot.qaCorrectionFollowup).toEqual(c.ref);
+        expect(observations).toBe(3);
+      } finally { observer.mockRestore(); }
+    } else result = await prepare(input);
     const tables = locks.mock.contexts.map(q => (q as { toSQL(): { sql: string } }).toSQL().sql.match(/from "([^"]+)"/)?.[1]);
     if (mode === "content-only") expect(tables.slice(0, 11)).toEqual([
       "quality_policy_usage", "quality_action_groups", "quality_actions", "quality_policy_versions",

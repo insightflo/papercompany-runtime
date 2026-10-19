@@ -19,8 +19,11 @@ import { readObject } from "./core-tool-context.js";
 import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 import { assertQaCorrectionRequestFiles, assertQaCorrectionSelectionUnchanged,
   lockQaCorrectionSelections, readSelectedQaCorrections } from "./control-flow/qa-correction-selection.js";
-import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup } from "./control-flow/qa-correction-followup.js";
+import { observeQaCorrectionFollowup, QaCorrectionFollowupReadError,
+  readCurrentQaCorrectionFollowup } from "./control-flow/qa-correction-followup.js";
 import { readIssuedQaCorrection } from "./control-flow/qa-correction-reader.js";
+
+class QaRequestReobservationRequired extends Error {}
 
 export type QaRequest = Awaited<ReturnType<typeof prepareQaArtifactRequest>>;
 export async function prepareQaArtifactRequest(input: { db: Db; companyId: string; workflowRunId?: string | null;
@@ -121,15 +124,25 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     return scope;
   };
   // No filesystem work occurs while holding mission -> run -> sorted step locks.
-  const chosen = await input.db.transaction(async tx => {
+  const choose = (token: typeof observation, allowReobserve: boolean) => input.db.transaction(async tx => {
     const locked = correction ? await lockQaCorrectionSelections(tx, selectionScope, corrections)
       : await lockProducerSelection(tx, { companyId: input.companyId, workflowRunId: row.run.id,
         stepIds: [contract.inputStepId], stepRunIds: [row.step.id] }, "update");
     const currentCorrections = await readSelectedQaCorrections(tx, selectionScope);
     assertQaCorrectionSelectionUnchanged(corrections, currentCorrections);
-    if (correction && observation) await readCurrentQaCorrectionFollowup(tx,
-      correction.consumer.candidate.ref, observation, readIssuedQaCorrection);
     const run = locked.run, step = locked.steps.find(s => s.id === row.step.id);
+    const current = step?.metadata.toolArtifactRequest, observed = row.step.metadata.toolArtifactRequest;
+    const exactReuse = readObject(current).requestId === input.requestId
+      && isDeepStrictEqual(identity(current as typeof snapshot), identity(snapshot));
+    if (correction && token) {
+      try {
+        await readCurrentQaCorrectionFollowup(tx, correction.consumer.candidate.ref, token, readIssuedQaCorrection);
+      } catch (error) {
+        if (error instanceof QaCorrectionFollowupReadError && error.reason === "observation"
+          && exactReuse && allowReobserve) throw new QaRequestReobservationRequired();
+        throw error;
+      }
+    }
     const [mission] = await tx.select().from(missions).where(and(
       eq(missions.id, row.run.missionId!), eq(missions.companyId, input.companyId)));
     if (!mission || !["planning", "active"].includes(mission.status) || !run || run.status !== "running"
@@ -152,7 +165,6 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
       missionId: run.missionId, workflowRunId: run.id, stepId: step.stepId });
     if (!isDeepStrictEqual(product, selected.product) || !isDeepStrictEqual(currentPin, pin)
       || !isDeepStrictEqual(currentPaths, paths)) throw new Error("qa_artifact_request_stale");
-    const current = step.metadata.toolArtifactRequest, observed = row.step.metadata.toolArtifactRequest;
     if (readObject(current).requestId === input.requestId) {
       const saved = current as typeof snapshot;
       if (!isDeepStrictEqual(identity(saved), identity(snapshot))) throw new Error("qa_artifact_request_conflict");
@@ -170,6 +182,14 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     if (updated.length !== 1) throw new Error("qa_artifact_request_stale");
     return snapshot;
   });
+  let chosen: typeof snapshot;
+  try {
+    chosen = await choose(observation, true);
+  } catch (error) {
+    if (!(error instanceof QaRequestReobservationRequired) || !correction) throw error;
+    const refreshed = await observeQaCorrectionFollowup(input.db, correction.consumer.candidate.ref, readIssuedQaCorrection);
+    chosen = await choose(refreshed, false);
+  }
   if (!chosen.root || typeof chosen.outputRoot !== "string" || chosen.root.path !== chosen.outputRoot
     || (chosen.outputRoot !== requestPath && path.dirname(chosen.outputRoot) !== requestPath)
     || chosen.outputRootHash !== digest(JSON.stringify({ path: chosen.root.path, dev: chosen.root.dev, ino: chosen.root.ino }))
