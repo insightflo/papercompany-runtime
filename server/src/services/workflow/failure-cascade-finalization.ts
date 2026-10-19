@@ -1,7 +1,8 @@
 import type { Db } from "@paperclipai/db";
 import { workflowRuns } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { ReconciliationResult } from "./reconciler.js";
+import { deferRunForQaCorrection } from "./control-flow/qa-correction-liveness.js";
 import { isStepRunAwaitingRetry } from "./retry-reconciler.js";
 import { hasLiveWorkflowChildWait } from "./workflow-child-execution.js";
 import {
@@ -21,6 +22,16 @@ class CascadeCancelled extends Error {
   constructor(readonly result: Cancelled) {
     super("Failure cascade cancelled");
   }
+}
+
+// The observation enum is not a run row. Re-read the full row under the outer run/step locks.
+async function deferCascadeForQaCorrection(tx: CascadeTx, run: FailureCascadeRun): Promise<void> {
+  const [current] = await tx.select().from(workflowRuns).where(and(
+    eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, run.companyId),
+  ));
+  if (!current) throw new CascadeCancelled("stale_observation");
+  const deferred = await deferRunForQaCorrection(tx, current, "failed");
+  if (deferred) throw new CascadeCancelled(deferred);
 }
 
 async function finalizeCascade(tx: CascadeTx, input: FinalizeRunTerminalInput): Promise<Finalized> {
@@ -112,6 +123,7 @@ export async function settleStuckFailureCascade(
         kind: "stuck", run, pendingSteps, boundaryStepRuns, boundaryEnabled,
       });
       if (observation === "stale_observation") throw new CascadeCancelled(observation);
+      if (observation === "current") await deferCascadeForQaCorrection(tx, run);
       if (observation === "current" && pendingSteps.length > 0) {
         await writeStuckCascade(tx, run, pendingSteps, new Date());
       }
@@ -168,7 +180,10 @@ export async function settleDeadlockFailureCascade(
         kind: "deadlock", run, stepsToSkip, runSteps, boundaryEnabled, mayFinalize,
       });
       if (observation === "stale_observation") throw new CascadeCancelled(observation);
-      if (observation === "current") await writeDeadlockCascade(tx, run, stepsToSkip, now);
+      if (observation === "current") {
+        await deferCascadeForQaCorrection(tx, run);
+        await writeDeadlockCascade(tx, run, stepsToSkip, now);
+      }
       // A valid mixed hold commits only its selected skips.
       if (!mayFinalize) return null;
       if (boundaryEnabled) {
