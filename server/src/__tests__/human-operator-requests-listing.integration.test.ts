@@ -228,4 +228,63 @@ describePg("listCompanyHumanOperatorRequests source routing", () => {
     expect(lines[3]).toMatch(/^근거: /);
     expect(lines[3]).toContain("failed-run-count=2");
   });
+
+  it("groups repeated rows of the same case into one request with a count and a latest representative", async () => {
+    companyId = randomUUID();
+    const agentId = randomUUID();
+    const missionId = randomUUID();
+    const ownerIssueId = randomUUID();
+    const otherIssueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Dedup Co",
+      issuePrefix: `DC${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Mission Owner", role: "ceo", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: "Dedup mission", status: "active" });
+    await db.insert(issues).values([
+      { id: ownerIssueId, companyId, missionId, title: "owner unblock", status: "blocked", assigneeAgentId: agentId },
+      { id: otherIssueId, companyId, missionId, title: "other unblock", status: "blocked", assigneeAgentId: agentId },
+    ]);
+    const base = Date.now() - 6 * 60 * 60 * 1000; // 6시간 전부터 시차를 두고 반복(라이브 사례)
+    const row = (issueId: string, decision: "request_input" | "escalate", minutesAgo: number) => ({
+      companyId,
+      actorType: "agent" as const,
+      actorId: agentId,
+      action: HUMAN_OPERATOR_REQUEST_ACTION,
+      entityType: "issue",
+      entityId: issueId,
+      createdAt: new Date(base + (360 - minutesAgo) * 60 * 1000),
+      details: {
+        missionId, issueId, decisionEventId: randomUUID(), decision,
+        reason: "같은 건 재발화", actorType: "agent", actorId: agentId,
+      },
+    });
+    // 같은 (mission, issue, escalate) 5행 — 09:09/09:15/11:15/15:01/15:40 패턴.
+    await db.insert(activityLog).values([
+      row(ownerIssueId, "escalate", 360),
+      row(ownerIssueId, "escalate", 354),
+      row(ownerIssueId, "escalate", 225),
+      row(ownerIssueId, "escalate", 100),
+      row(ownerIssueId, "escalate", 60),
+      // 유형이 다른 행 / 앵커 이슈가 다른 행은 별도로 유지된다.
+      row(ownerIssueId, "request_input", 200),
+      row(otherIssueId, "escalate", 120),
+    ]);
+
+    const requests = await listCompanyHumanOperatorRequests(db, { companyId });
+
+    expect(requests).toHaveLength(3);
+    const escalateGroup = requests.find((request) => request.issueId === ownerIssueId && request.severity === "blocked")!;
+    expect(escalateGroup.count).toBe(5); // 5행 → 1행 + count=5
+    expect(escalateGroup.timestamp).toBe(new Date(base + (360 - 60) * 60 * 1000).toISOString()); // 대표=최신 타임스탬프
+    const requestInputGroup = requests.find((request) => request.issueId === ownerIssueId && request.severity === "attention")!;
+    expect(requestInputGroup.count).toBe(1);
+    const otherIssueGroup = requests.find((request) => request.issueId === otherIssueId)!;
+    expect(otherIssueGroup.count).toBe(1);
+  });
 });

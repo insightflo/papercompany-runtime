@@ -319,6 +319,8 @@ export interface MissionHumanOperatorRequest {
   title: string;
   summary: string;
   timestamp: string;
+  /** 같은 (missionId, issueId, decision 종류) 반복 행 수 — 서버 표시 통합(2026-10-18) 추가. 없으면 1. */
+  count?: number;
   severity?: MissionGovernanceThreadSeverity;
   event: MissionGovernanceThreadEvent;
 }
