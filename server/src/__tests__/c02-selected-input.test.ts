@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
-import { expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   issueWorkProducts,
   workflowDefinitions,
@@ -14,6 +14,12 @@ import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor
 import type { QaRequest } from "../services/workflow/qa-artifact-request.js";
 import { resolveWorkflowToolStepArgs } from "../services/workflow/tool-step-args.js";
 import { database, fixture } from "./helpers/qa-receipt-fixture.js";
+import { PgSelectBase } from "drizzle-orm/pg-core";
+import { selectOfficialWorkProduct } from "../services/workflow/workproduct-selector.js";
+import { commitDbState } from "./qa-correction-commit-fixture.js";
+import { commitBuffers, commitFacts, createCommitSourceHarness, issueC02, issueNextC02,
+  type C02Case } from "./helpers/c02-fixture.js";
+
 
 // C02 stage6/C12 expectation sources: the adopted extraction map,
 // workflow-tool-step-args (ancestor/assets and metadata), and workflow-qa-receipt.
@@ -124,4 +130,110 @@ it("renders selected input into the real QA request without restamping its produ
   expect(await readFile(path.join(request.outputRoot, "input", "assets", "hero.png"))).toEqual(assetBytes);
   expect(result.toolArtifactReceipt?.input).toEqual(request.input);
   expect(await readPins()).toEqual(pins);
+});
+
+// C02-9A/C12: real issuance, independent fixture bytes and peer SQL. B capture is stage9B.
+describe("C02 corrected selected inputs", () => {
+  let owned: Awaited<ReturnType<typeof createCommitSourceHarness>>;
+  beforeAll(async () => {
+    owned = await createCommitSourceHarness();
+    vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk");
+    vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", path.join(owned.root, "selection-quality-storage"));
+  }, 120000);
+  afterEach(() => { vi.restoreAllMocks(); });
+  afterAll(async () => { try { await owned?.close(); } finally { vi.unstubAllEnvs(); } }, 120000);
+  const scope = (c: C02Case, pinnedId?: string) => ({ companyId: c.s.p.companyId,
+    workflowRunId: c.s.p.workflowRunId, stepId: "produce", selector: { type: "artifact", title: "report" }, pinnedId });
+  const state = (c: C02Case) => commitDbState({ ...c.s, db: c.peer });
+  async function args(c: C02Case, db = c.peer, consumerStepRunId = c.s.f.qa.id) {
+    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, c.s.p.workflowRunId));
+    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
+    const workflowSteps = definition!.stepsJson as Parameters<typeof resolveWorkflowToolStepArgs>[0]["workflowSteps"];
+    const qa = workflowSteps.find(s => s.id === c.s.f.qa.stepId)!;
+    return resolveWorkflowToolStepArgs({ db, run: run!, consumerStepRunId, workflowSteps,
+      step: { ...qa, workProductSelectors: { produce: scope(c).selector },
+        toolArgs: { content: "{$steps.produce.workProductPath}" } } });
+  }
+  // The same issued B previously failed provenance_missing; C02 requires B plus A's unchanged producer.
+  it("selects actual B and C with the entire original producer, preserving the existing pin", async () => {
+    const b = await issueC02(owned), r = b.applied.revisions[0]!, expected = commitBuffers("html", "new");
+    // A non-null existing generation must survive even though B has no source generation.
+    await b.peer.update(workflowStepOutputBindings).set({ sourceExecutionGeneration: b.s.producer.executionGeneration })
+      .where(eq(workflowStepOutputBindings.id, b.s.f.bindingId));
+    const before = await state(b), selected = await selectOfficialWorkProduct(b.peer, scope(b));
+    expect(selected.product.id).toBe(r.workProductId);
+    expect(selected.file).toBe(path.join(r.root, "report.html"));
+    expect(selected.producer).toEqual(b.s.producer);
+    expect(selected.producer.sha256).toBe(commitFacts(commitBuffers("html", "old")).find(f => f.role === "main")!.sha256);
+    expect(selected.producer.byteSize).toBe(commitBuffers("html", "old").get("report.html")!.length);
+    expect(selected.product.metadata?.workflowProducer).toBeUndefined();
+    expect(selected.product.sourceExecutionGeneration).toBeNull();
+    if (!("correction" in selected) || !selected.correction) throw Error("issued revision evidence required");
+    expect(selected.correction.candidates.map(c => c.ref)).toEqual([b.ref]);
+    expect(selected.correction.revision.ancillaryRoleBindings).toEqual([{ role: "research", relativePath: "source-notes.txt" }]);
+    const facts = selected.correction.revision.files.map(({ beforeSha256: _, ...f }) => f);
+    expect(facts.sort((a, z) => a.relativePath.localeCompare(z.relativePath)))
+      .toEqual(commitFacts(expected).sort((a, z) => a.relativePath.localeCompare(z.relativePath)));
+    for (const [name, bytes] of expected) expect(await readFile(path.join(r.root, name))).toEqual(bytes);
+    expect(await args(b)).toEqual({ content: path.join(r.root, "report.html") });
+    expect(await state(b)).toEqual(before);
+    expect(before.pins.find(p => p.id === b.s.f.bindingId)).toMatchObject({
+      workProductId: r.workProductId, sourceExecutionGeneration: b.s.producer.executionGeneration,
+    });
+    const c = await issueNextC02(b), cr = c.applied.revisions[0]!;
+    await expect(selectOfficialWorkProduct(b.peer, scope(b, r.workProductId))).rejects.toThrow();
+    const current = await selectOfficialWorkProduct(c.peer, scope(c));
+    expect(current.product.id).toBe(cr.workProductId);
+    expect(current.producer).toEqual(b.s.producer);
+    expect(await readFile(current.file)).toEqual(commitBuffers("html", "final").get("report.html"));
+    expect(await args(c)).toEqual({ content: path.join(cr.root, "report.html") });
+    const after = await state(c);
+    expect(after.pins).toEqual(before.pins.map(p => ({ ...p, workProductId: cr.workProductId,
+      resolvedAt: after.pins.find(a => a.id === p.id)!.resolvedAt })));
+  }, 20000);
+  it.each(["malformed", "legacy", "cancel", "binding"] as const)("refuses %s without changing pins or issuing proof", async fault => {
+    const c = await issueC02(owned, { mode: "content-only", legacy: fault === "legacy" });
+    if (fault === "malformed") await c.peer.update(issueWorkProducts).set({ metadata: {
+      path: path.join(c.applied.revisions[0]!.root, "report.html"), qaCorrection: null,
+      workflowProducer: c.s.producer } }).where(eq(issueWorkProducts.id, c.applied.revisions[0]!.workProductId));
+    if (fault === "cancel") await c.peer.update(workflowRuns).set({ status: "cancelled" }).where(eq(workflowRuns.id, c.s.p.workflowRunId));
+    if (fault === "binding") await c.peer.update(workflowStepOutputBindings).set({ workProductId: c.s.productId })
+      .where(eq(workflowStepOutputBindings.id, c.s.f.bindingId));
+    const before = await state(c);
+    await expect(selectOfficialWorkProduct(c.peer, scope(c))).rejects.toThrow();
+    await expect(args(c)).rejects.toThrow();
+    expect(await state(c)).toEqual(before);
+  }, 20000);
+  it("locks the root quality prefix first, reuses its last use and adds no late locks in a nested call", async () => {
+    const c = await issueC02(owned, { mode: "content-only", quality: true }), before = await state(c);
+    const locks = vi.spyOn(PgSelectBase.prototype, "for");
+    expect(await args(c)).toEqual({ content: path.join(c.applied.revisions[0]!.root, "report.html") });
+    const tables = locks.mock.contexts.map(q => (q as { toSQL(): { sql: string } }).toSQL().sql
+      .match(/from "([^"]+)"/)?.[1]);
+    expect(tables).toEqual([
+      "quality_policy_usage", "quality_action_groups", "quality_actions", "quality_policy_versions",
+      "missions", "workflow_runs", "heartbeat_runs", "issues", "workflow_step_runs",
+      "issue_work_products", "workflow_step_output_bindings",
+    ]);
+    locks.mockClear();
+    await c.peer.transaction(async tx => {
+      expect(await args(c, tx as unknown as typeof c.peer)).toEqual({
+        content: path.join(c.applied.revisions[0]!.root, "report.html"),
+      });
+    });
+    expect(locks).not.toHaveBeenCalled();
+    await expect(args(c, c.peer, c.s.f.producer.id)).rejects.toThrow();
+    expect(await state(c)).toEqual(before);
+  }, 20000);
+  it("aborts when B changes to C between root classification and the transaction", async () => {
+    const b = await issueC02(owned, { mode: "content-only" }), transaction = b.peer.transaction.bind(b.peer);
+    let c: C02Case | undefined;
+    vi.spyOn(b.peer, "transaction").mockImplementationOnce(async (body, config) => {
+      c = await issueNextC02(b);
+      return transaction(body, config);
+    });
+    await expect(args(b)).rejects.toThrow("workproduct_selector_correction_selection_changed");
+    if (!c) throw Error("peer C issuance must precede the selection transaction");
+    expect(await args(c)).toEqual({ content: path.join(c.applied.revisions[0]!.root, "report.html") });
+  }, 20000);
 });
