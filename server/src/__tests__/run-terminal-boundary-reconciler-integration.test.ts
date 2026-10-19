@@ -96,6 +96,8 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     expect(run?.completedAt).toBeNull();
     const steps = await stepsOf(world.runId);
     expect(steps.find((step) => step.stepId === "post")?.status).toBe("pending");
+    expect(steps.find((step) => step.stepId === "post")?.metadata).not.toHaveProperty("failureCascadeSkipped");
+    expect(await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowRunId, world.runId))).toHaveLength(0);
     expect(await decisionsOf(world.runId)).toHaveLength(0);
   });
 
@@ -130,6 +132,12 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     expect(intents.every((intent) => intent.status === "completed")).toBe(true);
     const [runtime] = await db.select().from(missionAgentRuntimes).where(eq(missionAgentRuntimes.id, world.runtimeId!));
     expect(runtime?.status).toBe("stopped");
+    const steps = await stepsOf(world.runId);
+    expect(steps.find((step) => step.stepId === "post")).toMatchObject({ status: "skipped", metadata: { failureCascadeSkipped: true } });
+    expect(await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.workflowStepRunId, world.stepRunIdsByStep["post"]!))).toEqual([
+      expect.objectContaining({ fromStatus: "pending", toStatus: "skipped", reasonCode: "workflow_reconciler", payload: expect.objectContaining({ source: "workflow_reconciler" }) }),
+    ]);
   });
 
   it("flag OFF stuck pass: the legacy direct UPDATE stays decision-free", async () => {
@@ -152,6 +160,10 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     expect(await decisionsOf(world.runId)).toHaveLength(0);
     const steps = await stepsOf(world.runId);
     expect((steps.find((step) => step.stepId === "post")?.metadata as { failureCascadeSkipped?: boolean })?.failureCascadeSkipped).toBe(true);
+    expect(await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.workflowStepRunId, world.stepRunIdsByStep["post"]!))).toEqual([
+      expect.objectContaining({ fromStatus: "pending", toStatus: "skipped", reasonCode: "workflow_reconciler", payload: expect.objectContaining({ source: "workflow_reconciler" }) }),
+    ]);
   });
 
   it("flag ON deadlock pass: convergence finalizes via the boundary", async () => {
@@ -181,6 +193,10 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     const synthesize = steps.find((step) => step.stepId === "synthesize")!;
     expect(synthesize.status).toBe("skipped");
     expect((synthesize.metadata as { controlFlowSkipped?: boolean }).controlFlowSkipped).toBe(true);
+    expect(await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.workflowStepRunId, world.stepRunIdsByStep["synthesize"]!))).toEqual([
+      expect.objectContaining({ fromStatus: "pending", toStatus: "skipped", reasonCode: "workflow_deadlock_reconciler", payload: expect.objectContaining({ source: "workflow_deadlock_reconciler" }) }),
+    ]);
   });
 
   it("flag ON deadlock pass: open retry channel defers finalization and leaves the run running", async () => {
@@ -229,6 +245,12 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     const run = await runOf(world.runId);
     expect(run?.status).toBe("failed");
     expect(await decisionsOf(world.runId)).toHaveLength(0);
+    const steps = await stepsOf(world.runId);
+    expect(steps.find((step) => step.stepId === "synthesize")).toMatchObject({ status: "skipped", metadata: { controlFlowSkipped: true } });
+    expect(await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.workflowStepRunId, world.stepRunIdsByStep["synthesize"]!))).toEqual([
+      expect.objectContaining({ fromStatus: "pending", toStatus: "skipped", reasonCode: "workflow_deadlock_reconciler", payload: expect.objectContaining({ source: "workflow_deadlock_reconciler" }) }),
+    ]);
   });
 
   it("sweep: an intent on an already-settled heartbeat stays pending, increments attempts, then exhausts to failed", async () => {
