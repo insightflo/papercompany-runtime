@@ -18,6 +18,7 @@ import {
 } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -74,7 +75,11 @@ describeEP("P4 oversight wakeup promote integration", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   beforeAll(async () => { tempDb = await startEmbeddedPostgresTestDatabase("paperclip-oversight-promote-"); db = createDb(tempDb.connectionString); }, 60_000);
-  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
+  afterAll(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
+    await db.$client.end({ timeout: 5 });
+    await tempDb?.cleanup();
+  });
 
   it("QA-gate ownerAction + live recovery → request completed + noop event + heartbeat run 0", async () => {
     const seed_ = await seed(db, true);

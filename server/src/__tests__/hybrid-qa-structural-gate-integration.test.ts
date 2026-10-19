@@ -19,9 +19,8 @@ import {
 } from "./helpers/embedded-postgres.js";
 import {
   completeWorkflowToolStepFromResult,
-  setWorkflowToolStepExecutor,
-  syncWorkflowRunState,
 } from "../services/workflow/dag-engine.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEP = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -56,6 +55,7 @@ describeEP("hybrid QA — structural gate integration", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
     await db.delete(issueComments);
     await db.delete(workflowTransitionEvents);
     await db.delete(workflowStepRuns);
@@ -64,8 +64,18 @@ describeEP("hybrid QA — structural gate integration", () => {
     await db.delete(issues);
   });
   afterAll(async () => {
+    await waitForHeartbeatExecutionsToDrain(db);
+    await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   });
+
+  async function readVerdictEvents(stepRunId: string) {
+    return db.select().from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.workflowStepRunId, stepRunId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
+      ));
+  }
 
   async function seedWorkflowWithStructuralGate() {
     const wfId = randomUUID();
@@ -150,11 +160,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     });
 
     // Official verdict should be in transition events (issueId=null, issue-less)
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe("workflow_validation_verdict");
     expect(events[0].verdict).toBe("request_changes");
@@ -182,11 +188,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     expect(updated.lastDispatchErrorSummary).toBe("connection refused");
 
     // No verdict event
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(0);
   });
 
@@ -204,11 +206,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     expect(updated.status).toBe("failed");
     expect(updated.lastDispatchErrorSummary).toBe("structural_gate_contract_failure");
 
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(0);
   });
 
@@ -225,11 +223,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));
     expect(updated.status).toBe("completed");
 
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass");
   });
@@ -251,11 +245,7 @@ describeEP("hybrid QA — structural gate integration", () => {
       data: { verdict: "pass" },
     });
 
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(1);
   });
 
@@ -314,11 +304,7 @@ describeEP("hybrid QA — structural gate integration", () => {
     // Both the verdict event AND the step completion must exist.
     // If the ledger write had failed, the function would have thrown
     // and the step would not be completed — this proves fail-closed ordering.
-    const events = await db.select().from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.workflowStepRunId, gateRun.id),
-        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      ));
+    const events = await readVerdictEvents(gateRun.id);
     expect(events).toHaveLength(1);
     expect(events[0].verdict).toBe("pass");
     const [updated] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, gateRun.id));
