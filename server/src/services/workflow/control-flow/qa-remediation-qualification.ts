@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import type { Db } from "@paperclipai/db";
 import type { EdgeBearingStep } from "./edge-condition.js";
 import { isStructuralGateStep } from "./structural-gate.js";
 import { isDeliveryReadbackStep } from "../delivery-verification-gate.js";
@@ -66,8 +67,16 @@ export function isInsideBoundary(file: string, boundary: { allowedFiles: Set<str
   });
 }
 
-/** [T3 추출] 자격검사+경계+two-phase 검증까지만 — 깨우기/기록은 하지 않는다(두 경로 공유). */
-export async function collectQualifiableQaRemediations(input: TryQaRemediationInput): Promise<QualificationResult> {
+export type QaRemediationEligibilityInput = Pick<TryQaRemediationInput,
+  "run" | "steps" | "producerRun" | "rejectedQas" | "findingsByQaStepId"
+> & { db: Pick<Db, "select"> };
+export type QaRemediationEligibilityResult =
+  | { status: "eligible"; qualified: QualifiedQa[] }
+  | { status: "waiting" | "not_applicable"; detail: string };
+
+/** DB-only eligibility. Prepare owns history/caps; every other existing check remains shared. */
+export async function collectQaRemediationEligibility(input: QaRemediationEligibilityInput,
+  history: "legacy" | "prepare" = "legacy"): Promise<QaRemediationEligibilityResult> {
   const { db, run } = input;
   if (run.status === "cancelled") return { status: "not_applicable", detail: "run cancelled" };
   if (input.rejectedQas.length === 0) return { status: "not_applicable", detail: "no rejected qas" };
@@ -99,18 +108,19 @@ export async function collectQualifiableQaRemediations(input: TryQaRemediationIn
       return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation not fresh for producer generation` };
     }
     // [execution freshness] verdict heartbeat 가 이 QA step 의 최신 실행이어야 한다(재발행 이후 판정 스킵).
-    if (!(await isLatestQaExecution(db, qaRun.issueId, qaRun.id, loaded.heartbeatRunId))) {
+    if (!(await isLatestQaExecution(db as Db, qaRun.issueId, qaRun.id, loaded.heartbeatRunId))) {
       return { status: "not_applicable", detail: `qa ${q.edge.stepId} verdict superseded by newer execution` };
     }
-    // [idempotency] 이 verdict event 에 대한 remediation 이 이미 적용됐다면 재적용/재작업 모두 스킵(홀드).
-    if (await remediationAlreadyApplied(db, run.companyId, qaRun.id, loaded.sourceVerdictEventId)) {
-      waitingCount += 1;
-      continue;
-    }
-    // [bounded] QA stepRun 당 시도 상한 — 초과 시 생산자 재작업 경로로 폴백.
-    const attempts = await remediationAttemptCount(db, run.companyId, qaRun.id);
-    if (attempts >= QA_REMEDIATION_MAX_ATTEMPTS) {
-      return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation attempt cap exhausted` };
+    // These legacy helpers use SELECT only; their older Db annotations also accept a transaction.
+    if (history === "legacy") {
+      if (await remediationAlreadyApplied(db as Db, run.companyId, qaRun.id, loaded.sourceVerdictEventId)) {
+        waitingCount += 1;
+        continue;
+      }
+      const attempts = await remediationAttemptCount(db as Db, run.companyId, qaRun.id);
+      if (attempts >= QA_REMEDIATION_MAX_ATTEMPTS) {
+        return { status: "not_applicable", detail: `qa ${q.edge.stepId} remediation attempt cap exhausted` };
+      }
     }
 
     qualified.push({
@@ -125,6 +135,14 @@ export async function collectQualifiableQaRemediations(input: TryQaRemediationIn
     return { status: "waiting", detail: "all rejected qa verdicts already remediated; awaiting fresh QA verdict" };
   }
 
+  return { status: "eligible", qualified };
+}
+
+/** Existing callers retain the boundary, size, read and sequential exactly-once replacement checks. */
+export async function collectQualifiableQaRemediations(input: TryQaRemediationInput): Promise<QualificationResult> {
+  const eligibility = await collectQaRemediationEligibility(input);
+  if (eligibility.status !== "eligible") return eligibility;
+  const { qualified } = eligibility;
   // boundary: 생산자 등록 산출물 경로/디렉터리 외부 파일은 절대 건드리지 않는다.
   const boundary = await loadProducerArtifactBoundary(input);
   if (!boundary) return { status: "not_applicable", detail: "producer has no absolute-path active work products" };

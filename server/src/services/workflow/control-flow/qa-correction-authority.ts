@@ -21,7 +21,7 @@ import { loadLatestQaRemediations } from "../validation-verdict-ledger.js";
 import { isLatestQaExecution } from "./qa-cap-acceptance.js";
 import { isStructuralGateStep } from "./structural-gate.js";
 import {
-  hashQaCorrectionPayload, parseQaCorrectionEventPayload,
+  hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionPreparationKey,
   type QaCorrectionAttempt, type QaCorrectionPreparation, type QaCorrectionVerdictAuthority,
 } from "./qa-correction-contract.js";
 import { readQaCorrectionSources, type QaCorrectionSourceRead } from "./qa-correction-reader.js";
@@ -111,9 +111,38 @@ export interface QaCorrectionQualityRead {
   totals: Awaited<ReturnType<typeof readPolicyUsageTotals>> | null;
 }
 
+export interface QaCorrectionReservationProof { preparationEventId: string; preparationHash: string }
+
+/** An event lookup/key alone is never a reservation proof. Shared with the prepare writer's history count. */
+export function parseQaCorrectionPreparationRow(row: typeof workflowTransitionEvents.$inferSelect): QaCorrectionPreparation {
+  let p: QaCorrectionPreparation;
+  try { p = parseQaCorrectionEventPayload("qa_correction_prepared", row.payload); }
+  catch { throw new QaCorrectionReadError("record"); }
+  requireQaCorrection(row.id === p.correctionId && row.companyId === p.companyId && row.missionId === p.missionId
+    && row.workflowRunId === p.workflowRunId && row.workflowStepRunId === p.producer.stepRunId
+    && row.issueId === p.producer.issueId && row.executionGeneration === p.producer.executionGeneration
+    && row.eventType === "qa_correction_prepared" && row.layer === "workflow_validation"
+    && row.idempotencyKey === qaCorrectionPreparationKey(row.payload)
+    && row.createdAt.getTime() === new Date(p.preparedAt).getTime(), "record");
+  return p;
+}
+export async function readQaCorrectionReservation(db: QaCorrectionDb, p: QaCorrectionPreparation,
+  proof: QaCorrectionReservationProof): Promise<void> {
+  requireQaCorrection(proof && typeof proof === "object" && Object.keys(proof).length === 2
+    && proof.preparationEventId === p.correctionId && /^[a-f0-9]{64}$/.test(proof.preparationHash), "record");
+  const [row] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, proof.preparationEventId));
+  requireQaCorrection(row, "record");
+  const stored = parseQaCorrectionPreparationRow(row);
+  requireQaCorrection(stored.correctionId === p.correctionId && hashQaCorrectionPayload(row.payload) === proof.preparationHash
+    && hashQaCorrectionPayload(row.payload) === hashQaCorrectionPayload(p), "record");
+}
+
 /** Historical checks use issuance time; later cancellation/policy replacement does not erase history. */
 export async function readQaCorrectionQuality(db: QaCorrectionDb, p: QaCorrectionPreparation,
-  current: boolean, issuedAt = new Date(p.preparedAt)): Promise<QaCorrectionQualityRead | null> {
+  current: boolean, issuedAt = new Date(p.preparedAt),
+  reservation?: QaCorrectionReservationProof): Promise<QaCorrectionQualityRead | null> {
+  if (reservation !== undefined) await readQaCorrectionReservation(db, p, reservation);
+  const delta = reservation === undefined ? 1 : 0;
   const a = p.authority;
   if (a.kind !== "quality_current_output") return null;
   const [action] = await db.select().from(qualityActions).where(and(eq(qualityActions.companyId, p.companyId), eq(qualityActions.id, a.actionId)));
@@ -180,7 +209,7 @@ export async function readQaCorrectionQuality(db: QaCorrectionDb, p: QaCorrectio
       eq(qualityEvidenceRefs.companyId, p.companyId), eq(qualityEvidenceRefs.qualityActionId, action.id),
       sql`${qualityEvidenceRefs.qualityContract}->>'kind' = 'use'`));
     requireQaCorrection(Number(used?.n ?? 0) < budget.maxExecutorAttempts
-      && totals.executionAttempts + 1 <= budget.maxExecutorAttempts && usage("executionAttempts") + 1 <= budget.maxExecutorAttempts
+      && totals.executionAttempts + delta <= budget.maxExecutorAttempts && usage("executionAttempts") + delta <= budget.maxExecutorAttempts
       && totals.reservedCostCents + totals.chargedCostCents <= rules.maxCostCentsPerPeriod
       && usage("reservedCostCents") + usage("chargedCostCents") <= budget.maxCumulativeCostCents, "budget");
   }
@@ -199,9 +228,10 @@ export interface QaCorrectionAuthorityRead {
 /**
  * C03/C12: no file IO, reservation, event write or wake. The existing qualification caller still
  * owns sibling/back-edge eligibility, source-data/gate classification, patch validation and caps.
- * Prepare/commit must recheck under usage→group→action→policy→mission→run→steps→products→bindings locks.
+ * Prepare/commit rechecks under usage→group→action→policy→mission→run→heartbeat→issue→steps→products→bindings locks.
  */
-export async function validateQaCorrectionAuthority(db: QaCorrectionDb, value: unknown): Promise<QaCorrectionAuthorityRead> {
+export async function validateQaCorrectionAuthority(db: QaCorrectionDb, value: unknown,
+  options?: { reservation?: QaCorrectionReservationProof }): Promise<QaCorrectionAuthorityRead> {
   let p: QaCorrectionPreparation;
   try { p = parseQaCorrectionEventPayload("qa_correction_prepared", value); }
   catch { throw new QaCorrectionReadError("record"); }
@@ -234,7 +264,7 @@ export async function validateQaCorrectionAuthority(db: QaCorrectionDb, value: u
         && frozen.qaConfigHash === proof.qaConfigHash, "tool");
     } catch { throw new QaCorrectionReadError("tool"); }
   }
-  const quality = await readQaCorrectionQuality(db, p, true);
+  const quality = await readQaCorrectionQuality(db, p, true, undefined, options?.reservation);
   const sources = await readQaCorrectionSources(db, p, true);
   return { status: "authority_validated", preparation: p, sources, quality,
     qualificationRequired: "collectQualifiableQaRemediations", finalizationRequired: "locked_recheck_and_reservation_cas" };
