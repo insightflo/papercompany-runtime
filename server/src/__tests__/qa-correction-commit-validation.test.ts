@@ -1,7 +1,7 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, readlink } from "node:fs/promises";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { chmod, lstat, readFile, readlink } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 import { eq } from "drizzle-orm";
 import { companies, issueWorkProducts, workflowTransitionEvents } from "@paperclipai/db";
 import { captureArtifactRoot, digest } from "../services/workflow/artifact-files.js";
@@ -113,7 +113,26 @@ describe("C03 whole stored candidate validation", () => {
       }
       await hideCommitDeclaration(s);
       await owned.db.update(companies).set({ workProductRoot: null }).where(eq(companies.id, s.p.companyId));
-      const stored = await stage(s), expectedBase = kind === "original" ? s.directory : owned.root;
+      let stored: StoredCorrection;
+      if (kind === "original") {
+        const directory = s.directory, file = s.file;
+        const directoryStat = await lstat(directory), fileStat = await lstat(file), original = await readFile(file);
+        expect(directoryStat.isDirectory()).toBe(true); expect(directoryStat.mode & 0o777).toBe(0o500);
+        expect(fileStat.isFile()).toBe(true); expect(fileStat.mode & 0o777).toBe(0o400);
+        const restore = async () => {
+          const current = await lstat(directory);
+          expect([current.isDirectory(), current.dev, current.ino]).toEqual([true, directoryStat.dev, directoryStat.ino]);
+          await chmod(directory, directoryStat.mode & 0o777);
+          expect((await lstat(directory)).mode).toBe(directoryStat.mode);
+        };
+        onTestFinished(restore);
+        // This positive legacy case needs a writable storage base; legacy-readonly rejection stays separate.
+        await chmod(directory, 0o700);
+        expect((await lstat(file)).mode).toBe(fileStat.mode); expect(await readFile(file)).toEqual(original);
+        try { stored = await stage(s); } finally { await restore(); }
+        expect((await lstat(file)).mode).toBe(fileStat.mode); expect(await readFile(file)).toEqual(original);
+      } else stored = await stage(s);
+      const expectedBase = kind === "original" ? s.directory : owned.root;
       const prefix = kind === "mission-prior" ? path.join("missions", s.p.missionId) : "";
       expect(stored.revisions[0]!.root.startsWith(path.join(expectedBase, prefix, "qa-corrections", s.p.correctionId) + path.sep)).toBe(true);
       await unchanged(s, stored, () => validateQaCorrectionCommitCandidate(owned.db, stored));

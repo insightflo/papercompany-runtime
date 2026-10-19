@@ -86,8 +86,50 @@ describe("C03 candidate bytes and quality evidence preparation", () => {
         expect((await lstat(file)).isSymbolicLink()).toBe(true);
       }
       if (fault === "root_symlink") {
-        const parent = path.dirname(r.root);
-        await chmod(parent, 0o700); await rename(r.root, r.root + ".saved"); await symlink(r.root + ".saved", r.root);
+        const root = r.root, parent = path.dirname(root), saved = root + ".saved";
+        const parentStat = await lstat(parent), rootStat = await lstat(root);
+        const bytesAt = (directory: string) => Promise.all(r.files.map(f => readFile(path.join(directory, f.relativePath))));
+        const original = await bytesAt(root);
+        const present = (file: string) => lstat(file).catch(error => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        const isRoot = (entry: typeof rootStat | null) => entry?.isDirectory()
+          && entry.dev === rootStat.dev && entry.ino === rootStat.ino;
+        expect(parentStat.isDirectory()).toBe(true); expect(rootStat.isDirectory()).toBe(true);
+        expect(rootStat.mode & 0o777).toBe(0o500); expect(await present(saved)).toBeNull();
+        // Cleanup follows the no-effect assertions; only the captured owned inode may be restored.
+        onTestFinished(async () => {
+          const currentParent = await lstat(parent);
+          expect([currentParent.isDirectory(), currentParent.dev, currentParent.ino]).toEqual([true, parentStat.dev, parentStat.ino]);
+          await chmod(parent, 0o700);
+          try {
+            const moved = await present(saved);
+            if (moved) {
+              expect(isRoot(moved)).toBe(true);
+              await chmod(saved, 0o700);
+              const link = await present(root);
+              if (link) {
+                expect(link.isSymbolicLink()).toBe(true); expect(await readlink(root)).toBe(saved);
+                await unlink(root);
+              }
+              await rename(saved, root);
+            }
+            expect(isRoot(await present(root))).toBe(true);
+            await chmod(root, rootStat.mode & 0o777);
+            expect(await lstat(root)).toMatchObject({ dev: rootStat.dev, ino: rootStat.ino, mode: rootStat.mode });
+          } finally { await chmod(parent, parentStat.mode & 0o777); }
+        });
+        // macOS needs the owned root writable for rename; restore read-only modes before validation.
+        await chmod(parent, 0o700);
+        try {
+          await chmod(root, 0o700); await rename(root, saved);
+          await chmod(saved, rootStat.mode & 0o777); await symlink(saved, root);
+        } finally { await chmod(parent, parentStat.mode & 0o777); }
+        expect((await lstat(root)).isSymbolicLink()).toBe(true); expect(await readlink(root)).toBe(saved);
+        expect(await lstat(saved)).toMatchObject({ dev: rootStat.dev, ino: rootStat.ino, mode: rootStat.mode });
+        expect(await bytesAt(saved)).toEqual(original);
+        expect(await lstat(parent)).toMatchObject({ dev: parentStat.dev, ino: parentStat.ino, mode: parentStat.mode });
       }
       if (fault === "manifest") await overwrite(path.join(r.root, "bundle-index.json"), Buffer.from("{}"));
       const before = await state(s, stored);
@@ -180,7 +222,7 @@ describe("C03 candidate bytes and quality evidence preparation", () => {
       })).rejects.toBe(rollback);
     }
     await expect(owned.db.transaction(tx => useEvidence.linkPreparedQaCorrectionUseEvidence(tx,
-      { token: prepared.token, expected }))).rejects.toMatchObject({ message: "quality_evidence_token_invalid" });
+      { token: prepared.token, expected })).rejects.toMatchObject({ message: "quality_evidence_token_invalid" });
     expect(remove).not.toHaveBeenCalled(); expect(await state(s, stored)).toEqual(before);
   }, 20000);
 
