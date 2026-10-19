@@ -12,28 +12,26 @@
 // - 이 모듈은 플래그를 읽지 않는다. 게이팅(run-terminal-boundary-flag.ts)은 호출자 책임이며
 //   legacy 경로는 이 모듈을 전혀 거치지 않는다.
 
-import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, eq, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  heartbeatRuns,
-  missionAgentRuntimes,
   workflowRuns,
   workflowStepRuns,
   workflowTerminalDecisions,
   workflowTerminalEffectIntents,
-  type WorkflowTerminalStopTargets,
 } from "@paperclipai/db";
-import { ACTIVE_MISSION_RUNTIME_STATUSES } from "../missions/mission-runtime-manager.js";
 import { logger } from "../../middleware/logger.js";
 import {
   TERMINAL_RUN_STATUSES,
   isTerminalRunStatus,
   validateTerminalCause,
   type FinalizeRunTerminalInput,
+  type TerminalBoundaryDb,
   type TerminalDecisionValue,
   type TerminalFinalizeResult,
 } from "./run-terminal-boundary-cause.js";
 import { evaluateRecoveryChannels, uniqueIssueIds } from "./run-terminal-recovery-gate.js";
+import { buildEffectIntentValues, captureStopTargets } from "./run-terminal-boundary-storage.js";
 
 // 지정된 공개 API 표면 — 내부 분할과 무관하게 본 모듈이 단일 진입점이다.
 export type {
@@ -59,24 +57,6 @@ export type {
 } from "./run-terminal-recovery-gate.js";
 export { evaluateRecoveryChannels } from "./run-terminal-recovery-gate.js";
 export { executeTerminalEffectIntents, processPendingTerminalEffectIntents } from "./run-terminal-effect-executor.js";
-
-/** 캡처된 정지 대상 → 효과 인텐트 행 값(공통 조립 — 본 경로/자가치유 경로 동일 계약). */
-function buildEffectIntentValues(
-  base: { companyId: string; terminalDecisionId: string; payload: Record<string, unknown> },
-  targets: WorkflowTerminalStopTargets,
-): Array<typeof workflowTerminalEffectIntents.$inferInsert> {
-  const values: Array<typeof workflowTerminalEffectIntents.$inferInsert> = [];
-  for (const runtimeId of targets.runtimeIds) {
-    values.push({ ...base, effectKind: "kill_runtime", targetId: runtimeId });
-  }
-  for (const heartbeatRunId of targets.heartbeatRunIds) {
-    values.push({ ...base, effectKind: "cancel_heartbeat_run", targetId: heartbeatRunId });
-  }
-  for (const issueId of targets.supersededUnblockIssueIds) {
-    values.push({ ...base, effectKind: "supersede_unblock_issue", targetId: issueId });
-  }
-  return values;
-}
 
 /** 이미 기록된 (run, version) 결정을 분류한다 — 같은 결정이면 멱등, 다르면 충돌(전체 롤백). */
 async function classifyExistingDecision(
@@ -105,53 +85,11 @@ async function classifyExistingDecision(
   };
 }
 
-async function captureStopTargets(
-  tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
-  input: FinalizeRunTerminalInput,
-  run: typeof workflowRuns.$inferSelect,
-  stepIssueIds: string[],
-  staleUnblockIssueIds: string[],
-): Promise<WorkflowTerminalStopTargets> {
-  const targets: WorkflowTerminalStopTargets = {
-    runtimeIds: [],
-    heartbeatRunIds: [],
-    supersededUnblockIssueIds: staleUnblockIssueIds,
-  };
-  // dynamicOwnerPlanCompleted 는 기존 제외 규칙을 그대로 따른다(런타임 캡처 생략).
-  if (!input.dynamicOwnerPlanCompleted && run.missionId !== null && stepIssueIds.length > 0) {
-    const runtimes = await tx
-      .select({ id: missionAgentRuntimes.id })
-      .from(missionAgentRuntimes)
-      .where(and(
-        eq(missionAgentRuntimes.companyId, input.companyId),
-        eq(missionAgentRuntimes.missionId, run.missionId),
-        inArray(missionAgentRuntimes.status, [...ACTIVE_MISSION_RUNTIME_STATUSES]),
-        inArray(missionAgentRuntimes.currentIssueId, stepIssueIds),
-      ));
-    targets.runtimeIds = runtimes.map((runtime) => runtime.id);
-  }
-  // 게이트 제외 규칙을 그대로 미러링한다 — 정산된 heartbeat, 트리거 자기 자신은 대상이 아니다.
-  if (stepIssueIds.length > 0) {
-    const heartbeatFilters = [
-      eq(heartbeatRuns.companyId, input.companyId),
-      inArray(heartbeatRuns.issueId, stepIssueIds),
-      inArray(heartbeatRuns.status, ["queued", "running"]),
-      isNull(heartbeatRuns.terminalOutcome),
-    ];
-    if (input.triggerHeartbeatRunId) {
-      heartbeatFilters.push(notInArray(heartbeatRuns.id, [input.triggerHeartbeatRunId]));
-    }
-    const heartbeats = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(...heartbeatFilters));
-    targets.heartbeatRunIds = heartbeats.map((heartbeat) => heartbeat.id);
-  }
-  return targets;
-}
-
 /**
  * 종결 유일 진입점. run 행 잠금 하에서 CAS 검증 → (필요 시) 회복 게이트 → CAS 종결 쓰기 →
  * 결정/정지 대상 캡처/인텐트 기록을 한 트랜잭션으로 수행한다.
  */
-export async function finalizeRunTerminal(db: Db, input: FinalizeRunTerminalInput): Promise<TerminalFinalizeResult> {
+export async function finalizeRunTerminal(db: TerminalBoundaryDb, input: FinalizeRunTerminalInput): Promise<TerminalFinalizeResult> {
   validateTerminalCause(input.cause, input.decision);
   return await db.transaction(async (tx): Promise<TerminalFinalizeResult> => {
     const [locked] = await tx
