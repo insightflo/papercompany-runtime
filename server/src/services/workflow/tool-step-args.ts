@@ -1,5 +1,6 @@
 import path from "node:path";
 import { withSelectedInputTransaction } from "./selected-input-transaction.js";
+import { selectQaCorrectionConsumer } from "./control-flow/qa-correction-selection.js";
 import { resolveSelectedPaths } from "./workproduct-selector.js";
 import { resolveToolResultPaths } from "./artifact-step-result.js";
 import { and, desc, eq, inArray, not } from "drizzle-orm";
@@ -98,6 +99,15 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   }
   const selected = await resolveSelectedPaths(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id,
     selectors: input.step.workProductSelectors, references, pins: pinIds });
+  for (const [stepId, value] of selected) {
+    if (!("correction" in value) || !value.correction) continue;
+    if (input.consumerStepRunId) {
+      const consumer = await selectQaCorrectionConsumer(input.db, value.correction, input.consumerStepRunId, stepId);
+      if (pinIds.get(stepId) !== consumer.binding.row.workProductId) throw new Error("workproduct_selector_pin_conflict");
+    }
+    // Keep the existing binding and generation; render all sibling paths from the issued B main.
+    pathsByStepId.set(stepId, value.file);
+  }
   // [소비 하드닍 4단계] selector 없는 참조 중 시드 없음(=레거시 폴백/핀 소비 대상)을 분류한다.
   // 분류는 resolveSelectedPaths 와 동일하게 findWorkflowSeed 를 재사용한다 — 시드가 존재하면
   // (tool-output 은 resolveToolResultPaths, 비 tool-output 은 위 explicit_selector_required)

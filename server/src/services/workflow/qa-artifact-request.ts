@@ -17,6 +17,10 @@ import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js
 import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } from "./artifact-files.js";
 import { readObject } from "./core-tool-context.js";
 import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
+import { assertQaCorrectionRequestFiles, assertQaCorrectionSelectionUnchanged,
+  lockQaCorrectionSelections, readSelectedQaCorrections } from "./control-flow/qa-correction-selection.js";
+import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup } from "./control-flow/qa-correction-followup.js";
+import { readIssuedQaCorrection } from "./control-flow/qa-correction-reader.js";
 
 export type QaRequest = Awaited<ReturnType<typeof prepareQaArtifactRequest>>;
 export async function prepareQaArtifactRequest(input: { db: Db; companyId: string; workflowRunId?: string | null;
@@ -48,8 +52,21 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     eq(workflowStepOutputBindings.companyId, input.companyId), eq(workflowStepOutputBindings.workflowRunId, row.run.id),
     eq(workflowStepOutputBindings.consumerStepRunId, row.step.id), eq(workflowStepOutputBindings.referencedStepId, contract.inputStepId)));
   if (!pin) throw new Error("qa_artifact_input_pin_required");
+  const selectionScope = { companyId: input.companyId, workflowRunId: row.run.id,
+    consumerStepRunId: row.step.id, selectors: { [contract.inputStepId]: selector } };
+  // Classify independently of the pin: an old A pin cannot hide an active correction.
+  const corrections = await readSelectedQaCorrections(input.db, selectionScope);
+  const correction = corrections.find(c => c.stepId === contract.inputStepId);
   const selected = await selectOfficialWorkProduct(input.db, { companyId: input.companyId, workflowRunId: row.run.id,
     stepId: contract.inputStepId, selector, pinnedId: pin.workProductId });
+  const selectedCorrection = "correction" in selected ? selected.correction : undefined;
+  if (!isDeepStrictEqual(correction?.selected.correction, selectedCorrection)
+    || (correction && (!isDeepStrictEqual(correction.selected.product, selected.product)
+      || !isDeepStrictEqual(correction.selected.producer, selected.producer)
+      || correction.selected.file !== selected.file))) throw new Error("qa_artifact_request_stale");
+  // The observer rejects PgTransaction; B preparation requires the actual root connection.
+  const observation = correction ? await observeQaCorrectionFollowup(input.db,
+    correction.consumer.candidate.ref, readIssuedQaCorrection) : undefined;
   const paths = await resolveMissionWorkProductPaths(input.db, { companyId: input.companyId, missionId: row.run.missionId,
     workflowRunId: row.run.id, stepId: row.step.stepId });
   if (!paths?.stepOutputDir) throw new Error("qa_artifact_root_missing");
@@ -72,6 +89,10 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     names.manifest ? parameters[names.manifest] : undefined, artifact.bundleManifest) : undefined;
   const assets = html?.assets ?? await readDraftAssets(inputRoot, bytes, assetsRoot, artifact.assetDiscovery ?? []);
   const ancillary = html?.ancillary ?? [];
+  const manifestBytes = correction && html ? await readArtifactBytes(inputRoot,
+    path.relative(inputRoot.path, html.manifest.path), 1024 * 1024) : undefined;
+  if (correction) assertQaCorrectionRequestFiles(correction.selected.correction, selected.file,
+    bytes, assetsRoot, assets, html, manifestBytes);
   const directories = new Set(["input/assets", "input/ancillary", "input"]);
   for (const a of assets) for (let d = path.posix.dirname(`input/assets/${a.fileName}`); d !== "."; d = path.posix.dirname(d)) directories.add(d);
   const requestPath = path.join(paths.stepOutputDir, "attempts", String(row.step.executionGeneration), digest(input.requestId));
@@ -82,12 +103,14 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
     { relative: `input/${path.basename(selected.file)}`, bytes },
     ...assets.map(a => ({ relative: `input/assets/${a.fileName}`, bytes: a.bytes })),
     ...ancillary.map(a => ({ relative: `input/ancillary/${a.fileName}`, bytes: a.bytes })),
+    ...(html && manifestBytes ? [{ relative: `input/${path.basename(html.manifest.path)}`, bytes: manifestBytes }] : []),
   ], [...directories].sort((a,b) => b.split("/").length - a.split("/").length));
   await dispatch.assertCurrent();
   const snapshot = { artifactExecution: frozen, companyId: input.companyId, missionId: row.run.missionId, workflowRunId: row.run.id,
     stepRunId: row.step.id, stepId: row.step.stepId, executionGeneration: row.step.executionGeneration,
     retryCount: row.step.retryCount, iterationIndex: row.step.iterationIndex, requestId: input.requestId,
     outputRoot: root.path, outputRootHash: digest(JSON.stringify(root)), root,
+    ...(correction ? { qaCorrectionFollowup: correction.consumer.candidate.ref } : {}),
     internalPathRoots: await resolveQaInternalPathRoots([paths.workProductRoot, paths.missionOutputDir,
       paths.runOutputDir, paths.stepOutputDir, root.path, inputRoot.path]),
     input: { workProductId: selected.product.id, producer: selected.producer, path: selected.file, sha256: digest(bytes),
@@ -99,8 +122,13 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
   };
   // No filesystem work occurs while holding mission -> run -> sorted step locks.
   const chosen = await input.db.transaction(async tx => {
-    const locked = await lockProducerSelection(tx, { companyId: input.companyId, workflowRunId: row.run.id,
-      stepIds: [contract.inputStepId], stepRunIds: [row.step.id] }, "update");
+    const locked = correction ? await lockQaCorrectionSelections(tx, selectionScope, corrections)
+      : await lockProducerSelection(tx, { companyId: input.companyId, workflowRunId: row.run.id,
+        stepIds: [contract.inputStepId], stepRunIds: [row.step.id] }, "update");
+    const currentCorrections = await readSelectedQaCorrections(tx, selectionScope);
+    assertQaCorrectionSelectionUnchanged(corrections, currentCorrections);
+    if (correction && observation) await readCurrentQaCorrectionFollowup(tx,
+      correction.consumer.candidate.ref, observation, readIssuedQaCorrection);
     const run = locked.run, step = locked.steps.find(s => s.id === row.step.id);
     const [mission] = await tx.select().from(missions).where(and(
       eq(missions.id, row.run.missionId!), eq(missions.companyId, input.companyId)));
@@ -160,11 +188,14 @@ export async function prepareQaArtifactRequest(input: { db: Db; companyId: strin
   for (const a of assets) capturedAssets.push({ ...a, bytes: await readCaptured(`input/assets/${a.fileName}`, a.bytes, 16 * 1024 * 1024) });
   for (const a of ancillary) capturedAncillary.push({ ...a, bytes: await readCaptured(`input/ancillary/${a.fileName}`, a.bytes, 16 * 1024 * 1024) });
   const capturedHtml = html ? { ...html, assets: capturedAssets, ancillary: capturedAncillary } : undefined;
+  if (html && manifestBytes) await readCaptured(`input/${path.basename(html.manifest.path)}`, manifestBytes, 1024 * 1024);
   await dispatch.assertCurrent();
   const inputFile = path.join(chosen.outputRoot, "input", path.basename(chosen.input.path));
   return { snapshot: chosen, dispatch,
     inputBytes: encodeQaInput(capturedBytes, capturedAssets, null, capturedHtml, artifact.inputEnvelopeVersion),
     parameters: { ...parameters, [sourceArg]: inputFile,
+      ...(html && manifestBytes && names.manifest
+        ? { [names.manifest]: path.join(chosen.outputRoot, "input", path.basename(html.manifest.path)) } : {}),
       ...(mode === "content" && names.assetsDir ? { [names.assetsDir]: path.join(chosen.outputRoot, "input", "assets") } : {}),
       ...(names.out ? { [names.out]: path.join(chosen.outputRoot, artifact.resultFileName) } : {}) } };
 }

@@ -5,6 +5,8 @@ import { heartbeatRuns, issues, issueWorkProducts, missions, workflowRuns, workf
   workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import type { WorkProductSelectors } from "@paperclipai/shared/validators/workflow-artifact";
 import { resolveWorkProductLocalFilePath } from "../../work-products.js";
+import { digest } from "../artifact-files.js";
+import type { readHtmlBundle } from "../qa-html-input.js";
 import { lockQualityAttemptBudget } from "../../quality/retry-budget.js";
 import { qaCorrectionProductPointerSchema, readIssuedQaCorrection,
   type IssuedQaCorrection } from "./qa-correction-reader.js";
@@ -166,7 +168,7 @@ export async function lockQaCorrectionSelections(tx: Tx, scope: InputScope, sele
   const missionIds = [...new Set(preparations.map(p => p.missionId))];
   await tx.select({ id: missions.id }).from(missions).where(and(eq(missions.companyId, scope.companyId),
     inArray(missions.id, missionIds))).orderBy(asc(missions.id)).for("no key update");
-  await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(eq(workflowRuns.companyId, scope.companyId),
+  const [run] = await tx.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, scope.companyId),
     eq(workflowRuns.id, scope.workflowRunId))).for("no key update");
   const attempts = preparations.flatMap(p => [p.producer, ...p.authority.verdicts.map(v => v.qa),
     ...p.bindings.map(b => b.consumer)]);
@@ -183,7 +185,7 @@ export async function lockQaCorrectionSelections(tx: Tx, scope: InputScope, sele
     .orderBy(asc(heartbeatRuns.id)).for("update");
   await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, scope.companyId),
     inArray(issues.id, attempts.map(a => a.issueId)))).orderBy(asc(issues.id)).for("update");
-  await tx.select({ id: workflowStepRuns.id }).from(workflowStepRuns).where(and(
+  const steps = await tx.select().from(workflowStepRuns).where(and(
     eq(workflowStepRuns.workflowRunId, scope.workflowRunId),
     or(inArray(workflowStepRuns.id, [scope.consumerStepRunId, ...attempts.map(a => a.stepRunId)]),
       inArray(workflowStepRuns.stepId, Object.keys(scope.selectors)))))
@@ -198,4 +200,50 @@ export async function lockQaCorrectionSelections(tx: Tx, scope: InputScope, sele
     eq(workflowStepOutputBindings.workflowRunId, scope.workflowRunId),
     inArray(workflowStepOutputBindings.id, preparations.flatMap(p => p.bindings.map(b => b.bindingId)))))
     .orderBy(asc(workflowStepOutputBindings.id)).for("update");
+  return { run, steps };
+}
+
+type Bundle = Awaited<ReturnType<typeof readHtmlBundle>>;
+type CapturedAsset = Bundle["assets"][number];
+
+/** Match captured bytes and physical paths, including the HTML reader's role-name conversion. */
+export function assertQaCorrectionRequestFiles(correction: QaCorrectionSelection, source: string, main: Buffer,
+  assetsRoot: string, assets: CapturedAsset[], html?: Bundle, manifestBytes?: Buffer) {
+  const r = correction.revision;
+  const files: { role: "main" | "asset" | "ancillary"; relativePath: string; sha256: string; byteSize: number }[] = [];
+  const add = (role: "main" | "asset" | "ancillary", file: string, bytes: Buffer) => {
+    files.push({ role, relativePath: path.relative(r.root, file), sha256: digest(bytes), byteSize: bytes.length });
+  };
+  const actualAssetsRoot = html ? path.join(path.dirname(source), "assets") : assetsRoot;
+  requireSelection(actualAssetsRoot === (typeof r.assetsRelativeRoot === "string"
+    ? path.resolve(r.root, r.assetsRelativeRoot) : ""), "request_assets_root");
+  requireSelection((html?.manifest.path ?? null) === (typeof r.bundleManifestRelativePath === "string"
+    ? path.resolve(r.root, r.bundleManifestRelativePath) : null), "request_manifest");
+  add("main", source, main);
+  for (const asset of assets) {
+    requireSelection(asset.sha256 === digest(asset.bytes) && asset.byteSize === asset.bytes.length, "request_files");
+    add("asset", path.join(actualAssetsRoot, asset.fileName), asset.bytes);
+  }
+  if (html) {
+    requireSelection(manifestBytes && digest(manifestBytes) === html.manifest.sha256
+      && manifestBytes.length === html.manifest.byteSize, "request_manifest");
+    const raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)) as {
+      ancillary: { role: string; fileName: string }[];
+    };
+    const roles = raw.ancillary.map(a => ({ role: a.role,
+      relativePath: path.relative(r.root, path.join(path.dirname(source), a.fileName)) }));
+    const byRole = (rows: typeof roles) => [...rows].sort((a, b) => a.role.localeCompare(b.role));
+    requireSelection(same(byRole(roles), byRole(r.ancillaryRoleBindings ?? []))
+      && html.ancillary.length === roles.length, "request_ancillary_roles");
+    add("ancillary", html.manifest.path, manifestBytes);
+    for (const ancillary of html.ancillary) {
+      const original = raw.ancillary.find(a => a.role === ancillary.fileName);
+      requireSelection(original, "request_ancillary_roles");
+      requireSelection(ancillary.sha256 === digest(ancillary.bytes)
+        && ancillary.byteSize === ancillary.bytes.length, "request_files");
+      add("ancillary", path.join(path.dirname(source), original.fileName), ancillary.bytes);
+    }
+  }
+  const sorted = (rows: typeof files) => [...rows].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  requireSelection(same(sorted(files), sorted(r.files.map(({ beforeSha256: _, ...f }) => f))), "request_files");
 }
