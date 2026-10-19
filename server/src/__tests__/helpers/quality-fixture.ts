@@ -100,8 +100,8 @@ export async function seedQualityFixture(db: Db): Promise<QualityFixture> {
   const companyId = randomUUID();
   const otherCompanyId = randomUUID();
   await db.insert(companies).values([
-    { id: companyId, name: "Quality Fixture Co", issuePrefix: `QF${companyId.slice(0, 4)}` },
-    { id: otherCompanyId, name: "Quality Other Co", issuePrefix: `QO${otherCompanyId.slice(0, 4)}` },
+    { id: companyId, name: "Quality Fixture Co", issuePrefix: `QF${companyId.replaceAll("-", "")}` },
+    { id: otherCompanyId, name: "Quality Other Co", issuePrefix: `QO${otherCompanyId.replaceAll("-", "")}` },
   ]);
   const authorAgentId = randomUUID();
   const verifierAgentId = randomUUID();
