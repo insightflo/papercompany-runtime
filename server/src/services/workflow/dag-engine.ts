@@ -45,9 +45,10 @@ import { heartbeatService } from "../heartbeat.js";
 import { applyWorkflowIssueCreatedSideEffects as applyIssueCreatedSideEffects, wakeReplacementAwareIssueRetry as wakeIssueBackedRetryAndMarkDispatching } from "./replacement-agent-delivery.js";
 import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
 import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
-import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
-import { admitOwnerLinkedStepWake, ownerPlanExecutionIntentCurrent, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
-import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
+import { ownerPlanExecutionIntentCurrent } from "../missions/mission-owner-execution-state.js";
+import { wakeExistingWorkflowStepIssue, resolveWorkflowStepAssigneeAgentId } from "./workflow-step-wake.js";
+import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
+export { wakeExistingWorkflowStepIssue };
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
@@ -93,8 +94,6 @@ import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acce
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { readAttempts } from "./control-flow/verdict-store.js";
-import { loadWorkflowApiFindings } from "./validation-verdict-ledger.js";
-import type { WorkflowVerdictFinding } from "@paperclipai/shared/validators/workflow-agent-api";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
@@ -123,7 +122,6 @@ import {
   shouldRejectStructuralCallback,
   planStructuralCompletion,
   atomicStructuralCompletion,
-  checkDependencyFreshness,
 } from "./control-flow/structural-completion.js";
 import {
   readWorkflowRetryMetadata,
@@ -746,118 +744,6 @@ function buildDependencyStepContractLines(input: {
   return lines;
 }
 
-async function commentOnValidationRecheckQueued(input: {
-  db: Db;
-  companyId: string;
-  issueId: string;
-  workflowRunId: string;
-  step: WorkflowStep;
-  priorFindings?: readonly WorkflowVerdictFinding[];
-}): Promise<void> {
-  const dependencyStepIds = input.step.dependencies;
-  const dependencyRows = dependencyStepIds.length > 0
-    ? await input.db
-      .select({
-        stepId: workflowStepRuns.stepId,
-        issueId: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        status: issues.status,
-      })
-      .from(workflowStepRuns)
-      .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
-      .where(and(
-        eq(workflowStepRuns.workflowRunId, input.workflowRunId),
-        inArray(workflowStepRuns.stepId, dependencyStepIds),
-      ))
-    : [];
-
-  const order = new Map(dependencyStepIds.map((stepId, index) => [stepId, index]));
-  dependencyRows.sort((a, b) => (order.get(a.stepId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.stepId) ?? Number.MAX_SAFE_INTEGER));
-
-  const workProductRows = dependencyRows.length > 0
-    ? await input.db
-      .select({
-        issueId: issueWorkProducts.issueId,
-        title: issueWorkProducts.title,
-        type: issueWorkProducts.type,
-        provider: issueWorkProducts.provider,
-        url: issueWorkProducts.url,
-        externalId: issueWorkProducts.externalId,
-        metadata: issueWorkProducts.metadata,
-        status: issueWorkProducts.status,
-      })
-      .from(issueWorkProducts)
-      .where(inArray(issueWorkProducts.issueId, dependencyRows.map((row) => row.issueId)))
-    : [];
-
-  const workProductsByIssueId = new Map<string, typeof workProductRows>();
-  for (const product of workProductRows) {
-    const products = workProductsByIssueId.get(product.issueId) ?? [];
-    products.push(product);
-    workProductsByIssueId.set(product.issueId, products);
-  }
-
-  const renderWorkProductSummary = (product: typeof workProductRows[number]) => {
-    const metadata = normalizeRecord(product.metadata);
-    const metadataPath = typeof metadata.path === "string" ? metadata.path : null;
-    const artifactRef = metadataPath ?? product.url ?? product.externalId ?? (
-      product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
-    );
-    return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
-  };
-
-  const dependencyIssueLines = dependencyRows.flatMap((row) => {
-    const products = workProductsByIssueId.get(row.issueId) ?? [];
-    const lines = [
-      `- ${row.stepId}: ${row.identifier ?? row.issueId} (${row.status}) — ${row.title}`,
-    ];
-    if (products.length > 0) {
-      lines.push(`  workProducts: ${products.map(renderWorkProductSummary).join("; ")}`);
-    } else {
-      lines.push("  workProducts: none registered");
-    }
-    return lines;
-  });
-
-  const missingWorkProductLines = dependencyRows
-    .filter((row) => (workProductsByIssueId.get(row.issueId) ?? []).length === 0)
-    .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
-
-  await input.db.insert(issueComments).values({
-    companyId: input.companyId,
-    issueId: input.issueId,
-    body: [
-      "### Workflow validation recheck\nA validation recheck was requested because the dependency artifacts changed. Next action: inspect the updated inputs and the next official verdict; this request does not confirm a new review result.",
-      "",
-      "The producer/dependency completed after the previous REQUEST_CHANGES verdict.",
-      "Re-run this validation using the current dependency workProducts below.",
-      "",
-      `- workflowRunId: ${input.workflowRunId}`,
-      `- stepId: ${input.step.id}`,
-      `- dependencyStepIds: ${JSON.stringify(dependencyStepIds)}`,
-      "",
-      ...(input.priorFindings && input.priorFindings.length > 0
-        ? [
-          "**Verify these previous REQUEST_CHANGES findings FIRST**, then continue the full checklist:",
-          ...input.priorFindings.map((finding) => `- [${finding.layer}] ${finding.id}: ${finding.summary}`),
-          "",
-        ]
-        : []),
-      "Current dependency issue inputs:",
-      ...(dependencyIssueLines.length > 0 ? dependencyIssueLines : ["- No dependency issue inputs are registered for this step."]),
-      ...(missingWorkProductLines.length > 0
-        ? [
-            "",
-            "Missing dependency hard-stop:",
-            ...missingWorkProductLines,
-            "- If this validation needs a missing dependency deliverable, submit `REQUEST_CHANGES` with a findings entry naming the missing workProduct.",
-          ]
-        : []),
-    ].join("\n"),
-  });
-}
-
 type ValidationVerdict = "pass" | "request_changes";
 
 interface ValidationVerdictObservation {
@@ -1075,128 +961,15 @@ async function syncStepRunsFromIssueState(
     });
   }
   const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationBindings);
-  // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
-  const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
-
-  const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
-  for (const stepRun of stepRuns) {
-    if (!stepRun.issueId) continue;
-    const issue = issueById.get(stepRun.issueId);
-    if (!issue || (issue.status !== "blocked" && issue.status !== "done")) continue;
-    const step = stepById.get(stepRun.stepId);
-    if (!step || step.dependencies.length === 0) continue;
-    if (!isValidationGateCandidate({ issueTitle: issue.title, issueOriginKind: issue.originKind, step })) continue;
-
-    const latestVerdict = latestValidationVerdictByIssueId.get(issue.id);
-    if (latestVerdict?.verdict !== "request_changes" || !latestVerdict.observedAt) continue;
-
-    // [Hybrid QA] Tolerate issue-less structural tool gate dependencies (extracted).
-    const depCheck = checkDependencyFreshness(step.dependencies, stepRunByStepId, issueById);
-    if (!depCheck.allFound || !depCheck.allDone) continue;
-    if (depCheck.maxCompletedAt === 0) continue;
-    // [Transitive producer freshness] A reworked producer can sit 2+ hops above
-    //   the QA step (producer → intermediate QA/gate → semantic QA). Direct-dep
-    //   freshness then never advances after a producer rework and the recheck is
-    //   skipped forever — the QA re-fire chain dead-ends silently and the run
-    //   finalizes failed (gazua-evening 2026-08-20: producer gen2 completed 09:22,
-    //   direct-dep max stayed 09:04 < RC verdict 09:11 → owner-action stall).
-    //   Include gate-validated producers' completion times so a reworked producer
-    //   generation re-arms the recheck regardless of DAG topology.
-    let freshnessMaxCompletedAt = depCheck.maxCompletedAt;
-    for (const producerStepIds of collectGateValidatedProducerStepIds(step.dependencies, stepById).values()) {
-      for (const producerStepId of producerStepIds) {
-        const producerRun = stepRunByStepId.get(producerStepId);
-        if (!producerRun) continue;
-        const producerIssue = producerRun.issueId ? issueById.get(producerRun.issueId) : undefined;
-        const producerCompletedMs = producerIssue
-          ? (producerIssue.completedAt?.getTime() ?? 0)
-          : (producerRun.completedAt?.getTime() ?? 0);
-        if (producerCompletedMs > freshnessMaxCompletedAt) freshnessMaxCompletedAt = producerCompletedMs;
-      }
-    }
-    if (freshnessMaxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
-    // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
-    //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
-    //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
-    //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
-    const dependencyMaxCompletedAt = freshnessMaxCompletedAt;
-    const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
-    if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
-
-    if (!context) continue;
-    // [recheck priority] Load the structured findings from the latest REQUEST_CHANGES
-    //   so the re-check can verify the previous fixes FIRST, then run the full
-    //   checklist. Machine contract only (workflow_api findings payload); absent
-    //   findings (legacy verdicts) degrade to the previous behavior.
-    let priorFindings: readonly WorkflowVerdictFinding[] | undefined;
-    try {
-      priorFindings = await loadWorkflowApiFindings({
-        db,
-        companyId: issue.companyId,
-        issueId: issue.id,
-        workflowRunId: stepRun.workflowRunId,
-        workflowStepRunId: stepRun.id,
-      }) ?? undefined;
-    } catch {
-      priorFindings = undefined;
-    }
-    // [Hybrid QA] Force fresh session on semantic QA recheck so stale verdict/session
-    //   state is not reused after a new producer generation.
-    const queued = await wakeExistingWorkflowStepIssue({
-      db,
-      run: context.run,
-      definition: context.definition,
-      step,
-      stepRunId: stepRun.id,
-      stepRunMetadata: stepRun.metadata,
-      issueId: issue.id,
-      allowCompletedIssue: true,
-      allowBlockedIssue: true,
-      forceFreshSession: true,
-      priorFindings,
-    });
-    if (!queued) continue;
-
-    const [updatedIssue] = await db
-      .select({
-        id: issues.id,
-        companyId: issues.companyId,
-        status: issues.status,
-        startedAt: issues.startedAt,
-        completedAt: issues.completedAt,
-        cancelledAt: issues.cancelledAt,
-        title: issues.title,
-        originKind: issues.originKind,
-      })
-      .from(issues)
-      .where(eq(issues.id, issue.id))
-      .limit(1);
-    if (updatedIssue) issueById.set(updatedIssue.id, updatedIssue);
-    await commentOnValidationRecheckQueued({
-      db,
-      companyId: issue.companyId,
-      issueId: issue.id,
-      workflowRunId: stepRun.workflowRunId,
-      step,
-      ...(priorFindings && priorFindings.length > 0 ? { priorFindings } : {}),
-    });
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: "system",
-      actorId: "workflow:validation-recheck",
-      action: "workflow.validation_recheck_queued",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        workflowRunId: stepRun.workflowRunId,
-        workflowStepRunId: stepRun.id,
-        stepId: step.id,
-        dependencyStepIds: step.dependencies,
-        reason: "dependency_completed_after_request_changes",
-        requestChangesObservedAt: latestVerdict.observedAt.toISOString(),
-      },
-    });
-  }
+  await recheckValidationStepIssues({
+    db,
+    stepRuns,
+    stepById,
+    issueById,
+    validationCandidateIssueIds,
+    latestValidationVerdictByIssueId,
+    context,
+  }, { isValidationGateCandidate, collectGateValidatedProducerStepIds });
 
   // A rework reset ignores the prior issue completion but accepts a later
   // completion from the current iteration.
@@ -1798,245 +1571,6 @@ async function createWorkflowStepIssue(input: {
   else await applyCreatedSideEffects();
 
   return createdIssue.id;
-}
-
-// [Patch 3 recheck idempotency] validation issue 별 latest succeeded heartbeat finishedAt.
-//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 실행 요청을 만들지 않도록 한다:
-//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재요청 금지" 판정 재료.
-//   A1 RES-424 사례: 재실행 run 은 succeeded 였으나 explicit PASS verdict 가 없어 latestValidationVerdict
-//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 실행 요청이 반복되던 stale duplicate.
-async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
-  const latest = new Map<string, Date>();
-  if (issueIds.length === 0) return latest;
-  const rows = await db
-    .select({ issueId: heartbeatRuns.issueId, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
-    .from(heartbeatRuns)
-    .where(and(inArray(heartbeatRuns.issueId, issueIds), eq(heartbeatRuns.status, "succeeded")))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-  for (const row of rows) {
-    if (!row.issueId) continue;
-    if (latest.has(row.issueId)) continue; // desc 정렬 → 첫 행이 최신
-    const at = row.finishedAt ?? row.createdAt;
-    if (at) latest.set(row.issueId, at);
-  }
-  return latest;
-}
-
-export async function wakeExistingWorkflowStepIssue(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  definition: typeof workflowDefinitions.$inferSelect;
-  step: WorkflowStep;
-  stepRunId?: string;
-  stepRunMetadata?: unknown;
-  issueId: string;
-  allowCompletedIssue?: boolean;
-  allowBlockedIssue?: boolean;
-  /** When true, the heartbeat session is forced fresh (no stale context reuse). */
-  forceFreshSession?: boolean;
-  /** [recheck priority] Structured findings from the previous REQUEST_CHANGES that
-   *  this recheck should verify FIRST (then continue the full checklist). Machine
-   *  contract only — never natural-language parsing. */
-  priorFindings?: readonly WorkflowVerdictFinding[];
-  /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
-  idempotencyKey?: string | null;
-  /** [owner admission] owner-linked 실행의 typed 승인 정보 — 생략해도 저장 영수증 맥락에서
-   *  동일 검사가 적용된다(인자 생략으로 우회 불가). */
-  ownerExecution?: OwnerExecutionAdmission;
-}): Promise<boolean> {
-  // [Task5a2a] external recovery paths 는 live steps/definition 을 넘길 수 있다. 진입 시 1회 로드해 snapshot 이면
-  //   caller 입력을 캡처 정의/저장 step 으로 대체하고(구조게이트·QA-cap 배열 소비자 모두 캡처 배열), 저장 step 이
-  //   없으면 mutation/wake 없이 false. legacy_current 는 caller step/definition 동작 + legacy builder 배열 유지.
-  const execution = await loadExecutionDefinition(input.db, input.run.id, { requireHistorical: false });
-  let effectiveInput = input;
-  if (execution.source === "snapshot") {
-    const storedStep = execution.steps.find((candidate) => candidate.id === input.step.id);
-    if (!storedStep) return false;
-    effectiveInput = {
-      ...input,
-      definition: projectExecutionDefinition(input.definition, execution),
-      step: storedStep,
-    };
-  }
-  const executionSteps = execution.steps;
-  // This guards every resume entry point (normal recheck, reconciler, owner
-  // recovery). A semantic QA issue may not be queued from status alone.
-  const structuralReadiness = await evaluateSemanticStructuralReadiness({
-    db: input.db,
-    companyId: input.run.companyId,
-    workflowRunId: input.run.id,
-    step: effectiveInput.step,
-    steps: executionSteps,
-  });
-  if (!structuralReadiness.ready) return false;
-
-  const [issue] = await input.db
-    .select({
-      id: issues.id,
-      companyId: issues.companyId,
-      assigneeAgentId: issues.assigneeAgentId,
-      status: issues.status,
-    })
-    .from(issues)
-    .where(eq(issues.id, input.issueId))
-    .limit(1);
-  if (!issue) return false;
-  const isRunnableIssue =
-    issue.status === "todo" ||
-    (input.allowCompletedIssue === true && issue.status === "done") ||
-    (input.allowBlockedIssue === true && issue.status === "blocked");
-  if (!isRunnableIssue) return false;
-
-  let wakeIssue = issue;
-  if (!wakeIssue.assigneeAgentId) {
-    const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, effectiveInput.step);
-    if (!assigneeAgentId) return false;
-
-    const [updatedIssue] = await input.db
-      .update(issues)
-      .set({
-        assigneeAgentId,
-        updatedAt: new Date(),
-      })
-      .where(eq(issues.id, wakeIssue.id))
-      .returning({
-        id: issues.id,
-        companyId: issues.companyId,
-        assigneeAgentId: issues.assigneeAgentId,
-        status: issues.status,
-      });
-    if (!updatedIssue) return false;
-
-    await logActivity(input.db, {
-      companyId: updatedIssue.companyId,
-      actorType: "system",
-      actorId: `workflow:${input.definition.id}`,
-      action: "issue.assignee_restored",
-      entityType: "issue",
-      entityId: updatedIssue.id,
-      details: {
-        assigneeAgentId,
-        reason: "workflow_step_runnable",
-        workflowRunId: input.run.id,
-        workflowDefinitionId: input.definition.id,
-        stepId: input.step.id,
-      },
-    });
-
-    wakeIssue = updatedIssue;
-  }
-
-  const stepRunMetadata = normalizeRecord(input.stepRunMetadata);
-  const reworkContract = readWorkflowReworkContract(stepRunMetadata.workflowReworkContract);
-  const reworkContext = reworkContract
-    ? { paperclipWorkflowReworkContract: reworkContract }
-    : {};
-  const priorFindingsContext = input.priorFindings && input.priorFindings.length > 0
-    ? { priorQaFindings: input.priorFindings.map((finding) => ({ id: finding.id, summary: finding.summary, layer: finding.layer })) }
-    : {};
-  // [qa-cap acceptance] resumed downstream issue sees predecessor cap-accepted limitations.
-  const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
-    db: input.db,
-    workflowRunId: input.run.id,
-    predecessorStepIds: resolveEdges(effectiveInput.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
-  });
-  const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
-    ? { acceptedQaLimitations: capAcceptanceContext }
-    : {};
-  const executionStepRuns = await input.db
-    .select({
-      stepId: workflowStepRuns.stepId,
-      status: workflowStepRuns.status,
-      iterationIndex: workflowStepRuns.iterationIndex,
-    })
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, input.run.id));
-  const qaCapAcceptanceContract = buildQaCapAcceptanceRuntimeContract({
-    qaStep: effectiveInput.step,
-    qaIssueId: issue.id,
-    steps: executionSteps,
-    stepRuns: executionStepRuns,
-  });
-  const qaCapAcceptancePayload = qaCapAcceptanceContract
-    ? { paperclipQaCapAcceptanceContract: qaCapAcceptanceContract }
-    : {};
-
-  // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재
-  //   intent/권한버전/세대를 재확인한다(무연결 run은 무변화 통과). 검사와 wake 사이에 다른 await 없음.
-  if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
-    workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
-    ownerExecution: input.ownerExecution ?? null }))) return false;
-  await queueIssueAssignmentWakeup({
-    heartbeat: heartbeatService(input.db),
-    issue: wakeIssue,
-    reason: "workflow_step_runnable",
-    mutation: "workflow_resume",
-    contextSource: "workflow.resume",
-    payload: {
-      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
-      workflowRunId: input.run.id,
-      workflowDefinitionId: input.definition.id,
-      stepId: input.step.id,
-      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
-      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
-      ...reworkContext,
-      ...priorFindingsContext,
-      ...capAcceptancePayload,
-      ...qaCapAcceptancePayload,
-    },
-    contextSnapshot: {
-      issueId: issue.id,
-      taskId: issue.id,
-      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
-      workflowRunId: input.run.id,
-      workflowDefinitionId: input.definition.id,
-      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
-      workflowStepId: input.step.id,
-      stepId: input.step.id,
-      source: "workflow.resume",
-      wakeReason: "workflow_step_runnable",
-      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
-      ...reworkContext,
-      ...capAcceptancePayload,
-      ...qaCapAcceptancePayload,
-    },
-    requestedByActorType: "system",
-    requestedByActorId: `workflow:${input.definition.id}`,
-    idempotencyKey: input.idempotencyKey ?? null,
-    rethrowOnError: isCapOverrideWakeKey(input.idempotencyKey),
-  });
-  return true;
-}
-
-async function resolveWorkflowStepAssigneeAgentId(
-  db: Db,
-  companyId: string,
-  step: WorkflowStep,
-): Promise<string | undefined> {
-  if (typeof step.agentId === "string" && step.agentId.trim()) {
-    return step.agentId.trim();
-  }
-
-  const rawAgentName = (step as PersistedWorkflowStep).agentName;
-  const agentName = typeof rawAgentName === "string"
-    ? rawAgentName.trim()
-    : "";
-  if (!agentName) return undefined;
-
-  const [agent] = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(and(
-      eq(agents.companyId, companyId),
-      eq(agents.name, agentName),
-      ne(agents.status, "terminated"),
-      ne(agents.status, "pending_approval"),
-    ))
-    .orderBy(asc(agents.createdAt))
-    .limit(1);
-  return agent?.id;
 }
 
 function buildStepRunMap(
