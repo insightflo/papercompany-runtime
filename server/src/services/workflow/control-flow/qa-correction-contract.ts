@@ -99,17 +99,27 @@ export const qaCorrectionSourceMeasuredSchema = z.object({
   preparationEventId: uuid, preparationHash: sha256,
   sources: z.array(measuredSourceSchema).min(1), measuredAt: timestamp,
 }).strict().refine(m => unique(m.sources, s => s.productId), "qa_correction_duplicate_source");
+// Keep the HTML bundle role spelling; it is distinct from the physical artifact path.
+const ancillaryRoleSchema = z.string().max(512).refine(s => s.split("/").every(p =>
+  /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(p) && ![".", ".."].includes(p)));
 const revisionSchema = z.object({
   revisionId: uuid, sourceProductId: uuid, workProductId: uuid, root: text, mainRelativePath: artifactRelativePathSchema,
   bundleManifestRelativePath: artifactRelativePathSchema.nullable().optional(),
   assetsRelativeRoot: artifactRelativePathSchema.nullable().optional(),
+  ancillaryRoleBindings: z.array(z.object({ role: ancillaryRoleSchema,
+    relativePath: artifactRelativePathSchema }).strict()).max(100).optional(),
   files: z.array(z.object({ ...fileFields, beforeSha256: sha256 }).strict()).min(1),
 }).strict().refine(r => r.sourceProductId !== r.workProductId && completeFiles(r.files)
   && r.files.some(f => f.role === "main" && f.relativePath === r.mainRelativePath), "qa_correction_revision_manifest")
   .refine(r => typeof r.bundleManifestRelativePath !== "string"
     || r.files.some(f => f.role === "ancillary" && f.relativePath === r.bundleManifestRelativePath), "qa_correction_bundle_manifest")
   .refine(r => r.assetsRelativeRoot === undefined || r.files.every(f => f.role !== "asset"
-    || (typeof r.assetsRelativeRoot === "string" && f.relativePath.startsWith(r.assetsRelativeRoot + "/"))), "qa_correction_assets_root");
+    || (typeof r.assetsRelativeRoot === "string" && f.relativePath.startsWith(r.assetsRelativeRoot + "/"))), "qa_correction_assets_root")
+  .refine(r => r.ancillaryRoleBindings === undefined || (unique(r.ancillaryRoleBindings, b => b.role)
+    && unique(r.ancillaryRoleBindings, b => b.relativePath)
+    && sameIds(r.ancillaryRoleBindings.map(b => b.relativePath), r.files.filter(f =>
+      f.role === "ancillary" && f.relativePath !== r.bundleManifestRelativePath).map(f => f.relativePath))),
+  "qa_correction_ancillary_role_bindings");
 export const qaCorrectionAppliedSchema = z.object({
   schemaVersion: z.literal("workflow.qa-correction.applied.v1"), correctionId: uuid,
   preparationEventId: uuid, preparationHash: sha256, sourceMeasuredEventId: uuid, sourceMeasuredHash: sha256,

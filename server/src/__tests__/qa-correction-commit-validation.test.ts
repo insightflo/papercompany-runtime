@@ -12,6 +12,9 @@ import { storeQaCorrection, type StoredCorrection } from "../services/workflow/c
 import { assertQaCorrectionCommitCurrent, qaCorrectionCommitDetails, rereadQaCorrectionCommitSources,
   validateQaCorrectionCommitCandidate } from "../services/workflow/control-flow/qa-correction-commit-validation.js";
 import { hashQaCorrectionPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { commitQaCorrection } from "../services/workflow/control-flow/qa-correction-commit.js";
+import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
+import { issueC02, issueNextC02 } from "./helpers/c02-fixture.js";
 import { commitBuffers, commitDbState, commitFacts, commitFileState, createCommitSourceHarness,
   hideCommitDeclaration, makeCommitPrior, makeCommitSource, type CommitSourceCase } from "./qa-correction-commit-fixture.js";
 
@@ -64,6 +67,20 @@ describe("C03 whole stored candidate validation", () => {
       expect(r.assetsRelativeRoot).toBe(mode === "content-only" ? null : "assets");
       expect(r.bundleManifestRelativePath).toBe(mode === "html" ? "bundle-index.json" : null);
       expect(r.files.filter(f => f.role === "asset")).toHaveLength(mode === "content" ? 9 : mode === "html" ? 1 : 0);
+      const roles = [{ role: "research", relativePath: "source-notes.txt" }]; // Independent manifest: fixture lines 35–48.
+      if (mode === "html" && !prior) expect(r.ancillaryRoleBindings).toEqual(roles);
+      else expect(r).not.toHaveProperty("ancillaryRoleBindings");
+      if (s.history) expect((await readIssuedQaCorrection(owned.db, s.history.scope)).applied.revisions[0])
+        .not.toHaveProperty("ancillaryRoleBindings");
+      expect(await beginQaCorrection(owned.db, s.p)).toMatchObject({ status: "existing", preparationEventId: stored.preparationEventId });
+      const reused = await measureQaCorrectionSources(owned.db, {
+        preparationEventId: stored.preparationEventId, preparationHash: stored.preparationHash });
+      expect(reused.sourceMeasured).toEqual(stored.sourceMeasured);
+      expect(reused.sourceMeasuredEventId).toBe(stored.sourceMeasuredEventId);
+      expect(reused.sourceMeasuredHash).toBe(stored.sourceMeasuredHash);
+      const again = (await storeQaCorrection(owned.db, reused)).revisions[0]!;
+      expect(again.ancillaryRoleBindings).toEqual(r.ancillaryRoleBindings);
+      expect(Object.hasOwn(again, "ancillaryRoleBindings")).toBe(Object.hasOwn(r, "ancillaryRoleBindings"));
       if (mode === "html") {
         const manifest = JSON.parse((await readFile(path.join(r.root, "bundle-index.json"))).toString());
         expect(manifest.htmlSha256).toBe(digest(await readFile(stored.outputs[0]!.mainPath)));
@@ -73,6 +90,11 @@ describe("C03 whole stored candidate validation", () => {
       await unchanged(s, stored, async () => {
         const token = await validateQaCorrectionCommitCandidate(owned.db, stored), d = qaCorrectionCommitDetails(token);
         expect(d.stored).toEqual(stored);
+        if (prior || mode !== "html") {
+          const invented = structuredClone(stored);
+          invented.revisions[0]!.ancillaryRoleBindings = mode === "html" ? roles : [];
+          await expect(validateQaCorrectionCommitCandidate(owned.db, invented)).rejects.toMatchObject({ reason: "source" });
+        }
         expect(d.beforeHash).toBe(hashQaCorrectionPayload(stored.sourceMeasured.sources));
         expect(d.revisionHash).toBe(hashQaCorrectionPayload(stored.revisions));
         await rereadQaCorrectionCommitSources(token);
@@ -88,6 +110,29 @@ describe("C03 whole stored candidate validation", () => {
       });
       expect(await commitFileState(s)).toEqual(original);
     }, 20000);
+
+  it("preserves HTML roles through actual B/C issuance, history and replay", async () => {
+    const expected = [{ role: "research", relativePath: "source-notes.txt" }];
+    const b = await issueC02(owned);
+    const check = async (c: Awaited<ReturnType<typeof issueC02>>) => {
+      const issued = await readIssuedQaCorrection(c.peer, c.ref);
+      expect(c.stored.revisions[0]!.ancillaryRoleBindings).toEqual(expected);
+      expect(c.applied.revisions[0]!.ancillaryRoleBindings).toEqual(expected);
+      expect(issued.applied.revisions[0]!.ancillaryRoleBindings).toEqual(expected);
+      await unchanged(c.s, { ...c.stored, revisions: [...b.stored.revisions, ...c.stored.revisions] }, async () => {
+        const replay = await commitQaCorrection(owned.db, c.stored);
+        expect(replay).toMatchObject({ status: "existing", authority: "history_only" });
+        if (replay.status !== "existing") throw Error("actual historical replay required");
+        expect(replay.proof.applied).toEqual(issued.applied);
+        expect(await beginQaCorrection(owned.db, c.s.p)).toMatchObject({ status: "already_applied", authority: "history_only" });
+      });
+    };
+    await check(b);
+    const c = await issueNextC02(b);
+    expect(c.applied.revisions[0]!.sourceProductId).toBe(b.applied.revisions[0]!.workProductId);
+    await check(c);
+    expect((await readIssuedQaCorrection(c.peer, b.ref)).applied).toEqual(b.applied);
+  }, 20000);
 
   it.each(["original", "mission-prior", "bare-prior"] as const)(
     "preserves undeclared registered-legacy storage selection: %s", async kind => {
@@ -161,6 +206,19 @@ describe("C03 whole stored candidate validation", () => {
     assets_null: c => { c.revisions[0]!.assetsRelativeRoot = null; },
     assets_missing: c => { delete (c.revisions[0]! as Partial<StoredCorrection["revisions"][number]>).assetsRelativeRoot; },
     assets_type: c => { Object.assign(c.revisions[0]!, { assetsRelativeRoot: 7 }); },
+    ancillary_role: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.role = "source-notes.txt"; },
+    ancillary_path: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.relativePath = "other.txt"; },
+    ancillary_missing: c => { delete c.revisions[0]!.ancillaryRoleBindings; },
+    ancillary_omitted: c => { c.revisions[0]!.ancillaryRoleBindings = []; },
+    ancillary_extra: c => { c.revisions[0]!.ancillaryRoleBindings!.push({ role: "other", relativePath: "other.txt" }); },
+    ancillary_duplicate_role: c => { c.revisions[0]!.ancillaryRoleBindings!.push({ ...c.revisions[0]!.ancillaryRoleBindings![0]! }); },
+    ancillary_duplicate_path: c => { c.revisions[0]!.ancillaryRoleBindings!.push({ role: "other", relativePath: "source-notes.txt" }); },
+    ancillary_main: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.relativePath = "report.html"; },
+    ancillary_asset: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.relativePath = "assets/nested/pixel.svg"; },
+    ancillary_manifest: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.relativePath = "bundle-index.json"; },
+    ancillary_role_invalid: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.role = "../research"; },
+    ancillary_path_invalid: c => { c.revisions[0]!.ancillaryRoleBindings![0]!.relativePath = "../source-notes.txt"; },
+    ancillary_undefined: c => { Object.assign(c.revisions[0]!, { ancillaryRoleBindings: undefined }); },
     file_before: c => { c.revisions[0]!.files[0]!.beforeSha256 = "ff".repeat(32); },
     file_after: c => { c.revisions[0]!.files[0]!.sha256 = "ff".repeat(32); },
     file_size: c => { c.revisions[0]!.files[0]!.byteSize++; },

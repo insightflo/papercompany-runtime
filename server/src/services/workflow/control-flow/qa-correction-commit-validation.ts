@@ -173,6 +173,12 @@ export async function inspectQaCorrectionCommitCandidate(db: Db, input: StoredCo
     const output = stored.outputs.find(o => o.sourceProductId === sourceId)!;
     const source = original.find(source => source.productId === sourceId)!;
     const layout = productLayouts.find(layout => layout.productId === sourceId)!;
+    // Recompute from independently read source/issuance facts, never from the candidate.
+    const priorRevision = current.observation.priors.find(p => p.productId === sourceId)?.revision;
+    const ancillaryRoleBindings = priorRevision ? priorRevision.ancillaryRoleBindings
+      : layout.bundleManifestRelativePath === null ? undefined
+      : source.files.flatMap(f => f.ancillaryRole === undefined ? []
+        : [{ role: f.ancillaryRole, relativePath: f.relativePath }]);
     const prior = current.priors.find(prior => prior.productId === sourceId);
     const origin = !selected && prior ? priorBase(source.root.path, prior) : null;
     const base = selected ?? (origin ? await captureArtifactRoot(origin.base) : source.root);
@@ -185,6 +191,7 @@ export async function inspectQaCorrectionCommitCandidate(db: Db, input: StoredCo
     candidateId = relative[0];
     requireQaCorrection(r.mainRelativePath === expected.mainRelativePath
       && r.bundleManifestRelativePath === layout.bundleManifestRelativePath && r.assetsRelativeRoot === layout.assetsRelativeRoot
+      && isDeepStrictEqual(r.ancillaryRoleBindings, ancillaryRoleBindings)
       && isDeepStrictEqual(r.files, expected.files.map(({ role, relativePath, beforeSha256, sha256, byteSize }) =>
         ({ role, relativePath, beforeSha256, sha256, byteSize })))
       && isDeepStrictEqual(await captureArtifactRoot(r.root), output.artifactRoot), "source");

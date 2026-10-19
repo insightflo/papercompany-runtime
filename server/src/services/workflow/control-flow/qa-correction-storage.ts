@@ -157,6 +157,12 @@ export async function storeQaCorrection(db: Db, measured: MeasuredRef): Promise<
   for (const source of patched) {
     const sourceId = source.sourceProductId, input = original.find(s => s.productId === sourceId)!;
     const layout = productLayouts.find(l => l.productId === sourceId)!;
+    // C02: preserve issued history; only fresh HTML may introduce observed role evidence.
+    const priorRevision = first.observation.priors.find(p => p.productId === sourceId)?.revision;
+    const ancillaryRoleBindings = priorRevision ? priorRevision.ancillaryRoleBindings
+      : layout.bundleManifestRelativePath === null ? undefined
+      : input.files.flatMap(f => f.ancillaryRole === undefined ? []
+        : [{ role: f.ancillaryRole, relativePath: f.relativePath }]);
     const prior = first.priors.find(p => p.productId === sourceId);
     const origin = !selectedRoot && prior ? priorBase(input.root.path, prior) : null;
     const base = selectedRoot ?? (origin ? await captureArtifactRoot(origin.base) : input.root);
@@ -170,6 +176,7 @@ export async function storeQaCorrection(db: Db, measured: MeasuredRef): Promise<
     revisions.push({ revisionId: randomUUID(), workProductId: randomUUID(), sourceProductId: sourceId,
       root: artifactRoot.path, mainRelativePath: source.mainRelativePath,
       bundleManifestRelativePath: layout.bundleManifestRelativePath, assetsRelativeRoot: layout.assetsRelativeRoot,
+      ...(ancillaryRoleBindings === undefined ? {} : { ancillaryRoleBindings: structuredClone(ancillaryRoleBindings) }),
       files: source.files.map(({ role, relativePath, beforeSha256, sha256, byteSize }) =>
         ({ role, relativePath, beforeSha256, sha256, byteSize })) });
     outputs.push({ sourceProductId: sourceId, artifactRoot,
