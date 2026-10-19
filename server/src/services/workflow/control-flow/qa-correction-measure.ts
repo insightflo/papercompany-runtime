@@ -6,7 +6,7 @@ import { workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { QaCorrectionReadError, parseQaCorrectionPreparationRow, readQaCorrectionReservation,
   requireQaCorrection, type QaCorrectionDb } from "./qa-correction-authority.js";
 import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionSourceMeasuredKey,
-  type QaCorrectionPreparation, type QaCorrectionSourceMeasured } from "./qa-correction-contract.js";
+  qaCorrectionSourceMeasuredSchema, type QaCorrectionPreparation, type QaCorrectionSourceMeasured } from "./qa-correction-contract.js";
 import { withCurrentQaCorrectionPreparation } from "./qa-correction-prepare.js";
 import { observeQaCorrectionSources, readQaCorrectionSourceBytes, qaCorrectionSourceFacts } from "./qa-correction-source-bytes.js";
 
@@ -38,6 +38,30 @@ function checkedMeasurement(row: Event, p: QaCorrectionPreparation, proof: Prepa
     && m.sources.length === p.sources.length && m.sources.every(s => p.sources.some(old => old.productId === s.productId)), "record");
   return { ...proof, sourceMeasuredEventId: row.id, sourceMeasuredHash: hashQaCorrectionPayload(row.payload), sourceMeasured: m };
 }
+const measuredRefSchema = preparationRefSchema.extend({
+  sourceMeasuredEventId: z.string().uuid(), sourceMeasuredHash: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceMeasured: qaCorrectionSourceMeasuredSchema,
+}).strict();
+
+/** C03: historical SELECT-only proof of the original measurement, not current issuance authority. */
+export async function readMeasuredQaCorrection(db: QaCorrectionDb, expected: MeasuredRef):
+  Promise<{ preparation: QaCorrectionPreparation; measured: MeasuredRef }> {
+  const parsed = measuredRefSchema.safeParse(expected);
+  requireQaCorrection(parsed.success, "record");
+  const ref = parsed.data, proof = { preparationEventId: ref.preparationEventId, preparationHash: ref.preparationHash };
+  requireQaCorrection(hashQaCorrectionPayload(expected.sourceMeasured) === ref.sourceMeasuredHash, "record");
+  const [prepared] = await db.select().from(workflowTransitionEvents)
+    .where(eq(workflowTransitionEvents.id, proof.preparationEventId));
+  requireQaCorrection(prepared, "record");
+  const preparation = parseQaCorrectionPreparationRow(prepared);
+  await readQaCorrectionReservation(db, preparation, proof);
+  const row = await measuredRow(db, preparation);
+  requireQaCorrection(row && row.id === ref.sourceMeasuredEventId, "record");
+  const measured = checkedMeasurement(row, preparation, proof);
+  requireQaCorrection(isDeepStrictEqual(measured, ref), "record");
+  return { preparation, measured };
+}
+
 function sortedSources(sources: QaCorrectionSourceMeasured["sources"]) {
   return sources.map(s => ({ ...s, files: [...s.files].sort((a, b) =>
     a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0) }))

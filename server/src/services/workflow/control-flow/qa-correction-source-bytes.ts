@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { workflowStepOutputBindings } from "@paperclipai/db";
 import { artifactRelativePathSchema, selectArtifactValues } from "@paperclipai/shared/validators/artifact-contract";
-import { toolArtifactContractSchema, toolArtifactReceiptSchema } from "@paperclipai/shared/validators/workflow-artifact";
+import { toolArtifactContractSchema, toolArtifactReceiptSchema, workProductSelectorsSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { readFrozenArtifactAttempt } from "../artifact-contract-runtime.js";
 import { readObject } from "../core-tool-context.js";
 import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } from "../artifact-files.js";
@@ -26,12 +26,61 @@ const inside = (file: string, root: string) => {
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
 
+type Revision = QaCorrectionApplied["revisions"][number];
+type Producer = ReturnType<typeof inputSchema.parse>["producer"];
+
+/** Follow verified issuance edges to the original record; never restamp a corrected product. */
+async function originalWorkflowProducer(db: QaCorrectionDb, p: QaCorrectionPreparation,
+  issued: Awaited<ReturnType<typeof readIssuedQaCorrection>>, revision: Revision): Promise<Producer | null> {
+  const visited = new Set<string>();
+  for (;;) {
+    const ancestor = issued.preparation;
+    requireQaCorrection(!visited.has(ancestor.correctionId)
+      && ancestor.companyId === p.companyId && ancestor.missionId === p.missionId
+      && ancestor.workflowRunId === p.workflowRunId && ancestor.producer.stepRunId === p.producer.stepRunId
+      && ancestor.producer.stepId === p.producer.stepId && ancestor.producer.issueId === p.producer.issueId
+      && Date.parse(issued.applied.appliedAt) <= Date.parse(p.preparedAt), "lineage");
+    visited.add(ancestor.correctionId);
+    const source = ancestor.sources.find(s => s.productId === revision.sourceProductId);
+    const actual = issued.sources.find(s => s.product.id === revision.sourceProductId);
+    requireQaCorrection(source && actual, "lineage");
+    if (source.provenance.kind === "registered_legacy") return null;
+    if (source.provenance.kind === "workflow_producer") return source.provenance.workflowProducer;
+    const hint = qaCorrectionProductPointerSchema.parse(actual.product.metadata?.qaCorrection);
+    requireQaCorrection(hint.appliedEventId === source.provenance.appliedEventId, "lineage");
+    issued = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
+      appliedEventId: source.provenance.appliedEventId });
+    const previous = issued.applied.revisions.find(r =>
+      r.workProductId === source.productId && r.revisionId === hint.revisionId);
+    requireQaCorrection(previous && path.resolve(previous.root, previous.mainRelativePath) === actual.file, "lineage");
+    revision = previous;
+  }
+}
+
 /** C03/C12 SELECT-only observation, collected again under the preparation locks before INSERT. */
 export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectionPreparation) {
   const sources = await readQaCorrectionSources(db, p, true);
   const execution = await loadExecutionDefinition(db, p.workflowRunId, { requireHistorical: false });
   const paths = await resolveMissionWorkProductPaths(db, { companyId: p.companyId,
     missionId: p.missionId, workflowRunId: p.workflowRunId });
+  const priors: { productId: string; revision: Revision; workflowProducer: Producer | null }[] = [];
+  for (const s of sources) {
+    const provenance = p.sources.find(x => x.productId === s.product.id)!.provenance;
+    if (provenance.kind !== "prior_correction") continue;
+    const pointer = qaCorrectionProductPointerSchema.parse(s.product.metadata?.qaCorrection);
+    requireQaCorrection(pointer.appliedEventId === provenance.appliedEventId, "lineage");
+    const issued = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
+      appliedEventId: provenance.appliedEventId });
+    const revision = issued.applied.revisions.find(r => r.revisionId === pointer.revisionId && r.workProductId === s.product.id);
+    requireQaCorrection(revision && issued.preparation.companyId === p.companyId
+      && issued.preparation.missionId === p.missionId && issued.preparation.workflowRunId === p.workflowRunId
+      && issued.preparation.producer.stepRunId === p.producer.stepRunId
+      && issued.preparation.producer.stepId === p.producer.stepId && issued.preparation.producer.issueId === p.producer.issueId
+      && Date.parse(issued.applied.appliedAt) <= Date.parse(p.preparedAt)
+      && path.resolve(revision.root, revision.mainRelativePath) === s.file, "lineage");
+    priors.push({ productId: s.product.id, revision,
+      workflowProducer: await originalWorkflowProducer(db, p, issued, revision) });
+  }
   const declarations: {
     qa: Awaited<ReturnType<typeof readQaCorrectionVerdict>>["qa"];
     definition: Awaited<ReturnType<typeof loadExecutionDefinition>>["steps"][number];
@@ -61,14 +110,29 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
         { executionGeneration: qa.executionGeneration, requestId: qa.lastDispatchRequestId ?? "" }), frozen), "tool");
     const source = sources.find(s => s.product.id === input.workProductId);
     requireQaCorrection(source && source.file === input.path && paths && inside(source.file, paths.missionOutputDir), "source");
-    const producer = input.producer;
-    requireQaCorrection(producer.companyId === p.companyId && producer.missionId === p.missionId
-      && producer.workflowRunId === p.workflowRunId && producer.stepRunId === p.producer.stepRunId
-      && producer.stepId === p.producer.stepId && producer.executionGeneration === p.producer.executionGeneration
-      && producer.retryCount === p.producer.retryCount && producer.iterationIndex === p.producer.iterationIndex, "source");
-    const provenance = p.sources.find(s => s.productId === source.product.id)!.provenance;
-    requireQaCorrection(provenance.kind === "workflow_producer"
-      && isDeepStrictEqual(producer, provenance.workflowProducer), "source");
+    const producer = input.producer, prior = priors.find(s => s.productId === source.product.id);
+    if (prior) {
+      const selector = workProductSelectorsSchema.parse(readObject(definition).workProductSelectors)[contract.inputStepId];
+      requireQaCorrection(selector && selector.type === source.product.type && selector.title === source.product.title, "source");
+      requireQaCorrection(prior.workflowProducer && isDeepStrictEqual(producer, prior.workflowProducer), "source");
+      const revision = prior.revision;
+      // Undefined historical format is not inferred from mutable request metadata.
+      requireQaCorrection(revision.bundleManifestRelativePath !== undefined && revision.assetsRelativeRoot !== undefined, "lineage");
+      if (input.mode === "html") requireQaCorrection(input.assetsRoot === ""
+        && typeof revision.bundleManifestRelativePath === "string" && typeof revision.assetsRelativeRoot === "string"
+        && input.htmlManifest!.path === path.resolve(revision.root, revision.bundleManifestRelativePath)
+        && path.resolve(revision.root, revision.assetsRelativeRoot) === path.join(path.dirname(source.file), "assets"), "source");
+      else requireQaCorrection(revision.bundleManifestRelativePath === null && input.assetsRoot ===
+        (revision.assetsRelativeRoot === null ? "" : path.resolve(revision.root, revision.assetsRelativeRoot)), "source");
+    } else {
+      requireQaCorrection(producer.companyId === p.companyId && producer.missionId === p.missionId
+        && producer.workflowRunId === p.workflowRunId && producer.stepRunId === p.producer.stepRunId
+        && producer.stepId === p.producer.stepId && producer.executionGeneration === p.producer.executionGeneration
+        && producer.retryCount === p.producer.retryCount && producer.iterationIndex === p.producer.iterationIndex, "source");
+      const provenance = p.sources.find(s => s.productId === source.product.id)!.provenance;
+      requireQaCorrection(provenance.kind === "workflow_producer"
+        && isDeepStrictEqual(producer, provenance.workflowProducer), "source");
+    }
     const [pin] = await db.select().from(workflowStepOutputBindings).where(and(
       eq(workflowStepOutputBindings.companyId, p.companyId), eq(workflowStepOutputBindings.workflowRunId, p.workflowRunId),
       eq(workflowStepOutputBindings.consumerStepRunId, qa.id), eq(workflowStepOutputBindings.referencedStepId, p.producer.stepId)));
@@ -88,18 +152,6 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
     const previous = declarations.find(d => d.input.workProductId === input.workProductId);
     requireQaCorrection(!previous || isDeepStrictEqual(previous.input, input), "source");
     declarations.push({ qa, definition, request, frozen, input, pin });
-  }
-  const priors: { productId: string; revision: QaCorrectionApplied["revisions"][number] }[] = [];
-  for (const s of sources) {
-    const provenance = p.sources.find(x => x.productId === s.product.id)!.provenance;
-    if (provenance.kind !== "prior_correction") continue;
-    const pointer = qaCorrectionProductPointerSchema.parse(s.product.metadata?.qaCorrection);
-    const issued = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
-      appliedEventId: provenance.appliedEventId });
-    const revision = issued.applied.revisions.find(r => r.revisionId === pointer.revisionId && r.workProductId === s.product.id);
-    requireQaCorrection(revision && pointer.appliedEventId === provenance.appliedEventId
-      && path.resolve(revision.root, revision.mainRelativePath) === s.file, "lineage");
-    priors.push({ productId: s.product.id, revision });
   }
   return { sources, declarations, priors, paths, definitionHash: execution.definitionHash };
 }
@@ -132,7 +184,8 @@ export async function readQaCorrectionSourceBytes(p: QaCorrectionPreparation, ob
       requireQaCorrection(main.sha256 === provenance.workflowProducer.sha256
         && main.byteSize === provenance.workflowProducer.byteSize, "source");
     }
-    let files = [main], assetsRoot: string | null = null;
+    let files = [main], assetsRoot: string | null = typeof prior?.assetsRelativeRoot === "string"
+      ? path.resolve(prior.root, prior.assetsRelativeRoot) : null;
     if (prior) {
       for (const f of prior.files) if (f.role !== "main") files.push(await read(path.join(prior.root, f.relativePath),
         f.role, f.relativePath, f.role === "asset" ? 16 * 1024 * 1024 : 1024 * 1024));
@@ -145,7 +198,8 @@ export async function readQaCorrectionSourceBytes(p: QaCorrectionPreparation, ob
       requireQaCorrection(input.sha256 === main.sha256 && input.byteSize === main.byteSize, "source");
       if (input.mode === "html") {
         const html = await readHtmlBundle(root, source.file, main.bytes, input.htmlManifest!.path, d.frozen.contract.bundleManifest);
-        const manifest = await read(html.manifest.path, "ancillary", path.basename(html.manifest.path), 1024 * 1024);
+        const manifest = await read(html.manifest.path, "ancillary",
+          prior ? path.relative(prior.root, html.manifest.path) : path.basename(html.manifest.path), 1024 * 1024);
         requireQaCorrection(manifest.sha256 === html.manifest.sha256 && manifest.byteSize === html.manifest.byteSize
           && isDeepStrictEqual(html.manifest, input.htmlManifest), "source");
         // readHtmlBundle checks this raw document but aliases ancillary fileName to role.
@@ -156,13 +210,16 @@ export async function readQaCorrectionSourceBytes(p: QaCorrectionPreparation, ob
         const ancillary = html.ancillary.map(a => ({ fileName: a.fileName, sha256: a.sha256, byteSize: a.byteSize }));
         requireQaCorrection(isDeepStrictEqual(assets, input.assetManifest)
           && isDeepStrictEqual(ancillary, input.ancillaryManifest), "source");
-        for (const a of html.assets) current.push({ role: "asset", relativePath: `assets/${a.fileName}`,
+        for (const a of html.assets) current.push({ role: "asset", relativePath: prior
+          ? path.posix.join(prior.assetsRelativeRoot!, a.fileName) : `assets/${a.fileName}`,
           sourcePath: path.join(path.dirname(source.file), "assets", a.fileName), bytes: a.bytes, sha256: a.sha256, byteSize: a.byteSize });
         for (const a of html.ancillary) {
           const original = raw.ancillary.find(entry => entry.role === a.fileName);
           requireQaCorrection(original && original.sha256 === a.sha256 && original.byteSize === a.byteSize, "source");
           artifactRelativePathSchema.parse(original.fileName);
-          current.push({ role: "ancillary", ancillaryRole: original.role, relativePath: original.fileName, sourcePath: path.join(path.dirname(source.file), original.fileName),
+          current.push({ role: "ancillary", ancillaryRole: original.role, relativePath: prior
+            ? path.relative(prior.root, path.join(path.dirname(source.file), original.fileName)) : original.fileName,
+            sourcePath: path.join(path.dirname(source.file), original.fileName),
             bytes: a.bytes, sha256: a.sha256, byteSize: a.byteSize });
         }
         current.push(manifest);
@@ -175,10 +232,11 @@ export async function readQaCorrectionSourceBytes(p: QaCorrectionPreparation, ob
           }
         }
         requireQaCorrection(!names.size || input.assetsRoot !== "", "source");
-        assetsRoot = input.assetsRoot;
+        if (!prior) assetsRoot = input.assetsRoot;
         const assets = [];
         for (const fileName of [...names].sort()) {
-          const file = await read(path.join(input.assetsRoot, fileName), "asset", `assets/${fileName}`, 16 * 1024 * 1024);
+          const file = await read(path.join(input.assetsRoot, fileName), "asset",
+            prior ? path.posix.join(prior.assetsRelativeRoot!, fileName) : `assets/${fileName}`, 16 * 1024 * 1024);
           current.push(file); assets.push({ fileName, sha256: file.sha256, byteSize: file.byteSize });
         }
         requireQaCorrection(isDeepStrictEqual(assets, input.assetManifest), "source");
