@@ -56,8 +56,11 @@ function options(i: root.CorrectionDeliveryInput): Options {
     triggerDetail: r.triggerDetail, reason: r.reason, payload: r.payload, contextSnapshot: r.contextSnapshot,
     requestedByActorId: r.requestedByActorId, requestedByActorType: r.requestedByActorType as Options["requestedByActorType"] };
 }
-async function world() {
-  const c = await issueC02(owned, { mode: "content-only", quality: true }), i = await deliveryInput(c);
+async function world(quality = true) {
+  const c = await issueC02(owned, { mode: "content-only", quality });
+  await c.peer.update(agentWakeupRequests).set({ status: "completed" })
+    .where(eq(agentWakeupRequests.id, c.s.f.verdictWakeId));
+  const i = await deliveryInput(c);
   track(c.peer);
   await c.peer.update(agents).set({ status: "active", adapterType: "codex_local",
     adapterConfig: { cwd: owned.root, promptTemplate: "Isolated public callback" },
@@ -67,13 +70,13 @@ async function world() {
 type World = Awaited<ReturnType<typeof world>>;
 const wake = (w: World, db = owned.db, opts = w.opts) => heartbeatService(track(db)).wakeup(w.i.agentId, opts);
 function gate() {
-  let enter!: () => void, release!: () => void;
-  const entered = new Promise<void>(resolve => { enter = resolve; });
+  let enter!: (runId: string) => void, release!: () => void;
+  const entered = new Promise<string>(resolve => { enter = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  adapter.mockImplementation(async () => { enter(); await held; return stopped; });
-  return { release, entered: () => new Promise<void>((resolve, reject) => {
+  adapter.mockImplementation(async ({ runId }) => { enter(runId); await held; return stopped; });
+  return { release, entered: () => new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("adapter did not enter")), 5000);
-    void entered.then(() => { clearTimeout(timer); resolve(); });
+    void entered.then(runId => { clearTimeout(timer); resolve(runId); });
   }) };
 }
 async function pending(w: World, deferred = false) {
@@ -196,7 +199,7 @@ it("rejects ref/key/source/actor/payload changes without peer-visible writes", a
   expect(adapter).not.toHaveBeenCalled();
 }, 30000);
 it("returns delivered B after actual C issuance and terminal/paused/budget changes; rejects undelivered stale B", async () => {
-  const w = await world(), run = await wake(w);
+  const w = await world(false), run = await wake(w);
   await drain();
   await issueNextC02(w.c);
   await owned.db.update(missions).set({ status: "completed" }).where(eq(missions.id, w.i.missionId));
@@ -206,7 +209,7 @@ it("returns delivered B after actual C issuance and terminal/paused/budget chang
   expect((await wake(w))!.id).toBe(run!.id);
   expect(await state(w)).toEqual(before);
   expect(adapter).toHaveBeenCalledTimes(count);
-  const stale = await world();
+  const stale = await world(false);
   await issueNextC02(stale.c);
   const old = await deliveryState(stale.c);
   await expect(wake(stale)).rejects.toThrow();
@@ -214,10 +217,11 @@ it("returns delivered B after actual C issuance and terminal/paused/budget chang
 }, 60000);
 it.each(["active", "mention"] as const)("%s merge keeps both directions isolated and ordinary merging intact", async route => {
   const w = await world(), g = gate(), reason = route === "mention" ? "issue_comment_mentioned" : "ordinary";
-  const normal: Options = { source: "automation", reason, contextSnapshot: { ...w.i.request.contextSnapshot, wakeReason: reason } };
+  const normal: Options = { source: "automation", reason, idempotencyKey: `workflow-step-retry:${w.i.workflowStepRunId}:1`,
+    contextSnapshot: { ...w.i.request.contextSnapshot, wakeReason: reason } };
   try {
     const original = await wake(w, owned.db, normal);
-    await g.entered();
+    expect(await g.entered()).toBe(original!.id);
     const control = await wake(w, owned.db, { ...normal, contextSnapshot: { ...normal.contextSnapshot, ordinaryProbe: true } });
     expect(control!.id).toBe(original!.id);
     const snapshot = await w.c.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, original!.id));
@@ -231,9 +235,11 @@ it.each(["active", "mention"] as const)("%s merge keeps both directions isolated
     const older = route === "mention" ? await heartbeatService(owned.db).wakeup(reverse.i.agentId,
       { source: "automation", contextSnapshot: { taskKey: reverse.i.issueId } }) : null;
     const corrected = await wake(reverse);
-    await held.entered();
+    expect(await held.entered()).toBe(older?.id ?? corrected!.id);
     const before = await one(reverse);
-    const generic = { ...normal, contextSnapshot: { ...reverse.i.request.contextSnapshot, wakeReason: reason } };
+    if (older) expect(before.heartbeats[0]!.status).toBe("queued");
+    const generic = { ...normal, idempotencyKey: `workflow-step-retry:${reverse.i.workflowStepRunId}:1`,
+      contextSnapshot: { ...reverse.i.request.contextSnapshot, wakeReason: reason } };
     const first = await wake(reverse, owned.db, generic);
     expect(first?.id).not.toBe(corrected!.id);
     if (older) expect(first!.id).toBe(older.id);
