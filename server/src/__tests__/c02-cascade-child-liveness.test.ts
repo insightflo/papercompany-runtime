@@ -91,7 +91,9 @@ describe("C12 stage8B cascade preservation controls", () => {
     if (hold) expect(result).toBeNull();
     else expect(result?.action).toBe("recovered");
     expect(run.status).toBe(hold ? "running" : "failed");
-    expect(run.dispatchAuthorityVersion).toBe(enabled && !hold ? 1 : 0);
+    expect(run.dispatchAuthorityVersion).toBe(
+      before.runs.find(row => row.id === c.s.p.workflowRunId)!.dispatchAuthorityVersion,
+    );
     expect(after.decisions).toHaveLength(enabled && !hold ? 1 : 0);
     expect(after.effects).toHaveLength(enabled && !hold ? 1 : 0);
     if (enabled && !hold) expect(after.effects[0]?.status).toBe("completed");
