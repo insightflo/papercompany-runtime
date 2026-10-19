@@ -134,6 +134,37 @@ export type QaCorrectionSourceMeasured = z.infer<typeof qaCorrectionSourceMeasur
 export type QaCorrectionApplied = z.infer<typeof qaCorrectionAppliedSchema>;
 export type QaCorrectionFollowup = z.infer<typeof qaCorrectionFollowupSchema>;
 
+// C02: references identify records; only DB readers can prove delivery or consumption.
+export const qaCorrectionFollowupRefSchema = z.object({
+  companyId: uuid, workflowRunId: uuid, appliedEventId: uuid, requestId: uuid,
+}).strict();
+export const qaCorrectionDeliverySchema = z.object({
+  schemaVersion: z.literal("workflow.qa-correction.delivery.v1"),
+  ref: qaCorrectionFollowupRefSchema, followupEventId: uuid,
+  wakeupRequestId: uuid, heartbeatRunId: uuid, deliveredAt: timestamp,
+}).strict();
+export const qaCorrectionConsumptionSchema = z.object({
+  schemaVersion: z.literal("workflow.qa-correction.consumption.v1"),
+  ref: qaCorrectionFollowupRefSchema, followupEventId: uuid,
+  followup: qaCorrectionFollowupSchema, consumedAt: timestamp,
+  evidence: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("workflow_verdict"), eventId: uuid, deliveryEventId: uuid }).strict(),
+    z.object({ kind: z.literal("tool_qa"), stepRunId: uuid, requestId: text, sha256 }).strict(),
+  ]),
+}).strict().refine(c => c.ref.requestId === c.followup.requestId
+  && c.ref.appliedEventId === c.followup.appliedEventId, "qa_correction_consumption_reference");
+export type QaCorrectionFollowupRef = z.infer<typeof qaCorrectionFollowupRefSchema>;
+export type QaCorrectionDelivery = z.infer<typeof qaCorrectionDeliverySchema>;
+export type QaCorrectionConsumption = z.infer<typeof qaCorrectionConsumptionSchema>;
+
+// Existing (companyId, idempotencyKey) uniqueness owns one delivery/consumption per request.
+export function qaCorrectionDeliveryKey(requestId: string): string {
+  return "qa-correction-delivered:" + uuid.parse(requestId);
+}
+export function qaCorrectionConsumptionKey(requestId: string): string {
+  return "qa-correction-consumed:" + uuid.parse(requestId);
+}
+
 const eventSchemas = {
   qa_correction_prepared: qaCorrectionPreparationSchema,
   qa_correction_source_measured: qaCorrectionSourceMeasuredSchema,
