@@ -1,24 +1,68 @@
-import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { issueComments, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { and, eq, like, sql } from "drizzle-orm";
+import { workflowRuns } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
 import type { ReconciliationResult } from "./reconciler.js";
 import { isStepRunAwaitingRetry } from "./retry-reconciler.js";
 import { hasLiveWorkflowChildWait } from "./workflow-child-execution.js";
-import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
-import { evaluateRecoveryChannels, executeTerminalEffectIntents, finalizeRunTerminal, type TerminalStepRunRef } from "./run-terminal-boundary.js";
+import {
+  evaluateRecoveryChannels, executeTerminalEffectIntents, finalizeRunTerminal,
+  type FinalizeRunTerminalInput, type TerminalFinalizeResult,
+} from "./run-terminal-boundary.js";
+import {
+  lockCascadeObservation, writeStuckCascade, writeDeadlockCascade,
+  type CascadeTx, type FailureCascadeRun, type FailureCascadeStep, type DeadlockCascadeStep,
+} from "./failure-cascade-writes.js";
 
-type FailureCascadeRun = Pick<typeof workflowRuns.$inferSelect, "id" | "companyId" | "missionId" | "dispatchAuthorityVersion">;
-type FailureCascadeStep = TerminalStepRunRef & { statusTransitionVersion: number };
+type Finalized = Extract<TerminalFinalizeResult, { kind: "finalized" }>;
+type Cancelled = Exclude<TerminalFinalizeResult, Finalized> | "stale_observation";
 
-const DEADLOCK_COMMENT_MARKER = "control-plane-deadlock";
+// Only the owner of the outer transaction translates this error into a result.
+class CascadeCancelled extends Error {
+  constructor(readonly result: Cancelled) {
+    super("Failure cascade cancelled");
+  }
+}
+
+async function finalizeCascade(tx: CascadeTx, input: FinalizeRunTerminalInput): Promise<Finalized> {
+  const boundary = await finalizeRunTerminal(tx, input);
+  if (boundary.kind !== "finalized") throw new CascadeCancelled(boundary);
+  return boundary;
+}
+
+function cancelledResult(runId: string, result: Cancelled, deadlock = false): ReconciliationResult {
+  if (result === "stale_observation") {
+    return { runId, action: "skipped", reason: "Failure cascade discarded: run or step observation changed" };
+  }
+  if (result.kind === "deferred") {
+    return deadlock
+      ? { runId, action: "skipped", reason: "Deadlock finalization deferred: recovery channel open/unknown; waiting for recovery" }
+      : { runId, action: "deferred", reason: "Recovery channel opened during finalization; cascade rolled back, run left non-terminal" };
+  }
+  if (result.kind === "stale_authority") {
+    return { runId, action: "skipped", reason: deadlock
+      ? "Deadlock finalization discarded: run authority superseded"
+      : "Run authority superseded; stuck finalization discarded" };
+  }
+  return { runId, action: "skipped", reason: deadlock
+    ? "Deadlock finalization skipped: run already terminal" : "Run already terminal" };
+}
+
+async function terminalEffectNote(db: Db, decisionId: string): Promise<string> {
+  try {
+    await executeTerminalEffectIntents(db, decisionId);
+    return "";
+  } catch (error) {
+    // Pending intents remain available to the periodic sweep after a committed decision.
+    return ` (effect execution deferred to sweep: ${error instanceof Error ? error.message : String(error)})`;
+  }
+}
 
 export async function settleStuckFailureCascade(
   db: Db,
   { run, pendingSteps, boundaryStepRuns, boundaryEnabled }: {
     run: FailureCascadeRun;
     pendingSteps: FailureCascadeStep[];
-    boundaryStepRuns: TerminalStepRunRef[];
+    boundaryStepRuns: FailureCascadeStep[];
     boundaryEnabled: boolean;
   },
 ): Promise<ReconciliationResult> {
@@ -60,97 +104,51 @@ export async function settleStuckFailureCascade(
         };
       }
     }
-    const now = new Date();
-    for (const step of pendingSteps) {
-      const metadata = normalizeMetadata(step.metadata);
-      const [updated] = await db
-        .update(workflowStepRuns)
-        .set({
-          status: "skipped",
-          completedAt: now,
-          metadata: {
-            ...metadata,
-            failureCascadeSkipped: true,
-          },
-        })
-        .where(eq(workflowStepRuns.id, step.id))
-        .returning({
-          id: workflowStepRuns.id,
-          transitionVersion: workflowStepRuns.statusTransitionVersion,
-        });
-      if (updated) {
-        await recordWorkflowStepStatusTransition(db, {
-          companyId: run.companyId,
-          missionId: run.missionId,
-          workflowRunId: run.id,
-          workflowStepRunId: step.id,
-          issueId: step.issueId,
-          fromStatus: step.status,
-          toStatus: "skipped",
-          source: "workflow_reconciler",
-          transitionVersion: updated.transitionVersion > step.statusTransitionVersion
-            ? updated.transitionVersion
-            : null,
-        });
-      }
-    }
   }
 
-  if (boundaryEnabled) {
-    // [run-terminal-boundary v1] stuck 강제 종결을 경계로 우한다 — CAS/원인 스탬프/회복 게이트는
-    //   코어 계약이 소유한다. 최종 재평가에서 채널이 열리면 유예되어 run 은 비종말로 남는다.
-    const boundary = await finalizeRunTerminal(db, {
-      runId: run.id,
-      companyId: run.companyId,
-      expectedAuthorityVersion: run.dispatchAuthorityVersion,
-      decision: "failed",
-      cause: {
-        policy: "recovery_deadline_hard",
-        discovery: "stuck_diagnostic",
-        origin: "reconciler",
-        reason: "Marked stuck run as failed",
-      },
-      gatePolicy: "defer_on_open_recovery",
-      now: new Date(),
-      stepRuns: boundaryStepRuns,
+  try {
+    const boundary = await db.transaction(async (tx) => {
+      const observation = await lockCascadeObservation(tx, {
+        kind: "stuck", run, pendingSteps, boundaryStepRuns, boundaryEnabled,
+      });
+      if (observation === "stale_observation") throw new CascadeCancelled(observation);
+      if (observation === "current" && pendingSteps.length > 0) {
+        await writeStuckCascade(tx, run, pendingSteps, new Date());
+      }
+      if (boundaryEnabled) {
+        return await finalizeCascade(tx, {
+          runId: run.id,
+          companyId: run.companyId,
+          expectedAuthorityVersion: run.dispatchAuthorityVersion,
+          decision: "failed",
+          cause: {
+            policy: "recovery_deadline_hard",
+            discovery: "stuck_diagnostic",
+            origin: "reconciler",
+            reason: "Marked stuck run as failed",
+          },
+          gatePolicy: "defer_on_open_recovery",
+          now: new Date(),
+          stepRuns: boundaryStepRuns,
+        });
+      }
+      await tx.update(workflowRuns).set({ status: "failed", completedAt: new Date() })
+        .where(eq(workflowRuns.id, run.id));
+      return null;
     });
-    if (boundary.kind === "deferred") {
-      return { runId: run.id, action: "deferred", reason: "Recovery channel opened during finalization; steps skipped, run left non-terminal" };
-    }
-    if (boundary.kind === "stale_authority") {
-      return { runId: run.id, action: "skipped", reason: "Run authority superseded; stuck finalization discarded" };
-    }
-    if (boundary.kind === "already_finalized") {
-      return { runId: run.id, action: "skipped", reason: "Run already terminal" };
-    }
-    let effectNote = "";
-    try {
-      await executeTerminalEffectIntents(db, boundary.decisionId);
-    } catch (error) {
-      // 부작용 실행 실패는 관측 사항 — pending 인텐트는 periodic sweep 이 재처리한다(계약).
-      effectNote = ` (effect execution deferred to sweep: ${error instanceof Error ? error.message : String(error)})`;
-    }
+    const effectNote = boundary ? await terminalEffectNote(db, boundary.decisionId) : "";
     return {
       runId: run.id,
       action: "recovered",
-      reason: `Marked stuck run as failed (terminal decision ${boundary.decisionId})${effectNote}`,
+      reason: boundary
+        ? `Marked stuck run as failed (terminal decision ${boundary.decisionId})${effectNote}`
+        : "Marked stuck run as failed",
     };
+  } catch (error) {
+    if (error instanceof CascadeCancelled) return cancelledResult(run.id, error.result);
+    // Keep the caller's contention, timeout and ordinary failure classifications.
+    throw error;
   }
-
-  // Mark the run as failed
-  await db
-    .update(workflowRuns)
-    .set({
-      status: "failed",
-      completedAt: new Date(),
-    })
-    .where(eq(workflowRuns.id, run.id));
-
-  return {
-    runId: run.id,
-    action: "recovered",
-    reason: "Marked stuck run as failed",
-  };
 }
 
 export async function settleDeadlockFailureCascade(
@@ -158,129 +156,53 @@ export async function settleDeadlockFailureCascade(
   { run, stepsToSkip, runSteps, boundaryEnabled, now, mayFinalize }: {
     run: FailureCascadeRun;
     stepsToSkip: FailureCascadeStep[];
-    runSteps: TerminalStepRunRef[];
+    runSteps: DeadlockCascadeStep[];
     boundaryEnabled: boolean;
     now: Date;
     mayFinalize: boolean;
   },
 ): Promise<ReconciliationResult | null> {
-  for (const step of stepsToSkip) {
-    const priorMetadata = (step.metadata as Record<string, unknown> | null) ?? {};
-    const [updated] = await db
-      .update(workflowStepRuns)
-      .set({ status: "skipped", completedAt: now, metadata: { ...priorMetadata, controlFlowSkipped: true } })
-      .where(eq(workflowStepRuns.id, step.id))
-      .returning({
-        id: workflowStepRuns.id,
-        transitionVersion: workflowStepRuns.statusTransitionVersion,
+  try {
+    const boundary = await db.transaction(async (tx) => {
+      const observation = await lockCascadeObservation(tx, {
+        kind: "deadlock", run, stepsToSkip, runSteps, boundaryEnabled, mayFinalize,
       });
-    if (updated) {
-      await recordWorkflowStepStatusTransition(db, {
-        companyId: run.companyId,
-        missionId: run.missionId,
-        workflowRunId: run.id,
-        workflowStepRunId: step.id,
-        issueId: step.issueId,
-        fromStatus: step.status,
-        toStatus: "skipped",
-        source: "workflow_deadlock_reconciler",
-        transitionVersion: updated.transitionVersion > step.statusTransitionVersion
-          ? updated.transitionVersion
-          : null,
-      });
-    }
-    if (step.issueId) {
-      await blockIssueOnDeadlock(db, {
-        issueId: step.issueId,
-        companyId: run.companyId,
-        runId: run.id,
-        stepId: step.id,
-      });
-    }
-  }
-
-  // [B3] 보류(hold)된 스텝이 하나라도 있으면 run 종결(final skip 수렴)도 함께 보류한다 —
-  //   run failed + pending 잔존 상태(되돌림 역발생)를 만들지 않는다. 모두 수렴했을 때만 기존과
-  //   동일하게 최종 실패 처리와 회복 채널 종료를 일관되게 수행한다.
-  if (!mayFinalize) return null;
-  if (boundaryEnabled) {
-    // [run-terminal-boundary v1] 최종 수렴을 경계로 우회한다 — CAS/원인 스탬프/회복 게이트는
-    //   코어 계약(run-terminal-boundary.ts)이 소유한다. 채널이 열리면 유예되어 run 은 비종말로 남는다.
-    const boundary = await finalizeRunTerminal(db, {
-      runId: run.id,
-      companyId: run.companyId,
-      expectedAuthorityVersion: run.dispatchAuthorityVersion,
-      decision: "failed",
-      cause: {
-        policy: "recovery_deadline_hard",
-        discovery: "deadlock_detection",
-        origin: "deadlock_reconciler",
-        reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
-      },
-      gatePolicy: "defer_on_open_recovery",
-      now,
-      stepRuns: runSteps,
-    });
-    if (boundary.kind === "finalized") {
-      let effectNote = "";
-      try {
-        await executeTerminalEffectIntents(db, boundary.decisionId);
-      } catch (error) {
-        // 부작용 실행 실패는 관측 사항 — pending 인텐트는 periodic sweep 이 재처리한다(계약).
-        effectNote = ` (effect execution deferred to sweep: ${error instanceof Error ? error.message : String(error)})`;
+      if (observation === "stale_observation") throw new CascadeCancelled(observation);
+      if (observation === "current") await writeDeadlockCascade(tx, run, stepsToSkip, now);
+      // A valid mixed hold commits only its selected skips.
+      if (!mayFinalize) return null;
+      if (boundaryEnabled) {
+        return await finalizeCascade(tx, {
+          runId: run.id,
+          companyId: run.companyId,
+          expectedAuthorityVersion: run.dispatchAuthorityVersion,
+          decision: "failed",
+          cause: {
+            policy: "recovery_deadline_hard",
+            discovery: "deadlock_detection",
+            origin: "deadlock_reconciler",
+            reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
+          },
+          gatePolicy: "defer_on_open_recovery",
+          now,
+          stepRuns: runSteps,
+        });
       }
-      return {
-        runId: run.id,
-        action: "recovered",
-        reason: `Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait (terminal decision ${boundary.decisionId})${effectNote}`,
-      };
-    } else if (boundary.kind === "deferred") {
-      return { runId: run.id, action: "skipped", reason: "Deadlock finalization deferred: recovery channel open/unknown; waiting for recovery" };
-    } else if (boundary.kind === "stale_authority") {
-      return { runId: run.id, action: "skipped", reason: "Deadlock finalization discarded: run authority superseded" };
-    } else {
-      return { runId: run.id, action: "skipped", reason: "Deadlock finalization skipped: run already terminal" };
-    }
-  } else {
-    await db.update(workflowRuns).set({ status: "failed", completedAt: now }).where(eq(workflowRuns.id, run.id));
+      await tx.update(workflowRuns).set({ status: "failed", completedAt: now })
+        .where(eq(workflowRuns.id, run.id));
+      return null;
+    });
+    if (!mayFinalize) return null;
+    const effectNote = boundary ? await terminalEffectNote(db, boundary.decisionId) : "";
     return {
       runId: run.id,
       action: "recovered",
-      reason: "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
+      reason: boundary
+        ? `Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait (terminal decision ${boundary.decisionId})${effectNote}`
+        : "Deadlock: no runnable/no active step + failed predecessor; converged without 60-min wait",
     };
+  } catch (error) {
+    if (error instanceof CascadeCancelled) return cancelledResult(run.id, error.result, true);
+    throw error;
   }
-}
-
-async function blockIssueOnDeadlock(
-  db: Db,
-  input: { issueId: string; companyId: string; runId: string; stepId: string },
-) {
-  const marker = `[${DEADLOCK_COMMENT_MARKER}:${input.runId}:${input.stepId}]`;
-  const issue = await db
-    .select({ status: issues.status, language: sql<string>`(select default_language from companies where id = ${issues.companyId})` })
-    .from(issues)
-    .where(eq(issues.id, input.issueId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!issue || issue.status === "blocked" || issue.status === "done" || issue.status === "cancelled") return;
-
-  const existing = await db
-    .select({ id: issueComments.id })
-    .from(issueComments)
-    .where(and(eq(issueComments.issueId, input.issueId), like(issueComments.body, `%${marker}%`)))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (existing) return;
-
-  const now = new Date();
-  await db.update(issues).set({ status: "blocked", updatedAt: now }).where(eq(issues.id, input.issueId));
-  await db.insert(issueComments).values({
-    id: randomUUID(),
-    companyId: input.companyId,
-    issueId: input.issueId,
-    authorUserId: null,
-    body: `unreachable: upstream step failed; replan or cancel ${marker}\n${issue.language === "ko" ? "선행 단계 실패로 이 단계를 실행할 수 없습니다. 다음 행동: 실패한 의존 업무를 확인한 뒤 수정 계획을 제출하거나 업무를 취소해 주세요. 이 차단은 재시도를 요청하지 않습니다." : "The upstream failure prevents this step from running. Next action: review the failed dependency, then submit a revised plan or cancel the work. This block does not request a retry."}`,
-    createdAt: now,
-    updatedAt: now,
-  });
 }
