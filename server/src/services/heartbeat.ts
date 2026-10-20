@@ -218,7 +218,8 @@ import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitial
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
 import { assertDeliveryInput, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
-import { isQaCorrectionRootOwnerRequired, validateAndRegisterQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
+import { currentReplacementRootNotifications, isQaCorrectionRootOwnerRequired, validateAndRegisterQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
+import { withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -4731,7 +4732,16 @@ export function heartbeatService(db: Db) {
     return Number(count ?? 0);
   }
 
-  function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+  async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+    if (is(db, PgTransaction)) {
+      // Validate correction ancestry before registering; a savepoint cannot own execution.
+      await withQaCorrectionClaimRoot(db, run,
+        tx => assertHeartbeatRecoveryAdmission(tx, run), async () => {
+          currentReplacementRootNotifications(db)?.agentIds.add(run.agentId);
+        });
+      // Keep the durable row queued for the owning root drain or scheduler after commit.
+      return { kind: "root_deferred" as const };
+    }
     return claimQueuedRunWithRecoveryGuard({
       db, cancelRun: cancelRunInternal, recordQueueTransitionEvent, publishLiveEvent, setWakeupStatus,
     }, run);
