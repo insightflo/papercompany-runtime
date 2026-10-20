@@ -4,7 +4,7 @@ import { operatorDecisions } from "@paperclipai/db";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
 import type { OperatorDecisionListQuery } from "@paperclipai/shared/validators/operator-decision";
 import { badRequest, notFound } from "../errors.js";
-import { loadOperatorDecisionProjection } from "./operator-decision-view.js";
+import { loadOperatorDecisionProjection, loadOperatorDecisionProjections } from "./operator-decision-view.js";
 
 const priorityRank: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 type ViewName = "pending" | "attention" | "history";
@@ -75,12 +75,18 @@ export function operatorDecisionReadService(db: Db) {
 
   async function list(companyId: string, query: OperatorDecisionListQuery) {
     const cursor = decodeCursor(query.cursor, query.view);
-    const statusFilter = query.view === "pending" ? ["pending"] : ["resolved", "cancelled"];
+    // [N+1 제거 2026-10-20] 뷰별 상태 필터 + 일괄 투영(테이블당 1쿼리).
+    //   attention 뷰는 resolved 만 대상 — cancelled 행은 어차피 아래 JS 필터에서 제외됐다(의미 동일).
+    const statusFilter = query.view === "pending"
+      ? ["pending"]
+      : query.view === "attention"
+        ? ["resolved"]
+        : ["resolved", "cancelled"];
     const rows = await db.select().from(operatorDecisions).where(and(
       eq(operatorDecisions.companyId, companyId),
       inArray(operatorDecisions.status, statusFilter),
     ));
-    const projections = await Promise.all(rows.map((row) => loadOperatorDecisionProjection(db, row)));
+    const projections = await loadOperatorDecisionProjections(db, rows);
     let items = projections.map((item) => item.view);
     let cursorFor: (item: OperatorDecisionView) => Cursor;
 
