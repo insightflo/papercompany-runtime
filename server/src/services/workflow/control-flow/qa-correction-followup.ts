@@ -1,4 +1,3 @@
-import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { and, count, eq, is, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -9,7 +8,8 @@ import { qualityPolicySchema, retryEnvelopeSchema, workflowValidationVerdictValu
 import { hashContract, evidenceContractSchema } from "../../quality/contract.js";
 import { readPolicyUsageTotals } from "../../quality/policy-usage.js";
 import { captureArtifactRoot, digest, readArtifactBytes } from "../artifact-files.js";
-import { assertQaReceiptScope } from "../qa-artifact-receipt.js";
+import { assertQaReceiptScope, compareQaCorrectionReceiptFiles, readQaCorrectionToolConsumptionProof } from "../qa-artifact-receipt.js";
+import { producerAttemptDetail } from "../../work-products/producer-attempt.js";
 import { assertRunNotReplaced } from "../run-replacement-guard.js";
 import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionFollowupRefSchema,
   qaCorrectionConsumptionSchema, qaCorrectionDeliverySchema, qaCorrectionConsumptionKey, qaCorrectionDeliveryKey,
@@ -239,11 +239,13 @@ export async function readQaCorrectionFollowupConsumption(db: QaCorrectionDb, re
       && heartbeat.workflowExecutionGeneration === t.executionGeneration && heartbeat.wakeupRequestId === wake.id
       && wake.runId === heartbeat.id && same(object(wake.payload).qaCorrectionFollowup, s.ref)
       && deliveredRow.heartbeatRunId === heartbeat.id && deliveredRow.wakeupRequestId === wake.id
-      && row.heartbeatRunId === heartbeat.id && row.wakeupRequestId === wake.id, "consumption");
+      && (consumed.schemaVersion !== "workflow.qa-correction.consumption.v1"
+        || row.heartbeatRunId === heartbeat.id && row.wakeupRequestId === wake.id), "consumption");
     const [verdict] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, evidence.eventId));
     requireFollowup(verdict && verdict.companyId === p.companyId && verdict.missionId === p.missionId
       && verdict.workflowRunId === p.workflowRunId && verdict.workflowStepRunId === t.stepRunId && verdict.issueId === t.issueId
-      && verdict.heartbeatRunId === heartbeat.id && (verdict.wakeupRequestId === null || verdict.wakeupRequestId === wake.id)
+      && (consumed.schemaVersion !== "workflow.qa-correction.consumption.v1"
+        || verdict.heartbeatRunId === heartbeat.id && (verdict.wakeupRequestId === null || verdict.wakeupRequestId === wake.id))
       && verdict.eventType === "workflow_validation_verdict"
       && verdict.layer === "workflow_validation" && verdict.reason === "workflow_api"
       && (verdict.executionGeneration === null || verdict.executionGeneration === t.executionGeneration)
@@ -251,6 +253,24 @@ export async function readQaCorrectionFollowupConsumption(db: QaCorrectionDb, re
       && verdict.payload.kind === "workflow_validation_verdict" && verdict.payload.workflowRunId === p.workflowRunId
       && verdict.payload.stepRunId === t.stepRunId && verdict.payload.issueId === t.issueId && verdict.payload.verdict === verdict.verdict
       && verdict.createdAt >= deliveredRow.createdAt && verdict.createdAt <= row.createdAt, "consumption");
+    if (consumed.schemaVersion === "workflow.qa-correction.consumption.v2") {
+      requireFollowup(verdict.heartbeatRunId, "consumption");
+      const [actor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, verdict.heartbeatRunId));
+      requireFollowup(actor && row.heartbeatRunId === actor.id && row.wakeupRequestId === actor.wakeupRequestId
+        && (verdict.wakeupRequestId === null || verdict.wakeupRequestId === actor.wakeupRequestId), "consumption");
+      const detail = await producerAttemptDetail(db, actor, {
+        id: t.stepRunId, workflowRunId: p.workflowRunId, stepId: t.stepId, issueId: t.issueId,
+        executionGeneration: t.executionGeneration, retryCount: t.retryCount, iterationIndex: t.iterationIndex,
+      });
+      requireFollowup(detail.rootHeartbeatRunId === heartbeat.id && detail.rootWakeupRequestId === wake.id, "consumption");
+    }
+  } else if (consumed.schemaVersion === "workflow.qa-correction.consumption.v2" && consumed.evidence.kind === "tool_qa") {
+    const evidence = consumed.evidence;
+    const { proof } = await readQaCorrectionToolConsumptionProof(db, { ref: s.ref,
+      proofEventId: evidence.proofEventId, stepRunId: evidence.stepRunId, requestId: evidence.requestId, sha256: evidence.sha256 });
+    requireFollowup(row.heartbeatRunId === null && row.wakeupRequestId === null
+      && Date.parse(proof.completedAt) <= Date.parse(consumed.consumedAt)
+      && proof.followupEventId === s.followupEventId, "consumption");
   } else {
     const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, evidence.stepRunId));
     requireFollowup(step && step.id === t.stepRunId && step.workflowRunId === p.workflowRunId
@@ -261,34 +281,12 @@ export async function readQaCorrectionFollowupConsumption(db: QaCorrectionDb, re
       { run: { id: p.workflowRunId, companyId: p.companyId, missionId: p.missionId }, stepRun: step }, evidence.requestId);
     requireFollowup(s.revisions.length === 1, "consumption");
     const revision = s.revisions.find(r => r.revision.workProductId === receipt.input.workProductId);
-    const main = revision?.revision.files.find(f => f.role === "main");
+    const mismatch = revision ? compareQaCorrectionReceiptFiles(revision.revision, receipt.input) : "input";
     requireFollowup(receipt.sha256 === evidence.sha256 && receipt.executionGeneration === t.executionGeneration
       && receipt.retryCount === t.retryCount && receipt.iterationIndex === t.iterationIndex
-      && same(object(step.metadata.toolArtifactRequest).qaCorrectionFollowup, s.ref) && revision && main
-      && receipt.input.path === path.join(revision.revision.root, revision.revision.mainRelativePath)
-      && receipt.input.sha256 === main.sha256 && receipt.input.byteSize === main.byteSize
+      && same(object(step.metadata.toolArtifactRequest).qaCorrectionFollowup, s.ref) && revision && mismatch !== "input"
       && revision.workflowProducer && same(receipt.input.producer, revision.workflowProducer), "consumption");
-    const r = revision.revision, input = receipt.input;
-    const assets = r.files.filter(f => f.role === "asset").map(f => ({
-      fileName: path.posix.relative(r.assetsRelativeRoot ?? "", f.relativePath), sha256: f.sha256, byteSize: f.byteSize }));
-    const sorted = (files: { fileName: string; sha256: string; byteSize: number }[]) =>
-      [...files].sort((a, b) => a.fileName.localeCompare(b.fileName));
-    requireFollowup(same(sorted(input.assetManifest), sorted(assets)), "consumption");
-    if (input.mode === "html") {
-      const manifest = r.files.find(f => f.relativePath === r.bundleManifestRelativePath);
-      requireFollowup(manifest && input.htmlManifest && input.htmlManifest.path === path.join(r.root, manifest.relativePath)
-        && input.htmlManifest.sha256 === manifest.sha256 && input.htmlManifest.byteSize === manifest.byteSize, "consumption");
-      // Issued parsing already guarantees unique roles/paths and coverage excluding the bundle manifest.
-      requireFollowup(r.ancillaryRoleBindings !== undefined && input.ancillaryManifest, "consumption");
-      const ancillary = r.ancillaryRoleBindings.map(binding => {
-        const file = r.files.find(f => f.role === "ancillary" && f.relativePath !== r.bundleManifestRelativePath
-          && f.relativePath === binding.relativePath);
-        requireFollowup(file, "consumption");
-        return { fileName: binding.role, sha256: file.sha256, byteSize: file.byteSize };
-      });
-      requireFollowup(same(sorted(input.ancillaryManifest), sorted(ancillary)), "consumption");
-    } else requireFollowup(r.bundleManifestRelativePath === null && input.assetsRoot ===
-      (r.assetsRelativeRoot === null ? "" : path.join(r.root, r.assetsRelativeRoot!)), "consumption");
+    requireFollowup(mismatch === null, "consumption");
   }
   return { status: "db_consumption_relation_only" as const, consumed, eventId: row.id };
 }

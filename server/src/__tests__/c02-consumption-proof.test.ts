@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { verifyQaArtifact } from "../services/workflow/qa-artifact-receipt.js";
 import { qaCorrectionConsumptionSchema, qaCorrectionConsumptionKey } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
@@ -9,14 +9,13 @@ import { readQaCorrectionFollowupConsumption } from "../services/workflow/contro
 import { storeC02ConsumptionInput } from "./helpers/c02-fixture.js";
 import { database, databaseConnectionString, fixture } from "./helpers/qa-receipt-fixture.js";
 import { commitBuffers, commitFacts, createCommitSourceHarness, currentConsumptionStep, issueC02,
-  prepareConsumptionRequest, prepareSuccessorConsumption, seedConsumptionProof,
-  writeConsumptionQaResult } from "./helpers/c02-consumption-fixture.js";
+  prepareConsumptionRequest, prepareSuccessorConsumption,
+  writeConsumptionQaResult, consumptionTool as tool, consumptionDeployment as deployment,
+  consumptionState, createConsumptionHarness, legacyHtmlConsumptionInput, prepareProvedConsumption, prepareVerdictConsumption, seedV2Consumption } from "./helpers/c02-consumption-fixture.js";
 
-const tool = { id: "af9d3918-b6c9-4ddd-927f-0a783a22f487", name: "byte-qa-fixture" };
-const deployment = [{ fileName: "qa.mjs", sha256: "cd".repeat(32), byteSize: 3 }];
 describe("C02 consumption preparation (reader seeds are not atomic writer evidence)", () => {
   let owned: Awaited<ReturnType<typeof createCommitSourceHarness>>;
-  beforeAll(async () => { owned = await createCommitSourceHarness(); }, 60000);
+  beforeAll(async () => { owned = await createConsumptionHarness(); }, 60000);
   afterAll(async () => { await owned?.close(); }, 60000);
 
   // The parent's frozen-receipt comparison selects ONLY this title substring (three cases).
@@ -68,10 +67,7 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
   }, 30000);
 
   it("strictly parses frozen proof input without granting issuance authority", async () => {
-    const c = await issueC02(owned), request = await prepareConsumptionRequest(c);
-    await writeConsumptionQaResult(c, request);
-    const { receipt } = await verifyQaArtifact(request, tool, deployment);
-    const seed = await seedConsumptionProof(c, request, receipt);
+    const { c, seed } = await prepareProvedConsumption(owned);
     // New exports must be loaded only in after-contract cases, never required by the before comparison.
     const api = await import("../services/workflow/qa-artifact-receipt.js");
     expect(api.parseQaCorrectionToolConsumptionProof(seed.proof)).toEqual(seed.proof);
@@ -98,10 +94,7 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
   }, 30000);
 
   it("rejects missing proof, wrong lookup and every foreign event-row identity", async () => {
-    const c = await issueC02(owned), request = await prepareConsumptionRequest(c);
-    await writeConsumptionQaResult(c, request);
-    const { receipt } = await verifyQaArtifact(request, tool, deployment);
-    const seed = await seedConsumptionProof(c, request, receipt);
+    const { c, seed } = await prepareProvedConsumption(owned);
     const api = await import("../services/workflow/qa-artifact-receipt.js");
     expect(await api.readQaCorrectionToolConsumptionProof(owned.db, seed.lookup)).toEqual({
       eventId: seed.row.id, proof: seed.proof });
@@ -134,10 +127,7 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
   }, 60000);
 
   it("rejects well-shaped request/receipt copies that disagree with actual C03 issuance", async () => {
-    const c = await issueC02(owned), request = await prepareConsumptionRequest(c);
-    await writeConsumptionQaResult(c, request);
-    const { receipt } = await verifyQaArtifact(request, tool, deployment);
-    const seed = await seedConsumptionProof(c, request, receipt);
+    const { c, seed } = await prepareProvedConsumption(owned);
     const api = await import("../services/workflow/qa-artifact-receipt.js");
     const q = seed.proof.request, r = seed.proof.receipt;
     const unissuedRef = { ...c.ref, requestId: randomUUID() };
@@ -168,17 +158,33 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
         await c.peer.update(workflowTransitionEvents).set({ payload: seed.proof }).where(eq(workflowTransitionEvents.id, seed.row.id));
       }
     }
+    // revision79 preserves main -> assets -> proof-only HTML manifest -> ancillary error priority.
+    const badHtml = { ...r.input, assetsRoot: "/wrong-html-root", ancillaryManifest: [] };
+    for (const [input, reason] of [
+      [{ ...badHtml, sha256: "00".repeat(32), assetManifest: [] }, "input"],
+      [{ ...badHtml, assetManifest: [] }, "assets"], [badHtml, "manifest"],
+    ] as const) {
+      try {
+        await c.peer.update(workflowTransitionEvents).set({ payload: { ...seed.proof,
+          request: { ...q, input }, receipt: { ...r, input } } }).where(eq(workflowTransitionEvents.id, seed.row.id));
+        await expect(api.readQaCorrectionToolConsumptionProof(owned.db, seed.lookup))
+          .rejects.toThrow("qa_correction_tool_proof_" + reason);
+      } finally {
+        await c.peer.update(workflowTransitionEvents).set({ payload: seed.proof }).where(eq(workflowTransitionEvents.id, seed.row.id));
+      }
+    }
   }, 60000);
 
   it("reads immutable B by event ID after actual C issuance replaces current request receipt and status", async () => {
-    const b = await issueC02(owned), requestB = await prepareConsumptionRequest(b);
-    await writeConsumptionQaResult(b, requestB);
-    const verifiedB = await verifyQaArtifact(requestB, tool, deployment);
-    const seed = await seedConsumptionProof(b, requestB, verifiedB.receipt);
+    const { c: b, request: requestB, seed } = await prepareProvedConsumption(owned);
+    const consumption = await seedV2Consumption(b, { kind: "tool_qa", proofEventId: seed.row.id,
+      stepRunId: seed.lookup.stepRunId, requestId: seed.lookup.requestId, sha256: seed.lookup.sha256 });
     const api = await import("../services/workflow/qa-artifact-receipt.js");
     expect(seed.proof.statusTransitionVersion).toBe(seed.completed.statusTransitionVersion);
     expect(seed.proof.statusTransitionVersion).not.toBe(seed.row.finalizationVersion);
     const original = await api.readQaCorrectionToolConsumptionProof(owned.db, seed.lookup);
+    const originalConsumption = await readQaCorrectionFollowupConsumption(owned.db, b.ref, readIssuedQaCorrection);
+    expect(originalConsumption?.eventId).toBe(consumption.row.id);
     const { c, request } = await prepareSuccessorConsumption(b);
     await writeConsumptionQaResult(c, request, "final");
     const verifiedC = await verifyQaArtifact(request, tool, deployment), current = await currentConsumptionStep(c);
@@ -192,7 +198,10 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
     expect(c.ref.requestId).not.toBe(b.ref.requestId);
     expect(request.snapshot.requestId).not.toBe(requestB.snapshot.requestId);
     expect(request.snapshot.input.workProductId).toBe(c.applied.revisions[0]!.workProductId);
+    const state = await consumptionState(c);
     expect(await api.readQaCorrectionToolConsumptionProof(owned.db, seed.lookup)).toEqual(original);
+    expect(await readQaCorrectionFollowupConsumption(owned.db, b.ref, readIssuedQaCorrection)).toEqual(originalConsumption);
+    expect(await consumptionState(c)).toEqual(state);
     expect(await currentConsumptionStep(c)).toEqual(before);
     const [stored] = await c.peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, seed.row.id));
     expect(stored).toEqual(seed.row);
@@ -205,13 +214,87 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
       expect(qaCorrectionConsumptionSchema.parse(seed.row.payload)).toEqual(seed.consumed);
       expect((await readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))?.eventId).toBe(seed.row.id);
       expect(seed.row.idempotencyKey).toBe(qaCorrectionConsumptionKey(c.ref.requestId));
+      if (kind === "tool_qa") {
+        await legacyHtmlConsumptionInput(c);
+        expect((await readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))?.eventId).toBe(seed.row.id);
+      }
       const v2 = { ...seed.consumed, schemaVersion: "workflow.qa-correction.consumption.v2" };
       if (kind === "tool_qa") {
         expect(qaCorrectionConsumptionSchema.safeParse(v2).success).toBe(false);
         expect(qaCorrectionConsumptionSchema.parse({ ...v2,
           evidence: { ...seed.consumed.evidence, proofEventId: randomUUID() } })).toMatchObject({
           schemaVersion: "workflow.qa-correction.consumption.v2", evidence: { kind: "tool_qa" } });
-      } else expect(qaCorrectionConsumptionSchema.parse(v2).evidence).toEqual(seed.consumed.evidence);
+      } else {
+        expect(qaCorrectionConsumptionSchema.parse(v2).evidence).toEqual(seed.consumed.evidence);
+        const [heartbeat] = await c.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seed.heartbeatRunId!));
+        const [wake] = await c.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seed.wakeupRequestId!));
+        expect(heartbeat!.startedAt).toBeNull();
+        expect(wake!.payload).not.toHaveProperty("__paperclipWorkflowProducerAttempt");
+        await c.peer.update(workflowTransitionEvents).set({ payload: v2 }).where(eq(workflowTransitionEvents.id, seed.row.id));
+        await expect(readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection)).rejects.toThrow();
+      }
       // storeC02ConsumptionInput proves stored v1 reading only, never a completed stage13 writer.
     }, 30000);
+
+  // C02/revision79: H0/W0 are delivery identities; official H1/W1 may be a supported technical child.
+  it.each(["self", "process_lost_retry", "adapter_fallback"] as const)(
+    "reads actual v2 %s claims without spending quality again and keeps v1 H1 rejected", async kind => {
+      const v = await prepareVerdictConsumption(owned, kind), { c, root, actor, row, consumed, verdict } = v;
+      expect(actor.startedAt).toBeInstanceOf(Date);
+      expect(v.detail).toMatchObject({ rootHeartbeatRunId: root.id, rootWakeupRequestId: root.wakeupRequestId });
+      expect(verdict.wakeupRequestId).toBeNull();
+      const before = await consumptionState(c);
+      expect(before.receipts.filter(r => r.qualityContract?.kind === "use")).toHaveLength(1);
+      expect(before.usage.reduce((sum, r) => sum + r.executionAttempts, 0)).toBe(1);
+      expect((await readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))?.eventId).toBe(row.id);
+      expect(await consumptionState(c)).toEqual(before);
+      await c.peer.update(workflowTransitionEvents).set({ wakeupRequestId: actor.wakeupRequestId }).where(eq(workflowTransitionEvents.id, verdict.id));
+      expect((await readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))?.eventId).toBe(row.id);
+      for (const fault of [{ heartbeatRunId: c.s.f.verdictHeartbeatId }, { wakeupRequestId: c.s.f.verdictWakeId },
+        ...(kind === "self" ? [] : [{ payload: { ...consumed, schemaVersion: "workflow.qa-correction.consumption.v1" } }])]) {
+        try {
+          await c.peer.update(workflowTransitionEvents).set(fault).where(eq(workflowTransitionEvents.id, row.id));
+          await expect(readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection)).rejects.toThrow();
+        } finally {
+          await c.peer.update(workflowTransitionEvents).set(row).where(eq(workflowTransitionEvents.id, row.id));
+        }
+      }
+      for (const fault of [{ heartbeatRunId: c.s.f.producerHeartbeatId }, { wakeupRequestId: c.s.f.verdictWakeId }]) {
+        try {
+          await c.peer.update(workflowTransitionEvents).set(fault).where(eq(workflowTransitionEvents.id, verdict.id));
+          await expect(readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection)).rejects.toThrow();
+        } finally {
+          await c.peer.update(workflowTransitionEvents).set(verdict).where(eq(workflowTransitionEvents.id, verdict.id));
+        }
+      }
+    }, 60000);
+
+  it("rejects an independently proved actual actor whose root differs from delivery", async () => {
+    const v = await prepareVerdictConsumption(owned, "other-root");
+    expect(v.detail).toMatchObject({ rootHeartbeatRunId: v.actor.id, rootWakeupRequestId: v.actor.wakeupRequestId });
+    expect(v.actor.id).not.toBe(v.root.id);
+    await expect(readQaCorrectionFollowupConsumption(owned.db, v.c.ref, readIssuedQaCorrection))
+      .rejects.toThrow("qa_correction_followup_consumption");
+  }, 60000);
+
+  it("requires null v2 tool consumption actors, a completed proof and the same followup", async () => {
+    const { c, seed } = await prepareProvedConsumption(owned);
+    const { row, consumed } = await seedV2Consumption(c, { kind: "tool_qa", proofEventId: seed.row.id,
+      stepRunId: seed.lookup.stepRunId, requestId: seed.lookup.requestId, sha256: seed.lookup.sha256 });
+    expect((await readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))?.eventId).toBe(row.id);
+    const early = new Date(Date.parse(seed.proof.completedAt) - 1);
+    expect(early.getTime()).toBeGreaterThanOrEqual(Date.parse(c.applied.appliedAt));
+    for (const fault of [{ heartbeatRunId: c.s.f.verdictHeartbeatId }, { wakeupRequestId: c.s.f.verdictWakeId },
+      { createdAt: early, payload: { ...consumed, consumedAt: early.toISOString() } },
+      { payload: { ...consumed, followupEventId: randomUUID() } }]) {
+      try {
+        await c.peer.update(workflowTransitionEvents).set(fault).where(eq(workflowTransitionEvents.id, row.id));
+        await expect(readQaCorrectionFollowupConsumption(owned.db, c.ref, readIssuedQaCorrection))
+          .rejects.toThrow("qa_correction_followup_consumption");
+      } finally {
+        await c.peer.update(workflowTransitionEvents).set(row).where(eq(workflowTransitionEvents.id, row.id));
+      }
+    }
+  }, 30000);
 });
+

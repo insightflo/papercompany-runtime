@@ -13,6 +13,7 @@ import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionFollowupRefSchema,
   type QaCorrectionFollowupRef } from "./control-flow/qa-correction-contract.js";
 import type { QaCorrectionDb } from "./control-flow/qa-correction-authority.js";
+import type { IssuedQaCorrection } from "./control-flow/qa-correction-reader.js";
 
 type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution" | "internalPathRoots"> & {
   artifactExecution?: FrozenArtifactAttempt; internalPathRoots?: string[];
@@ -192,6 +193,36 @@ export function parseQaCorrectionToolConsumptionProof(raw: unknown): QaCorrectio
   return proof;
 }
 
+
+/** Issued file facts only; request, producer, DB authority and proof-only HTML rules stay with callers. */
+export function compareQaCorrectionReceiptFiles(revision: IssuedQaCorrection["applied"]["revisions"][number],
+  input: ToolArtifactReceipt["input"]): "input" | "assets" | "manifest" | "ancillary" | null {
+  const main = revision.files.find(file => file.role === "main");
+  if (!main || input.path !== path.join(revision.root, revision.mainRelativePath)
+    || input.sha256 !== main.sha256 || input.byteSize !== main.byteSize) return "input";
+  const sorted = (files: { fileName: string; sha256: string; byteSize: number }[]) =>
+    [...files].sort((a, b) => a.fileName.localeCompare(b.fileName));
+  const assets = revision.files.filter(file => file.role === "asset").map(file => ({
+    fileName: path.posix.relative(revision.assetsRelativeRoot ?? "", file.relativePath), sha256: file.sha256, byteSize: file.byteSize }));
+  if (!isDeepStrictEqual(sorted(input.assetManifest), sorted(assets))) return "assets";
+  if (input.mode === "html") {
+    const manifest = revision.files.find(file => file.relativePath === revision.bundleManifestRelativePath);
+    if (!manifest || !input.htmlManifest || input.htmlManifest.path !== path.join(revision.root, manifest.relativePath)
+      || input.htmlManifest.sha256 !== manifest.sha256 || input.htmlManifest.byteSize !== manifest.byteSize
+      || revision.ancillaryRoleBindings === undefined || !input.ancillaryManifest) return "manifest";
+    const ancillary = [];
+    for (const binding of revision.ancillaryRoleBindings) {
+      const file = revision.files.find(file => file.role === "ancillary" && file.relativePath !== revision.bundleManifestRelativePath
+        && file.relativePath === binding.relativePath);
+      if (!file) return "ancillary";
+      ancillary.push({ fileName: binding.role, sha256: file.sha256, byteSize: file.byteSize });
+    }
+    if (!isDeepStrictEqual(sorted(input.ancillaryManifest), sorted(ancillary))) return "ancillary";
+  } else if (revision.bundleManifestRelativePath !== null || input.assetsRoot !==
+    (revision.assetsRelativeRoot === null ? "" : path.join(revision.root, revision.assetsRelativeRoot!))) return "manifest";
+  return null;
+}
+
 /** SELECT-only historical relation; never re-read current request/status, files or completion writers. */
 export async function readQaCorrectionToolConsumptionProof(db: QaCorrectionDb, value: {
   ref: QaCorrectionFollowupRef; proofEventId: string; stepRunId: string; requestId: string; sha256: string;
@@ -223,27 +254,12 @@ export async function readQaCorrectionToolConsumptionProof(db: QaCorrectionDb, v
     && q.retryCount === t.retryCount && q.iterationIndex === t.iterationIndex, "attempt");
   const revisions = issued.applied.revisions.filter(revision => followup.revisionIds.includes(revision.revisionId));
   const revision = revisions.find(revision => revision.workProductId === r.input.workProductId);
-  const main = revision?.files.find(file => file.role === "main"), input = r.input;
-  requireToolProof(revisions.length === 1 && revision && main
-    && input.path === path.join(revision.root, revision.mainRelativePath)
-    && input.sha256 === main.sha256 && input.byteSize === main.byteSize, "input");
-  const sorted = (files: { fileName: string; sha256: string; byteSize: number }[]) =>
-    [...files].sort((a, b) => a.fileName.localeCompare(b.fileName));
-  const assets = revision.files.filter(file => file.role === "asset").map(file => ({
-    fileName: path.posix.relative(revision.assetsRelativeRoot ?? "", file.relativePath), sha256: file.sha256, byteSize: file.byteSize }));
-  requireToolProof(isDeepStrictEqual(sorted(input.assetManifest), sorted(assets)), "assets");
-  if (input.mode === "html") {
-    const manifest = revision.files.find(file => file.relativePath === revision.bundleManifestRelativePath);
-    requireToolProof(input.assetsRoot === "" && manifest && input.htmlManifest && input.htmlManifest.path === path.join(revision.root, manifest.relativePath)
-      && input.htmlManifest.sha256 === manifest.sha256 && input.htmlManifest.byteSize === manifest.byteSize
-      && revision.ancillaryRoleBindings !== undefined && input.ancillaryManifest, "manifest");
-    const ancillary = revision.ancillaryRoleBindings.map(binding => {
-      const file = revision.files.find(file => file.relativePath === binding.relativePath)!;
-      return { fileName: binding.role, sha256: file.sha256, byteSize: file.byteSize };
-    });
-    requireToolProof(isDeepStrictEqual(sorted(input.ancillaryManifest), sorted(ancillary)), "ancillary");
-  } else requireToolProof(revision.bundleManifestRelativePath === null && input.assetsRoot ===
-    (revision.assetsRelativeRoot === null ? "" : path.join(revision.root, revision.assetsRelativeRoot!)), "manifest");
+  requireToolProof(revisions.length === 1 && revision, "input");
+  const input = r.input;
+  let mismatch = compareQaCorrectionReceiptFiles(revision, input);
+  // The proof-only empty HTML root belongs at manifest priority, before ancillary but after main/assets.
+  if (mismatch !== "input" && mismatch !== "assets" && input.mode === "html" && input.assetsRoot !== "") mismatch = "manifest";
+  requireToolProof(mismatch === null, mismatch ?? "input");
   let ancestor = issued, sourceProductId = revision.sourceProductId;
   const visited = new Set<string>();
   for (;;) {
