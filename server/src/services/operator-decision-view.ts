@@ -19,8 +19,10 @@ import type {
 
 export interface ContinuationStatusInput {
   continuation: typeof operatorDecisionContinuations.$inferSelect;
-  wakeup: typeof agentWakeupRequests.$inferSelect | null;
-  run: typeof heartbeatRuns.$inferSelect | null;
+  // [열 좁히기 2026-10-20] 파생은 status/runId 만 읽는다. heartbeat_runs 는 행당 수백 KB TOAST 라
+  //   전체 행 로드가 목록 병목(90행 = 1.1s)이었으므로 최소 필드만 요청한다. 전체 행도 구조적으로 만족한다.
+  wakeup: Pick<typeof agentWakeupRequests.$inferSelect, "id" | "status" | "runId"> | null;
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "status"> | null;
   issue: Pick<typeof issues.$inferSelect, "id" | "status" | "assigneeAgentId"> | null;
   targetAgent: Pick<typeof agents.$inferSelect, "id" | "status"> | null;
   /** 카드 원 요청자 에이전트 — 있으면 전달 대상이 요청자로 고정된 카드다. */
@@ -201,13 +203,16 @@ export async function loadOperatorDecisionProjections(
 
   const wakeupIds = uniqueIds(continuations.map((row) => row.wakeupRequestId));
   const wakeups = wakeupIds.length > 0
-    ? await db.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakeupIds))
+    ? await db.select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status, runId: agentWakeupRequests.runId })
+      .from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakeupIds))
     : [];
   const wakeupById = new Map(wakeups.map((row) => [row.id, row]));
 
   const runIds = uniqueIds(wakeups.map((row) => row.runId));
+  // heartbeat_runs 전체 행은 행당 수백 KB(라이브 테이블 7GB TOAST) — status 만 읽으므로 최소 컬럼만.
   const runs = runIds.length > 0
-    ? await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, runIds))
+    ? await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(inArray(heartbeatRuns.id, runIds))
     : [];
   const runById = new Map(runs.map((row) => [row.id, row]));
 
