@@ -2055,6 +2055,28 @@ function hasWorkflowToolCorrectionInvocation(stepRun: typeof workflowStepRuns.$i
     && invocation.requestId === stepRun.lastDispatchRequestId;
 }
 
+/** Rebuild the captured tool arguments from the stored request; never reread the mutable source path. */
+function workflowToolCorrectionParameters(request: Record<string, unknown>) {
+  const snapshot = request as {
+    outputRoot: string;
+    artifactExecution: { contract: { inputParams: Record<string, string>; resultFileName: string } };
+    input: { mode?: string; path: string; htmlManifest?: { path: string } };
+  };
+  const names = snapshot.artifactExecution.contract.inputParams;
+  const input = path.join(snapshot.outputRoot, "input", path.basename(snapshot.input.path));
+  if (snapshot.input.mode === "html") return {
+    ...(names.html ? { [names.html]: input } : {}),
+    ...(names.manifest && snapshot.input.htmlManifest
+      ? { [names.manifest]: path.join(snapshot.outputRoot, "input", path.basename(snapshot.input.htmlManifest.path)) } : {}),
+    ...(names.out ? { [names.out]: path.join(snapshot.outputRoot, snapshot.artifactExecution.contract.resultFileName) } : {}),
+  };
+  return {
+    ...(names.content ? { [names.content]: input } : {}),
+    ...(names.assetsDir ? { [names.assetsDir]: path.join(snapshot.outputRoot, "input", "assets") } : {}),
+    ...(names.out ? { [names.out]: path.join(snapshot.outputRoot, snapshot.artifactExecution.contract.resultFileName) } : {}),
+  };
+}
+
 /** Real root only: observe files first, then reuse the accepted ordered dependency locks and reservation. */
 async function withWorkflowToolCorrection<T>(input: {
   db: Db; run: typeof workflowRuns.$inferSelect; stepRun: typeof workflowStepRuns.$inferSelect;
@@ -2137,13 +2159,11 @@ async function startIssueLessToolStepRun(input: {
       : write(db);
   };
   try {
-    args = await resolveWorkflowToolStepArgs({
-      db,
-      run,
-      step: step as PersistedWorkflowStep,
-      workflowSteps,
-      consumerStepRunId: stepRun.id,
-    });
+    args = reuseRequest
+      ? workflowToolCorrectionParameters(storedRequest)
+      : await resolveWorkflowToolStepArgs({
+        db, run, step: step as PersistedWorkflowStep, workflowSteps, consumerStepRunId: stepRun.id,
+      });
     artifactExecution = reuseRequest
       ? readFrozenArtifactAttempt(stepRun.metadata.artifactExecution,
         { executionGeneration: stepRun.executionGeneration, requestId })
