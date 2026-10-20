@@ -64,6 +64,8 @@ async function prove(db: Connection, run: Run, l: Lineage) {
   requireClaim(step && step.workflowRunId === l.ref!.workflowRunId && step.issueId === target.issueId
     && step.stepId === target.stepId);
   const first = l.chain[0]!, wake = l.wakes[0]!;
+  requireClaim((first.workflowStepRunId === null || first.workflowStepRunId === wake.workflowStepRunId)
+    && (first.workflowExecutionGeneration === null || first.workflowExecutionGeneration === wake.workflowExecutionGeneration));
   await producerAttempt(db, { ...first, workflowStepRunId: wake.workflowStepRunId,
     workflowExecutionGeneration: wake.workflowExecutionGeneration },
     { ...step!, executionGeneration: target.executionGeneration, retryCount: target.retryCount,
