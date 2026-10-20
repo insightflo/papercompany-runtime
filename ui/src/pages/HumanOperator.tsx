@@ -15,10 +15,6 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { L, useCompanyLanguage } from "../lib/companyLanguage";
-import {
-  operatorDecisionStageLabel,
-  requesterOutcomeStatusLabel,
-} from "../components/OperatorDecisionActivity";
 
 function formatRequestTime(value: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -103,79 +99,6 @@ function HumanOperatorRow({
   );
 }
 
-function humanize(value: string | null) {
-  return value ? value.replace(/_/g, " ") : "unknown continuation error";
-}
-export function isContinuationRetryEligible(decision: OperatorDecisionView) {
-  const continuation = decision.continuation;
-  if (!continuation || continuation.manualRetryCount >= continuation.maxManualRetries) return false;
-  if (continuation.state === "exhausted") return true;
-  if (continuation.state === "blocked") {
-    return continuation.errorCode === "issue_unassigned" || continuation.errorCode === "issue_terminal";
-  }
-  return ["skipped", "failed", "cancelled", "timed_out", "assignee_changed"]
-    .includes(continuation.effectiveStatus);
-}
-
-function ContinuationAttention({
-  decision,
-  onRetry,
-}: {
-  decision: OperatorDecisionView;
-  onRetry: (decision: OperatorDecisionView) => Promise<void>;
-}) {
-  const lang = useCompanyLanguage();
-  const continuation = decision.continuation!;
-  const [retryError, setRetryError] = useState<string | null>(null);
-  const [isRetrying, setIsRetrying] = useState(false);
-  const retryable = isContinuationRetryEligible(decision);
-
-  async function retry() {
-    setRetryError(null);
-    setIsRetrying(true);
-    try {
-      await onRetry(decision);
-    } catch (error) {
-      setRetryError(error instanceof Error ? error.message : L(lang, { en: "Failed to retry this continuation.", ko: "이어서 진행 재시도에 실패했습니다." }));
-    } finally {
-      setIsRetrying(false);
-    }
-  }
-  return (
-    <li className="border border-destructive/40 bg-card p-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold">{decision.title}</h3>
-          {continuation.issueIdentifier && (
-            <p className="mt-1 text-sm text-foreground">
-              이슈: {continuation.issueIdentifier}
-              {continuation.issueTitle ? ` — ${continuation.issueTitle}` : ""}
-            </p>
-          )}
-          {continuation.missionTitle && (
-            <p className="mt-0.5 text-sm text-muted-foreground">미션: {continuation.missionTitle}</p>
-          )}
-          <p className="mt-1 text-sm text-destructive">{humanize(continuation.errorCode)}</p>
-          {continuation.retryHint && (
-            <p className="mt-0.5 text-xs text-muted-foreground">{continuation.retryHint}</p>
-          )}
-          <p className="mt-1 text-xs text-muted-foreground">
-            {/* [4b-2] 요청자 회신 outcome 이 대표 상태(우선), continuation 단계는 보조로 함께 노출한다. */}
-            {decision.requesterOutcome ? <>{L(lang, { en: "Requester outcome", ko: "요청자 결과" })} <span title={decision.requesterOutcome.status}>{requesterOutcomeStatusLabel(lang, decision.requesterOutcome.status)}</span> · </> : null}
-            <span title={continuation.effectiveStatus}>{operatorDecisionStageLabel(lang, continuation.effectiveStatus)}</span> · {L(lang, { en: `Generation ${continuation.generation}`, ko: `재시도 회차 ${continuation.generation}` })} · {L(lang, { en: `Attempt ${continuation.attemptCount}`, ko: `시도 ${continuation.attemptCount}회` })}
-          </p>
-        </div>
-        <div className="space-y-1">
-          <Button type="button" variant="outline" size="sm" disabled={!retryable || isRetrying} onClick={() => void retry()}>
-            {isRetrying ? L(lang, { en: "Retrying…", ko: "재시도 중…" }) : L(lang, { en: "Retry continuation", ko: "이어서 재시도" })}
-          </Button>
-          {retryError && <p role="alert" className="text-xs text-destructive">{retryError}</p>}
-        </div>
-      </div>
-    </li>
-  );
-}
-
 export function focusOperatorDecisionSuccessTarget(root: ParentNode = document) {
   const target = root.querySelector<HTMLElement>(
     "[data-operator-decision-heading], [data-operator-decision-attention-heading], [data-human-operator-empty-heading]",
@@ -204,19 +127,9 @@ export function HumanOperator() {
     enabled: !!selectedCompanyId,
     refetchInterval: 30_000,
   });
-  const attentionQuery = useQuery({
-    queryKey: selectedCompanyId ? queryKeys.operatorDecisions.list(selectedCompanyId, "attention") : ["operator-decisions", "attention"],
-    queryFn: () => operatorDecisionsApi.list(selectedCompanyId!, "attention"),
-    enabled: !!selectedCompanyId,
-    refetchInterval: 30_000,
-  });
-  // [C4] 해결·취소된 moi 카드의 상태 배지용 이력 — resolved/cancelled 는 pending 뷰에 없다.
-  const historyQuery = useQuery({
-    queryKey: selectedCompanyId ? queryKeys.operatorDecisions.list(selectedCompanyId, "history") : ["operator-decisions", "history"],
-    queryFn: () => operatorDecisionsApi.list(selectedCompanyId!, "history"),
-    enabled: !!selectedCompanyId,
-    refetchInterval: 30_000,
-  });
+  // [2026-10-20 운영자 승인] resolved/cancelled 이력(attention·history 뷰)은 가져오지 않는다.
+  // 두 뷰가 회사 전체 카드를 N+1로 로드해 페이지를 2.5s+ 지연시켰고 표시 대상도 아니었다.
+  // 활성(pending) 카드와 요청 행만 조회한다.
 
   useEffect(() => {
     if (!focusAfterSuccess) return;
@@ -225,19 +138,17 @@ export function HumanOperator() {
       setFocusAfterSuccess(false);
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusAfterSuccess, pendingQuery.data, attentionQuery.data, requestsQuery.data]);
+  }, [focusAfterSuccess, pendingQuery.data, requestsQuery.data]);
 
   if (!selectedCompanyId) {
     return <EmptyState icon={UserRoundCheck} message="Select a company to view human operator requests." />;
   }
-  if (requestsQuery.isLoading || pendingQuery.isLoading || attentionQuery.isLoading || historyQuery.isLoading) {
+  if (requestsQuery.isLoading || pendingQuery.isLoading) {
     return <PageSkeleton variant="approvals" />;
   }
 
   const requests = requestsQuery.data ?? [];
   const pending = pendingQuery.data?.data ?? [];
-  const attention = attentionQuery.data?.data ?? [];
-  const history = historyQuery.data?.data ?? [];
   // [C4] moi 카드 ↔ 요청 행 매칭. 행에 바인딩된 pending 카드는 요청 섹션에서만 렌더하고
   //   pending 카드 섹션에서 제외해 같은 카드의 중복 렌더를 막는다. 행이 없는 moi pending 카드는
   //   (소유자 이슈가 닫혀 행에서 빠진 경우) 여전히 pending 섹션에 남는다.
@@ -245,22 +156,16 @@ export function HumanOperator() {
     pending.filter((decision) => decision.requestKey.startsWith(MOI_REQUEST_KEY_PREFIX))
       .map((decision) => [decision.requestKey, decision]),
   );
-  const moiResolvedByKey = new Map(
-    history.filter((decision) => decision.requestKey.startsWith(MOI_REQUEST_KEY_PREFIX))
-      .map((decision) => [decision.requestKey, decision]),
-  );
   const boundRequestKeys = new Set(
     requests.map(requestKeyOf).filter((key): key is string => key !== null && moiPendingByKey.has(key)),
   );
   const actionableCount = requests.length + pending.length - boundRequestKeys.size;
-  const error = requestsQuery.error ?? pendingQuery.error ?? attentionQuery.error ?? historyQuery.error;
-  const isFetching = requestsQuery.isFetching || pendingQuery.isFetching || attentionQuery.isFetching || historyQuery.isFetching;
+  const error = requestsQuery.error ?? pendingQuery.error;
+  const isFetching = requestsQuery.isFetching || pendingQuery.isFetching;
 
   async function refreshDecisionSurfaces() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.operatorDecisions.list(selectedCompanyId!, "pending") }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.operatorDecisions.list(selectedCompanyId!, "attention") }),
-      queryClient.invalidateQueries({ queryKey: queryKeys.operatorDecisions.list(selectedCompanyId!, "history") }),
       queryClient.invalidateQueries({ queryKey: queryKeys.missions.humanOperatorRequests(selectedCompanyId!) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId!) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.activity(selectedCompanyId!) }),
@@ -273,13 +178,8 @@ export function HumanOperator() {
     await refreshDecisionSurfaces();
   }
 
-  async function retryContinuation(decision: OperatorDecisionView) {
-    await operatorDecisionsApi.retryContinuation(decision.id);
-    await refreshDecisionSurfaces();
-  }
-
   async function refreshAll() {
-    await Promise.all([requestsQuery.refetch(), pendingQuery.refetch(), attentionQuery.refetch(), historyQuery.refetch()]);
+    await Promise.all([requestsQuery.refetch(), pendingQuery.refetch()]);
   }
 
   return (
@@ -309,15 +209,6 @@ export function HumanOperator() {
           .map((decision) => <OperatorDecisionCard key={decision.id} decision={decision} onResolve={resolveDecision} />)}
       </section>
 
-      {attention.length > 0 && <section aria-labelledby="continuation-attention-heading" className="space-y-2">
-        <h2 id="continuation-attention-heading" data-operator-decision-attention-heading tabIndex={-1} className="text-base font-semibold">
-          Continuations needing attention
-        </h2>
-        <ul className="space-y-2">{attention.map((decision) => (
-          <ContinuationAttention key={decision.id} decision={decision} onRetry={retryContinuation} />
-        ))}</ul>
-      </section>}
-
       <ExternalAutomationApprovals />
 
       {requests.length > 0 ? <ul className="space-y-2">{requests.map((request) => {
@@ -327,11 +218,11 @@ export function HumanOperator() {
             key={request.id}
             request={request}
             card={key ? moiPendingByKey.get(key) ?? null : null}
-            resolvedCard={key ? moiResolvedByKey.get(key) ?? null : null}
+            resolvedCard={null}
             onResolve={resolveDecision}
           />
         );
-      })}</ul> : pending.length === 0 && attention.length === 0 ? (
+      })}</ul> : pending.length === 0 ? (
         <h2 data-human-operator-empty-heading tabIndex={-1} className="text-sm font-medium">{L(lang, { en: "No open human operator requests.", ko: "열려 있는 사람 운영자 요청이 없습니다." })}</h2>
       ) : null}
     </div>

@@ -11,14 +11,11 @@ import {
 import {
   focusOperatorDecisionSuccessTarget,
   HumanOperator,
-  isContinuationRetryEligible,
 } from "./HumanOperator";
 
 const { mockState, resolveSpy, invalidateSpy } = vi.hoisted(() => ({
   mockState: {
     pendingCards: [] as OperatorDecisionView[],
-    attentionCards: [] as OperatorDecisionView[],
-    historyCards: [] as OperatorDecisionView[],
     requests: [] as unknown[],
   },
   resolveSpy: vi.fn().mockResolvedValue({ decision: {}, applied: true, continuation: null }),
@@ -30,12 +27,6 @@ vi.mock("@tanstack/react-query", () => ({
   useQuery: ({ queryKey }: { queryKey: readonly unknown[] }) => {
     if (queryKey[0] === "operator-decisions" && queryKey[2] === "pending") {
       return { data: { data: mockState.pendingCards, page: { nextCursor: null } }, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
-    }
-    if (queryKey[0] === "operator-decisions" && queryKey[2] === "attention") {
-      return { data: { data: mockState.attentionCards, page: { nextCursor: null } }, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
-    }
-    if (queryKey[0] === "operator-decisions" && queryKey[2] === "history") {
-      return { data: { data: mockState.historyCards, page: { nextCursor: null } }, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
     }
     return {
       data: mockState.requests,
@@ -50,7 +41,6 @@ vi.mock("../api/operator-decisions", async (importOriginal) => {
     operatorDecisionsApi: {
       ...actual.operatorDecisionsApi,
       resolve: resolveSpy,
-      retryContinuation: vi.fn().mockResolvedValue({ decision: {}, applied: true, continuation: null }),
     },
   };
 });
@@ -76,21 +66,6 @@ const pending: OperatorDecisionView = {
   result: null, issueId: null, issueIdentifier: null, issueTitle: null, missionTitle: null, continuationMode: "none", requestedBy: null,
   resolvedByUserId: null, resolvedAt: null, cancelledAt: null,
   createdAt: "2026-07-29T10:00:00.000Z", updatedAt: "2026-07-29T10:00:00.000Z", continuation: null,
-};
-const attention: OperatorDecisionView = {
-  ...pending,
-  id: "attention-1", requestKey: "attention", status: "resolved", title: "Continuation needs attention",
-  result: { actionId: "hold", outcome: "hold", selectedOptionIds: [], comment: null },
-  resolvedByUserId: "board", resolvedAt: "2026-07-29T10:01:00.000Z",
-  continuation: {
-    id: "continuation-1", state: "blocked", generation: 1, attemptCount: 1, maxAttempts: 3,
-    manualRetryCount: 0, maxManualRetries: 2, nextAttemptAt: "2026-07-29T10:01:00.000Z",
-    leaseExpiresAt: null, targetAgentId: null, wakeupRequestId: null,
-    effectiveStatus: "blocked", errorCode: "issue_unassigned",
-    issueIdentifier: "GAZ-1337", issueTitle: "[OVERSIGHT] gazua-morning", issueStatus: "in_progress",
-    issueAssigneeAgentId: null, missionId: null, missionTitle: "2026-08-25 gazua-morning",
-    retryHint: "연결 이슈가 진행 중이지만 담당자가 없습니다. 이슈에 담당자를 지정하면 재시도가 깨움으로 이어집니다.",
-  },
 };
 
 // [Stage 2 fixture] Stage 1 기본 정의(moi1:{decisionEventId}, approve/hold/reject + comment required) 재현.
@@ -120,15 +95,6 @@ const moiCard: OperatorDecisionView = {
     },
   },
 };
-const resolvedMoiCard: OperatorDecisionView = {
-  ...moiCard, id: "moi-card-2", requestKey: "moi1:decision-event-2", sourceId: "decision-event-2", status: "resolved",
-  result: { actionId: "approve", outcome: "approve", selectedOptionIds: ["approve"], comment: "go" },
-  resolvedByUserId: "board", resolvedAt: "2026-07-29T11:00:00.000Z",
-};
-const cancelledMoiCard: OperatorDecisionView = {
-  ...moiCard, id: "moi-card-3", requestKey: "moi1:decision-event-3", sourceId: "decision-event-3", status: "cancelled",
-  cancelledAt: "2026-07-29T12:00:00.000Z",
-};
 
 function moiRequest(id: string, decisionEventId: string | null) {
   return {
@@ -157,8 +123,6 @@ const legacyRequest = {
 
 function setDefaultMocks() {
   mockState.pendingCards = [pending];
-  mockState.attentionCards = [attention];
-  mockState.historyCards = [];
   mockState.requests = [legacyRequest];
 }
 
@@ -185,16 +149,16 @@ describe("HumanOperator", () => {
     host.remove();
   });
 
-  it("renders pending cards, attention, automation, then existing requests in order", () => {
+  it("renders pending cards, automation, then existing requests in order", () => {
     const html = renderToStaticMarkup(<HumanOperator />);
     const pendingIndex = html.indexOf("Pending Interactive Card");
-    const attentionIndex = html.indexOf("Continuation needs attention");
     const automationIndex = html.indexOf("External automation approvals");
     const requestIndex = html.indexOf("Mission request");
     expect(pendingIndex).toBeGreaterThan(-1);
-    expect(pendingIndex).toBeLessThan(attentionIndex);
-    expect(attentionIndex).toBeLessThan(automationIndex);
+    expect(pendingIndex).toBeLessThan(automationIndex);
     expect(automationIndex).toBeLessThan(requestIndex);
+    // [2026-10-20] resolved/cancelled 이력(attention·history)은 더 이상 조회·렌더하지 않는다.
+    expect(html).not.toContain("Continuations needing attention");
   });
 
   it("renders the structured request summary with preserved line breaks", () => {
@@ -206,27 +170,9 @@ describe("HumanOperator", () => {
     expect(html).not.toContain("Issue: "); // raw issue UUID line removed from the card
   });
 
-  it("counts pending cards plus existing requests without counting attention", () => {
+  it("counts pending cards plus existing requests", () => {
     const html = renderToStaticMarkup(<HumanOperator />);
     expect(html).toContain("2 actionable");
-    expect(html).toContain("Retry continuation");
-    expect(html).toContain("issue unassigned");
-  });
-
-  it("only enables retries for server-eligible continuation states", () => {
-    expect(isContinuationRetryEligible(attention)).toBe(true);
-    expect(isContinuationRetryEligible({
-      ...attention,
-      continuation: { ...attention.continuation!, state: "pending", effectiveStatus: "pending", errorCode: "dispatch_delayed" },
-    })).toBe(false);
-    expect(isContinuationRetryEligible({
-      ...attention,
-      continuation: { ...attention.continuation!, state: "blocked", errorCode: "issue_missing" },
-    })).toBe(false);
-    expect(isContinuationRetryEligible({
-      ...attention,
-      continuation: { ...attention.continuation!, state: "accepted", effectiveStatus: "failed", errorCode: "heartbeat_failed" },
-    })).toBe(true);
   });
 
   it("moves success focus to next pending, attention, then empty heading", () => {
@@ -245,7 +191,7 @@ describe("HumanOperator", () => {
     expect(document.activeElement?.textContent).toBe("Empty");
   });
 
-  it("binds a pending card to its request row, resolves it once, and refetches requests+history", async () => {
+  it("binds a pending card to its request row, resolves it once, and refetches requests+decisions", async () => {
     mockState.requests = [moiRequest("a", "decision-event-1")];
     mockState.pendingCards = [pending, moiCard];
     await act(async () => {
@@ -286,13 +232,13 @@ describe("HumanOperator", () => {
     expect(html).not.toContain("Owner asks for direction");
   });
 
-  it("shows resolved and cancelled status badges from history for matched rows", () => {
+  it("marks rows with resolved/cancelled cards as card-less since history is not fetched", () => {
     mockState.requests = [moiRequest("b", "decision-event-2"), moiRequest("c", "decision-event-3")];
-    mockState.historyCards = [resolvedMoiCard, cancelledMoiCard];
     const html = renderKo(<HumanOperator />);
-    expect(html).toContain("해결됨");
-    expect(html).toContain("취소됨");
-    // 해결·취소된 카드 본문(선택지 폼)은 행에 렌더하지 않는다.
+    // [2026-10-20] resolved/cancelled 이력 조회 제거 — 매칭 행은 카드 없음 배지로 표시한다.
+    expect(html.split("카드 없음").length - 1).toBe(2);
+    expect(html).not.toContain("해결됨");
+    expect(html).not.toContain("취소됨");
     expect(html).not.toContain('value="approve"');
   });
 
