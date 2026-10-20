@@ -85,8 +85,12 @@ export async function prepareNextC02Input(previous: C02Case): Promise<CommitSour
   if (!origin || !run) throw Error("existing QA origin and workflow run required");
   const [definition] = await peer.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run.workflowId));
   if (!definition) throw Error("existing workflow definition required");
+  const sourceQa = (definition.stepsJson as { id: string; [key: string]: unknown }[])
+    .find(step => step.id === s.f.qa.stepId);
+  if (!sourceQa?.toolArtifactContract) throw Error("existing QA artifact contract required");
   await peer.update(workflowDefinitions).set({ stepsJson: [...definition.stepsJson, {
     id: stepId, name: "QA next correction", type: "agent", agentId: origin.agentId, dependencies: [p.producer.stepId],
+    toolArtifactContract: sourceQa.toolArtifactContract,
     workProductSelectors: { [p.producer.stepId]: { type: "artifact", title: "report" } },
   }] }).where(eq(workflowDefinitions.id, definition.id));
   const [issue] = await peer.insert(issues).values({ companyId: p.companyId, missionId: p.missionId,
