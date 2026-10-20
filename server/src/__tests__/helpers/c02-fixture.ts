@@ -11,6 +11,10 @@ import { readIssuedQaCorrection } from "../../services/workflow/control-flow/qa-
 import { measureQaCorrectionSources } from "../../services/workflow/control-flow/qa-correction-measure.js";
 import { storeQaCorrection } from "../../services/workflow/control-flow/qa-correction-storage.js";
 import { commitQaCorrection } from "../../services/workflow/control-flow/qa-correction-commit.js";
+import { freezeArtifactAttempt } from "../../services/workflow/artifact-contract-runtime.js";
+import { captureArtifactRoot, digest } from "../../services/workflow/artifact-files.js";
+import { createArtifactDirectory } from "../../services/workflow/artifact-writer.js";
+import { buildMissionWorkProductPaths } from "../../services/work-products/output-paths.js";
 import { parseQaCorrectionEventPayload, qaCorrectionDeliverySchema, qaCorrectionConsumptionSchema,
   qaCorrectionDeliveryKey, qaCorrectionConsumptionKey,
   type QaCorrectionConsumption } from "../../services/workflow/control-flow/qa-correction-contract.js";
@@ -88,22 +92,61 @@ export async function prepareNextC02Input(previous: C02Case): Promise<CommitSour
   const sourceQa = (definition.stepsJson as { id: string; [key: string]: unknown }[])
     .find(step => step.id === s.f.qa.stepId);
   if (!sourceQa?.toolArtifactContract) throw Error("existing QA artifact contract required");
-  await peer.update(workflowDefinitions).set({ stepsJson: [...definition.stepsJson, {
+  const nextStep = {
     id: stepId, name: "QA next correction", type: "agent", agentId: origin.agentId, dependencies: [p.producer.stepId],
     toolArtifactContract: sourceQa.toolArtifactContract,
     workProductSelectors: { [p.producer.stepId]: { type: "artifact", title: "report" } },
-  }] }).where(eq(workflowDefinitions.id, definition.id));
+  };
+  const nextSteps = [...definition.stepsJson, nextStep];
+  await peer.update(workflowDefinitions).set({ stepsJson: nextSteps }).where(eq(workflowDefinitions.id, definition.id));
   const [issue] = await peer.insert(issues).values({ companyId: p.companyId, missionId: p.missionId,
     title: "[QA] Next correction", status: "todo", assigneeAgentId: origin.agentId,
     originKind: "workflow_execution", originRunId: p.workflowRunId }).returning();
   if (!issue) throw Error("fresh QA issue required");
   const [qa] = await peer.insert(workflowStepRuns).values({ workflowRunId: p.workflowRunId,
-    stepId, issueId: issue.id, status: "failed" }).returning();
+    stepId, issueId: issue.id, status: "failed", retryCount: 1, iterationIndex: 2 }).returning();
   if (!qa) throw Error("fresh QA step required");
   const [binding] = await peer.insert(workflowStepOutputBindings).values({ companyId: p.companyId,
     workflowRunId: p.workflowRunId, consumerStepRunId: qa.id, referencedStepId: p.producer.stepId,
     sourceExecutionGeneration: p.producer.executionGeneration, workProductId: revision.workProductId }).returning();
   if (!binding) throw Error("fresh QA binding required");
+  const requestId = "c02-next:" + randomUUID();
+  const frozen = freezeArtifactAttempt({ adapterConfig: { artifactContract: s.request.artifactExecution.contract },
+    step: sourceQa, executionGeneration: qa.executionGeneration, requestId });
+  if (!frozen) throw Error("fresh QA artifact execution required");
+  await peer.update(workflowStepRuns).set({ lastDispatchRequestId: requestId,
+    metadata: { artifactExecution: frozen } }).where(eq(workflowStepRuns.id, qa.id));
+  const request = structuredClone(s.request), main = facts.find(fact => fact.role === "main")!;
+  request.requestId = requestId;
+  request.artifactExecution = frozen;
+  request.stepRunId = qa.id;
+  request.stepId = stepId;
+  request.retryCount = qa.retryCount;
+  request.iterationIndex = qa.iterationIndex;
+  request.input.workProductId = revision.workProductId;
+  request.input.path = file;
+  request.input.sha256 = main.sha256;
+  request.input.byteSize = main.byteSize;
+  request.input.assetsRoot = request.input.mode === "html" ? ""
+    : revision.assetsRelativeRoot === null ? "" : path.resolve(revision.root, revision.assetsRelativeRoot);
+  request.input.assetManifest = facts.filter(fact => fact.role === "asset").map(fact => ({
+    fileName: path.posix.relative("assets", fact.relativePath), sha256: fact.sha256, byteSize: fact.byteSize }));
+  if (request.input.mode === "html") {
+    const manifest = facts.find(fact => fact.relativePath === "bundle-index.json")!;
+    const notes = facts.find(fact => fact.relativePath === "source-notes.txt")!;
+    request.input.htmlManifest = { path: path.join(revision.root, manifest.relativePath),
+      sha256: manifest.sha256, byteSize: manifest.byteSize };
+    request.input.ancillaryManifest = [{ fileName: "research", sha256: notes.sha256, byteSize: notes.byteSize }];
+  }
+  const qaPaths = buildMissionWorkProductPaths({ workProductRoot: s.root, missionId: p.missionId,
+    workflowRunId: p.workflowRunId, stepId });
+  const output = path.join(qaPaths.stepOutputDir!, "attempts", String(qa.executionGeneration), digest(requestId), randomUUID());
+  const outputRoot = await createArtifactDirectory(await captureArtifactRoot(s.root), path.relative(s.root, output), [], []);
+  request.root = outputRoot;
+  request.outputRoot = outputRoot.path;
+  request.outputRootHash = digest(JSON.stringify(outputRoot));
+  await peer.update(workflowStepRuns).set({ metadata: { artifactExecution: frozen,
+    toolArtifactRequest: request } }).where(eq(workflowStepRuns.id, qa.id));
   const remediations = { items: [{ op: "string_replace" as const, file, find: "new", replace: "final" }] };
   const f = { ...s.f, qa, bindingId: binding.id, remediations, preparation: p };
   const verdict = await appendQaVerdict(peer, f, "request_changes", remediations), now = new Date();
