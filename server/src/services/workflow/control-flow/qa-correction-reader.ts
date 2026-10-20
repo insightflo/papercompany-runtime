@@ -290,10 +290,10 @@ export async function readIssuedQaCorrection(db: QaCorrectionDb, scope: Scope): 
   return (await readIssuedQaCorrectionHistory(db, scope)).issued;
 }
 
-/** Original attempt history only: exclude current binding successors, retain every issuance proof. */
+/** Original attempt history only: reuse issuance proofs per call, excluding current binding successors. */
 export async function readIssuedQaCorrectionFollowupForAttempt(db: Pick<Db, "select">, ref: QaCorrectionFollowupRef) {
   const { readIssuedQaCorrectionFollowup } = await import("./qa-correction-followup.js");
-  // This historical path is SELECT-only. The local type bridge grants no transaction or lock authority.
+  const cache: IssuedCache = new Map(); // SELECT-only type bridge grants no transaction or lock authority.
   return readIssuedQaCorrectionFollowup(db as QaCorrectionDb, ref,
-    (connection, scope) => readIssued(connection, scope, new Set(), new Map()));
+    (connection, scope) => readIssued(connection, scope, new Set(), cache));
 }

@@ -10,7 +10,7 @@ import { missionDedupExemptOversightReviewClause } from "../../heartbeat-mission
 import { insertWorkflowWakeRequest } from "../../heartbeat-workflow-wake.js";
 import { lockQualityAttemptBudget } from "../../quality/retry-budget.js";
 import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup, readQaCorrectionFollowupDb } from "./qa-correction-followup.js";
-import { readIssuedQaCorrection } from "./qa-correction-reader.js";
+import { createQaCorrectionHistorySession } from "./qa-correction-history-session.js";
 import { assertDeliveryInput, assertDeliveryScope, assertDeliverySignature, assertDeliveryWake, findDeliveryEvent,
   insertCorrectionDelivery, persistDeliveryIdentity, readQaCorrectionDelivery, readDeliveryWakeCandidates as wakes, requireDelivery,
   type CorrectionDeliveryInput, type CorrectionDeliveryResult, type DeliveryHistory, type DeliveryTx, type DeliveryWake,
@@ -51,9 +51,9 @@ async function heartbeatSet(db: Pick<Db, "select">, i: CorrectionDeliveryInput, 
 }
 async function observe(db: Db, i: CorrectionDeliveryInput) {
   // This is the real stage7 file/DB capability; never synthesize or replace its WeakMap token.
-  const selected = await readQaCorrectionFollowupDb(db, i.ref, readIssuedQaCorrection);
+  const selected = await readQaCorrectionFollowupDb(db, i.ref, createQaCorrectionHistorySession(db, i.ref));
   await assertDeliveryScope(db, i, selected);
-  const token = await observeQaCorrectionFollowup(db, i.ref, readIssuedQaCorrection);
+  const token = await observeQaCorrectionFollowup(db, i.ref, createQaCorrectionHistorySession(db, i.ref));
   const pending = await wakes(db, i), rows = await issueRows(db, i, selected);
   const heartbeats = await heartbeatSet(db, i, selected, rows, pending);
   const owners = sorted(rows.flatMap(r => [r.executionRunId, r.checkoutRunId]).filter((id): id is string => !!id));
@@ -174,7 +174,7 @@ export async function withCorrectionDeliveryRoot(db: Db, input: CorrectionDelive
     try {
       return await transaction<CorrectionDeliveryResult>(async tx => {
         await lockPrefix(tx, i, o);
-        const h = await readCurrentQaCorrectionFollowup(tx, i.ref, o.token, readIssuedQaCorrection);
+        const h = await readCurrentQaCorrectionFollowup(tx, i.ref, o.token, createQaCorrectionHistorySession(tx, i.ref));
         requireDelivery(h.followup.target.executionGeneration === i.workflowExecutionGeneration, "generation");
         const waiting = await waitingState(tx, i, h), pending = await wakes(tx, i);
         requireDelivery(pending.length <= 1, "duplicate_wake");

@@ -9,7 +9,8 @@ import { isQaCorrectionRootOwnerRequired, registerQaCorrectionRootDrain } from "
 import { lockQualityAttemptBudget } from "../../quality/retry-budget.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
 import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
-import { readIssuedQaCorrection, readIssuedQaCorrectionFollowupForAttempt, type IssuedQaCorrection } from "./qa-correction-reader.js";
+import { readIssuedQaCorrectionFollowupForAttempt, type IssuedQaCorrection } from "./qa-correction-reader.js";
+import { createQaCorrectionHistorySession } from "./qa-correction-history-session.js";
 import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup,
   readQaCorrectionFollowupDb } from "./qa-correction-followup.js";
 import type { DeliveryHistory, DeliveryTx, DeliveryWake } from "./qa-correction-delivery-receipt.js";
@@ -77,11 +78,12 @@ async function prove(db: Connection, run: Run, l: Lineage) {
 }
 /** Correction history has no technical-retry limit. Collect every historical proof's lock dependencies. */
 async function scope(db: Db, h: DeliveryHistory) {
+  const readIssued = createQaCorrectionHistorySession(db, h.ref);
   const history = new Map<string, IssuedQaCorrection>([[h.issued.preparation.correctionId, h.issued]]);
   for (const issued of history.values()) {
     for (const source of issued.preparation.sources) {
       if (source.provenance.kind !== "prior_correction") continue;
-      const prior = await readIssuedQaCorrection(db, { companyId: h.ref.companyId,
+      const prior = await readIssued(db, { companyId: h.ref.companyId,
         workflowRunId: h.ref.workflowRunId, appliedEventId: source.provenance.appliedEventId });
       requireClaim(prior.preparation.missionId === h.issued.preparation.missionId);
       history.set(prior.preparation.correctionId, prior);
@@ -126,8 +128,8 @@ async function heartbeats(db: Connection, h: DeliveryHistory, l: Lineage,
 }
 
 async function observe(db: Db, run: Run, l: Lineage) {
-  const h = await readQaCorrectionFollowupDb(db, l.ref!, readIssuedQaCorrection);
-  const token = await observeQaCorrectionFollowup(db, l.ref!, readIssuedQaCorrection);
+  const h = await readQaCorrectionFollowupDb(db, l.ref!, createQaCorrectionHistorySession(db, l.ref!));
+  const token = await observeQaCorrectionFollowup(db, l.ref!, createQaCorrectionHistorySession(db, l.ref!));
   const dependencies = await scope(db, h), rows = await issueRows(db, h, dependencies);
   const observed = await heartbeats(db, h, l, rows, dependencies);
   requireClaim(observed.some(r => r.id === run.id));
@@ -170,7 +172,7 @@ async function lock(tx: DeliveryTx, run: Run, l: Lineage, o: Observation,
 }
 
 async function currentPermission(tx: DeliveryTx, run: Run, o: Observation) {
-  const h = await readCurrentQaCorrectionFollowup(tx, o.h.ref, o.token, readIssuedQaCorrection);
+  const h = await readCurrentQaCorrectionFollowup(tx, o.h.ref, o.token, createQaCorrectionHistorySession(tx, o.h.ref));
   const [agent] = await tx.select().from(agents).where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId)));
   const issue = h.database.target.issue, verdict = h.issued.preparation.authority.verdicts.find(v => same(v.qa, h.followup.target));
   const origin = o.observed.find(r => r.id === verdict?.heartbeatRunId);
