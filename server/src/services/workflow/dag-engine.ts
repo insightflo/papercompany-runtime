@@ -2029,8 +2029,11 @@ function workflowToolQueueCandidate() {
 }
 
 function isQaCorrectionToolStep(step: WorkflowStep) {
+  const toolNames = Array.isArray(step.toolNames)
+    ? step.toolNames.filter(name => typeof name === "string" && name.trim()) : [];
   return !isStructuralGateStep(step) && !isWorkflowControlNode(step) && !isWorkflowChildStep(step)
-    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa";
+    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa"
+    && toolNames.length === 1;
 }
 
 async function readWorkflowToolCorrection(db: Pick<Db, "select">, run: typeof workflowRuns.$inferSelect,
