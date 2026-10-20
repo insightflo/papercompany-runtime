@@ -1,7 +1,8 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import { and, eq } from "drizzle-orm";
-import { workflowStepRuns, type Db } from "@paperclipai/db";
+import { workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { adaptQaResult, toolArtifactReceiptSchema, type ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { artifactRelativePathSchema } from "@paperclipai/shared/validators/artifact-contract";
 import { captureArtifactRoot, digest, readArtifactBytes } from "./artifact-files.js";
@@ -9,10 +10,25 @@ import { readCompletedSourceArtifactAttempt, readFrozenArtifactAttempt, type Fro
 import { evaluateQaRules } from "./qa-rules.js";
 import type { QaRequest } from "./qa-artifact-request.js";
 import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
+import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionFollowupRefSchema,
+  type QaCorrectionFollowupRef } from "./control-flow/qa-correction-contract.js";
+import type { QaCorrectionDb } from "./control-flow/qa-correction-authority.js";
 
 type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution" | "internalPathRoots"> & {
   artifactExecution?: FrozenArtifactAttempt; internalPathRoots?: string[];
 };
+
+type QaReceiptRequestScope = Pick<ToolArtifactReceipt,
+  "companyId" | "missionId" | "workflowRunId" | "stepRunId" | "stepId" | "executionGeneration"
+  | "retryCount" | "iterationIndex" | "requestId" | "outputRoot" | "outputRootHash" | "input">;
+function projectQaReceiptRequestScope(s: QaReceiptRequestScope): QaReceiptRequestScope {
+  return {
+    companyId: s.companyId, missionId: s.missionId, workflowRunId: s.workflowRunId,
+    stepRunId: s.stepRunId, stepId: s.stepId, executionGeneration: s.executionGeneration,
+    retryCount: s.retryCount, iterationIndex: s.iterationIndex, requestId: s.requestId,
+    outputRoot: s.outputRoot, outputRootHash: s.outputRootHash, input: s.input,
+  };
+}
 
 /** Server-verifier rejection, distinct from child diagnostics and invalid machine results. */
 export class QaArtifactRejectionError extends Error {
@@ -60,7 +76,7 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
       if (digest(data) !== asset.sha256 || data.length !== asset.byteSize) throw new Error("qa_artifact_asset_changed");
     }
   }
-  const { root: _, artifactExecution: __, internalPathRoots: ___, ...scope } = s;
+  const scope = projectQaReceiptRequestScope(s);
   const receipt = toolArtifactReceiptSchema.parse({ ...scope,
     schemaVersion: frozen ? "workflow.tool-artifact.v2" : "workflow.tool-artifact.v1", role: "qa",
     relativePath: contract.resultFileName, resultSchema: contract.resultSchemaVersion, sha256: digest(bytes), byteSize: bytes.length,
@@ -135,4 +151,114 @@ export async function readQaReceiptBytes(db: Db, scope: { companyId: string; wor
   const bytes = await readArtifactBytes(request.root, receipt.relativePath, 1024 * 1024);
   if (digest(bytes) !== receipt.sha256 || bytes.length !== receipt.byteSize) throw new Error("qa_artifact_receipt_bytes_changed");
   return { receipt, bytes };
+}
+
+const proofUuid = z.string().uuid(), proofText = z.string().min(1);
+const proofHash = z.string().regex(/^[a-f0-9]{64}$/);
+const proofRequestSchema = toolArtifactReceiptSchema.options[1].pick({
+  companyId: true, missionId: true, workflowRunId: true, stepRunId: true, stepId: true,
+  executionGeneration: true, retryCount: true, iterationIndex: true, requestId: true,
+  outputRoot: true, outputRootHash: true, input: true,
+}).extend({
+  qaCorrectionFollowup: qaCorrectionFollowupRefSchema,
+  artifactExecution: z.custom<FrozenArtifactAttempt>(value => {
+    try { readFrozenArtifactAttempt(value); return true; } catch { return false; }
+  }, "qa_correction_tool_proof_frozen"),
+}).strict();
+const toolConsumptionProofSchema = z.object({
+  schemaVersion: z.literal("workflow.qa-correction.tool-consumption-proof.v1"),
+  ref: qaCorrectionFollowupRefSchema, followupEventId: proofUuid,
+  request: proofRequestSchema,
+  receipt: toolArtifactReceiptSchema.options[1].extend({ role: z.literal("qa") }).strict(),
+  completedAt: z.string().datetime({ offset: true }),
+  statusTransitionVersion: z.number().int().safe().nonnegative(),
+}).strict();
+export type QaCorrectionToolConsumptionProof = z.infer<typeof toolConsumptionProofSchema>;
+function requireToolProof(value: unknown, reason: string): asserts value {
+  if (!value) throw new Error("qa_correction_tool_proof_" + reason);
+}
+
+/** Shape and frozen equality only; server issuance requires the DB reader below. */
+export function parseQaCorrectionToolConsumptionProof(raw: unknown): QaCorrectionToolConsumptionProof {
+  hashQaCorrectionPayload(raw);
+  const proof = toolConsumptionProofSchema.parse(raw), q = proof.request, r = proof.receipt;
+  const frozen = readFrozenArtifactAttempt(q.artifactExecution, q);
+  requireToolProof(isDeepStrictEqual(q.qaCorrectionFollowup, proof.ref)
+    && q.companyId === proof.ref.companyId && q.workflowRunId === proof.ref.workflowRunId
+    && isDeepStrictEqual(projectQaReceiptRequestScope(q), projectQaReceiptRequestScope(r)), "request");
+  requireToolProof(r.contractHash === frozen.contractHash && r.qaConfigHash === frozen.qaConfigHash
+    && r.relativePath === frozen.contract.resultFileName && r.resultSchema === frozen.contract.resultSchemaVersion
+    && frozen.contract.role === "qa", "receipt");
+  return proof;
+}
+
+/** SELECT-only historical relation; never re-read current request/status, files or completion writers. */
+export async function readQaCorrectionToolConsumptionProof(db: QaCorrectionDb, value: {
+  ref: QaCorrectionFollowupRef; proofEventId: string; stepRunId: string; requestId: string; sha256: string;
+}) {
+  const lookup = z.object({ ref: qaCorrectionFollowupRefSchema, proofEventId: proofUuid,
+    stepRunId: proofUuid, requestId: proofText, sha256: proofHash }).strict().parse(value);
+  const [row] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, lookup.proofEventId));
+  requireToolProof(row, "missing");
+  const proof = parseQaCorrectionToolConsumptionProof(row.payload), q = proof.request, r = proof.receipt;
+  requireToolProof(isDeepStrictEqual(proof.ref, lookup.ref) && r.stepRunId === lookup.stepRunId
+    && r.requestId === lookup.requestId && r.sha256 === lookup.sha256, "lookup");
+  const { readIssuedQaCorrectionHistory } = await import("./control-flow/qa-correction-reader.js");
+  const history = await readIssuedQaCorrectionHistory(db, proof.ref), issued = history.issued, p = issued.preparation;
+  const followup = issued.followups.find(f => f.requestId === proof.ref.requestId);
+  requireToolProof(followup && issued.applied.followupEventIds.includes(proof.followupEventId), "issuance");
+  const [followupRow] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, proof.followupEventId));
+  requireToolProof(followupRow && followupRow.eventType === "qa_correction_followup_requested"
+    && isDeepStrictEqual(parseQaCorrectionEventPayload("qa_correction_followup_requested", followupRow.payload), followup), "issuance");
+  const t = followup.target;
+  requireToolProof(row.companyId === p.companyId && row.missionId === p.missionId
+    && row.workflowRunId === p.workflowRunId && row.workflowStepRunId === t.stepRunId && row.issueId === t.issueId
+    && row.executionGeneration === t.executionGeneration && row.eventType === "qa_correction_tool_consumption_proof"
+    && row.layer === "workflow_validation" && row.idempotencyKey === "qa-correction-tool-proof:" + q.requestId
+    && row.heartbeatRunId === null && row.wakeupRequestId === null && row.toStatus === "completed"
+    && row.createdAt.getTime() === Date.parse(proof.completedAt)
+    && row.createdAt >= followupRow.createdAt && Date.parse(proof.completedAt) >= Date.parse(issued.applied.appliedAt), "record");
+  requireToolProof(q.companyId === p.companyId && q.missionId === p.missionId && q.workflowRunId === p.workflowRunId
+    && q.stepRunId === t.stepRunId && q.stepId === t.stepId && q.executionGeneration === t.executionGeneration
+    && q.retryCount === t.retryCount && q.iterationIndex === t.iterationIndex, "attempt");
+  const revisions = issued.applied.revisions.filter(revision => followup.revisionIds.includes(revision.revisionId));
+  const revision = revisions.find(revision => revision.workProductId === r.input.workProductId);
+  const main = revision?.files.find(file => file.role === "main"), input = r.input;
+  requireToolProof(revisions.length === 1 && revision && main
+    && input.path === path.join(revision.root, revision.mainRelativePath)
+    && input.sha256 === main.sha256 && input.byteSize === main.byteSize, "input");
+  const sorted = (files: { fileName: string; sha256: string; byteSize: number }[]) =>
+    [...files].sort((a, b) => a.fileName.localeCompare(b.fileName));
+  const assets = revision.files.filter(file => file.role === "asset").map(file => ({
+    fileName: path.posix.relative(revision.assetsRelativeRoot ?? "", file.relativePath), sha256: file.sha256, byteSize: file.byteSize }));
+  requireToolProof(isDeepStrictEqual(sorted(input.assetManifest), sorted(assets)), "assets");
+  if (input.mode === "html") {
+    const manifest = revision.files.find(file => file.relativePath === revision.bundleManifestRelativePath);
+    requireToolProof(manifest && input.htmlManifest && input.htmlManifest.path === path.join(revision.root, manifest.relativePath)
+      && input.htmlManifest.sha256 === manifest.sha256 && input.htmlManifest.byteSize === manifest.byteSize
+      && revision.ancillaryRoleBindings !== undefined && input.ancillaryManifest, "manifest");
+    const ancillary = revision.ancillaryRoleBindings.map(binding => {
+      const file = revision.files.find(file => file.relativePath === binding.relativePath)!;
+      return { fileName: binding.role, sha256: file.sha256, byteSize: file.byteSize };
+    });
+    requireToolProof(isDeepStrictEqual(sorted(input.ancillaryManifest), sorted(ancillary)), "ancillary");
+  } else requireToolProof(revision.bundleManifestRelativePath === null && input.assetsRoot ===
+    (revision.assetsRelativeRoot === null ? "" : path.join(revision.root, revision.assetsRelativeRoot!)), "manifest");
+  let ancestor = issued, sourceProductId = revision.sourceProductId;
+  const visited = new Set<string>();
+  for (;;) {
+    requireToolProof(!visited.has(ancestor.preparation.correctionId), "lineage");
+    visited.add(ancestor.preparation.correctionId);
+    const source = ancestor.preparation.sources.find(source => source.productId === sourceProductId);
+    requireToolProof(source && source.provenance.kind !== "registered_legacy", "producer");
+    if (source.provenance.kind === "workflow_producer") {
+      requireToolProof(isDeepStrictEqual(input.producer, source.provenance.workflowProducer), "producer");
+      break;
+    }
+    ancestor = await history.readAncestor(source.provenance.appliedEventId);
+    const previous = ancestor.applied.revisions.find(revision => revision.workProductId === sourceProductId);
+    requireToolProof(previous, "lineage");
+    sourceProductId = previous.sourceProductId;
+  }
+  return { eventId: row.id, proof };
 }

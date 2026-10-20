@@ -153,15 +153,29 @@ export const qaCorrectionDeliverySchema = z.object({
   ref: qaCorrectionFollowupRefSchema, followupEventId: uuid,
   wakeupRequestId: uuid, heartbeatRunId: uuid, deliveredAt: timestamp,
 }).strict();
-export const qaCorrectionConsumptionSchema = z.object({
-  schemaVersion: z.literal("workflow.qa-correction.consumption.v1"),
+const workflowVerdictEvidenceSchema = z.object({
+  kind: z.literal("workflow_verdict"), eventId: uuid, deliveryEventId: uuid,
+}).strict();
+const toolQaEvidenceFields = { kind: z.literal("tool_qa"), stepRunId: uuid, requestId: text, sha256 };
+const consumptionFields = {
   ref: qaCorrectionFollowupRefSchema, followupEventId: uuid,
   followup: qaCorrectionFollowupSchema, consumedAt: timestamp,
-  evidence: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("workflow_verdict"), eventId: uuid, deliveryEventId: uuid }).strict(),
-    z.object({ kind: z.literal("tool_qa"), stepRunId: uuid, requestId: text, sha256 }).strict(),
-  ]),
-}).strict().refine(c => c.ref.requestId === c.followup.requestId
+};
+// v1 remains readable for stored history; new tool evidence binds an immutable proof event.
+export const qaCorrectionConsumptionSchema = z.discriminatedUnion("schemaVersion", [
+  z.object({
+    schemaVersion: z.literal("workflow.qa-correction.consumption.v1"), ...consumptionFields,
+    evidence: z.discriminatedUnion("kind", [
+      workflowVerdictEvidenceSchema, z.object(toolQaEvidenceFields).strict(),
+    ]),
+  }).strict(),
+  z.object({
+    schemaVersion: z.literal("workflow.qa-correction.consumption.v2"), ...consumptionFields,
+    evidence: z.discriminatedUnion("kind", [
+      workflowVerdictEvidenceSchema, z.object({ ...toolQaEvidenceFields, proofEventId: uuid }).strict(),
+    ]),
+  }).strict(),
+]).refine(c => c.ref.requestId === c.followup.requestId
   && c.ref.appliedEventId === c.followup.appliedEventId, "qa_correction_consumption_reference");
 export type QaCorrectionFollowupRef = z.infer<typeof qaCorrectionFollowupRefSchema>;
 export type QaCorrectionDelivery = z.infer<typeof qaCorrectionDeliverySchema>;
