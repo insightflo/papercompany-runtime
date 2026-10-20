@@ -10,7 +10,7 @@ import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } fro
 import { readHtmlBundle } from "../qa-html-input.js";
 import { loadExecutionDefinition } from "../execution-definition.js";
 import { buildMissionWorkProductPaths, resolveMissionWorkProductPaths } from "../../work-products/output-paths.js";
-import { readQaCorrectionSources, readIssuedQaCorrection, qaCorrectionProductPointerSchema } from "./qa-correction-reader.js";
+import { readQaCorrectionSources, readIssuedQaCorrectionHistory, qaCorrectionProductPointerSchema } from "./qa-correction-reader.js";
 import { readQaCorrectionVerdict, requireQaCorrection, type QaCorrectionDb } from "./qa-correction-authority.js";
 import { type QaCorrectionApplied, type QaCorrectionPreparation, type QaCorrectionSourceMeasured } from "./qa-correction-contract.js";
 
@@ -28,10 +28,12 @@ const inside = (file: string, root: string) => {
 
 type Revision = QaCorrectionApplied["revisions"][number];
 type Producer = ReturnType<typeof inputSchema.parse>["producer"];
+type History = Awaited<ReturnType<typeof readIssuedQaCorrectionHistory>>;
 
 /** Follow verified issuance edges to the original record; never restamp a corrected product. */
-async function originalWorkflowProducer(db: QaCorrectionDb, p: QaCorrectionPreparation,
-  issued: Awaited<ReturnType<typeof readIssuedQaCorrection>>, revision: Revision): Promise<Producer | null> {
+async function originalWorkflowProducer(p: QaCorrectionPreparation,
+  history: History, revision: Revision): Promise<Producer | null> {
+  let issued = history.issued;
   const visited = new Set<string>();
   for (;;) {
     const ancestor = issued.preparation;
@@ -48,8 +50,7 @@ async function originalWorkflowProducer(db: QaCorrectionDb, p: QaCorrectionPrepa
     if (source.provenance.kind === "workflow_producer") return source.provenance.workflowProducer;
     const hint = qaCorrectionProductPointerSchema.parse(actual.product.metadata?.qaCorrection);
     requireQaCorrection(hint.appliedEventId === source.provenance.appliedEventId, "lineage");
-    issued = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
-      appliedEventId: source.provenance.appliedEventId });
+    issued = await history.readAncestor(source.provenance.appliedEventId);
     const previous = issued.applied.revisions.find(r =>
       r.workProductId === source.productId && r.revisionId === hint.revisionId);
     requireQaCorrection(previous && path.resolve(previous.root, previous.mainRelativePath) === actual.file, "lineage");
@@ -69,8 +70,9 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
     if (provenance.kind !== "prior_correction") continue;
     const pointer = qaCorrectionProductPointerSchema.parse(s.product.metadata?.qaCorrection);
     requireQaCorrection(pointer.appliedEventId === provenance.appliedEventId, "lineage");
-    const issued = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
+    const history = await readIssuedQaCorrectionHistory(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
       appliedEventId: provenance.appliedEventId });
+    const issued = history.issued;
     const revision = issued.applied.revisions.find(r => r.revisionId === pointer.revisionId && r.workProductId === s.product.id);
     requireQaCorrection(revision && issued.preparation.companyId === p.companyId
       && issued.preparation.missionId === p.missionId && issued.preparation.workflowRunId === p.workflowRunId
@@ -79,7 +81,7 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
       && Date.parse(issued.applied.appliedAt) <= Date.parse(p.preparedAt)
       && path.resolve(revision.root, revision.mainRelativePath) === s.file, "lineage");
     priors.push({ productId: s.product.id, revision,
-      workflowProducer: await originalWorkflowProducer(db, p, issued, revision) });
+      workflowProducer: await originalWorkflowProducer(p, history, revision) });
   }
   const declarations: {
     qa: Awaited<ReturnType<typeof readQaCorrectionVerdict>>["qa"];
