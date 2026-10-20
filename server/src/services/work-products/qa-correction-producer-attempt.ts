@@ -7,6 +7,8 @@ import type { readIssuedQaCorrectionFollowup } from "../workflow/control-flow/qa
 import type { readWorkflowAttemptProof } from "../heartbeat-finalization/workflow-attempt-proof.js";
 
 export const QA_CORRECTION_WAKE_PREFIX = "qa-correction-wake:";
+type ProducerAttemptIdentity = Pick<typeof workflowStepRuns.$inferSelect,
+  "id" | "workflowRunId" | "stepId" | "issueId" | "executionGeneration" | "retryCount" | "iterationIndex">;
 type History = Awaited<ReturnType<typeof readIssuedQaCorrectionFollowup>>;
 type ReadHistory = (db: Pick<Db, "select">, ref: QaCorrectionFollowupRef) => Promise<History>;
 const reject = (): never => { throw conflict("workproduct_producer_attempt_unproven"); };
@@ -31,7 +33,7 @@ export function readQaCorrectionWakeRef(wake: typeof agentWakeupRequests.$inferS
 /** SELECT-only historical proof. The injected reader also proves revisions and original producer ancestry. */
 export async function readQaCorrectionProducerAttempt(db: Pick<Db, "select">,
   wake: typeof agentWakeupRequests.$inferSelect, heartbeat: typeof heartbeatRuns.$inferSelect,
-  step: typeof workflowStepRuns.$inferSelect, proof: ReturnType<typeof readWorkflowAttemptProof>,
+  step: ProducerAttemptIdentity, proof: ReturnType<typeof readWorkflowAttemptProof>,
   readHistory: ReadHistory) {
   const ref = readQaCorrectionWakeRef(wake);
   if (!ref) return null;
