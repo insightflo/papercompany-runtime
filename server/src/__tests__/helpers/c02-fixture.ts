@@ -1,11 +1,13 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { agentWakeupRequests, heartbeatRuns, issues, qualityActions, workflowStepRuns,
+import { agentWakeupRequests, heartbeatRuns, issues, qualityActions, workflowDefinitions, workflowRuns,
+  workflowStepOutputBindings, workflowStepRuns,
   workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { toolArtifactReceiptSchema } from "@paperclipai/shared/validators/workflow-artifact";
 import { hashContract } from "../../services/quality/contract.js";
 import { beginQaCorrection } from "../../services/workflow/control-flow/qa-correction-prepare.js";
+import { readIssuedQaCorrection } from "../../services/workflow/control-flow/qa-correction-reader.js";
 import { measureQaCorrectionSources } from "../../services/workflow/control-flow/qa-correction-measure.js";
 import { storeQaCorrection } from "../../services/workflow/control-flow/qa-correction-storage.js";
 import { commitQaCorrection } from "../../services/workflow/control-flow/qa-correction-commit.js";
@@ -82,6 +84,59 @@ export async function issueNextC02(previous: C02Case) {
   p.bindings.forEach(b => { b.expectedProductId = r.workProductId; });
   return issue({ ...s, p, files, text: "new", productId: r.workProductId, file: request.input.path,
     directory: r.root, request }, peer);
+}
+
+/** Prepare a fresh QA authority over registered B bytes; issuance remains with the caller. */
+export async function prepareNextC02Input(previous: C02Case): Promise<CommitSourceCase> {
+  const { s, peer } = previous, prior = await readIssuedQaCorrection(peer, previous.ref);
+  if (prior.preparation.authority.kind !== "workflow_qa") throw Error("workflow QA preparation required");
+  const revision = prior.applied.revisions[0]!, files = commitBuffers(s.mode, "new"), facts = commitFacts(files);
+  if (facts.length !== revision.files.length || facts.some(file => !revision.files.some(stored =>
+    stored.relativePath === file.relativePath && stored.role === file.role
+      && stored.sha256 === file.sha256 && stored.byteSize === file.byteSize))) {
+    throw Error("registered B bytes must match the next correction input");
+  }
+  const p = structuredClone(prior.preparation), file = path.join(revision.root, revision.mainRelativePath);
+  p.correctionId = randomUUID();
+  const stepId = "qa-" + p.correctionId;
+  const [origin] = await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, s.f.verdictHeartbeatId));
+  const [run] = await peer.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId));
+  if (!origin || !run) throw Error("existing QA origin and workflow run required");
+  const [definition] = await peer.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run.workflowId));
+  if (!definition) throw Error("existing workflow definition required");
+  await peer.update(workflowDefinitions).set({ stepsJson: [...definition.stepsJson, {
+    id: stepId, name: "QA next correction", type: "agent", agentId: origin.agentId, dependencies: [p.producer.stepId],
+    workProductSelectors: { [p.producer.stepId]: { type: "artifact", title: "report" } },
+  }] }).where(eq(workflowDefinitions.id, definition.id));
+  const [issue] = await peer.insert(issues).values({ companyId: p.companyId, missionId: p.missionId,
+    title: "[QA] Next correction", status: "todo", assigneeAgentId: origin.agentId,
+    originKind: "workflow_execution", originRunId: p.workflowRunId }).returning();
+  if (!issue) throw Error("fresh QA issue required");
+  const [qa] = await peer.insert(workflowStepRuns).values({ workflowRunId: p.workflowRunId,
+    stepId, issueId: issue.id, status: "failed" }).returning();
+  if (!qa) throw Error("fresh QA step required");
+  const [binding] = await peer.insert(workflowStepOutputBindings).values({ companyId: p.companyId,
+    workflowRunId: p.workflowRunId, consumerStepRunId: qa.id, referencedStepId: p.producer.stepId,
+    sourceExecutionGeneration: p.producer.executionGeneration, workProductId: revision.workProductId }).returning();
+  if (!binding) throw Error("fresh QA binding required");
+  const remediations = { items: [{ op: "string_replace" as const, file, find: "new", replace: "final" }] };
+  const f = { ...s.f, qa, bindingId: binding.id, remediations, preparation: p };
+  const verdict = await appendQaVerdict(peer, f, "request_changes", remediations), now = new Date();
+  const [heartbeat] = await peer.update(heartbeatRuns).set({ createdAt: now })
+    .where(eq(heartbeatRuns.id, verdict.heartbeatRunId)).returning();
+  if (!heartbeat?.wakeupRequestId) throw Error("fresh official QA heartbeat and wake required");
+  await peer.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
+  await peer.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.id, heartbeat.wakeupRequestId));
+  p.preparedAt = now.toISOString();
+  p.authority = { kind: "workflow_qa", verdicts: [verdict], toolEvidence: null };
+  p.sources = [{ productId: revision.workProductId,
+    provenance: { kind: "prior_correction", appliedEventId: previous.ref.appliedEventId } }];
+  // Describe the existing B pins without moving them before the caller commits C.
+  p.bindings = [...p.bindings.map(existing => ({ ...existing, expectedProductId: revision.workProductId })),
+    { bindingId: binding.id, consumer: verdict.qa,
+      referencedStepId: p.producer.stepId, expectedProductId: revision.workProductId }];
+  return { ...s, p, f: { ...f, verdictHeartbeatId: heartbeat.id, verdictWakeId: heartbeat.wakeupRequestId },
+    productId: revision.workProductId, file, directory: revision.root, text: "new", files };
 }
 
 /**

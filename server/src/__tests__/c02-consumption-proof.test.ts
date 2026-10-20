@@ -187,10 +187,10 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
     expect(originalConsumption?.eventId).toBe(consumption.row.id);
     const { c, request } = await prepareSuccessorConsumption(b);
     await writeConsumptionQaResult(c, request, "final");
-    const verifiedC = await verifyQaArtifact(request, tool, deployment), current = await currentConsumptionStep(c);
-    await c.peer.update(workflowStepRuns).set({ completedAt: null,
-      metadata: { ...current.metadata, toolArtifactReceipt: verifiedC.receipt } }).where(eq(workflowStepRuns.id, current.id));
-    const before = await currentConsumptionStep(c);
+    const verifiedC = await verifyQaArtifact(request, tool, deployment), current = await currentConsumptionStep(b);
+    await b.peer.update(workflowStepRuns).set({ status: "running", completedAt: null, lastDispatchRequestId: request.snapshot.requestId,
+      metadata: { ...current.metadata, artifactExecution: request.snapshot.artifactExecution, toolArtifactRequest: request.snapshot, toolArtifactReceipt: verifiedC.receipt } }).where(eq(workflowStepRuns.id, b.s.f.qa.id));
+    const before = await currentConsumptionStep(b);
     expect(before.status).toBe("running");
     expect(before.metadata.toolArtifactRequest).toEqual(request.snapshot);
     expect(before.metadata.toolArtifactReceipt).toEqual(verifiedC.receipt);
@@ -202,7 +202,7 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
     expect(await api.readQaCorrectionToolConsumptionProof(owned.db, seed.lookup)).toEqual(original);
     expect(await readQaCorrectionFollowupConsumption(owned.db, b.ref, readIssuedQaCorrection)).toEqual(originalConsumption);
     expect(await consumptionState(c)).toEqual(state);
-    expect(await currentConsumptionStep(c)).toEqual(before);
+    expect(await currentConsumptionStep(b)).toEqual(before);
     const [stored] = await c.peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, seed.row.id));
     expect(stored).toEqual(seed.row);
   }, 60000);

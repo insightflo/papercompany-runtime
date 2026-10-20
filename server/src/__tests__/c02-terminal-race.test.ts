@@ -18,7 +18,7 @@ import { commitQaCorrection } from "../services/workflow/control-flow/qa-correct
 import * as authority from "../services/workflow/control-flow/qa-correction-authority.js";
 import * as followupReader from "../services/workflow/control-flow/qa-correction-followup.js";
 import { appendQaVerdict } from "./helpers/qa-correction-fixture.js";
-import { issueC02, issueNextC02, storeC02ConsumptionInput } from "./helpers/c02-fixture.js";
+import { issueC02, issueNextC02, prepareNextC02Input, storeC02ConsumptionInput } from "./helpers/c02-fixture.js";
 import {
   commitDbState, createCommitSourceHarness, makeCommitSource, type CommitSourceCase,
 } from "./qa-correction-commit-fixture.js";
@@ -216,16 +216,7 @@ describe("C02 stage8A relation inputs and failure classification", () => {
     const b = await issueC02(owned, { mode: "content-only" });
     await storeC02ConsumptionInput(b, "tool_qa");
     expect(await liveness(b.s)).toEqual({ kind: "clear" });
-    const r = b.stored.revisions[0]!, now = new Date();
-    const verdict = await appendQaVerdict(b.peer, b.s.f, "request_changes", {
-      items: [{ op: "string_replace", file: path.join(r.root, r.mainRelativePath), find: "new", replace: "final" }],
-    });
-    await b.peer.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, verdict.heartbeatRunId));
-    await b.peer.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
-    const p = structuredClone(b.s.p);
-    p.correctionId = randomUUID(); p.preparedAt = now.toISOString(); p.authority.verdicts = [verdict];
-    p.sources = [{ productId: r.workProductId, provenance: { kind: "prior_correction", appliedEventId: b.ref.appliedEventId } }];
-    p.bindings.forEach(binding => { binding.expectedProductId = r.workProductId; });
+    const { p } = await prepareNextC02Input(b);
     const prepared = await beginQaCorrection(b.peer, p);
     expect(prepared.status).toBe("prepared");
     expect(await liveness(b.s)).toEqual({ kind: "open", correctionId: p.correctionId });

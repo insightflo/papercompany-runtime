@@ -18,6 +18,10 @@ import { storeQaCorrection } from "../services/workflow/control-flow/qa-correcti
 import { commitQaCorrection } from "../services/workflow/control-flow/qa-correction-commit.js";
 import { hashQaCorrectionPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
+import { claimHeartbeatWithRecoveryGuard } from "../services/heartbeat-recovery-guard.js";
+import { createClaimFixture } from "./helpers/c02-claim-race-fixture.js";
+import { correctionRows } from "./helpers/c02-delivery-fixture.js";
+import { seedV2Consumption } from "./helpers/c02-consumption-fixture.js";
 import { commitDbState } from "./qa-correction-commit-fixture.js";
 import { commitBuffers, commitFacts, createCommitSourceHarness, issueC02 } from "./helpers/c02-fixture.js";
 
@@ -98,6 +102,11 @@ describe("C02 stage10 original correction producer attempt", () => {
       eq(workflowTransitionEvents.heartbeatRunId, c.heartbeat.id),
       eq(workflowTransitionEvents.eventType, "workflow_validation_verdict")));
     if (!event) throw Error("same-H official rejection required");
+    const delivered = (await correctionRows(c)).receipts.find(row =>
+      row.heartbeatRunId === c.heartbeat.id && row.wakeupRequestId === c.wake.id);
+    if (!delivered) throw Error("same-H actual delivery event required");
+    // Reader input only; this does not prove an atomic public verdict/consumption writer.
+    await seedV2Consumption(c, { kind: "workflow_verdict", eventId: event.id, deliveryEventId: delivered.id }, c.heartbeat);
     const p = structuredClone(c.s.p);
     p.correctionId = randomUUID();
     p.preparedAt = new Date().toISOString();
@@ -116,7 +125,15 @@ describe("C02 stage10 original correction producer attempt", () => {
   }
 
   it("rejects same-H reentry through actual true history after B→C, then proves H with false history", async () => {
-    const c = await admitted();
+    const fixtures = createClaimFixture(owned, db => db, [], []), { c: b } = await fixtures.world();
+    const queued = (await correctionRows(b)).heartbeats[0];
+    if (!queued) throw Error("actual delivered root required");
+    const heartbeat = await claimHeartbeatWithRecoveryGuard(owned.db, queued, new Date());
+    if (!heartbeat?.wakeupRequestId) throw Error("actual root public claim required");
+    const [step] = await b.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, b.followup.target.stepRunId));
+    const [wake] = await b.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, heartbeat.wakeupRequestId));
+    if (!step || !wake) throw Error("actual claimed QA target and wake required");
+    const c = { ...b, heartbeat, step, wake };
     await issueC(c);
     // One pass-through only: without the ALS guard the next real false bridge would succeed, not loop.
     const spy = vi.spyOn(historyReader, "readIssuedQaCorrectionFollowupForAttempt").mockImplementationOnce(
