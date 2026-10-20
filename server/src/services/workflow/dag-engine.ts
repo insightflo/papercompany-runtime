@@ -6,6 +6,17 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual as same } from "node:util";
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { readFrozenArtifactAttempt } from "./artifact-contract-runtime.js";
+import { findWorkflowVerdictCorrection } from "./workflow-verdict-current.js";
+import { prepareWorkflowVerdictLocks, lockWorkflowVerdictDependencies } from "./workflow-verdict-write.js";
+import { lockQualityAttemptBudget } from "../quality/retry-budget.js";
+import { lockUnreplacedRun } from "./run-replacement-guard.js";
+import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
+import { QaCorrectionReadError } from "./control-flow/qa-correction-authority.js";
+import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup,
+  readQaCorrectionFollowupConsumption, QaCorrectionFollowupReadError } from "./control-flow/qa-correction-followup.js";
 import { dependencyToolEvidence } from "./dependency-tool-evidence.js";
 import { isIssueLessToolStep } from "./issue-less-tool-shape.js";
 import {
@@ -16,7 +27,7 @@ import {
   type ChildStartFence,
 } from "./workflow-child-start-state.js";
 import path from "node:path";
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
@@ -902,6 +913,14 @@ async function syncStepRunsFromIssueState(
   steps: WorkflowStep[] = [],
   context?: WorkflowExecutionContext,
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const correctionToolIds = new Set<string>();
+  if (context) {
+    for (const stepRun of stepRuns) {
+      const step = steps.find(s => s.id === stepRun.stepId);
+      if (step && await readWorkflowToolCorrection(db, context.run, stepRun, step)) correctionToolIds.add(stepRun.id);
+    }
+  }
+  // Issued tool targets settle through the tool queue, never through an old issue status or agent wake.
   const issueIds = stepRuns
     .map((stepRun) => stepRun.issueId)
     .filter((issueId): issueId is string => Boolean(issueId));
@@ -920,7 +939,10 @@ async function syncStepRunsFromIssueState(
     })
     .from(issues)
     .where(inArray(issues.id, issueIds));
-  const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
+  const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
+  const issueById = new Map(issueRows
+    .filter(issue => issue.status === "cancelled" || !correctionToolIssueIds.has(issue.id))
+    .map((issue) => [issue.id, issue]));
   const stepById = new Map(steps.map((step) => [step.id, step]));
   const workProductDependencyGate = await loadWorkProductDependencyGate(db, stepRuns, steps);
   const validationCandidateIssueIds = collectUniqueStepRunIssueIds(stepRuns.filter((stepRun) => {
@@ -1992,6 +2014,94 @@ async function failToolStepRunWithDispatchError(input: Parameters<typeof persist
   await persistFailedToolDispatch(input, buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata));
 }
 
+type WorkflowToolCorrection = NonNullable<Awaited<ReturnType<typeof findWorkflowVerdictCorrection>>>;
+
+/** Narrow discovery only; a matching event still needs issuance, currentness and byte proof. */
+function workflowToolQueueCandidate() {
+  return or(isNull(workflowStepRuns.issueId), sql`exists (
+    select 1 from ${workflowTransitionEvents}
+    where ${workflowTransitionEvents.companyId} = ${workflowRuns.companyId}
+      and ${workflowTransitionEvents.workflowRunId} = ${workflowRuns.id}
+      and ${workflowTransitionEvents.workflowStepRunId} = ${workflowStepRuns.id}
+      and ${workflowTransitionEvents.issueId} = ${workflowStepRuns.issueId}
+      and ${workflowTransitionEvents.eventType} = 'qa_correction_followup_requested'
+  )`);
+}
+
+function isQaCorrectionToolStep(step: WorkflowStep) {
+  return !isStructuralGateStep(step) && !isWorkflowControlNode(step) && !isWorkflowChildStep(step)
+    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa"
+    && (isIssueLessToolStep(step) || step.type?.trim().toLowerCase() === "tool");
+}
+
+async function readWorkflowToolCorrection(db: Pick<Db, "select">, run: typeof workflowRuns.$inferSelect,
+  stepRun: typeof workflowStepRuns.$inferSelect, step: WorkflowStep) {
+  if (!stepRun.issueId || !isQaCorrectionToolStep(step)) return null;
+  const correction = await findWorkflowVerdictCorrection(db, { companyId: run.companyId,
+    issueId: stepRun.issueId, workflowRunId: run.id, workflowStepRunId: stepRun.id });
+  if (!correction || correction.issued.preparation.missionId !== run.missionId
+    || !same(correction.followup.target, { stepRunId: stepRun.id, stepId: stepRun.stepId,
+      issueId: stepRun.issueId, executionGeneration: stepRun.executionGeneration,
+      retryCount: stepRun.retryCount, iterationIndex: stepRun.iterationIndex })) return null;
+  return correction;
+}
+
+/** The ref is a lookup binding, never permission. Keep it across existing dispatch-failure metadata. */
+function hasWorkflowToolCorrectionInvocation(stepRun: typeof workflowStepRuns.$inferSelect,
+  correction: WorkflowToolCorrection) {
+  const invocation = getMetadataRecord(stepRun.metadata, "toolInvocation");
+  const request = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
+  const ref = normalizeRecord(stepRun.metadata).qaCorrectionToolFollowup ?? request.qaCorrectionFollowup;
+  return same(ref, correction.ref) && typeof invocation.requestId === "string"
+    && invocation.requestId === stepRun.lastDispatchRequestId;
+}
+
+/** Real root only: observe files first, then reuse the accepted ordered dependency locks and reservation. */
+async function withWorkflowToolCorrection<T>(input: {
+  db: Db; run: typeof workflowRuns.$inferSelect; stepRun: typeof workflowStepRuns.$inferSelect;
+  step: WorkflowStep; correction: WorkflowToolCorrection;
+}, write: (tx: Db) => Promise<T>): Promise<T | null> {
+  const { db, run, stepRun, step, correction } = input;
+  if (is(db, PgTransaction)) return null;
+  try {
+    const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
+    if (!same(execution.steps.find(s => s.id === step.id), step)
+      || await readQaCorrectionFollowupConsumption(db, correction.ref,
+        createQaCorrectionHistorySession(db, correction.ref))) return null;
+    const observation = await observeQaCorrectionFollowup(db, correction.ref,
+      createQaCorrectionHistorySession(db, correction.ref));
+    const dependencies = await prepareWorkflowVerdictLocks(db, correction, []);
+    return await db.transaction(async tx => {
+      const p = correction.issued.preparation;
+      if (p.authority.kind === "quality_current_output") {
+        await lockQualityAttemptBudget(tx, { companyId: run.companyId, actionId: p.authority.actionId, now: new Date() });
+      }
+      const currentRun = await lockUnreplacedRun(tx as unknown as Db, run.id, run.companyId);
+      if (!currentRun || currentRun.status !== "running" || currentRun.missionId !== run.missionId) return null;
+      await assertResumeAccepted(tx, run.id, currentRun.dispatchAuthorityVersion);
+      await lockWorkflowVerdictDependencies(tx, dependencies);
+      const current = await readCurrentQaCorrectionFollowup(tx, correction.ref, observation,
+        createQaCorrectionHistorySession(tx, correction.ref));
+      const latest = await readWorkflowToolCorrection(tx, currentRun, current.database.target.step, step);
+      const captured = await loadExecutionDefinition(tx, run.id, { requireHistorical: false });
+      if (!latest || !same(latest.ref, correction.ref) || !same(current.database.target.step, stepRun)
+        || captured.definitionHash !== execution.definitionHash
+        || !same(captured.steps.find(s => s.id === step.id), step)
+        || await readQaCorrectionFollowupConsumption(tx, correction.ref,
+          createQaCorrectionHistorySession(tx, correction.ref))) return null;
+      const rows = await tx.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
+      if (!classifyStepActivation(step, buildPredFactsMap(captured.steps, buildStepRunMap(rows))).runnable
+        || !await ownerPlanExecutionIntentCurrent(tx as unknown as Db, run.companyId,
+          { runMetadata: currentRun.metadata, stepMetadata: current.database.target.step.metadata })) return null;
+      return write(tx as unknown as Db);
+    });
+  } catch (error) {
+    // A refused/stale observation leaves the request unclaimed; unexpected DB errors still propagate.
+    if (!(error instanceof QaCorrectionReadError) && !(error instanceof QaCorrectionFollowupReadError)) throw error;
+    return null;
+  }
+}
+
 async function startIssueLessToolStepRun(input: {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
@@ -2004,11 +2114,29 @@ async function startIssueLessToolStepRun(input: {
 }): Promise<boolean> {
   const { db, run, definition, step, stepRun, now } = input;
 
+  const correction = stepRun.issueId ? await readWorkflowToolCorrection(db, run, stepRun, step) : null;
+  if (stepRun.issueId && (!correction || is(db, PgTransaction))) return true;
+  if (correction && hasWorkflowToolCorrectionInvocation(stepRun, correction)) return true;
   const toolName = getSingleToolStepName(step);
-  const requestId = `${run.id}:${step.id}:${Date.now()}`;
+  const storedRequest = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
+  const reuseRequest = correction && same(storedRequest.qaCorrectionFollowup, correction.ref)
+    && typeof storedRequest.requestId === "string" && storedRequest.requestId === stepRun.lastDispatchRequestId;
+  const requestId = reuseRequest ? storedRequest.requestId as string
+    : correction?.ref.requestId ?? `${run.id}:${step.id}:${Date.now()}`;
   const workflowSteps = input.steps;
   let args: unknown;
   let artifactExecution: Awaited<ReturnType<typeof freezeCompanyArtifactAttempt>>;
+  const failStart = async (error: unknown, failedArgs: unknown): Promise<boolean> => {
+    const write = async (writer: Db) => {
+      await failToolStepRunWithDispatchError({ db: writer, step,
+        stepRun: correction ? { ...stepRun, metadata: { ...stepRun.metadata,
+          qaCorrectionToolFollowup: correction.ref } } : stepRun,
+        now, requestId, toolName, args: failedArgs, error });
+      return false;
+    };
+    return correction ? (await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, write)) ?? true
+      : write(db);
+  };
   try {
     args = await resolveWorkflowToolStepArgs({
       db,
@@ -2017,20 +2145,16 @@ async function startIssueLessToolStepRun(input: {
       workflowSteps,
       consumerStepRunId: stepRun.id,
     });
-    artifactExecution = await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
-      executionGeneration: stepRun.executionGeneration, requestId });
+    artifactExecution = reuseRequest
+      ? readFrozenArtifactAttempt(stepRun.metadata.artifactExecution,
+        { executionGeneration: stepRun.executionGeneration, requestId })
+      : await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
+        executionGeneration: stepRun.executionGeneration, requestId });
+    if (reuseRequest && !same(storedRequest.artifactExecution, artifactExecution)) {
+      throw new Error("artifact_contract_snapshot_stale");
+    }
   } catch (error) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args: step.toolArgs ?? {},
-      error,
-    });
-    return false;
+    return failStart(error, step.toolArgs ?? {});
   }
   const concurrencyKey = step.executionControls?.concurrencyKey;
   const concurrencyLimit = step.executionControls?.concurrencyLimit;
@@ -2042,8 +2166,8 @@ async function startIssueLessToolStepRun(input: {
       concurrencyKey,
     });
     if (runningCount >= concurrencyLimit) {
-      await blockToolStepRunForConcurrency({
-        db,
+      const block = (writer: Db) => blockToolStepRunForConcurrency({
+        db: writer,
         step,
         stepRun,
         concurrencyKey,
@@ -2051,11 +2175,13 @@ async function startIssueLessToolStepRun(input: {
         runningCount,
         now,
       });
+      if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, block);
+      else await block(db);
       return true;
     }
   }
   // QA/artifact attempts need current request-bound evidence, never generic cached results.
-  if (!isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
+  if (!correction && !isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
     const cachedStepRun = await findCachedToolStepRun({
       db,
       run,
@@ -2080,38 +2206,19 @@ async function startIssueLessToolStepRun(input: {
   }
 
   if (toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL && !workflowToolStepExecutor) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args,
-      error: "Workflow tool step executor is not configured.",
-    });
-    return false;
+    return failStart("Workflow tool step executor is not configured.", args);
   }
 
   const structuralGateProducerToken = isStructuralGateStep(step)
     ? await captureStructuralGateProducerToken({ db, workflowRunId: run.id, gate: step, steps: workflowSteps })
     : null;
   if (isStructuralGateStep(step) && !structuralGateProducerToken) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args,
-      error: "Structural gate producer generation is unavailable.",
-    });
-    return false;
+    return failStart("Structural gate producer generation is unavailable.", args);
   }
 
   const metadata: Record<string, unknown> = {
     ...artifactAttemptMetadata(buildWorkflowStepRunMetadata(step, stepRun.metadata), artifactExecution),
+    ...(correction ? { qaCorrectionToolFollowup: correction.ref } : {}),
     toolInvocation: {
       requestId,
       toolName,
@@ -2128,7 +2235,7 @@ async function startIssueLessToolStepRun(input: {
 
   // [step-status fencing v1] 스냅샷 status CAS — 이미 다른 실행자가 전이시킨 행으로의
   //   늦은 running 덮어쓰기(running 재기입 + requestId 교체)를 폐기한다.
-  await setWorkflowStepRunStatus(db, {
+  const enqueue = (writer: Db) => setWorkflowStepRunStatus(writer, {
     stepRunId: stepRun.id,
     status: "running",
     patch: {
@@ -2142,7 +2249,12 @@ async function startIssueLessToolStepRun(input: {
       metadata,
     },
     expectedStatuses: [stepRun.status],
+    extraConditions: correction ? [eq(workflowStepRuns.metadata, stepRun.metadata),
+      eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
+      eq(workflowStepRuns.retryCount, stepRun.retryCount), eq(workflowStepRuns.iterationIndex, stepRun.iterationIndex)] : [],
   });
+  if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, enqueue);
+  else await enqueue(db);
 
   return true;
 }
@@ -2194,7 +2306,7 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
     .where(and(
       eq(workflowRuns.status, "running"),
       eq(workflowStepRuns.status, "running"),
-      isNull(workflowStepRuns.issueId),
+      workflowToolQueueCandidate(),
       isNull(workflowStepRuns.lastDispatchErrorAt),
       isNotNull(workflowStepRuns.lastDispatchAcceptedAt),
       isNotNull(workflowStepRuns.lastDispatchRequestId),
@@ -2210,7 +2322,13 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
     //   persisted invocation 권위/에러 fallback 은 변경 없다.
     const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-    if (!step || !isIssueLessToolStep(step)) {
+    if (!step || (!isIssueLessToolStep(step) && !(row.stepRun.issueId && isQaCorrectionToolStep(step)))) {
+      skippedCount += 1;
+      continue;
+    }
+    const correction = row.stepRun.issueId
+      ? await readWorkflowToolCorrection(db, row.run, row.stepRun, step) : null;
+    if (row.stepRun.issueId && (!correction || !hasWorkflowToolCorrectionInvocation(row.stepRun, correction))) {
       skippedCount += 1;
       continue;
     }
@@ -2231,17 +2349,26 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
       skippedCount += 1;
       continue;
     }
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun: row.stepRun,
-      now,
-      requestId,
-      toolName,
-      args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
-      error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
-      provenance: { run: row.run, source: "workflow_tool_queue" },
-    });
+    const failOrphan = async (writer: Db) => {
+      await failToolStepRunWithDispatchError({
+        db: writer,
+        step,
+        stepRun: row.stepRun,
+        now,
+        requestId,
+        toolName,
+        args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
+        error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
+        provenance: { run: row.run, source: "workflow_tool_queue" },
+      });
+      return true;
+    };
+    if (correction) {
+      if (!await withWorkflowToolCorrection({ db, run: row.run, stepRun: row.stepRun, step, correction }, failOrphan)) {
+        skippedCount += 1;
+        continue;
+      }
+    } else await failOrphan(db);
     await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
     orphanedCount += 1;
   }
@@ -2253,6 +2380,31 @@ export async function processQueuedWorkflowToolStepRuns(
   options: { limit?: number; now?: Date } = {},
 ): Promise<WorkflowToolStepQueueDispatchResult> {
   const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+  // A nested sync cannot observe correction files or take a late quality prefix. Admit issued
+  // targets here on the existing root queue tick, including a prior failed/completed QA attempt.
+  if (!is(db, PgTransaction)) {
+    const correctionRows = await db
+      .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
+      .from(workflowStepRuns)
+      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+      .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+      .where(and(eq(workflowRuns.status, "running"), isNotNull(workflowStepRuns.issueId),
+        inArray(workflowStepRuns.status, ["pending", "running", "failed", "completed"]), workflowToolQueueCandidate()))
+      .orderBy(asc(workflowStepRuns.startedAt), asc(workflowStepRuns.id))
+      .limit(limit);
+    for (const row of correctionRows) {
+      const context = await loadWorkflowExecutionContext(db, row.run.id);
+      const step = context.steps.find(s => s.id === row.stepRun.stepId);
+      if (!step || step.triggerOn === "escalation"
+        || isRetryDelayBlockingDispatch(row.stepRun.metadata, options.now ?? new Date())) continue;
+      const launched = getDynamicLaunchStepIds(context);
+      if (launched && !launched.has(step.id)) continue;
+      const correction = await readWorkflowToolCorrection(db, row.run, row.stepRun, step);
+      if (!correction || hasWorkflowToolCorrectionInvocation(row.stepRun, correction)) continue;
+      await startIssueLessToolStepRun({ db, run: row.run, definition: context.definition,
+        step, steps: context.steps, stepRun: row.stepRun, now: options.now ?? new Date() });
+    }
+  }
   const orphanReconcile = await reconcileOrphanedWorkflowToolStepClaims(db, { ...options, limit });
   const queuedRows = await db
     .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
@@ -2262,7 +2414,7 @@ export async function processQueuedWorkflowToolStepRuns(
     .where(and(
       eq(workflowRuns.status, "running"),
       eq(workflowStepRuns.status, "running"),
-      isNull(workflowStepRuns.issueId),
+      workflowToolQueueCandidate(),
       isNull(workflowStepRuns.lastDispatchAcceptedAt),
       isNull(workflowStepRuns.lastDispatchErrorAt),
       sql`${workflowStepRuns.lastDispatchRequestId} is not null`,
@@ -2284,7 +2436,7 @@ export async function processQueuedWorkflowToolStepRuns(
     const execution = await loadExecutionDefinition(db, row.run.id, { requireHistorical: false });
     const steps = execution.steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-    if (!step || !isIssueLessToolStep(step)) {
+    if (!step || (!isIssueLessToolStep(step) && !(row.stepRun.issueId && isQaCorrectionToolStep(step)))) {
       result.skippedCount += 1;
       continue;
     }
@@ -2300,9 +2452,21 @@ export async function processQueuedWorkflowToolStepRuns(
     // [owner plan admission] 오래된 owner 계획 intent 소유 run 의 실제 실행 admission 은 연기한다(스텝은 queued 유지).
     if (!(await ownerPlanExecutionIntentCurrent(db, row.run.companyId, { runMetadata: row.run.metadata, stepMetadata: row.stepRun.metadata }))) { result.skippedCount += 1; continue; }
 
+    const correction = row.stepRun.issueId
+      ? await readWorkflowToolCorrection(db, row.run, row.stepRun, step) : null;
     const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
     const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);
     const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+    if (row.stepRun.issueId) {
+      if (!correction || !hasWorkflowToolCorrectionInvocation(row.stepRun, correction)
+        || invocation.requestId !== requestId || toolName !== getSingleToolStepName(step)
+        || !Object.prototype.hasOwnProperty.call(invocation, "args")) {
+        result.skippedCount += 1;
+        continue;
+      }
+      readFrozenArtifactAttempt(row.stepRun.metadata.artifactExecution,
+        { executionGeneration: row.stepRun.executionGeneration, requestId: requestId! });
+    }
     // [arg hygiene] 저장된 인자 재사용 시에도 셸 이스케이프 잔여($/, $')를 정화한다 —
     // 렌더 직후 값과 동일한 위생 보장(2026-09-02 enqueue 오염 사고).
     const args = Object.prototype.hasOwnProperty.call(invocation, "args")
@@ -2368,7 +2532,9 @@ export async function processQueuedWorkflowToolStepRuns(
       ))
       .returning()
       .then((rows) => rows[0] ?? null);
-    const claimedStepRun = row.run.missionId === null
+    const claimedStepRun = correction
+      ? await withWorkflowToolCorrection({ db, run: row.run, stepRun: row.stepRun, step, correction }, claimStepRun)
+      : row.run.missionId === null
       ? await claimStepRun(db)
       : await withResumeSerialization(db, {
         companyId: row.run.companyId,
@@ -3293,7 +3459,7 @@ async function syncWorkflowRunStateCore(
           continue;
         }
 
-        if (isIssueLessToolStep(step)) {
+        if (isIssueLessToolStep(step) || await readWorkflowToolCorrection(db, context.run, stepRun, step)) {
           const started = await startIssueLessToolStepRun({
             db,
             run: context.run,
