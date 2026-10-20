@@ -176,7 +176,6 @@ describeEP("C02 13A: public verdict consumption", () => {
       expect(await effects(s)).toEqual(stored);
       expect(await consumptionState(s.c)).toEqual(before);
     }, 60000);
-
   // C02/13B: actual B → queue claim → core executor/FD4 → file verification → public completion.
   // C02 requires one effect for B; C12 requires first-effect/quality preservation and atomic rejection.
   it.each(["normal", "concurrent", "C first", "cancel first", "CAS loss", "proof failure", "consumption failure"] as const)(
