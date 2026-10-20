@@ -4,7 +4,6 @@ import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  agentWakeupRequests,
   heartbeatRuns,
   issues,
   issueWorkProducts,
@@ -12,7 +11,6 @@ import {
   workflowRuns,
   workflowStepOutputBindings,
   workflowStepRuns,
-  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import type { QaRequest } from "../services/workflow/qa-artifact-request.js";
@@ -21,9 +19,7 @@ import { database, fixture } from "./helpers/qa-receipt-fixture.js";
 import { PgSelectBase } from "drizzle-orm/pg-core";
 import { selectOfficialWorkProduct } from "../services/workflow/workproduct-selector.js";
 import { commitDbState, commitFileState, makeCommitSource } from "./qa-correction-commit-fixture.js";
-import { attempt } from "./helpers/qa-correction-fixture.js";
-import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
-import { hashQaCorrectionPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { appendQaVerdict, attempt } from "./helpers/qa-correction-fixture.js";
 import { beginQaCorrection } from "../services/workflow/control-flow/qa-correction-prepare.js";
 import { measureQaCorrectionSources } from "../services/workflow/control-flow/qa-correction-measure.js";
 import { storeQaCorrection } from "../services/workflow/control-flow/qa-correction-storage.js";
@@ -200,8 +196,14 @@ describe("C02 corrected selected inputs", () => {
     expect(await readFile(current.file)).toEqual(commitBuffers("html", "final").get("report.html"));
     expect(await args(c)).toEqual({ content: path.join(cr.root, "report.html") });
     const after = await state(c);
-    expect(after.pins).toEqual(before.pins.map(p => ({ ...p, workProductId: cr.workProductId,
-      resolvedAt: after.pins.find(a => a.id === p.id)!.resolvedAt })));
+    const expectedPins = [...before.pins.map(p => ({ ...p, workProductId: cr.workProductId,
+      resolvedAt: after.pins.find(a => a.id === p.id)!.resolvedAt })), {
+      id: c.s.f.bindingId, companyId: c.s.p.companyId, workflowRunId: c.s.p.workflowRunId,
+      consumerStepRunId: c.s.f.qa.id, referencedStepId: c.s.p.producer.stepId,
+      workProductId: cr.workProductId, sourceExecutionGeneration: c.s.producer.executionGeneration,
+      createdAt: expect.any(Date), resolvedAt: expect.any(Date),
+    }].sort((a, z) => a.id.localeCompare(z.id));
+    expect(after.pins).toEqual(expectedPins);
   }, 20000);
   it.each(["malformed", "legacy", "cancel", "binding"] as const)("refuses %s without changing pins or issuing proof", async fault => {
     const c = await issueC02(owned, { mode: "content-only", legacy: fault === "legacy" });
@@ -249,15 +251,10 @@ describe("C02 corrected selected inputs", () => {
     await owned.db.update(workflowDefinitions).set({ stepsJson: [...definition!.stepsJson,
       { id: qa!.stepId, name: "Second QA", agentId: hb!.agentId, dependencies: ["produce"] }] })
       .where(eq(workflowDefinitions.id, definition!.id));
-    const [wake] = await owned.db.insert(agentWakeupRequests).values({ companyId: p.companyId,
-      agentId: hb!.agentId, source: "workflow.dispatch", workflowStepRunId: qa!.id }).returning();
-    const [heartbeat] = await owned.db.insert(heartbeatRuns).values({ companyId: p.companyId,
-      agentId: hb!.agentId, issueId: issue!.id, wakeupRequestId: wake!.id, status: "succeeded" }).returning();
     const remediations = { items: [{ op: "string_replace" as const, file: s.file, find: "Draft", replace: "Reviewed" }] };
-    await recordWorkflowValidationVerdict({ db: owned.db, issue: issue!, source: "workflow_api",
-      verdict: "request_changes", heartbeatRunId: heartbeat!.id, remediations });
-    const [event] = await owned.db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.heartbeatRunId, heartbeat!.id));
-    p.authority.verdicts.unshift({ eventId: event!.id, heartbeatRunId: heartbeat!.id, qa: attempt(qa!), remediationsHash: hashQaCorrectionPayload(remediations.items) });
+    const verdict = await appendQaVerdict(owned.db,
+      { ...s.f, qa: qa!, remediations }, "request_changes");
+    p.authority.verdicts.unshift(verdict);
     const [pin] = await owned.db.insert(workflowStepOutputBindings).values({ companyId: p.companyId, workflowRunId: p.workflowRunId,
       consumerStepRunId: qa!.id, referencedStepId: "produce", workProductId: s.productId,
       sourceExecutionGeneration: s.producer.executionGeneration }).returning();

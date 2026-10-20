@@ -173,7 +173,7 @@ describe("C02 stage11 correction merge isolation", () => {
     const bKey = qaCorrectionWakeKey(b.ref), cKey = qaCorrectionWakeKey(c.ref), t = c.followup.target;
     expect(b.ref.requestId).not.toBe(c.ref.requestId);
     const generic = await stored(c, null, { original: "generic" });
-    const wb = await stored(b, bKey, { qaCorrectionFollowup: b.ref });
+    const wb = await stored(c, bKey, { qaCorrectionFollowup: b.ref });
     const wc = await stored(c, cKey, { qaCorrectionFollowup: c.ref });
     await stored(c, cKey, { original: "key-only" });
     const malformed = await stored(c, QA_CORRECTION_WAKE_PREFIX, null);

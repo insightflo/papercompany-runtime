@@ -63,27 +63,8 @@ export async function issueC02(owned: Awaited<ReturnType<typeof createCommitSour
 }
 
 export async function issueNextC02(previous: C02Case) {
-  const { s, peer } = previous, r = previous.stored.revisions[0]!, files = commitBuffers(s.mode, "new");
-  const request = structuredClone(s.request);
-  request.input.workProductId = r.workProductId; request.input.path = path.join(r.root, r.mainRelativePath);
-  request.input.sha256 = commitFacts(files).find(f => f.role === "main")!.sha256;
-  request.input.byteSize = files.get("report.html")!.length;
-  if (request.input.mode === "html") request.input.htmlManifest = { path: path.join(r.root, "bundle-index.json"),
-    sha256: commitFacts(files).find(f => f.relativePath === "bundle-index.json")!.sha256,
-    byteSize: files.get("bundle-index.json")!.length };
-  else request.input.assetsRoot = r.assetsRelativeRoot === null ? "" : path.join(r.root, r.assetsRelativeRoot!);
-  await s.db.update(workflowStepRuns).set({ metadata: { artifactExecution: request.artifactExecution,
-    toolArtifactRequest: request } }).where(eq(workflowStepRuns.id, s.f.qa.id));
-  const remediations = { items: [{ op: "string_replace" as const, file: request.input.path, find: "new", replace: "final" }] };
-  const verdict = await appendQaVerdict(s.db, s.f, "request_changes", remediations), now = new Date();
-  await s.db.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, verdict.heartbeatRunId));
-  await s.db.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
-  const p = structuredClone(s.p); p.correctionId = randomUUID(); p.preparedAt = now.toISOString();
-  p.authority.verdicts = [verdict];
-  p.sources = [{ productId: r.workProductId, provenance: { kind: "prior_correction", appliedEventId: previous.ref.appliedEventId } }];
-  p.bindings.forEach(b => { b.expectedProductId = r.workProductId; });
-  return issue({ ...s, p, files, text: "new", productId: r.workProductId, file: request.input.path,
-    directory: r.root, request }, peer);
+  const input = await prepareNextC02Input(previous);
+  return issue(input, previous.peer);
 }
 
 /** Prepare a fresh QA authority over registered B bytes; issuance remains with the caller. */

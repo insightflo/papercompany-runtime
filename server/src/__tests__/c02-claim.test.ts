@@ -87,7 +87,7 @@ it.each([false, true])("valid B claims and invokes once with finalization=%s, re
   g.release();
 }, 60000);
 it("rejects actually queued B after real C issuance and starts C in the same public drain", async () => {
-  const w = await fixtures.world(), b = await queued(w), c = await issueNextC02(w.c), i = await deliveryInput(c), g = gate(w);
+  const w = await fixtures.world(), b = await queued(w), c = await issueNextC02(w.c), i = await deliveryInput(c), g = gate({ ...w, c, i });
   await deliver(c, i);
   await heartbeatService(owned.db).resumeQueuedRuns(w.i.agentId);
   const id = await g.entered(), rows = await correctionRows(c);
