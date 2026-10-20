@@ -11,6 +11,7 @@ import {
   workflowRuns,
   workflowStepOutputBindings,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import type { QaRequest } from "../services/workflow/qa-artifact-request.js";
@@ -254,6 +255,8 @@ describe("C02 corrected selected inputs", () => {
     const remediations = { items: [{ op: "string_replace" as const, file: s.file, find: "Draft", replace: "Reviewed" }] };
     const verdict = await appendQaVerdict(owned.db,
       { ...s.f, qa: qa!, remediations }, "request_changes");
+    await owned.db.update(workflowTransitionEvents).set({ createdAt: new Date() })
+      .where(eq(workflowTransitionEvents.id, verdict.eventId));
     p.authority.verdicts.unshift(verdict);
     const [pin] = await owned.db.insert(workflowStepOutputBindings).values({ companyId: p.companyId, workflowRunId: p.workflowRunId,
       consumerStepRunId: qa!.id, referencedStepId: "produce", workProductId: s.productId,
@@ -290,7 +293,7 @@ describe("C02 corrected selected inputs", () => {
       c = await issueNextC02(b);
       return transaction(body, config);
     });
-    await expect(args(b)).rejects.toThrow("workproduct_selector_correction_selection_changed");
+    await expect(args(b)).rejects.toThrow("workproduct_selector_correction_consumer_binding");
     if (!c) throw Error("peer C issuance must precede the selection transaction");
     expect(await args(c)).toEqual({ content: path.join(c.applied.revisions[0]!.root, "report.html") });
   }, 20000);
