@@ -42,6 +42,30 @@ const STORED_OUTPUT_CAP_CHARS_PER_SIDE = 32 * 1024;
 const STORED_OUTPUT_TRUNCATE_THRESHOLD_CHARS = 70_000;
 const STORED_OUTPUT_TEXT_KEYS = ["stdout", "stderr"] as const;
 
+// [경계 안전 2026-10-20] JS slice 는 UTF-16 코드 유닛 단위라 서로게이트 페어(이모지)를
+//   한가운데 잘라 고립 서로게이트를 만들 수 있고, 그 문자열을 담은 JSON 을 PostgreSQL 가
+//   "invalid input syntax for json ... surrogate" 오류로 거부해 실행 정산 저장이 실패한다(실측).
+//   경계가 상위 서로게이트로 끝나거나 하위로 시작하면 한 코드 유닛 안쪽으로 물러나
+//   항상 유효한 유니코드 문자열만 만든다.
+function capOutputText(value: string): string {
+  let headEnd = Math.min(STORED_OUTPUT_CAP_CHARS_PER_SIDE, value.length);
+  if (headEnd > 0) {
+    const last = value.charCodeAt(headEnd - 1);
+    if (last >= 0xd800 && last <= 0xdbff) headEnd -= 1;
+  }
+  let tailStart = Math.max(value.length - STORED_OUTPUT_CAP_CHARS_PER_SIDE, 0);
+  if (tailStart < value.length) {
+    const first = value.charCodeAt(tailStart);
+    if (first >= 0xdc00 && first <= 0xdfff) tailStart += 1;
+  }
+  const head = value.slice(0, headEnd);
+  const tail = value.slice(tailStart);
+  const omitted = value.length - headEnd - (value.length - tailStart);
+  return head
+    + `\n...[truncated ${omitted} chars; full output in run log file]...\n`
+    + tail;
+}
+
 export function capHeartbeatRunResultJsonForStorage(
   resultJson: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
@@ -53,11 +77,7 @@ export function capHeartbeatRunResultJsonForStorage(
     const value = resultJson[key];
     if (typeof value !== "string" || value.length <= STORED_OUTPUT_TRUNCATE_THRESHOLD_CHARS) continue;
     if (!capped) capped = { ...resultJson };
-    const omitted = value.length - (STORED_OUTPUT_CAP_CHARS_PER_SIDE * 2);
-    capped[key] =
-      value.slice(0, STORED_OUTPUT_CAP_CHARS_PER_SIDE)
-      + `\n...[truncated ${omitted} chars; full output in run log file]...\n`
-      + value.slice(-STORED_OUTPUT_CAP_CHARS_PER_SIDE);
+    capped[key] = capOutputText(value);
   }
   return capped ?? resultJson;
 }
