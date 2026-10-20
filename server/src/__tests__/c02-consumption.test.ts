@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, companies, createDb, instanceSettings, workflowRuns, workflowStepRuns,
+  activityLog, agentWakeupRequests, companies, createDb, instanceSettings, issues, missions, workflowRuns, workflowStepRuns,
   workflowTerminalDecisions, workflowTerminalEffectIntents, workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
@@ -19,6 +19,13 @@ import {
   syncWorkflowRunState,
   type WorkflowToolStepExecutor,
 } from "../services/workflow/dag-engine.js";
+
+import { createConsumptionHarness, consumptionState } from "./helpers/c02-consumption-fixture.js";
+import { createClaimFixture } from "./helpers/c02-claim-race-fixture.js";
+import { correctionRows, issueNextC02 } from "./helpers/c02-delivery-fixture.js";
+import { claimHeartbeatWithRecoveryGuard } from "../services/heartbeat-recovery-guard.js";
+import { submitWorkflowVerdict } from "../services/workflow/agent-api.js";
+import { hasWorkflowValidationCompletionLedger } from "../services/workflow/validation-verdict-ledger.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -136,4 +143,111 @@ describeEP("C02 stage 2: existing tool result acceptance and run finalization", 
       .where(eq(activityLog.companyId, companyId)).orderBy(activityLog.id)).toEqual(activities);
     expect(executeToolStep).toHaveBeenCalledTimes(1);
   });
+});
+
+describeEP("C02 13A: public verdict consumption", () => {
+  let owned: Awaited<ReturnType<typeof createConsumptionHarness>>;
+  beforeAll(async () => { owned = await createConsumptionHarness(); }, 60000);
+  afterAll(async () => { await owned?.close(); }, 60000);
+
+  async function prepare(quality = true) {
+    const fixtures = createClaimFixture(owned, db => db, [], []), w = await fixtures.world(quality);
+    const delivered = await correctionRows(w.c);
+    const root = await claimHeartbeatWithRecoveryGuard(owned.db, delivered.heartbeats[0]!, new Date());
+    if (!root) throw Error("public root claim missing");
+    const queued = await fixtures.retry(w, root, "process_lost_retry");
+    const actor = await claimHeartbeatWithRecoveryGuard(owned.db, queued, new Date());
+    if (!actor) throw Error("public H1 claim missing");
+    const [issue] = await w.c.peer.select().from(issues).where(eq(issues.id, w.c.followup.target.issueId));
+    if (!issue) throw Error("actual issue missing");
+    const input = { db: owned.db, issue, actor: { actorType: "agent" as const, actorId: actor.agentId,
+      agentId: actor.agentId, runId: actor.id }, data: { verdict: "pass" as const, reason: "First H1 verdict" } };
+    return { w, c: w.c, root, actor, input, delivery: delivered.receipts[0]! };
+  }
+  type Scenario = Awaited<ReturnType<typeof prepare>>;
+  async function effects(s: Scenario) {
+    // Independent peer SQL, including actual event IDs; no verdict/consumption seed.
+    return s.c.peer.$client<{ id: string; event_type: string; heartbeat_run_id: string;
+      wakeup_request_id: string | null; execution_generation: number | null; payload: Record<string, unknown> }[]>`
+      SELECT * FROM workflow_transition_events WHERE company_id=${s.c.ref.companyId}
+        AND ((heartbeat_run_id=${s.actor.id} AND event_type='workflow_validation_verdict')
+          OR idempotency_key=${"qa-correction-consumed:" + s.c.ref.requestId}) ORDER BY id`;
+  }
+
+  // C02 first-effect/restart contract: the incoming second verdict cannot replace the first stored result.
+  // C12 abstention contract: insufficient_evidence is recordable but cannot complete the issue.
+  it.each(["pass", "insufficient_evidence"] as const)("stores %s with exact H1/root evidence and replays it", async verdict => {
+    const s = await prepare(), quality = await consumptionState(s.c);
+    expect(await effects(s)).toEqual([]);
+    const first = await submitWorkflowVerdict({ ...s.input, data: { verdict, reason: "First H1 verdict" } });
+    expect(first).toMatchObject({ isCandidate: true, satisfied: true, verdict });
+    const stored = await effects(s);
+    expect(stored).toHaveLength(2);
+    const event = stored.find(row => row.event_type === "workflow_validation_verdict")!;
+    const consumed = stored.find(row => row.event_type === "qa_correction_followup_consumed")!;
+    expect(event).toMatchObject({ heartbeat_run_id: s.actor.id, payload: { verdict, reason: "First H1 verdict" } });
+    expect(consumed).toMatchObject({ heartbeat_run_id: s.actor.id, wakeup_request_id: s.actor.wakeupRequestId,
+      execution_generation: s.c.followup.target.executionGeneration,
+      payload: { schemaVersion: "workflow.qa-correction.consumption.v2", ref: s.c.ref,
+        followupEventId: s.c.followupRow.id, followup: s.c.followup,
+        evidence: { kind: "workflow_verdict", eventId: event.id, deliveryEventId: s.delivery.id } } });
+    expect(s.actor.retryOfRunId).toBe(s.root.id);
+    expect(s.delivery).toMatchObject({ heartbeatRunId: s.root.id, wakeupRequestId: s.root.wakeupRequestId });
+    const after = await consumptionState(s.c);
+    expect(after.receipts).toEqual(quality.receipts);
+    expect(after.usage).toEqual(quality.usage);
+    expect(after.groups).toEqual(quality.groups);
+    expect(await hasWorkflowValidationCompletionLedger({ db: owned.db, issue: s.input.issue })).toMatchObject(
+      verdict === "pass" ? { satisfied: true, verdict: "pass" }
+        : { satisfied: false, verdict: null, insufficientEvidence: true, insufficientEvidenceReason: "First H1 verdict" });
+    expect(await submitWorkflowVerdict({ ...s.input,
+      data: { verdict: "request_changes", reason: "Different incoming verdict" } })).toEqual(first);
+    expect(await effects(s)).toEqual(stored);
+    expect(await consumptionState(s.c)).toEqual(after);
+  }, 60000);
+
+  it("rolls back the official event on consumption failure and serializes first-effect retries", async () => {
+    const s = await prepare(), before = await consumptionState(s.c);
+    const name = "c02_" + randomUUID().replaceAll("-", "");
+    await s.c.peer.execute(sql.raw(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.company_id='${s.c.ref.companyId}'::uuid AND NEW.event_type='qa_correction_followup_consumed'
+        THEN RAISE EXCEPTION 'c02_consumption_rollback'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER ${name} BEFORE INSERT ON workflow_transition_events FOR EACH ROW EXECUTE FUNCTION ${name}();`));
+    try {
+      const failure: unknown = await submitWorkflowVerdict(s.input).then(() => null, error => error);
+      const messages: string[] = [];
+      for (let error: unknown = failure; error instanceof Error; error = error.cause) messages.push(error.message);
+      expect(messages).toContain("c02_consumption_rollback");
+      expect(await effects(s)).toEqual([]);
+      expect(await consumptionState(s.c)).toEqual(before);
+    } finally {
+      await s.c.peer.execute(sql.raw(`DROP TRIGGER ${name} ON workflow_transition_events; DROP FUNCTION ${name}();`));
+    }
+    const [first, second] = await Promise.all([submitWorkflowVerdict(s.input),
+      submitWorkflowVerdict({ ...s.input, db: s.c.peer })]);
+    expect(second).toEqual(first);
+    expect(await effects(s)).toHaveLength(2);
+    const after = await consumptionState(s.c);
+    expect(after.receipts).toEqual(before.receipts);
+    expect(after.usage).toEqual(before.usage);
+    expect(after.groups).toEqual(before.groups);
+  }, 60000);
+
+  it.each(["late A", "C first", "cancel first", "broken proof"] as const)(
+    "rejects %s without an ordinary verdict fallback", async fault => {
+      const s = await prepare(false);
+      if (fault === "C first") await issueNextC02(s.c);
+      if (fault === "cancel first") await s.c.peer.update(missions).set({ status: "cancelled" })
+        .where(eq(missions.id, s.c.s.p.missionId));
+      if (fault === "broken proof") {
+        const [wake] = await s.c.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, s.actor.wakeupRequestId!));
+        await s.c.peer.update(agentWakeupRequests).set({ payload: { ...wake!.payload,
+          __paperclipWorkflowProducerAttempt: { schemaVersion: 1 } } }).where(eq(agentWakeupRequests.id, wake!.id));
+      }
+      const input = fault === "late A" ? { ...s.input, actor: { ...s.input.actor, runId: s.c.s.f.verdictHeartbeatId } } : s.input;
+      const before = await consumptionState(s.c), stored = await effects(s);
+      await expect(submitWorkflowVerdict(input)).rejects.toThrow();
+      expect(await effects(s)).toEqual(stored);
+      expect(await consumptionState(s.c)).toEqual(before);
+    }, 60000);
 });

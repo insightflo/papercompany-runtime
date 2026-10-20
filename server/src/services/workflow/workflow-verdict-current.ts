@@ -1,6 +1,10 @@
 import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { heartbeatRuns, workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { parseQaCorrectionEventPayload } from "./control-flow/qa-correction-contract.js";
+import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
+import { readIssuedQaCorrectionFollowup, readQaCorrectionFollowupConsumption } from "./control-flow/qa-correction-followup.js";
+import type { QaCorrectionDb } from "./control-flow/qa-correction-authority.js";
 import { workflowNonblockingAcceptanceSchema, workflowQaRemediationsSchema } from "@paperclipai/shared";
 import type {
   WorkflowNonblockingAcceptance,
@@ -41,6 +45,51 @@ export async function heartbeatRunScopedToIssue(
   return Boolean(run && run.companyId === expected.companyId && run.issueId === expected.issueId);
 }
 
+/** A DB-issued target is also a fence for late ordinary submissions; absence of a wake ref is insufficient. */
+export async function findWorkflowVerdictCorrection(db: Pick<Db, "select">, scope: {
+  companyId: string; issueId: string; workflowRunId?: string | null; workflowStepRunId?: string | null;
+}) {
+  const [step] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.issueId, scope.issueId),
+    ...(scope.workflowRunId ? [eq(workflowStepRuns.workflowRunId, scope.workflowRunId)] : []),
+    ...(scope.workflowStepRunId ? [eq(workflowStepRuns.id, scope.workflowStepRunId)] : [])))
+    .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt)).limit(1);
+  if (!step) return null;
+  const [row] = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, scope.companyId), eq(workflowTransitionEvents.issueId, scope.issueId),
+    eq(workflowTransitionEvents.workflowRunId, step.workflowRunId), eq(workflowTransitionEvents.workflowStepRunId, step.id),
+    eq(workflowTransitionEvents.eventType, "qa_correction_followup_requested")))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id)).limit(1);
+  if (!row) return null;
+  const followup = parseQaCorrectionEventPayload("qa_correction_followup_requested", row.payload);
+  const ref = { companyId: scope.companyId, workflowRunId: step.workflowRunId,
+    appliedEventId: followup.appliedEventId, requestId: followup.requestId };
+  // These readers are SELECT-only; the older annotation also admits transaction connections.
+  const connection = db as QaCorrectionDb;
+  const selected = await readIssuedQaCorrectionFollowup(connection, ref, createQaCorrectionHistorySession(connection, ref));
+  if (selected.followupEventId !== row.id) throw new Error("qa_correction_followup_record");
+  return selected;
+}
+
+async function matchesCurrentCorrection(db: Pick<Db, "select">, scope: {
+  companyId: string; issueId: string; workflowRunId?: string | null; workflowStepRunId?: string | null;
+}, eventId: string) {
+  const selected = await findWorkflowVerdictCorrection(db, scope);
+  if (!selected) return true;
+  const t = selected.followup.target;
+  const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, t.stepRunId));
+  if (!step || step.executionGeneration !== t.executionGeneration || step.retryCount !== t.retryCount
+    || step.iterationIndex !== t.iterationIndex) return false;
+  for (const change of selected.issued.applied.bindingChanges) {
+    const [binding] = await db.select().from(workflowStepOutputBindings).where(and(
+      eq(workflowStepOutputBindings.companyId, scope.companyId), eq(workflowStepOutputBindings.id, change.bindingId)));
+    if (!binding || binding.workProductId !== change.toProductId) return false;
+  }
+  const connection = db as QaCorrectionDb;
+  const relation = await readQaCorrectionFollowupConsumption(connection, selected.ref,
+    createQaCorrectionHistorySession(connection, selected.ref));
+  return relation?.consumed.evidence.kind === "workflow_verdict" && relation.consumed.evidence.eventId === eventId;
+}
+
 export async function hasWorkflowValidationCompletionLedger(input: {
   readonly db: WorkflowValidationDb;
   readonly issue: WorkflowValidationIssue;
@@ -72,6 +121,7 @@ export async function hasWorkflowValidationCompletionLedger(input: {
   //   pass/request_changes 만 게이트를 만족시키며, 인식 불가능한(레거시) verdict 행은 건너뛴다.
   const rows = await input.db
     .select({
+      id: workflowTransitionEvents.id,
       verdict: workflowTransitionEvents.verdict,
       payload: workflowTransitionEvents.payload,
       heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
@@ -89,6 +139,8 @@ export async function hasWorkflowValidationCompletionLedger(input: {
       { companyId: input.issue.companyId, issueId: input.issue.id },
     );
     if (!scoped) continue;
+    if (!await matchesCurrentCorrection(input.db, { companyId: input.issue.companyId, issueId: input.issue.id,
+      workflowRunId: context.workflowRunId, workflowStepRunId: context.workflowStepRunId }, row.id)) continue;
     if (row.verdict === "insufficient_evidence") {
       const payloadReason = asRecord(row.payload).reason;
       const reason = typeof payloadReason === "string" && payloadReason.trim().length > 0
@@ -128,6 +180,7 @@ export async function loadLatestNonblockingAcceptance(input: {
       verdict: workflowTransitionEvents.verdict,
       payload: workflowTransitionEvents.payload,
       createdAt: workflowTransitionEvents.createdAt,
+      id: workflowTransitionEvents.id,
       workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
       heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
     })
@@ -147,6 +200,7 @@ export async function loadLatestNonblockingAcceptance(input: {
   if (!(await heartbeatRunScopedToIssue(input.db, row.heartbeatRunId, { companyId: input.companyId, issueId: input.issueId }))) {
     return null;
   }
+  if (!await matchesCurrentCorrection(input.db, input, row.id)) return null;
   const payload = asRecord(row.payload);
   const parsed = workflowNonblockingAcceptanceSchema.safeParse(payload.nonblockingAcceptance);
   if (!parsed.success) return null;
@@ -207,6 +261,7 @@ export async function loadLatestQaRemediations(input: {
     return null;
   }
   const payload = asRecord(row.payload);
+  if (!await matchesCurrentCorrection(input.db, input, row.id)) return null;
   const parsed = workflowQaRemediationsSchema.safeParse(payload.remediations);
   if (!parsed.success) return null;
   return {
