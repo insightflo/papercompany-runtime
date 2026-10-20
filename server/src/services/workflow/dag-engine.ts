@@ -2030,8 +2030,7 @@ function workflowToolQueueCandidate() {
 
 function isQaCorrectionToolStep(step: WorkflowStep) {
   return !isStructuralGateStep(step) && !isWorkflowControlNode(step) && !isWorkflowChildStep(step)
-    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa"
-    && (isIssueLessToolStep(step) || step.type?.trim().toLowerCase() === "tool");
+    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa";
 }
 
 async function readWorkflowToolCorrection(db: Pick<Db, "select">, run: typeof workflowRuns.$inferSelect,
