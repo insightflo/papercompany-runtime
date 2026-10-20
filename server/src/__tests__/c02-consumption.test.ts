@@ -232,7 +232,8 @@ inputDigest:{mode:'content',sha256:createHash('sha256').update(b).digest('hex')}
             CREATE TRIGGER ${name} BEFORE ${cas ? "UPDATE" : "INSERT"} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${name}();`));
         }
         const transaction = owned.db.transaction.bind(owned.db);
-        if (fault === "C first" || fault === "cancel first") vi.spyOn(owned.db, "transaction").mockImplementationOnce(async (body, config) => {
+        let transactionSpy: ReturnType<typeof vi.spyOn> | null = null;
+        if (fault === "C first" || fault === "cancel first") transactionSpy = vi.spyOn(owned.db, "transaction").mockImplementationOnce(async (body, config) => {
           if (fault === "C first") await issueNextC02(c);
           else await c.peer.update(missions).set({ status: "cancelled" }).where(eq(missions.id, c.s.p.missionId));
           before = await consumptionState(c); beforeStep = await stepRow();
@@ -258,7 +259,7 @@ inputDigest:{mode:'content',sha256:createHash('sha256').update(b).digest('hex')}
             expect(await consumptionState(c)).toEqual(before);
           }
         } finally {
-          vi.restoreAllMocks();
+          transactionSpy?.mockRestore();
           if (injected) await c.peer.execute(sql.raw(`DROP TRIGGER ${name} ON ${fault === "CAS loss" ? "workflow_step_runs" : "workflow_transition_events"}; DROP FUNCTION ${name}();`));
         }
         return { accepted: true };
