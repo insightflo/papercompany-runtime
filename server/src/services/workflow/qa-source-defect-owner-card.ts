@@ -19,7 +19,8 @@ import { buildHistoricalQaSourceDefectCard } from "./qa-source-defect-card-histo
 
 export const QA_SOURCE_DEFECT_CARD_SOURCE_TYPE = "workflow_qa_rejection";
 // 카드 definition 문구가 바뀌면 이 값을 올린다 — 문구가 requestHash에 포함되어 같은 키 재요청 conflict를 막는 유일한 안전장치.
-export const QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION = 2;
+// v3: 선택지 추천(recommended) 표시 + 선택지별 반복되는 연관 업무 링크(evidenceRefs) 제거.
+export const QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION = 3;
 const QA_SOURCE_DEFECT_CARD_HASH_REPLACEMENT_REQUEST_KEY_LIMIT = 160;
 const QA_SOURCE_DEFECT_CARD_SOURCE_ID_REJECTION_LIMIT = 200;
 /** UTF-16 한도를 유지하되 경계에서 갈라지는 서로게이트 쌍은 통째로 제외한다. */
@@ -52,8 +53,9 @@ export interface QaSourceDefectCardQaRef {
   readonly qaIssueId: string | null;
 }
 
-/** 두 생성 지점의 동일 generation은 동일 hash여야 한다; 경로 구분 정보를 포함하지 않는다. */
-function buildCardCreateInput(input: {
+/** 두 생성 지점의 동일 generation은 동일 hash여야 한다; 경로 구분 정보를 포함하지 않는다.
+ *  [fixture 재생성용 export] 테스트가 동결 payload(payloads.json)를 현재 빌더 출력으로 갱신할 때 쓴다. */
+export function buildCardCreateInput(input: {
   readonly language: SystemLanguage;
   readonly workflowRunId: string;
   readonly producerStepId: string;
@@ -96,18 +98,19 @@ function buildCardCreateInput(input: {
     status: "known" as const,
   };
   const commonFacts = [layerFact, iterationFact];
-  const commonEvidenceRefs = qaRefsSorted
-    .filter((ref) => ref.qaIssueId)
-    .map((ref) => ({ label: text(`Quality review rejection task (${ref.qaStepId})`, `품질검수 반려 업무 (${ref.qaStepId})`), href: `/issues/${ref.qaIssueId}` }));
-
+  // [선택지 반복 링크 제거] 연관 업무 링크는 카드 헤더의 "연관 업무 열기" 버튼과 판단 근거에서 이미 보여준다.
+  // 과거 각 선택지 아래에 같은 "품질검수 반려 업무" 링크가 반복 표시되어 공간만 차지했다(2026-10-20 운영자 요청으로 제거).
   const option = (
     id: QaSourceDefectCardOptionId,
     label: string,
     description: string,
+    recommendation?: { readonly reason: string },
   ) => ({
     id,
     label,
     description,
+    // [요청자 추천] 검증기가 정의당 최대 1개 옵션만 허용한다. 추천은 표시일 뿐 선택을 강제하지 않는다.
+    ...(recommendation ? { recommended: true as const, recommendationReason: recommendation.reason } : {}),
     facts: [
       ...commonFacts,
       ...findingsSorted.slice(0, 8).map((finding) => ({
@@ -116,17 +119,27 @@ function buildCardCreateInput(input: {
         status: "known" as const,
       })),
     ],
-    evidenceRefs: commonEvidenceRefs.slice(0, 10),
+    evidenceRefs: [],
   });
+
+  // [요청자 추천] humanReview.recommendedNextStep와 같은 판단을 선택지 배지(추천)로도 표시한다.
+  const rerunRecommendation = findingsSorted.length > 0 && sourceOnly
+    ? { reason: text("Producer rework cannot fix source data defects; re-running collection replaces the flawed source material.", "생산자 재작업으로는 원천 데이터 결함을 고칠 수 없습니다. 수집을 다시 실행해야 결함 있는 원천 자료가 교체됩니다.") }
+    : undefined;
+  const reworkRecommendation = findingsSorted.length > 0 && !sourceOnly
+    ? { reason: text("The defect is in the produced output; the producer can fix it through rework. If rework cannot solve it, consider replanning the mission.", "결함이 산출물 자체에 있어 생산자가 재작업으로 고칠 수 있습니다. 재작업으로 해결이 어렵다면 미션 재계획을 검토하세요.") }
+    : undefined;
 
   const definition = {
     options: [
       option("rerun_source_collection", text("Run data collection again", "자료 수집 다시 실행"), text(
         "Choose this when the collected source material appears to be the cause. Ask the collection task to run again, replace the source material, and let the following work continue. Internal command: `retry_source_issue`.",
-        "자료를 모으는 단계의 결과가 문제의 원인으로 보일 때 고르세요. 수집 단계 업무를 다시 실행해 원천 자료를 새로 만들고 이어지는 작업이 계속되도록 지시합니다. 내부 명령: `retry_source_issue`.")),
+        "자료를 모으는 단계의 결과가 문제의 원인으로 보일 때 고르세요. 수집 단계 업무를 다시 실행해 원천 자료를 새로 만들고 이어지는 작업이 계속되도록 지시합니다. 내부 명령: `retry_source_issue`."),
+        rerunRecommendation),
       option("extra_producer_rework", text("Allow one more producer rework", "생산자 재작업 1회 더 허용"), text(
         `Choose this when the output itself needs fixing. Allow the agent that creates it one more rework attempt, then request rework of its task. Used ${input.iteration}/${input.maxIterations}. Internal command: \`qaReworkCapBoost\` (+1), then \`retry_source_issue\`.`,
-        `산출물(생산 단계의 결과물) 자체를 고쳐야 할 때 고르세요. 생산자(산출물을 만드는 에이전트)의 재작업을 1회 더 허용한 뒤 해당 업무의 재작업을 지시합니다. 현재 사용 ${input.iteration}/${input.maxIterations}회. 내부 명령: \`qaReworkCapBoost\`(+1), 이후 \`retry_source_issue\`.`)),
+        `산출물(생산 단계의 결과물) 자체를 고쳐야 할 때 고르세요. 생산자(산출물을 만드는 에이전트)의 재작업을 1회 더 허용한 뒤 해당 업무의 재작업을 지시합니다. 현재 사용 ${input.iteration}/${input.maxIterations}회. 내부 명령: \`qaReworkCapBoost\`(+1), 이후 \`retry_source_issue\`.`),
+        reworkRecommendation),
       option("maintenance_issue", text("Hand off to maintenance", "유지보수 업무로 넘기기"), text(
         "Choose this when code, agent skills, or the collection process may be the underlying cause. Create a maintenance task with the submitted findings as evidence.",
         "코드, 에이전트 스킬, 자료 수집 과정 자체에 문제가 있다고 의심될 때 고르세요. 제출된 결함 항목을 근거로 유지보수 업무를 만듭니다.")),

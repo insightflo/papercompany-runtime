@@ -17,7 +17,7 @@ describe("QA card request key overflow", () => {
   // Hashing at >=160 instead of >160 would change an existing readable identity.
   it.each([7, 101])("preserves readable keys with producer length %i through the 160-unit boundary", (length) => {
     const input = { workflowRunId: runId, producerStepId: "p".repeat(length), iteration: 0 };
-    const expected = `qa-source-defect:v2:${runId}:${input.producerStepId}:0`;
+    const expected = `qa-source-defect:v3:${runId}:${input.producerStepId}:0`;
     expect(expected.length).toBe(length + 59);
     expect(buildQaSourceDefectCardRequestKey(input)).toBe(expected);
     expect(buildQaSourceDefectCardRequestKey({ ...input })).toBe(expected);
@@ -27,7 +27,7 @@ describe("QA card request key overflow", () => {
     const keys = producerIds.map((producerStepId, index) => {
       const input = { workflowRunId: runId, producerStepId, iteration: 0 };
       const key = buildQaSourceDefectCardRequestKey(input);
-      expect(key).toBe(`qa-source-defect-sha256:v2:${runId}:${digests[index]}:0`);
+      expect(key).toBe(`qa-source-defect-sha256:v3:${runId}:${digests[index]}:0`);
       expect(key.length).toBeLessThanOrEqual(160);
       expect(buildQaSourceDefectCardRequestKey({ ...input })).toBe(key);
       return key;
@@ -43,7 +43,7 @@ describe("QA card overflow namespace isolation", () => {
     expect(workflowStepDefinitionSchema.safeParse({ id: literalProducerId, type: "agent", name: "Literal producer" }).success).toBe(true);
     const input = { workflowRunId: runId, iteration: 0 };
     const readable = buildQaSourceDefectCardRequestKey({ ...input, producerStepId: literalProducerId });
-    expect(readable).toBe(`qa-source-defect:v2:${runId}:${literalProducerId}:0`);
+    expect(readable).toBe(`qa-source-defect:v3:${runId}:${literalProducerId}:0`);
     expect(buildQaSourceDefectCardRequestKey({ ...input, producerStepId: producerIds[0]! })).not.toBe(readable);
   });
 });
@@ -108,7 +108,7 @@ describeDb("QA card overflow persistence", () => {
       const card = rows.find(row => row.id === result.decisionId)!;
       expect(card.sourceId).toBe(`${seed.runId}:${producerStepId}:0`);
       expect(card.sourceId!.length).toBe(200);
-      expect(card.requestKey).toMatch(/^qa-source-defect-sha256:v2:/u);
+      expect(card.requestKey).toMatch(/^qa-source-defect-sha256:v3:/u);
       expect(card.requestKey.length).toBeLessThanOrEqual(160);
     } else {
       expect(result.outcome, JSON.stringify(result)).toBe("failed");

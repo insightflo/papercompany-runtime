@@ -47,7 +47,7 @@ describeDb("QA card deploy and display safety", () => {
       title: "Legacy QA card wording",
     }).where(eq(operatorDecisions.id, legacy.id));
     const current = await persisted(input);
-    expect(current.requestKey).toBe(`qa-source-defect:v2:${input.workflowRunId}:produce:0`);
+    expect(current.requestKey).toBe(`qa-source-defect:v3:${input.workflowRunId}:produce:0`);
     expect(current.id).not.toBe(legacy.id);
     const [old] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, legacy.id));
     expect(old!.status).toBe("cancelled");

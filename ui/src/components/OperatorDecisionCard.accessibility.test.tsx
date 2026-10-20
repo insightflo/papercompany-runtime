@@ -67,11 +67,14 @@ const decision: OperatorDecisionView = {
 };
 
 describe("OperatorDecisionCard accessibility", () => {
-  it("uses native grouped controls and labelled descriptions", () => {
+  it("uses grouped ARIA controls with labelled descriptions", () => {
     const html = renderToStaticMarkup(<OperatorDecisionCard decision={decision} onResolve={vi.fn()} />);
     expect(html).toContain("<fieldset");
     expect(html).toContain("<legend");
-    expect(html).toContain('type="radio"');
+    // [2026-10-20] 네이티브 라디오 대신 role 기반 행으로 바꿨다 — 선택 상태의 유일한 소스가 React 상태가 되어
+    // controlled input/네이티브 라디오 간 불일치로 클릭이 유실되던 버그 경로를 원천 차단한다(키보드 지원 유지).
+    expect(html).toContain('role="radio"');
+    expect(html).toContain('aria-checked="false"');
     expect(html).toContain("aria-describedby");
     expect(html).toContain('role="alert"');
     expect(html).toContain("<textarea");
@@ -119,7 +122,7 @@ describe("OperatorDecisionCard accessibility", () => {
 
   it("uses checkboxes for multi-select and no options for action cards", () => {
     const multi = { ...decision, interactionType: "multi_select" as const };
-    expect(renderToStaticMarkup(<OperatorDecisionCard decision={multi} onResolve={vi.fn()} />)).toContain('type="checkbox"');
+    expect(renderToStaticMarkup(<OperatorDecisionCard decision={multi} onResolve={vi.fn()} />)).toContain('role="checkbox"');
     const action = {
       ...decision,
       interactionType: "action" as const,
@@ -127,6 +130,6 @@ describe("OperatorDecisionCard accessibility", () => {
     };
     const actionHtml = renderToStaticMarkup(<OperatorDecisionCard decision={action} onResolve={vi.fn()} />);
     expect(actionHtml).not.toContain("<fieldset");
-    expect(actionHtml).not.toContain('type="radio"');
+    expect(actionHtml).not.toContain('role="radio"');
   });
 });

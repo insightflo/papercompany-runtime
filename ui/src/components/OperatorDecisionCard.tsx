@@ -56,12 +56,16 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     const groupSingle = group !== null && group.selection !== null && group.selection.max === 1;
     if (decision.interactionType === "single_select" || groupSingle) {
       // 이 옵션이 속한 그룹(max=1)에서는 그 그룹 선택을 이 옵션으로 교체한다.
+      // [root cause 2026-10-20] single_select 필터 방향이 뒤집혀 있어 이전 선택이 삭제되지 않고 누적됐다
+      // (두 번째 클릭 후 상태가 [A,B]가 되어 max=1 초과 → “선택지를 1개 선택하세요”로 거부,
+      // 네이티브 라디오는 React가 A를 다시 체크해 표시가 되돌아가 클릭 무시처럼 보였다).
+      // single_select에서는 이전 선택 전부를 버리고 [id]로 교체한다.
       setSelectedOptionIds((current) => [
         ...current.filter((candidate) => {
           const candidateGroup = groupOf(candidate);
           return groupSingle
             ? candidateGroup?.id !== group?.id
-            : decision.interactionType === "single_select";
+            : decision.interactionType !== "single_select";
         }),
         id,
       ]);
@@ -156,7 +160,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
         <p id={descriptionId} className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{decision.description}</p>
       )}
 
-      <HumanReviewPacket packet={decision.definition.humanReview ?? null} />
+      <HumanReviewPacket packet={decision.definition.humanReview ?? null} variant="compact" />
 
       <div className="mt-3 flex flex-wrap gap-2">
         {decision.issueId && (
@@ -182,20 +186,36 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
 
       {commonFacts.length > 0 && <section className="mt-4"><h3 className="text-sm font-medium">{L(lang, { en: "Common facts", ko: "공통 사실" })}</h3><OperatorDecisionFacts facts={commonFacts} /></section>}
       {decision.interactionType !== "action" && (() => {
-        const renderOption = (option: OperatorDecisionView["definition"]["options"][number], nameSuffix: string, asRadio: boolean) => {
+        // [클릭 안정성] 네이티브 라디오/체크박스 대신 React 상태 기반 행(role=radio/checkbox)을 쓴다.
+        // 과거 controlled input + label 조합에서 클릭이 등록되지 않거나(체크 표시는 남았는데 제출 시 미선택 처리되는)
+        // 문서 단위 라디오 name 충돌로 표시와 상태가 어긋나는 사례가 보고되었다(2026-10-20 운영자 보고).
+        // 선택 상태의 유일한 소스를 React 상태로 두어 그런 불일치 경로를 원천 차단한다.
+        const renderOption = (option: OperatorDecisionView["definition"]["options"][number], asRadio: boolean) => {
           const checked = selectedOptionIds.includes(option.id);
+          const disabled = submittingActionId !== null;
           return (
-            <label key={option.id} className="block cursor-pointer border border-border p-3 has-[:checked]:border-primary">
+            <div
+              key={option.id}
+              role={asRadio ? "radio" : "checkbox"}
+              aria-checked={checked}
+              aria-disabled={disabled || undefined}
+              aria-describedby={`${descriptionId} ${errorId}`}
+              tabIndex={disabled ? -1 : 0}
+              data-operator-decision-option={option.id}
+              onClick={() => { if (!disabled) toggleOption(option.id); }}
+              onKeyDown={(event) => {
+                if (disabled || (event.key !== " " && event.key !== "Enter")) return;
+                event.preventDefault();
+                toggleOption(option.id);
+              }}
+              className={`block cursor-pointer border p-3 ${checked ? "border-primary bg-primary/5" : "border-border"}${disabled ? " pointer-events-none opacity-50" : ""}`}
+            >
               <span className="flex items-start gap-2">
-                <input
-                  type={asRadio ? "radio" : "checkbox"}
-                  name={`operator-decision-${decision.id}-${nameSuffix}`}
-                  value={option.id}
-                  checked={checked}
-                  onChange={() => toggleOption(option.id)}
-                  disabled={submittingActionId !== null}
-                  aria-describedby={`${descriptionId} ${errorId}`}
-                />
+                <span aria-hidden className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border ${asRadio ? "rounded-full" : "rounded-sm"} ${checked ? "border-primary" : "border-border"}`}>
+                  {checked && (asRadio
+                    ? <span className="h-2 w-2 rounded-full bg-primary" />
+                    : <span className="text-[10px] leading-none text-primary">✓</span>)}
+                </span>
                 <span>
                   <span className="block text-sm font-medium">
                     {option.label}
@@ -223,7 +243,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
                   {ref.label}
                 </a>
               ))}
-            </label>
+            </div>
           );
         };
         if (optionGroups && optionGroups.length > 0) {
@@ -240,13 +260,13 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
                   </legend>
                   {decision.definition.options
                     .filter((option) => group.optionIds.includes(option.id))
-                    .map((option) => renderOption(option, `group-${group.id}`, group.selection?.max === 1))}
+                    .map((option) => renderOption(option, group.selection?.max === 1))}
                 </fieldset>
               ))}
               {ungrouped.length > 0 && (
                 <fieldset className="space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
                   <legend className="text-sm font-medium">{L(lang, { en: "Options", ko: "선택지" })}</legend>
-                  {ungrouped.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
+                  {ungrouped.map((option) => renderOption(option, decision.interactionType === "single_select"))}
                 </fieldset>
               )}
             </div>
@@ -255,17 +275,13 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
         return (
           <fieldset className="mt-4 space-y-2" aria-describedby={`${descriptionId} ${errorId}`}>
             <legend className="text-sm font-medium">{L(lang, { en: "Options", ko: "선택지" })}</legend>
-            {decision.definition.options.map((option) => renderOption(option, "options", decision.interactionType === "single_select"))}
+            {decision.definition.options.map((option) => renderOption(option, decision.interactionType === "single_select"))}
           </fieldset>
         );
       })()}
 
-      {(decision.definition.approvedScope.length > 0 || decision.definition.forbiddenScope.length > 0) && (
-        <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
-          <div><strong>{L(lang, { en: "Approved scope", ko: "승인된 범위" })}</strong><ul>{decision.definition.approvedScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
-          <div><strong>{L(lang, { en: "Forbidden scope", ko: "금지된 범위" })}</strong><ul>{decision.definition.forbiddenScope.map((item) => <li key={item}>{item}</li>)}</ul></div>
-        </div>
-      )}
+      {/* [범위 표시 제거] approvedScope/forbiddenScope는 왜 카드로 승격됐는지 설명하는 표시 전용 메타데이터다.
+          운영자가 수정해도 실행을 바꾸는 경로가 없어서(2026-10-20 운영자 요청) 표시하지 않는다. */}
 
       {decision.definition.comment.mode !== "disabled" && (
         <div className="mt-4">
