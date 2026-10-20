@@ -142,6 +142,7 @@ describe("C02 consumption preparation (reader seeds are not atomic writer eviden
     const q = seed.proof.request, r = seed.proof.receipt;
     const unissuedRef = { ...c.ref, requestId: randomUUID() };
     const wrongInputs = [
+      { ...r.input, assetsRoot: "/c02-unissued-assets-root" },
       { ...r.input, workProductId: c.s.productId },
       { ...r.input, sha256: "00".repeat(32) },
       { ...r.input, path: c.s.file },

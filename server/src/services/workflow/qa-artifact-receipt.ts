@@ -234,7 +234,7 @@ export async function readQaCorrectionToolConsumptionProof(db: QaCorrectionDb, v
   requireToolProof(isDeepStrictEqual(sorted(input.assetManifest), sorted(assets)), "assets");
   if (input.mode === "html") {
     const manifest = revision.files.find(file => file.relativePath === revision.bundleManifestRelativePath);
-    requireToolProof(manifest && input.htmlManifest && input.htmlManifest.path === path.join(revision.root, manifest.relativePath)
+    requireToolProof(input.assetsRoot === "" && manifest && input.htmlManifest && input.htmlManifest.path === path.join(revision.root, manifest.relativePath)
       && input.htmlManifest.sha256 === manifest.sha256 && input.htmlManifest.byteSize === manifest.byteSize
       && revision.ancillaryRoleBindings !== undefined && input.ancillaryManifest, "manifest");
     const ancillary = revision.ancillaryRoleBindings.map(binding => {
