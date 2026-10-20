@@ -258,7 +258,7 @@ describe("HumanOperator", () => {
 
     resolveSpy.mockClear();
     invalidateSpy.mockClear();
-    act(() => (host.querySelector('input[value="approve"]') as HTMLElement).click());
+    act(() => (host.querySelector('[data-operator-decision-option="approve"]') as HTMLElement).click());
     const comment = host.querySelector("textarea") as HTMLTextAreaElement;
     act(() => {
       const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
