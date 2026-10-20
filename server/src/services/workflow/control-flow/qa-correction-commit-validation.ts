@@ -10,7 +10,6 @@ import { hashQaCorrectionPayload, qaCorrectionAppliedSchema, qaCorrectionSourceM
   type QaCorrectionPreparation } from "./qa-correction-contract.js";
 import { readMeasuredQaCorrection, type MeasuredRef } from "./qa-correction-measure.js";
 import { withCurrentQaCorrectionPreparation, type BeginQaCorrectionResult } from "./qa-correction-prepare.js";
-import { readIssuedQaCorrection } from "./qa-correction-reader.js";
 import { observeQaCorrectionSources, readQaCorrectionSourceBytes, qaCorrectionSourceFacts,
   type QaCorrectionSourceBytes } from "./qa-correction-source-bytes.js";
 import { patchQaCorrectionSources, type QaCorrectionProductLayout } from "./qa-correction-patch.js";
@@ -76,11 +75,8 @@ async function currentFacts(db: QaCorrectionDb, p: QaCorrectionPreparation, ref:
   for (const prior of observation.priors) {
     const provenance = p.sources.find(source => source.productId === prior.productId)!.provenance;
     requireQaCorrection(provenance.kind === "prior_correction", "lineage");
-    const issued = await readIssuedQaCorrection(db, { companyId: p.companyId,
-      workflowRunId: p.workflowRunId, appliedEventId: provenance.appliedEventId });
-    requireQaCorrection(issued.applied.revisions.some(r => isDeepStrictEqual(r, prior.revision)), "lineage");
-    priors.push({ productId: prior.productId, correctionId: issued.preparation.correctionId,
-      missionId: issued.preparation.missionId, sourceProductId: prior.revision.sourceProductId });
+    priors.push({ productId: prior.productId, correctionId: prior.correctionId,
+      missionId: prior.missionId, sourceProductId: prior.sourceProductId });
   }
   let retryEnvelope: unknown = null;
   if (p.authority.kind === "quality_current_output") {

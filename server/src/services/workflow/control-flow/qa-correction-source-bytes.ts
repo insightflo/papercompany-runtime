@@ -10,7 +10,8 @@ import { captureArtifactRoot, digest, readArtifactBytes, type ArtifactRoot } fro
 import { readHtmlBundle } from "../qa-html-input.js";
 import { loadExecutionDefinition } from "../execution-definition.js";
 import { buildMissionWorkProductPaths, resolveMissionWorkProductPaths } from "../../work-products/output-paths.js";
-import { readQaCorrectionSources, readIssuedQaCorrectionHistory, qaCorrectionProductPointerSchema } from "./qa-correction-reader.js";
+import { readQaCorrectionSourcesWithHistory, qaCorrectionProductPointerSchema,
+  type readIssuedQaCorrectionHistory } from "./qa-correction-reader.js";
 import { readQaCorrectionVerdict, requireQaCorrection, type QaCorrectionDb } from "./qa-correction-authority.js";
 import { type QaCorrectionApplied, type QaCorrectionPreparation, type QaCorrectionSourceMeasured } from "./qa-correction-contract.js";
 
@@ -60,18 +61,19 @@ async function originalWorkflowProducer(p: QaCorrectionPreparation,
 
 /** C03/C12 SELECT-only observation, collected again under the preparation locks before INSERT. */
 export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectionPreparation) {
-  const sources = await readQaCorrectionSources(db, p, true);
+  const { sources, histories } = await readQaCorrectionSourcesWithHistory(db, p);
   const execution = await loadExecutionDefinition(db, p.workflowRunId, { requireHistorical: false });
   const paths = await resolveMissionWorkProductPaths(db, { companyId: p.companyId,
     missionId: p.missionId, workflowRunId: p.workflowRunId });
-  const priors: { productId: string; revision: Revision; workflowProducer: Producer | null }[] = [];
+  const priors: { productId: string; correctionId: string; missionId: string; sourceProductId: string;
+    revision: Revision; workflowProducer: Producer | null }[] = [];
   for (const s of sources) {
     const provenance = p.sources.find(x => x.productId === s.product.id)!.provenance;
     if (provenance.kind !== "prior_correction") continue;
     const pointer = qaCorrectionProductPointerSchema.parse(s.product.metadata?.qaCorrection);
     requireQaCorrection(pointer.appliedEventId === provenance.appliedEventId, "lineage");
-    const history = await readIssuedQaCorrectionHistory(db, { companyId: p.companyId, workflowRunId: p.workflowRunId,
-      appliedEventId: provenance.appliedEventId });
+    const history = histories.get(provenance.appliedEventId);
+    requireQaCorrection(history, "lineage");
     const issued = history.issued;
     const revision = issued.applied.revisions.find(r => r.revisionId === pointer.revisionId && r.workProductId === s.product.id);
     requireQaCorrection(revision && issued.preparation.companyId === p.companyId
@@ -80,7 +82,8 @@ export async function observeQaCorrectionSources(db: QaCorrectionDb, p: QaCorrec
       && issued.preparation.producer.stepId === p.producer.stepId && issued.preparation.producer.issueId === p.producer.issueId
       && Date.parse(issued.applied.appliedAt) <= Date.parse(p.preparedAt)
       && path.resolve(revision.root, revision.mainRelativePath) === s.file, "lineage");
-    priors.push({ productId: s.product.id, revision,
+    priors.push({ productId: s.product.id, revision, correctionId: issued.preparation.correctionId,
+      missionId: issued.preparation.missionId, sourceProductId: revision.sourceProductId,
       workflowProducer: await originalWorkflowProducer(p, history, revision) });
   }
   const declarations: {

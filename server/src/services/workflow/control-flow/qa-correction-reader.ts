@@ -42,14 +42,15 @@ export interface IssuedQaCorrection {
 }
 type Scope = { companyId: string; workflowRunId: string; appliedEventId: string };
 type Event = typeof workflowTransitionEvents.$inferSelect;
-type IssuedCache = Map<string, IssuedQaCorrection>;
+type IssuedCache = Map<string, { issued: IssuedQaCorrection; ancestors: Set<string>; bindingCheck?: Promise<void> }>;
 
-function productFile(product: typeof issueWorkProducts.$inferSelect): string {
+function productFile(product: typeof issueWorkProducts.$inferSelect, registeredLegacy = false): string {
   const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
     .map(key => product.metadata?.[key]).find((value): value is string => typeof value === "string" && value.trim().length > 0);
   const ref = typeof selected === "string" ? selected.trim() : null;
   const file = resolveWorkProductLocalFilePath(product) ?? (typeof ref === "string" && path.isAbsolute(ref) ? ref : null);
   requireQaCorrection(file && path.isAbsolute(file), "source");
+  if (registeredLegacy) requireQaCorrection(ref && path.isAbsolute(ref) && path.resolve(ref) === path.resolve(file), "source");
   return path.resolve(file);
 }
 function pointer(product: typeof issueWorkProducts.$inferSelect) {
@@ -75,7 +76,7 @@ async function readSources(db: QaCorrectionDb, p: QaCorrectionPreparation, curre
       eq(issueWorkProducts.id, source.productId), eq(issueWorkProducts.companyId, p.companyId)));
     requireQaCorrection(product && product.issueId === p.producer.issueId
       && (!current || product.status === "active") && product.createdAt <= new Date(p.preparedAt), "source");
-    const file = productFile(product), provenance = source.provenance;
+    const provenance = source.provenance, file = productFile(product, provenance.kind === "registered_legacy");
     let origin: QaCorrectionSourceRead["origin"] = "registered_legacy";
     if (provenance.kind === "prior_correction") {
       requireQaCorrection(!Object.hasOwn(product.metadata ?? {}, "workflowProducer"), "source");
@@ -103,14 +104,8 @@ async function readSources(db: QaCorrectionDb, p: QaCorrectionPreparation, curre
     } else {
       requireQaCorrection(!Object.hasOwn(product.metadata ?? {}, "qaCorrection"), "source");
       const present = Object.hasOwn(product.metadata ?? {}, "workflowProducer");
-      if (provenance.kind === "registered_legacy") {
-        requireQaCorrection(!present, "source");
-        // Preserve the existing registration boundary, which requires an absolute registered ref.
-        const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
-          .map(key => product.metadata?.[key]).find(value => typeof value === "string" && value.trim());
-        const ref = typeof selected === "string" ? selected.trim() : null;
-        requireQaCorrection(typeof ref === "string" && path.isAbsolute(ref) && path.resolve(ref) === file, "source");
-      } else {
+      if (provenance.kind === "registered_legacy") requireQaCorrection(!present, "source");
+      else {
         const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
         requireQaCorrection(present && parsed.success
           && hashQaCorrectionPayload(parsed.data) === hashQaCorrectionPayload(provenance.workflowProducer), "source");
@@ -208,7 +203,7 @@ async function verifyQualityUse(db: QaCorrectionDb, p: QaCorrectionPreparation, 
 async function readIssued(db: QaCorrectionDb, scope: Scope, ancestors: Set<string>, cache: IssuedCache): Promise<IssuedQaCorrection> {
   requireQaCorrection(!ancestors.has(scope.appliedEventId), "lineage");
   const cached = cache.get(scope.appliedEventId);
-  if (cached) return cached;
+  if (cached) return cached.issued;
   const visited = new Set(ancestors).add(scope.appliedEventId);
   const appliedRow = await readEvent(db, scope, scope.appliedEventId, "qa_remediation_applied");
   const a = parseQaCorrectionEventPayload("qa_remediation_applied", appliedRow.payload);
@@ -259,30 +254,35 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, ancestors: Set<strin
   await verifyQualityUse(db, p, a);
   const issued: IssuedQaCorrection = { preparation: p, sourceMeasured: m, applied: a, followups, sources,
     currentConsumption: "requires_current_authority_cancellation_and_byte_checks" };
-  cache.set(scope.appliedEventId, issued);
+  const ancestors = new Set(p.sources.flatMap(source => source.provenance.kind === "prior_correction"
+    ? [source.provenance.appliedEventId, ...cache.get(source.provenance.appliedEventId)!.ancestors] : []));
+  ancestors.delete(scope.appliedEventId);
+  cache.set(scope.appliedEventId, { issued, ancestors });
   return issued;
 }
 
-/** One observation: cache issuance proofs, checking bindings only for the root and selected producer paths. */
-export async function readIssuedQaCorrectionHistory(db: QaCorrectionDb, scope: Scope) {
+/** One observation: reuse completed proofs; every root's source ancestry is fixed before checking successors. */
+export async function readQaCorrectionSourcesWithHistory(db: QaCorrectionDb, p: QaCorrectionPreparation) {
   const cache: IssuedCache = new Map();
-  const issued = await readIssued(db, scope, new Set(), cache);
-  // Successor validation can load later records; they must never become source ancestors.
-  const ancestors = new Set(cache.keys());
-  ancestors.delete(scope.appliedEventId);
-  const checked = new Map<string, Promise<void>>();
-  await verifyBindingSuccessors(db, scope, issued, cache);
+  const sources = await readSources(db, p, true, new Set(), undefined, cache);
+  const roots = new Set(p.sources.flatMap(s => s.provenance.kind === "prior_correction" ? [s.provenance.appliedEventId] : []));
+  const histories = new Map<string, Awaited<ReturnType<typeof readHistory>>>();
+  for (const appliedEventId of roots) histories.set(appliedEventId,
+    await readHistory(db, { companyId: p.companyId, workflowRunId: p.workflowRunId, appliedEventId }, cache));
+  return { sources, histories };
+}
+async function readHistory(db: QaCorrectionDb, scope: Scope, cache: IssuedCache = new Map()) {
+  const issued = await readIssued(db, scope, new Set(), cache), root = cache.get(scope.appliedEventId)!;
+  await (root.bindingCheck ??= verifyBindingSuccessors(db, scope, issued, cache));
   return { issued, readAncestor: async (appliedEventId: string): Promise<IssuedQaCorrection> => {
-    requireQaCorrection(ancestors.has(appliedEventId), "lineage");
+    requireQaCorrection(root.ancestors.has(appliedEventId), "lineage");
     const prior = cache.get(appliedEventId)!;
-    let check = checked.get(appliedEventId);
-    if (!check) {
-      check = verifyBindingSuccessors(db, { ...scope, appliedEventId }, prior, cache);
-      checked.set(appliedEventId, check);
-    }
-    await check;
-    return prior;
+    await (prior.bindingCheck ??= verifyBindingSuccessors(db, { ...scope, appliedEventId }, prior.issued, cache));
+    return prior.issued;
   } };
+}
+export async function readIssuedQaCorrectionHistory(db: QaCorrectionDb, scope: Scope) {
+  return readHistory(db, scope);
 }
 
 /** C03/C12 historical issuance only. New QA/PASS and B→C must not require the source verdict to stay latest. */
