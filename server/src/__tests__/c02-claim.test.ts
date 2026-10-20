@@ -210,6 +210,17 @@ it("accepts 32 technical ancestors, refuses the 33rd and a real stored cycle wit
   await noGrant(w, over.id);
 }, 120000);
 
+it.each(["root", "nested"] as const)("rejects a missing wake in actual correction ancestry at the %s claim", async mode => {
+  const { w, child, detached, observed, claimed, inside } = await fixtures.missingWakeClaim(mode);
+  expect(observed).toBeInstanceOf(Error);
+  expect(observed).toMatchObject({ message: "qa_correction_claim_relation_changed" });
+  expect(claimed).toBeUndefined();
+  expect(inside).toMatchObject({ status: "queued" });
+  expect(inside).toEqual(detached);
+  expect(await readRun(w, child.id)).toEqual(detached);
+  await noGrant(w, child.id); expect(adapter).not.toHaveBeenCalled();
+}, 60000);
+
 it.each(["generation", "step"] as const)("rejects stored heartbeat %s mismatch before nested notification and always rolls back", async kind => {
   const w = await fixtures.world(), b = await queued(w), target = await fixtures.replacement();
   const changed = kind === "generation" ? { workflowExecutionGeneration: b.workflowExecutionGeneration! + 1 }

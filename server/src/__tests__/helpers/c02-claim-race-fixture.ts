@@ -6,6 +6,7 @@ import { expect, vi } from "vitest";
 import { agents, agentWakeupRequests, heartbeatRuns, heartbeatRunEvents, issues, workflowDefinitions,
   workflowRuns, workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { insertWorkflowWakeRequest } from "../../services/heartbeat-workflow-wake.js";
+import { claimHeartbeatWithRecoveryGuard } from "../../services/heartbeat-recovery-guard.js";
 import { enqueueAdapterFallbackRun, enqueueProcessLossRetry } from "../../services/heartbeat-retry-enqueue.js";
 import { withReplacementFirstDelivery } from "../../services/workflow/replacement-first-delivery.js";
 import { admitReplacement } from "../../services/workflow/replacement-admission.js";
@@ -18,7 +19,7 @@ import { commitQaCorrection } from "../../services/workflow/control-flow/qa-corr
 import { readIssuedQaCorrection } from "../../services/workflow/control-flow/qa-correction-reader.js";
 import { appendQaVerdict } from "./qa-correction-fixture.js";
 import { seedReplacement } from "./replacement-scenario.js";
-import { createCommitSourceHarness, issueC02, deliveryInput, deliver } from "./c02-delivery-fixture.js";
+import { createCommitSourceHarness, issueC02, issueNextC02, deliveryInput, deliver, correctionRows } from "./c02-delivery-fixture.js";
 import type { C02Case } from "./c02-fixture.js";
 
 type World = { c: C02Case; i: Awaited<ReturnType<typeof deliveryInput>> };
@@ -98,6 +99,32 @@ export function createClaimFixture(owned: Harness, track: (db: Db) => Db, roots:
       : enqueueProcessLossRetry(deps, parent, agent!, new Date(),
         { kind: kind === "adapter_failed_retry" ? "adapter_failed_transient" : "process_lost" });
   }
+  async function missingWakeClaim(mode: "root" | "nested") {
+    const w = await world(), b = (await correctionRows(w.c)).heartbeats[0]!;
+    const parent = (await claimHeartbeatWithRecoveryGuard(owned.db, b, new Date()))!;
+    const child = await retry(w, parent, "process_lost_retry");
+    expect(child).toMatchObject({ retryOfRunId: parent.id, workflowStepRunId: null, workflowExecutionGeneration: null });
+    expect(child.wakeupRequestId).not.toBeNull();
+    const [detached] = await owned.db.update(heartbeatRuns).set({ wakeupRequestId: null })
+      .where(eq(heartbeatRuns.id, child.id)).returning();
+    await issueNextC02(w.c);
+    let observed: unknown, claimed: typeof heartbeatRuns.$inferSelect | null | undefined;
+    let inside: typeof heartbeatRuns.$inferSelect | undefined;
+    const attempt = async (db: Db) => {
+      try { claimed = await claimHeartbeatWithRecoveryGuard(db, detached!, new Date()); }
+      catch (error) { observed = error; }
+      const [current] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, child.id));
+      inside = current;
+    };
+    if (mode === "nested") {
+      const target = await replacement(), rollback = Error("missing wake outer rollback");
+      await expect(withReplacementFirstDelivery(owned.db, target, async tx => {
+        await attempt(track(tx));
+        throw rollback;
+      })).rejects.toBe(rollback);
+    } else await attempt(owned.db);
+    return { w, child, detached: detached!, observed, claimed, inside };
+  }
   async function changeOwnerAfterObservation(w: World, b: typeof heartbeatRuns.$inferSelect,
     resume: () => Promise<void>, finish: <T>(operation: Promise<T>) => Promise<T>) {
     const holder = track(owned.connect()), ownerHolder = track(owned.connect());
@@ -116,7 +143,7 @@ export function createClaimFixture(owned: Harness, track: (db: Db) => Db, roots:
       await vi.waitFor(async () => {
         const rows = await w.c.peer.execute(sql`SELECT pid FROM pg_stat_activity WHERE datname=current_database()
           AND wait_event_type='Lock' AND ${pid} = ANY(pg_blocking_pids(pid))
-          AND query ILIKE '%heartbeat_runs%' AND query ILIKE '%for update%'`);
+          AND query ILIKE '%heartbeat_runs%'`);
         expect(rows.length).toBeGreaterThan(0);
       }, { timeout: 10000 });
       // Create and commit only AFTER the public claim is observed waiting on B, before its issue lock.
@@ -141,7 +168,7 @@ export function createClaimFixture(owned: Harness, track: (db: Db) => Db, roots:
       return owner;
     } finally { releaseB(); await holding; }
   }
-  return { world, pending, replacement, ordinaryDag, insertGate, blockedInsert, retry, changeOwnerAfterObservation };
+  return { world, pending, replacement, ordinaryDag, insertGate, blockedInsert, retry, missingWakeClaim, changeOwnerAfterObservation };
 }
 
 /** C02/C12: a fresh genuine QA authority per correction, with registered prior bytes and public C03 writers. */

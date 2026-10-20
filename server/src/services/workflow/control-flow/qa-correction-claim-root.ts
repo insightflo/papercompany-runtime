@@ -36,29 +36,32 @@ export class QaCorrectionClaimRejected extends Error {
 async function lineage(db: Connection, run: Run) {
   const chain: Run[] = [], wakes: DeliveryWake[] = [], seen = new Set<string>();
   let id: string | null = run.id;
+  let missingWake = false;
   while (id) {
     if (seen.has(id) || seen.size >= 32) throw conflict("heartbeat_workflow_attempt_unproven");
     seen.add(id);
     const [current]: Run[] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id));
     requireClaim(current && current.companyId === run.companyId);
     chain.push(current!);
-    if (!current!.wakeupRequestId) return { chain, wakes, ref: null };
-    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current!.wakeupRequestId!));
-    requireClaim(wake);
-    wakes.push(wake!);
-    let ref: ReturnType<typeof readQaCorrectionWakeRef>;
-    try { ref = readQaCorrectionWakeRef(wake!); }
-    catch (error) { throw new QaCorrectionClaimRejected(error); }
-    if (ref) return { chain, wakes, ref };
+    if (!current!.wakeupRequestId) missingWake = true;
+    else {
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current!.wakeupRequestId!));
+      requireClaim(wake);
+      wakes.push(wake!);
+      let ref: ReturnType<typeof readQaCorrectionWakeRef>;
+      try { ref = readQaCorrectionWakeRef(wake!); }
+      catch (error) { throw new QaCorrectionClaimRejected(error); }
+      if (ref) return { chain, wakes, ref, missingWake };
+    }
     id = current!.retryOfRunId;
   }
-  return { chain, wakes, ref: null };
+  return { chain, wakes, ref: null, missingWake };
 }
 type Lineage = Awaited<ReturnType<typeof lineage>>;
 
 /** Historical counters come from issuance; mutable display counters cannot restamp the original proof. */
 async function prove(db: Connection, run: Run, l: Lineage) {
-  requireClaim(l.ref && same(identity(l.chain[0]!), identity(run)));
+  requireClaim(l.ref && !l.missingWake && same(identity(l.chain[0]!), identity(run)));
   const h = await readIssuedQaCorrectionFollowupForAttempt(db, l.ref!), target = h.followup.target;
   const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, target.stepRunId));
   requireClaim(step && step.workflowRunId === l.ref!.workflowRunId && step.issueId === target.issueId
