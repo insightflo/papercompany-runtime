@@ -1,7 +1,8 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, is } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import { workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { adaptQaResult, toolArtifactReceiptSchema, type ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { artifactRelativePathSchema } from "@paperclipai/shared/validators/artifact-contract";
@@ -11,14 +12,12 @@ import { evaluateQaRules } from "./qa-rules.js";
 import type { QaRequest } from "./qa-artifact-request.js";
 import { resolveQaInternalPathRoots } from "./qa-internal-paths.js";
 import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionFollowupRefSchema,
-  type QaCorrectionFollowupRef } from "./control-flow/qa-correction-contract.js";
+  qaCorrectionConsumptionSchema, qaCorrectionConsumptionKey, type QaCorrectionFollowupRef } from "./control-flow/qa-correction-contract.js";
 import type { QaCorrectionDb } from "./control-flow/qa-correction-authority.js";
 import type { IssuedQaCorrection } from "./control-flow/qa-correction-reader.js";
-
 type Snapshot = Omit<NonNullable<QaRequest>["snapshot"], "artifactExecution" | "internalPathRoots"> & {
   artifactExecution?: FrozenArtifactAttempt; internalPathRoots?: string[];
 };
-
 type QaReceiptRequestScope = Pick<ToolArtifactReceipt,
   "companyId" | "missionId" | "workflowRunId" | "stepRunId" | "stepId" | "executionGeneration"
   | "retryCount" | "iterationIndex" | "requestId" | "outputRoot" | "outputRootHash" | "input">;
@@ -30,7 +29,6 @@ function projectQaReceiptRequestScope(s: QaReceiptRequestScope): QaReceiptReques
     outputRoot: s.outputRoot, outputRootHash: s.outputRootHash, input: s.input,
   };
 }
-
 /** Server-verifier rejection, distinct from child diagnostics and invalid machine results. */
 export class QaArtifactRejectionError extends Error {
   constructor(message: "qa_artifact_verdict_failed" | `qa_artifact_runtime_checks_failed:${string}`) {
@@ -38,7 +36,6 @@ export class QaArtifactRejectionError extends Error {
     this.name = "QaArtifactRejectionError";
   }
 }
-
 /** Declared files only, relative to the configured deployment root. */
 export async function toolDeploymentHashes(files: string[], cwd: string) {
   if (!files.length) throw new Error("qa_tool_deployment_unresolved");
@@ -50,7 +47,6 @@ export async function toolDeploymentHashes(files: string[], cwd: string) {
   }
   return hashes;
 }
-
 export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { id: string; name: string },
   toolDeployment: ToolArtifactReceipt["toolDeployment"], legacyReceipt?: ToolArtifactReceipt) {
   const s = request.snapshot;
@@ -104,14 +100,12 @@ export async function verifyQaArtifact(request: { snapshot: Snapshot }, tool: { 
   }
   return { receipt: runtimeChecks ? toolArtifactReceiptSchema.parse({ ...receipt, runtimeChecks }) : receipt, qa };
 }
-
 /** Completion rechecks durable request + frozen contract, never stdout or supplied artifactPath. */
 export function assertQaReceiptScope(raw: unknown, row: { run: { id: string; companyId: string; missionId: string | null };
   stepRun: typeof workflowStepRuns.$inferSelect }, requestId?: string) {
   const receipt = toolArtifactReceiptSchema.parse(raw), s = row.stepRun;
   const request = s.metadata.toolArtifactRequest as Snapshot | undefined;
-  // [2026-10-04 tech-scout] 완료 소스의 영수증은 생성 시도의 냉동 스냅숏 기준으로 세대를 검증한다
-  //   (종결/복구가 완료 행 세대를 올려도 유효). running/failed 행은 기존 정확-일치 스코프.
+  // Completed sources retain their frozen generation; active attempts require exact current scope.
   const completedSource = s.status === "completed";
   const sourceFrozen = completedSource && s.metadata.artifactExecution !== undefined
     ? readCompletedSourceArtifactAttempt(s.metadata.artifactExecution, s) : null;
@@ -154,6 +148,35 @@ export async function readQaReceiptBytes(db: Db, scope: { companyId: string; wor
   return { receipt, bytes };
 }
 
+/** Caller owns the ordered locks and won the completion CAS; failures escape its transaction. No IO. */
+export async function persistQaCorrectionToolConsumption(db: Db,
+  selected: Awaited<ReturnType<typeof import("./control-flow/qa-correction-followup.js").readCurrentQaCorrectionFollowup>>,
+  step: typeof workflowStepRuns.$inferSelect, receipt: ToolArtifactReceipt, at: Date, transitionVersion: number) {
+  requireToolProof(is(db, PgTransaction), "transaction");
+  const p = selected.issued.preparation, t = selected.followup.target, request = step.metadata.toolArtifactRequest as Snapshot;
+  const proof = parseQaCorrectionToolConsumptionProof({
+    schemaVersion: "workflow.qa-correction.tool-consumption-proof.v1", ref: selected.ref,
+    followupEventId: selected.followupEventId, receipt, completedAt: at.toISOString(), statusTransitionVersion: transitionVersion,
+    request: { ...projectQaReceiptRequestScope(request), artifactExecution: request.artifactExecution, qaCorrectionFollowup: selected.ref },
+  });
+  const scope = { companyId: p.companyId, missionId: p.missionId, workflowRunId: p.workflowRunId,
+    workflowStepRunId: t.stepRunId, issueId: t.issueId, executionGeneration: t.executionGeneration,
+    layer: "workflow_validation", createdAt: at };
+  const [event] = await db.insert(workflowTransitionEvents).values({ ...scope,
+    eventType: "qa_correction_tool_consumption_proof", idempotencyKey: "qa-correction-tool-proof:" + receipt.requestId,
+    toStatus: "completed", payload: proof }).returning({ id: workflowTransitionEvents.id });
+  requireToolProof(event, "write");
+  const consumed = qaCorrectionConsumptionSchema.parse({ schemaVersion: "workflow.qa-correction.consumption.v2",
+    ref: selected.ref, followupEventId: selected.followupEventId, followup: selected.followup,
+    consumedAt: at.toISOString(), evidence: { kind: "tool_qa", proofEventId: event.id,
+      stepRunId: t.stepRunId, requestId: receipt.requestId, sha256: receipt.sha256 } });
+  await db.insert(workflowTransitionEvents).values({ ...scope, eventType: "qa_correction_followup_consumed",
+    idempotencyKey: qaCorrectionConsumptionKey(selected.ref.requestId), payload: consumed });
+  const { readQaCorrectionFollowupConsumption } = await import("./control-flow/qa-correction-followup.js");
+  const { createQaCorrectionHistorySession } = await import("./control-flow/qa-correction-history-session.js");
+  await readQaCorrectionFollowupConsumption(db, selected.ref, createQaCorrectionHistorySession(db, selected.ref));
+}
+
 const proofUuid = z.string().uuid(), proofText = z.string().min(1);
 const proofHash = z.string().regex(/^[a-f0-9]{64}$/);
 const proofRequestSchema = toolArtifactReceiptSchema.options[1].pick({
@@ -178,7 +201,6 @@ export type QaCorrectionToolConsumptionProof = z.infer<typeof toolConsumptionPro
 function requireToolProof(value: unknown, reason: string): asserts value {
   if (!value) throw new Error("qa_correction_tool_proof_" + reason);
 }
-
 /** Shape and frozen equality only; server issuance requires the DB reader below. */
 export function parseQaCorrectionToolConsumptionProof(raw: unknown): QaCorrectionToolConsumptionProof {
   hashQaCorrectionPayload(raw);
@@ -192,7 +214,6 @@ export function parseQaCorrectionToolConsumptionProof(raw: unknown): QaCorrectio
     && frozen.contract.role === "qa", "receipt");
   return proof;
 }
-
 
 /** Issued file facts only; request, producer, DB authority and proof-only HTML rules stay with callers. */
 export function compareQaCorrectionReceiptFiles(revision: IssuedQaCorrection["applied"]["revisions"][number],
@@ -222,7 +243,6 @@ export function compareQaCorrectionReceiptFiles(revision: IssuedQaCorrection["ap
     (revision.assetsRelativeRoot === null ? "" : path.join(revision.root, revision.assetsRelativeRoot!))) return "manifest";
   return null;
 }
-
 /** SELECT-only historical relation; never re-read current request/status, files or completion writers. */
 export async function readQaCorrectionToolConsumptionProof(db: QaCorrectionDb, value: {
   ref: QaCorrectionFollowupRef; proofEventId: string; stepRunId: string; requestId: string; sha256: string;

@@ -1,10 +1,8 @@
-/**
- * Accepts an existing tool callback without changing receipt, fencing, write or sync order.
- * DAG functions arrive as hooks; the DAG import is type-only to avoid a runtime cycle.
- */
+/** Accepts tool callbacks; issued QA completion, proof and consumption commit atomically before sync. */
 import path from "node:path";
+import { isDeepStrictEqual as same } from "node:util";
 import { and, eq } from "drizzle-orm";
-import { workflowDefinitions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { missions, workflowDefinitions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import type { WorkflowStep } from "./dag-engine.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import type { PersistedWorkflowStep } from "./execution-steps.js";
@@ -21,8 +19,16 @@ import { readArtifactDigest } from "./artifact-files.js";
 import { stripRetryTrackingOnSuccess } from "./retry-launch-dispatch.js";
 import { lockFailureObservationScope } from "./tool-dispatch-failure.js";
 import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
+import { assertQaReceiptScope, compareQaCorrectionReceiptFiles, persistQaCorrectionToolConsumption } from "./qa-artifact-receipt.js";
+import { findWorkflowVerdictCorrection } from "./workflow-verdict-current.js";
+import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
+import { observeQaCorrectionToolCompletion, readCurrentQaCorrectionFollowup,
+  readQaCorrectionToolReplay } from "./control-flow/qa-correction-followup.js";
+import { prepareWorkflowVerdictLocks, lockWorkflowVerdictDependencies } from "./workflow-verdict-write.js";
+import { lockQualityAttemptBudget } from "../quality/retry-budget.js";
 
 const WORKFLOW_STEP_TERMINAL_STATUSES = new Set(["completed", "failed", "skipped"]);
+class ToolCompletionCasLost extends Error {}
 
 export interface WorkflowToolResultInput {
     companyId: string;
@@ -40,7 +46,6 @@ export interface WorkflowToolResultInput {
     error?: string;
     allowTerminalRecovery?: boolean;
 }
-
 interface WorkflowToolResultAcceptanceHooks {
   normalizeRecord(value: unknown): Record<string, unknown>;
   getMetadataRecord(value: unknown, key: string): Record<string, unknown>;
@@ -49,7 +54,6 @@ interface WorkflowToolResultAcceptanceHooks {
   getWorkflowExecutionResultSnapshot(db: Db, runId: string): Promise<WorkflowExecutionResult | null>;
   syncWorkflowRunState(db: Db, runId: string, source: WorkflowSyncSource): Promise<WorkflowExecutionResult>;
 }
-
 export async function acceptWorkflowToolResult(
   db: Db,
   input: WorkflowToolResultInput,
@@ -65,14 +69,10 @@ export async function acceptWorkflowToolResult(
     .where(eq(workflowStepRuns.id, input.stepRunId))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-
   if (!row || row.run.companyId !== input.companyId) return null;
   if (input.workflowRunId && input.workflowRunId !== row.run.id) return null;
   if (input.stepId && input.stepId !== row.stepRun.stepId) return null;
-  // [Task6c-A] resume run 결과 수용은 정확한 dispatch 신원을 요구한다. requestId 가 없거나
-  //   현재 dispatch 와 다르면 이 결과는 이전/미지 세대의 늦은 도착물 — zero write 로
-  //   snapshot 만 돌려준다(ordinary run 은 이 가드가 없어 기존과 byte-identical). 이 가드는
-  //   resetForResume 이 stamp 한 own non-null metadata.resumeRequestId 로만 판정한다.
+  // Resume callbacks require the exact durable dispatch identity.
   const resumeScopeRequestId = readOwnResumeRequestId(row.stepRun.metadata);
   if (
     resumeScopeRequestId !== null
@@ -83,19 +83,14 @@ export async function acceptWorkflowToolResult(
   if (input.requestId && row.stepRun.lastDispatchRequestId && input.requestId !== row.stepRun.lastDispatchRequestId) {
     return null;
   }
-  // [Hybrid QA] Structural gate callback guard and verdict handling (extracted).
-  // [Task5a2a] snapshot 을 artifact/step metadata/status mutation(terminal recovery 포함) 전에
-  //   검증한다(422 fail-closed). 이후 두 step lookup 이 같은 로드 배열을 쓴다(2차 raw 정규화 삭제).
+  // Load the captured execution definition before any mutation.
   const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
   const stepForGuard = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 거부한다 — toolName/status/
-  //   metadata 는 완료 권위가 아니고, 자식 정산은 settlement writers(전체 신원 형태) 전용이다.
-  //   무변이 스냅숏으로 양보한다. 일반 tool 브랜치는 기존 동작을 그대로 유지한다.
+  // Child settlement owns workflow-child completion; generic callbacks only observe it.
   if (stepForGuard && isWorkflowChildStep(stepForGuard)) {
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
-  // [tool truth — 2026-09-02] 기계 계약 실패(data.ok===false)는 success=true여도 실패로 기록.
-  // 구조 게이트는 verdict 원장 계약상 제외. 상세: tool-result-truth.ts
+  // Machine-contract failures remain failures; structural gates keep their own verdict contract.
   input = {
     ...input,
     ...applyMachineContractTruth({
@@ -115,7 +110,6 @@ export async function acceptWorkflowToolResult(
   if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status) && !canRecoverTerminalFailure) {
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
-
   const now = new Date();
   const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
     ? row.stepRun.metadata
@@ -137,10 +131,7 @@ export async function acceptWorkflowToolResult(
     artifactPath: input.artifactPath,
     data: input.data,
   });
-  // [Q3 생산 시점 다이제스트 — 2026-10-04] 영수증 없이 완료되는 내구 toolResult 도 완료 시점
-  //   artifactSha256 를 함께 기록한다: 이후 tool-output seed 검증(workflow-seed-tool-output.ts)이
-  //   승인 시점 bytes 를 생산 시점 값과 비교해 변조를 가리고, 기록에 없으면 재사용이 fail-closed
-  //   로 거절된다. additive — 영수증 분기·기존 소비자 무변경, 안전 읽기 실패 시 필드만 비운다.
+  // Preserve the production digest used by later seed validation.
   const producedArtifactSha256 = artifactPath && input.success ? await readArtifactDigest(artifactPath) : null;
   const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
     || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
@@ -173,13 +164,7 @@ export async function acceptWorkflowToolResult(
     resultMetadata = stripRetryTrackingOnSuccess(resultMetadata) ?? resultMetadata;
   }
 
-  // [Hybrid QA] Structural gates: atomic ledger+status transaction with CAS.
-  // The status patch is derived PURELY (no DB/ledger write) via
-  // planStructuralCompletion; the authoritative verdict is recorded exactly once
-  // INSIDE the atomic transaction below. Never pre-write the ledger outside the
-  // transaction — a pre-tx write cannot roll back on CAS loss and would orphan a
-  // verdict row with no matching step status update.
-  // Non-structural tool steps: unchanged non-transactional path.
+  // Structural verdict and step CAS remain in their existing atomic writer.
   if (isStructuralGateStep(stepForGuard)) {
     const structuralGateProducerToken = readStructuralGateProducerToken(
       existingMetadata.structuralGateProducerToken,
@@ -205,19 +190,10 @@ export async function acceptWorkflowToolResult(
     return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
   }
 
-  // Non-structural path: reuse the pure completion plan.
-  // When finalization v1 is enabled, tool steps must also set dispatch_ready_at
-  // so that v1Enforcement-enabled edge-condition evaluation admits downstream steps.
-  // Heartbeat-backed steps get this via settlement.ts; tool steps bypass heartbeat
-  // entirely, so we set it here on successful completion (only if not already set).
+  // Successful tools also expose dispatch readiness to downstream evaluation.
   const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
   const nextStatus = effectiveSuccess ? "completed" : "failed";
-  // [Task6c-A] 완료 UPDATE 는 세대 CAS 로 강화된다: load 시점과 update 시점 사이
-  //   resetForResume 이 executionGeneration/statusTransitionVersion 을 정확히 함께 +1 하고 새
-  //   resumeRequestId 로 stamp 을 교체하므로, (generation, transitionVersion) 이 여전히 일치하는
-  //   resume 행은 필연히 같은 resumeRequestId 를 가진다(metadata 동등성은 이 CAS 가 보장 — 별도
-  //   where 불필요). ordinary run 도 generation 만으로 낡은 종결/복구 결과를 차단한다. 0 row 이면
-  //   stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다.
+  // Generation fences terminal/recovery changes; resume also fences transition version.
   const completionCasCondition = and(
     eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
     ...(artifactCompletion ? [eq(workflowStepRuns.lastDispatchRequestId, artifactCompletion.requestId), eq(workflowStepRuns.status, "running")] : []),
@@ -225,8 +201,6 @@ export async function acceptWorkflowToolResult(
       ? [eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion)]
       : []),
   );
-  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 절대 마감하지 않는다 —
-  //   자식 정산 권위는 workflow-child-settlement-writers 의 전체 신원 형태뿐이다(위에서 거부됨).
   const observeFailure = nextStatus === "failed" && isQaRebindConsumer(row.stepRun.issueId, stepForGuard, existingMetadata);
   const writeCompletion = async (writer: Db) => {
     const [updated] = await writer.update(workflowStepRuns).set({
@@ -249,14 +223,62 @@ export async function acceptWorkflowToolResult(
     }
     return updated;
   };
-  // Lock order mission → run → step (see lockFailureObservationScope).
-  const updatedStepRun = observeFailure
-    ? await db.transaction(async tx => {
+  // Files and frozen-receipt verification above run without locks. Only issued QA uses this writer.
+  const correction = effectiveSuccess && toolArtifactReceipt && row.stepRun.issueId
+    ? await findWorkflowVerdictCorrection(db, { companyId: row.run.companyId, issueId: row.stepRun.issueId,
+      workflowRunId: row.run.id, workflowStepRunId: row.stepRun.id }) : null;
+  const requestRef = getMetadataRecord(existingMetadata, "toolArtifactRequest").qaCorrectionFollowup;
+  if (toolArtifactReceipt && (correction || requestRef !== undefined)
+    && (!correction || !same(correction.ref, requestRef))) throw new Error("qa_correction_tool_request_changed");
+  let updatedStepRun;
+  if (correction && toolArtifactReceipt) {
+    const observation = await observeQaCorrectionToolCompletion(db, correction.ref, toolRequestId!,
+      createQaCorrectionHistorySession(db, correction.ref));
+    if (!observation) return getWorkflowExecutionResultSnapshot(db, row.run.id);
+    const dependencies = await prepareWorkflowVerdictLocks(db, correction, []);
+    updatedStepRun = await db.transaction(async tx => {
+      const p = correction.issued.preparation, connection = tx as unknown as Db;
+      if (p.authority.kind === "quality_current_output") await lockQualityAttemptBudget(tx,
+        { companyId: p.companyId, actionId: p.authority.actionId, now: new Date() });
+      // Existing order: quality → mission → run → heartbeat → issue → sorted steps → products → bindings.
+      await tx.select().from(missions).where(and(eq(missions.companyId, p.companyId),
+        eq(missions.id, p.missionId))).for("update");
+      await tx.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, p.companyId),
+        eq(workflowRuns.id, p.workflowRunId))).for("update");
+      if (await readQaCorrectionToolReplay(tx, correction.ref, toolRequestId!,
+        createQaCorrectionHistorySession(tx, correction.ref))) throw new ToolCompletionCasLost();
+      await lockWorkflowVerdictDependencies(tx, dependencies);
+      const current = await readCurrentQaCorrectionFollowup(tx, correction.ref, observation,
+        createQaCorrectionHistorySession(tx, correction.ref));
+      const latest = await findWorkflowVerdictCorrection(tx, { companyId: p.companyId,
+        issueId: row.stepRun.issueId!, workflowRunId: p.workflowRunId, workflowStepRunId: row.stepRun.id });
+      if (!same(latest?.ref, correction.ref) || !same(current.database.target.step, row.stepRun)) {
+        throw new Error("qa_correction_tool_request_changed");
+      }
+      assertQaReceiptScope(toolArtifactReceipt,
+        { run: current.database.run, stepRun: current.database.target.step }, toolRequestId ?? undefined);
+      const revision = current.revisions.length === 1 ? current.revisions[0] : null;
+      if (!revision?.workflowProducer || toolArtifactReceipt.input.workProductId !== revision.revision.workProductId
+        || compareQaCorrectionReceiptFiles(revision.revision, toolArtifactReceipt.input) !== null
+        || !same(toolArtifactReceipt.input.producer, revision.workflowProducer)
+        || toolArtifactReceipt.input.mode === "html" && toolArtifactReceipt.input.assetsRoot !== "") {
+        throw new Error("qa_correction_tool_input_changed");
+      }
+      const updated = await writeCompletion(connection);
+      // A losing completion must roll back even ancillary budget-lock materialization.
+      if (!updated) throw new ToolCompletionCasLost();
+      await persistQaCorrectionToolConsumption(connection, current, row.stepRun, toolArtifactReceipt,
+        now, updated.transitionVersion);
+      return updated;
+    }).catch(error => { if (error instanceof ToolCompletionCasLost) return null; throw error; });
+  } else {
+    // Existing failure observation order: mission → run → step.
+    updatedStepRun = observeFailure ? await db.transaction(async tx => {
       await lockFailureObservationScope(tx as unknown as Db, row.run);
       return writeCompletion(tx as unknown as Db);
     }) : await writeCompletion(db);
+  }
   if (!updatedStepRun) {
-    // [Task6c-A] stale resume 결과: 한 건도 쓰지 않고 현재 상태 snapshot 으로 수렴.
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
   {
@@ -274,6 +296,5 @@ export async function acceptWorkflowToolResult(
         : null,
     });
   }
-
   return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
 }

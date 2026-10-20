@@ -16,7 +16,6 @@ import { hashQaCorrectionPayload, parseQaCorrectionEventPayload, qaCorrectionFol
   type QaCorrectionFollowupRef, type QaCorrectionAttempt } from "./qa-correction-contract.js";
 import type { QaCorrectionDb } from "./qa-correction-authority.js";
 import type { IssuedQaCorrection } from "./qa-correction-reader.js";
-
 type ReadIssued = (db: QaCorrectionDb, scope: Omit<QaCorrectionFollowupRef, "requestId">) => Promise<IssuedQaCorrection>;
 type Revision = IssuedQaCorrection["applied"]["revisions"][number];
 type Producer = Extract<IssuedQaCorrection["preparation"]["sources"][number]["provenance"],
@@ -31,7 +30,6 @@ function requireFollowup(value: unknown, reason: string): asserts value {
 const same = isDeepStrictEqual;
 const object = (value: unknown) => value && typeof value === "object" && !Array.isArray(value)
   ? value as Record<string, unknown> : {};
-
 async function originalProducer(db: QaCorrectionDb, issued: IssuedQaCorrection, revision: Revision,
   readIssued: ReadIssued): Promise<Producer | null> {
   const p = issued.preparation, visited = new Set<string>();
@@ -54,7 +52,6 @@ async function originalProducer(db: QaCorrectionDb, issued: IssuedQaCorrection, 
     revision = prior;
   }
 }
-
 /** Historical issuance only. The injected reader validates the real C03 chain, not a key or hint. */
 export async function readIssuedQaCorrectionFollowup(db: QaCorrectionDb, value: QaCorrectionFollowupRef, readIssued: ReadIssued) {
   const ref = qaCorrectionFollowupRefSchema.parse(value);
@@ -79,11 +76,31 @@ export async function readIssuedQaCorrectionFollowup(db: QaCorrectionDb, value: 
   return { ref, issued, followup, followupEventId: rows[0]!.id, revisions };
 }
 type Selected = Awaited<ReturnType<typeof readIssuedQaCorrectionFollowup>>;
+/** Historical first effect is checked before currentness and again under the owning run lock. */
+export async function readQaCorrectionToolReplay(db: QaCorrectionDb, ref: QaCorrectionFollowupRef,
+  requestId: string, readIssued: ReadIssued) {
+  const relation = await readQaCorrectionFollowupConsumption(db, ref, readIssued);
+  if (!relation) return false;
+  requireFollowup(relation.consumed.schemaVersion === "workflow.qa-correction.consumption.v2"
+    && relation.consumed.evidence.kind === "tool_qa"
+    && relation.consumed.evidence.requestId === requestId, "consumption");
+  return true;
+}
+/** A concurrent winner can invalidate the IO snapshot; only its durable matching effect is replayable. */
+export async function observeQaCorrectionToolCompletion(db: QaCorrectionDb, ref: QaCorrectionFollowupRef,
+  requestId: string, readIssued: ReadIssued) {
+  if (await readQaCorrectionToolReplay(db, ref, requestId, readIssued)) return null;
+  try { return await observeQaCorrectionFollowup(db, ref, readIssued); }
+  catch (error) {
+    if (await readQaCorrectionToolReplay(db, ref, requestId, readIssued)) return null;
+    throw error;
+  }
+}
+
 const issuance = (s: Selected) => hashQaCorrectionPayload({ ref: s.ref, preparation: s.issued.preparation,
   applied: s.issued.applied, followup: s.followup, followupEventId: s.followupEventId, revisions: s.revisions });
 export type QaCorrectionFollowupObservation = { readonly ref: QaCorrectionFollowupRef };
 const observations = new WeakMap<QaCorrectionFollowupObservation, { issuance: string; database: unknown }>();
-
 /** Lock-free IO: compare EVERY registered main/asset/ancillary tuple, without directory discovery. */
 export async function observeQaCorrectionFollowup(db: QaCorrectionDb, ref: QaCorrectionFollowupRef, readIssued: ReadIssued) {
   requireFollowup(!is(db, PgTransaction), "transaction");
@@ -101,7 +118,6 @@ export async function observeQaCorrectionFollowup(db: QaCorrectionDb, ref: QaCor
   observations.set(token, { issuance: issuance(selected), database: structuredClone(selected.database) });
   return token;
 }
-
 /** Reuse the issued reservation/use. There is no next-slot test, reservation, write or quality lock. */
 async function currentQuality(db: QaCorrectionDb, s: Selected) {
   const p = s.issued.preparation, a = p.authority;
@@ -137,7 +153,6 @@ async function currentQuality(db: QaCorrectionDb, s: Selected) {
     && usage("reservedCostCents") + usage("chargedCostCents") <= budget.maxCumulativeCostCents, "budget");
   return { action, group, policy, use, totals };
 }
-
 async function currentAttempt(db: QaCorrectionDb, s: Selected, attempt: QaCorrectionAttempt) {
   const p = s.issued.preparation;
   const [step] = await db.select().from(workflowStepRuns).where(and(eq(workflowStepRuns.id, attempt.stepRunId),
@@ -150,11 +165,8 @@ async function currentAttempt(db: QaCorrectionDb, s: Selected, attempt: QaCorrec
   return { step, issue };
 }
 
-/**
- * SELECT-only DB currentness for stage8. No byte, delivery, claim or execution permission.
- * Future writers own usage→group→action→policy→mission→run→heartbeat→issue→sorted step→product→binding.
- * Never add that prefix after a terminal run lock. Read errors propagate.
- */
+/** SELECT-only currentness. Writers own quality→mission→run→heartbeat→issue→sorted steps→products→bindings.
+ * Never add that prefix after a terminal run lock. Read errors propagate. */
 export async function readQaCorrectionFollowupDb(db: QaCorrectionDb, ref: QaCorrectionFollowupRef, readIssued: ReadIssued) {
   const s = await readIssuedQaCorrectionFollowup(db, ref, readIssued), p = s.issued.preparation;
   await assertRunNotReplaced(db, p.workflowRunId, p.companyId);
@@ -184,11 +196,9 @@ export async function readQaCorrectionFollowupDb(db: QaCorrectionDb, ref: QaCorr
         || binding.sourceExecutionGeneration === p.producer.executionGeneration), "binding");
     bindings.push(found);
   }
-  // The existing durable QA request may still name A. stage9 owns preparing B's request.
   return { ...s, status: "db_current_only" as const,
     database: { run, mission, target, producer, products, bindings, quality: await currentQuality(db, s) } };
 }
-
 /** Same-transaction issuance + DB snapshot comparison against the unforgeable lock-free IO token. */
 export async function readCurrentQaCorrectionFollowup(db: QaCorrectionDb, ref: QaCorrectionFollowupRef,
   observation: QaCorrectionFollowupObservation, readIssued: ReadIssued) {
@@ -200,7 +210,6 @@ export async function readCurrentQaCorrectionFollowup(db: QaCorrectionDb, ref: Q
     && same(captured.database, current.database), "observation");
   return { ...current, status: "rechecked_only" as const };
 }
-
 function receiptRow(row: Event | undefined, s: Selected, type: string, key: string): asserts row is Event {
   const p = s.issued.preparation, t = s.followup.target;
   requireFollowup(row && row.companyId === p.companyId && row.missionId === p.missionId
@@ -208,7 +217,6 @@ function receiptRow(row: Event | undefined, s: Selected, type: string, key: stri
     && row.executionGeneration === t.executionGeneration && row.layer === "workflow_validation"
     && row.eventType === type && row.idempotencyKey === key, "consumption");
 }
-
 /** Stored relation ONLY, including finished heartbeats. This is neither bytes nor fresh execution authority. */
 export async function readQaCorrectionFollowupConsumption(db: QaCorrectionDb, ref: QaCorrectionFollowupRef, readIssued: ReadIssued) {
   const s = await readIssuedQaCorrectionFollowup(db, ref, readIssued), p = s.issued.preparation, t = s.followup.target;
