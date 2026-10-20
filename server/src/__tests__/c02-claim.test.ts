@@ -282,7 +282,7 @@ it("claims only the latest of 33 real corrections without applying the technical
   expect(adapter).toHaveBeenCalledTimes(1);
   const applied = await c.peer.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, c.ref.companyId), eq(workflowTransitionEvents.workflowRunId, c.ref.workflowRunId),
-    eq(workflowTransitionEvents.eventType, "qa_remediation_applied")));
+    sql`event_type = 'qa_remediation_applied' AND payload->>'schemaVersion' = 'workflow.qa-correction.applied.v1'`));
   expect(applied).toHaveLength(33);
   const ids = applied.map(row => row.payload.correctionId);
   expect(new Set(ids).size).toBe(33);
