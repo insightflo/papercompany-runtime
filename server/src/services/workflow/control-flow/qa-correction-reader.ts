@@ -200,11 +200,11 @@ async function verifyQualityUse(db: QaCorrectionDb, p: QaCorrectionPreparation, 
     && asset.sha256 === evidence.ref.sha256, "evidence");
 }
 
-async function readIssued(db: QaCorrectionDb, scope: Scope, ancestors: Set<string>, cache: IssuedCache): Promise<IssuedQaCorrection> {
-  requireQaCorrection(!ancestors.has(scope.appliedEventId), "lineage");
+async function readIssued(db: QaCorrectionDb, scope: Scope, activePath: Set<string>, cache: IssuedCache): Promise<IssuedQaCorrection> {
+  requireQaCorrection(!activePath.has(scope.appliedEventId), "lineage");
   const cached = cache.get(scope.appliedEventId);
   if (cached) return cached.issued;
-  const visited = new Set(ancestors).add(scope.appliedEventId);
+  const visited = new Set(activePath).add(scope.appliedEventId);
   const appliedRow = await readEvent(db, scope, scope.appliedEventId, "qa_remediation_applied");
   const a = parseQaCorrectionEventPayload("qa_remediation_applied", appliedRow.payload);
   const preparedRow = await readEvent(db, scope, a.preparationEventId, "qa_correction_prepared");
