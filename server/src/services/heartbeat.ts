@@ -57,7 +57,7 @@ import { finalizeHermesChatRun, hermesChatService } from "./hermes-chat.js";
 import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
-import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { capHeartbeatRunResultJsonForStorage, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
   attentionHeartbeatRuns,
   clampRunListLimit,
@@ -8098,7 +8098,7 @@ export function heartbeatService(db: Db) {
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
-        resultJson: adapterResult.resultJson ?? null,
+        resultJson: capHeartbeatRunResultJsonForStorage(adapterResult.resultJson),
         sessionIdAfter: persistedSessionIdAfter,
         stdoutExcerpt,
         stderrExcerpt,
