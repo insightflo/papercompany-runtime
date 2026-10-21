@@ -6,7 +6,7 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
-import { and, eq, is } from "drizzle-orm";
+import { and, eq, inArray, is } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, missions, workflowRuns,
   workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
@@ -54,6 +54,10 @@ const requestFor = (p: QaCorrectionPreparation): Request => ({ runId: p.workflow
 async function currentIssued(db: Db, run: typeof workflowRuns.$inferSelect, steps: readonly Step[]) {
   const found: Array<{ p: QaCorrectionPreparation; appliedEventId: string; targets: string[] }> = [];
   if (!run.missionId || ["completed", "cancelled", "aborted", "failed", "timed-out"].includes(run.status)) return found;
+  // Fence cancelled attempts at discovery; status sync must still settle them without delivery.
+  const cancelledIssues = await db.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, run.companyId),
+    inArray(issues.id, steps.flatMap(s => s.issueId ? [s.issueId] : [])), eq(issues.status, "cancelled")));
+  steps = steps.filter(s => s.status !== "cancelled" && !cancelledIssues.some(i => i.id === s.issueId));
   const rows = await db.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, run.id),
     eq(workflowTransitionEvents.eventType, "qa_correction_prepared")));

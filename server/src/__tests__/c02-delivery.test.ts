@@ -48,6 +48,9 @@ import { activatePlanningMissionForWorkflowRun } from "../services/missions/miss
 import { parseQaCorrectionEventPayload, qaCorrectionDeliverySchema } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import * as artifactWriter from "../services/workflow/artifact-writer.js";
+import { issueC02 } from "./helpers/c02-fixture.js";
+import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
+import { readQaCorrectionFollowupDb, readQaCorrectionFollowupConsumption } from "../services/workflow/control-flow/qa-correction-followup.js";
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
 if (!support.supported) console.warn(`Skipping C02 extraction test: ${support.reason ?? "unsupported environment"}`);
@@ -84,49 +87,21 @@ describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
     });
     const run = await createFrozenRun(db, { workflowId, companyId, missionId });
     await markRunStatus(db, run.id, "running");
-    const startedAt = new Date("2026-06-18T07:01:00.000Z");
-    const oldCompletedAt = new Date("2026-06-18T07:05:00.000Z");
-    const rejectedAt = new Date("2026-06-18T07:10:00.000Z");
-    const producerCompletedAt = new Date("2026-06-18T07:15:00.000Z");
-    const producerIssueId = randomUUID();
-    const qaIssueId = randomUUID();
-    await db.insert(issues).values([
-      {
-        id: producerIssueId, companyId, missionId, title: "Produce artifact",
-        status: "done", assigneeAgentId: agentId, originKind: "workflow_execution",
-        originId: run.id, originRunId: run.id, startedAt, completedAt: oldCompletedAt,
-      },
-      {
-        id: qaIssueId, companyId, missionId, title: "[QA] Validate artifact",
-        status: "blocked", assigneeAgentId: agentId, originKind: "workflow_execution",
-        originId: run.id, originRunId: run.id, startedAt,
-        description: "Dependency workProducts: none registered",
-      },
-    ]);
+    const startedAt = new Date("2026-06-18T07:01:00.000Z"); const oldCompletedAt = new Date("2026-06-18T07:05:00.000Z");
+    const rejectedAt = new Date("2026-06-18T07:10:00.000Z"); const producerCompletedAt = new Date("2026-06-18T07:15:00.000Z");
+    const producerIssueId = randomUUID(); const qaIssueId = randomUUID();
+    await db.insert(issues).values([{ id: producerIssueId, companyId, missionId, title: "Produce artifact", status: "done",
+      assigneeAgentId: agentId, originKind: "workflow_execution", originId: run.id, originRunId: run.id, startedAt, completedAt: oldCompletedAt },
+      { id: qaIssueId, companyId, missionId, title: "[QA] Validate artifact", status: "blocked", assigneeAgentId: agentId,
+        originKind: "workflow_execution", originId: run.id, originRunId: run.id, startedAt, description: "Dependency workProducts: none registered" }]);
     const stepRows = await db.insert(workflowStepRuns).values([
       { workflowRunId: run.id, stepId: "produce", issueId: producerIssueId, status: "completed", startedAt, completedAt: oldCompletedAt },
       { workflowRunId: run.id, stepId: "qa", issueId: qaIssueId, status: "failed", startedAt, completedAt: rejectedAt },
-      { workflowRunId: run.id, stepId: "approve", status: "pending" },
-    ]).returning();
-    const qaStepRunId = stepRows.find((row) => row.stepId === "qa")!.id;
-    const verdictHeartbeatId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: verdictHeartbeatId, companyId, agentId, issueId: qaIssueId,
-      status: "succeeded", startedAt, finishedAt: rejectedAt,
-    });
-    const priorFindings = [{ id: "refresh-source", summary: "Verify the revised source", layer: "artifact" }];
+      { workflowRunId: run.id, stepId: "approve", status: "pending" }]).returning(); const qaStepRunId = stepRows.find((row) => row.stepId === "qa")!.id; const verdictHeartbeatId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: verdictHeartbeatId, companyId, agentId, issueId: qaIssueId, status: "succeeded", startedAt, finishedAt: rejectedAt }); const priorFindings = [{ id: "refresh-source", summary: "Verify the revised source", layer: "artifact" }];
     // Structured workflow_api authority bound to this exact company/issue/run/step and QA heartbeat.
-    await db.insert(workflowTransitionEvents).values({
-      companyId, missionId, workflowRunId: run.id, workflowStepRunId: qaStepRunId,
-      issueId: qaIssueId, heartbeatRunId: verdictHeartbeatId,
-      eventType: "workflow_validation_verdict", layer: "workflow_validation",
-      verdict: "request_changes", decision: "request_changes", reason: "workflow_api", reasonCode: "workflow_api",
-      idempotencyKey: `c02-rejection:${qaStepRunId}`, createdAt: rejectedAt,
-      payload: {
-        kind: "workflow_validation_verdict", workflowRunId: run.id, stepRunId: qaStepRunId,
-        issueId: qaIssueId, verdict: "request_changes", diagnostics: [], findings: priorFindings,
-      },
-    });
+    await db.insert(workflowTransitionEvents).values({ companyId, missionId, workflowRunId: run.id, workflowStepRunId: qaStepRunId, issueId: qaIssueId, heartbeatRunId: verdictHeartbeatId, eventType: "workflow_validation_verdict", layer: "workflow_validation", verdict: "request_changes", decision: "request_changes", reason: "workflow_api", reasonCode: "workflow_api", idempotencyKey: `c02-rejection:${qaStepRunId}`, createdAt: rejectedAt,
+      payload: { kind: "workflow_validation_verdict", workflowRunId: run.id, stepRunId: qaStepRunId, issueId: qaIssueId, verdict: "request_changes", diagnostics: [], findings: priorFindings } });
     heartbeatWakeup.mockResolvedValue({ id: "c02-boundary-only" });
     const recheckComments = async () => (await db.select().from(issueComments)
       .where(eq(issueComments.issueId, qaIssueId)))
@@ -292,9 +267,34 @@ describeEP("C02 14A: real replacement rejection to immutable correction delivery
       expect(repeated.wakes).toEqual(state.wakes); expect(repeated.heartbeats).toEqual(state.heartbeats); expect(adapter).toHaveBeenCalledTimes(1); expect(await costs()).toEqual(costBefore);
     } finally { writer.mockRestore(); release(); let drained = false; try { await waitForHeartbeatExecutionsToDrain(owned.db); drained = true;
       const wakes = await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, target.id));
-      const runs = await peer.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, wakeupRequestId: heartbeatRuns.wakeupRequestId, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, error: heartbeatRuns.error }).from(heartbeatRuns).where(eq(heartbeatRuns.issueId, qa.issueId!));
+      const runs = await peer.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, wakeupRequestId: heartbeatRuns.wakeupRequestId, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, error: heartbeatRuns.error, retryOfRunId: heartbeatRuns.retryOfRunId, processLossRetryCount: heartbeatRuns.processLossRetryCount }).from(heartbeatRuns).where(eq(heartbeatRuns.issueId, qa.issueId!));
       console.info("C02 delivery execution evidence", JSON.stringify({ dbKinds, executed, drained, heartbeats: runs, wakes: wakes.map(w => ({ id: w.id, agentId: w.agentId, issueId: w.issueId, runId: w.runId, status: w.status, error: w.error, ref: w.payload?.qaCorrectionFollowup ?? null })) })); }
       catch (error) { console.info("C02 delivery execution evidence", JSON.stringify({ dbKinds, executed, drained, error: error instanceof Error ? error.message : String(error) })); throw error; }
       finally { actualDelivery.enabled = false; adapter.mockReset(); vi.unstubAllEnvs(); } }
+  }, 120000);
+  // C02/C12: only the QA issue is cancelled. Existing status mapping requires failed, never a fresh delivery.
+  it("settles an issued unconsumed B after only the QA issue is cancelled without delivery or execution", async () => {
+    const isolated = await createCommitSourceHarness();
+    try {
+      vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk"); vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", path.join(isolated.root, "cancel-storage"));
+      const c = await issueC02(isolated, { mode: "content-only" }), { peer, s } = c;
+      await peer.update(workflowStepRuns).set({ status: "running", completedAt: null }).where(eq(workflowStepRuns.id, s.f.qa.id));
+      await peer.update(agents).set({ status: "active", adapterType: "codex_local", adapterConfig: { cwd: isolated.root } }).where(eq(agents.companyId, s.p.companyId));
+      const current = () => readQaCorrectionFollowupDb(peer, c.ref, readIssuedQaCorrection);
+      expect((await current()).status).toBe("db_current_only"); expect(await readQaCorrectionFollowupConsumption(peer, c.ref, readIssuedQaCorrection)).toBeNull();
+      const before = await commitDbState({ ...s, db: peer }), cancelledAt = new Date(); expect(before.events.filter(e => e.eventType === "qa_correction_followup_delivered")).toHaveLength(0);
+      const costs = () => peer.select().from(costEvents).where(eq(costEvents.companyId, s.p.companyId)).orderBy(costEvents.id), costBefore = await costs();
+      await peer.update(issues).set({ status: "cancelled", cancelledAt }).where(eq(issues.id, s.f.qa.issueId!));
+      actualDelivery.enabled = true; adapter.mockReset().mockResolvedValue({ exitCode: 1, signal: null, timedOut: false, errorMessage: "unexpected cancelled execution", usage: null, provider: "test", model: "test", resultJson: null, runtimeServices: [] }); heartbeatWakeup.mockClear();
+      await expect(current()).rejects.toThrow("qa_correction_followup_attempt");
+      await expect(syncWorkflowRunState(isolated.db, s.p.workflowRunId)).resolves.toBeDefined(); await waitForHeartbeatExecutionsToDrain(isolated.db);
+      const [qa] = await peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.f.qa.id)), [issue] = await peer.select().from(issues).where(eq(issues.id, s.f.qa.issueId!));
+      expect(qa).toMatchObject({ status: "failed", completedAt: cancelledAt, executionGeneration: c.followup.target.executionGeneration, retryCount: c.followup.target.retryCount, iterationIndex: c.followup.target.iterationIndex }); expect(issue?.status).toBe("cancelled");
+      const after = await commitDbState({ ...s, db: peer });
+      for (const key of ["products", "pins", "usage", "groups", "receipts", "wakes", "heartbeats"] as const) expect(after[key]).toEqual(before[key]);
+      const correctionEvents = (state: typeof before) => state.events.filter(e => e.eventType.startsWith("qa_correction_") || e.idempotencyKey?.startsWith("qa-correction-applied:"));
+      expect(correctionEvents(after)).toEqual(correctionEvents(before)); expect(await costs()).toEqual(costBefore); expect(adapter).not.toHaveBeenCalled(); expect(heartbeatWakeup).not.toHaveBeenCalled();
+      console.info("C02 cancelled issue evidence", JSON.stringify({ ref: c.ref, issueStatus: issue?.status, stepStatus: qa?.status, completedAt: qa?.completedAt, deliveredDelta: after.events.filter(e => e.eventType === "qa_correction_followup_delivered").length - before.events.filter(e => e.eventType === "qa_correction_followup_delivered").length, heartbeatDelta: after.heartbeats.length - before.heartbeats.length, adapterCalls: adapter.mock.calls.length, drained: true }));
+    } finally { try { await waitForHeartbeatExecutionsToDrain(isolated.db); } finally { actualDelivery.enabled = false; adapter.mockReset(); vi.unstubAllEnvs(); await isolated.close(); } }
   }, 120000);
 });
