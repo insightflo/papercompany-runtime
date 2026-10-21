@@ -7,6 +7,7 @@ import { isRunRecoveryServiceEnabled } from "./run-reopen-guard-flag.js";
 import { resumeWorkflowRun } from "./workflow-store.js";
 import { HttpError } from "../../errors.js";
 import type { AutomaticSourceRecovery } from "./source-issue-native-resume.js";
+import { reviveAuthorizedFailureCascade } from "./failure-cascade-recovery.js";
 
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -48,6 +49,7 @@ export async function acceptSourceIssueRecovery(db: Db, input: {
           requestReference: input.ownerExecution ? `mission-owner-execute:${input.ownerExecution.actionId}` : input.issueId,
           requestedBy: input.ownerExecution ? "mission_owner_execute" : "source_issue_unblock", now: new Date() });
         if (recovery.kind !== "recovered") return null;
+        await reviveAuthorizedFailureCascade(t, { observedRun: run, failedStep: step, authority: recovery.authority });
         official = true;
         if (input.ownerExecution) receipt = { authorityId: recovery.authority.id,
           authorityVersion: recovery.authority.resultingAuthorityVersion,
