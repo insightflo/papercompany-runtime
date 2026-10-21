@@ -2,6 +2,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { heartbeatRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { z } from "zod";
 import { loadStructuralGateVerdictByRequest } from "../workflow/control-flow/structural-gate-ledger.js";
+import { isIssueLessToolStep } from "../workflow/issue-less-tool-shape.js";
 import type { RevisionStep } from "../workflow/revision-step-config.js";
 
 const toolFailure = z.object({ requestId: z.string().min(1), success: z.literal(false) }).passthrough();
@@ -10,7 +11,9 @@ const toolDispatchFailure = z.object({ requestId: z.string().min(1), dispatchErr
  * tool completion have their own durable authority, without a failed heartbeat/errorCode. */
 export async function hasRevisionResultFailure(db: Db, companyId: string, step: typeof workflowStepRuns.$inferSelect,
   definition: RevisionStep, heartbeats: (typeof heartbeatRuns.$inferSelect)[]) {
-  if (definition.type === "tool" && step.lastDispatchRequestId) {
+  // Typed tools and the executor's own issue-less tool shape (typeless judgment) both record
+  // dispatch outcomes against lastDispatchRequestId; only this metadata path is generation-free.
+  if (step.lastDispatchRequestId && (definition.type === "tool" || isIssueLessToolStep(definition))) {
     const result = toolFailure.safeParse(step.metadata?.toolResult);
     if (result.success && result.data.requestId === step.lastDispatchRequestId) return true;
     const invocation = toolDispatchFailure.safeParse(step.metadata?.toolInvocation);
