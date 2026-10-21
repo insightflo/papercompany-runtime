@@ -188,6 +188,39 @@ describe("C04 durable failure-cascade causes", () => {
     expect(current.steps.every(row => !Object.prototype.hasOwnProperty.call(row.metadata, "failureCascadeProvenance"))).toBe(true);
   });
 
+  // C04/addendum:2: a pre-upgrade held skip must join a newly written successor.
+  // The same valid prefix leaves last skipped on 36046828; both must recover together.
+  const prefixes = ["valid", "boolean-only", "wrong-source", "stale-version", "malformed", "incomplete"] as const;
+  it.each(officialModes.flatMap(mode => prefixes.map(prefix => ({ mode, prefix }))))(
+    "$mode links only proven historical $prefix prefixes to newly recorded successors", async ({ mode, prefix }) => {
+      const world = await seed(), id = world.stepRunIdsByStep.after!;
+      const metadata = { keep: "first", controlFlowSkipped: true,
+        ...(prefix === "malformed" ? { failureCascadeProvenance: null }
+          : prefix === "incomplete" ? { failureCascadeProvenance: {
+            ...expectedProof(world, "after", "deadlock-on"), complete: false,
+          } } : {}) };
+      const [after] = await owned.db.update(workflowStepRuns).set({ status: "skipped", completedAt: new Date(), metadata })
+        .where(eq(workflowStepRuns.id, id)).returning();
+      if (prefix !== "boolean-only") await recordWorkflowStepStatusTransition(owned.db, {
+        companyId: world.companyId, missionId: world.missionId, workflowRunId: world.runId,
+        workflowStepRunId: id, issueId: after!.issueId, fromStatus: "pending", toStatus: "skipped",
+        transitionVersion: after!.statusTransitionVersion + (prefix === "stale-version" ? 1 : 0),
+        source: prefix === "wrong-source" ? "workflow_sync" : "workflow_deadlock_reconciler",
+      });
+      const held = await snapshot(owned.peer, world);
+      expect(held.run.status).toBe("running");
+      expect(held.steps.find(row => row.stepId === "last")?.status).toBe("pending");
+      if (prefix === "valid") expect(after!.metadata).not.toHaveProperty("failureCascadeProvenance");
+      const terminal = await finish(world, mode);
+      const last = terminal.steps.find(row => row.stepId === "last")!;
+      expect(last.status).toBe("skipped");
+      // Exercise official recovery BEFORE checking the new record, including on the baseline.
+      // Existing oracle also preserves the two-cause branch, cancelled issue and publication.
+      await assertRecovery(world, terminal, prefix === "valid");
+      if (prefix === "valid") expect(last.metadata.failureCascadeProvenance).toEqual(expectedProof(world, "last", mode));
+      else expect(last.metadata.failureCascadeProvenance).toMatchObject({ complete: false });
+    });
+
   it.each(officialModes)("%s marks missing historical graph as unproven and keeps skips sticky", async mode => {
     const world = await seed(false), terminal = await finish(world, mode);
     expect(terminal.steps.find(row => row.stepId === "after")?.metadata.failureCascadeProvenance)

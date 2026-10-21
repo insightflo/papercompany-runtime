@@ -8,41 +8,12 @@ import {
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { reviveConditionalSkip } from "./conditional-skip-settlement.js";
-import { WORKFLOW_SYNC_SOURCES } from "./workflow-sync-source.js";
-import { orderedGraph, permitsRecordedCascadeRecovery } from "./failure-cascade-provenance.js";
+import { currentTransition, orderedGraph, permitsRecordedCascadeRecovery, unlaunched } from "./failure-cascade-provenance.js";
 import type { WorkflowRecoveryAuthorityRow } from "./run-recovery-authority.js";
 
 type Step = typeof workflowStepRuns.$inferSelect;
 type Run = typeof workflowRuns.$inferSelect;
 type Event = typeof workflowTransitionEvents.$inferSelect;
-
-function unlaunched(row: Step): boolean {
-  return row.startedAt === null && row.lastDispatchAttemptAt === null
-    && row.lastDispatchAcceptedAt === null && row.lastDispatchRequestId === null
-    && row.dispatchOwnerWakeupRequestId === null && row.dispatchOwnerHeartbeatRunId === null
-    && row.evidenceReadyAt === null && row.metadata?.toolResult == null;
-}
-
-/** Missing/ambiguous history is deliberately not upgraded into a failure cause. */
-function currentTransition(events: Event[], run: Run, row: Step): Event | undefined {
-  if (row.statusTransitionVersion < 1) return undefined;
-  const matches = events.filter(event => event.eventType === "workflow_step_status_transition"
-    && event.layer === "workflow_sync" && event.missionId === run.missionId
-    && WORKFLOW_SYNC_SOURCES.some(source => source === event.reasonCode)
-    && event.workflowStepRunId === row.id && event.issueId === row.issueId
-    && event.toStatus === row.status && typeof event.fromStatus === "string" && event.fromStatus !== row.status
-    && event.payload !== null && typeof event.payload === "object" && !Array.isArray(event.payload)
-    && event.payload.priorStatus === event.fromStatus && event.payload.source === event.reasonCode
-    && event.payload.transitionVersion === row.statusTransitionVersion
-    && event.idempotencyKey === `wf-step-status:${row.id}:${row.status}:${row.statusTransitionVersion}`
-    && (event.executionGeneration === null || event.executionGeneration === row.executionGeneration - 1));
-  const event = matches.length === 1 ? matches[0] : undefined;
-  if (!event || events.some(later => later.eventType === "workflow_authority_transition"
-    && later.workflowStepRunId === row.id && later.createdAt >= event.createdAt
-    && (later.payload?.transition === "generation_advanced" || later.reasonCode === "workflow_resume_reset"
-      || (later.executionGeneration !== null && later.executionGeneration !== row.executionGeneration - 1)))) return undefined;
-  return event;
-}
 
 export async function reviveAuthorizedFailureCascade(db: Db, input: {
   observedRun: Run; failedStep: Step; authority: WorkflowRecoveryAuthorityRow;
