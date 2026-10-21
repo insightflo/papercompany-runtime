@@ -199,21 +199,21 @@ describeEP("source-issue unblock wiring", () => {
     expect(await authoritiesOf(world.runId)).toHaveLength(0);
   });
 
-  it("wake failure after formal recovery leaves the run running — no mixed-version restore", async () => {
-    // [봇 지적 재발 방지 — bug·high] 복구 소비(버전 범프) 후 wake 단계 실패 시 무조건
-    //   failed 원상복구하면 결정은 v 에 남고 버전은 v+1 인 혼합 상태가 된다. 복구는
-    //   정당했으므로 run 은 running@v+1 로 유지하고 wake 결과만 report_only 로 보고한다.
+  it("wake failure rolls back formal recovery together with its request", async () => {
+    // C02/C03 + c04-c05-contract-addendum.txt:4 require one transaction for recovery and request.
+    // Old: report_only/running/version 1/one authority. New: original failed/version/zero new consumption.
     const world = await seedUnblockWorld(retryMetadata("waiting", 1, 3, hoursFromNow(1)));
+    const before = await runOf(db, world.runId);
     const outcome = await dispatchSourceIssueNativeResume(db, {
       companyId: world.companyId, issueId: world.sourceIssueId,
       wakeFn: async () => false,
     });
     expect(outcome.kind).toBe("report_only");
     const run = await runOf(db, world.runId);
-    expect(run?.status).toBe("running");
-    expect(run?.dispatchAuthorityVersion).toBe(1);
+    expect(run?.status).toBe(before?.status);
+    expect(run?.dispatchAuthorityVersion).toBe(before?.dispatchAuthorityVersion);
     const authorities = await authoritiesOf(world.runId);
-    expect(authorities).toHaveLength(1);
+    expect(authorities).toHaveLength(0);
   });
 
   it("open gate (live retry reservation): unblock consumes a source_issue_unblock authority and dispatches", async () => {
