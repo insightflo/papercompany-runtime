@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, is, sql } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog, costEvents, heartbeatRuns, issueComments, issueWorkProducts, issues, missions,
@@ -9,7 +10,6 @@ import {
   agents, agentWakeupRequests, workflowStepRuns, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
-
 const { heartbeatWakeup, actualDelivery, adapter } = vi.hoisted(() => ({
   heartbeatWakeup: vi.fn(), actualDelivery: { enabled: false }, adapter: vi.fn(),
 }));
@@ -17,7 +17,6 @@ vi.mock("../adapters/index.js", async original => ({
   ...await original<typeof import("../adapters/index.js")>(),
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: adapter }),
 }));
-
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
   return { ...actual, heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) =>
@@ -32,7 +31,6 @@ vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
         : actual.queueIssueAssignmentWakeup({ ...input, heartbeat: { wakeup: heartbeatWakeup } }),
   };
 });
-
 import {
   cleanupFrozenTables, createFrozenRun, markRunStatus, seedCompanyWithMission,
   seedWorkflowDefinition, startExecutionDefinitionFixture, stepRunsOf,
@@ -47,36 +45,29 @@ import { proposeReplacement, approveReplacement } from "../services/workflow/rep
 import { admitReplacement } from "../services/workflow/replacement-admission.js";
 import { claimPlainWorkflowStart } from "../services/workflow/plain-start-claim.js";
 import { activatePlanningMissionForWorkflowRun } from "../services/missions/mission-workflow-lifecycle.js";
-import { parseQaCorrectionEventPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { parseQaCorrectionEventPayload, qaCorrectionDeliverySchema } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import * as artifactWriter from "../services/workflow/artifact-writer.js";
-
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
-
 if (!support.supported) console.warn(`Skipping C02 extraction test: ${support.reason ?? "unsupported environment"}`);
-
 describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
   let fixture: Extract<ExecutionDefinitionFixture, { supported: true }>;
   let db: Db;
-
   beforeAll(async () => {
     const started = await startExecutionDefinitionFixture("c02-delivery-");
     if (!started.supported) throw new Error(started.reason);
     fixture = started;
     db = fixture.db;
   }, 60_000);
-
   afterEach(async () => {
     heartbeatWakeup.mockReset();
     await db.delete(heartbeatRuns);
     await cleanupFrozenTables(db);
   });
-
   afterAll(async () => {
     if (fixture?.supported) await fixture.cleanup();
   });
-
   // C02 stage-1 extraction map and workflow-dag-engine.test.ts recheck/current-workProduct/
   // succeeded-heartbeat cases define these preservation expectations; no queue/claim/QA proof is asserted.
   it("preserves fresh-session wake arguments, current artifact comments, activity and repeated sync behavior", async () => {
@@ -144,13 +135,11 @@ describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
       eq(activityLog.entityId, qaIssueId),
       eq(activityLog.action, "workflow.validation_recheck_queued"),
     ));
-
     // Counterexample: completion predates the official rejection, so no fresh-input recheck.
     await syncWorkflowRunForIssue(db, producerIssueId);
     expect(heartbeatWakeup).not.toHaveBeenCalled();
     expect(await recheckComments()).toHaveLength(0);
     expect(await recheckActivities()).toHaveLength(0);
-
     const reportPath = "/srv/papercompany/produced_work/c02-current-report.md";
     await db.insert(issueWorkProducts).values({
       companyId, issueId: producerIssueId, type: "file", provider: "local",
@@ -158,7 +147,6 @@ describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
       isPrimary: true, metadata: { path: reportPath },
     });
     await db.update(issues).set({ completedAt: producerCompletedAt }).where(eq(issues.id, producerIssueId));
-
     const result = await syncWorkflowRunForIssue(db, producerIssueId);
     expect(result?.status).toBe("running");
     expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
@@ -198,13 +186,11 @@ describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
     const [qaIssue] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
     expect(qaIssue).toMatchObject({ status: "blocked", description: "Dependency workProducts: none registered" });
     expect((await stepRunsOf(db, run.id)).find((row) => row.stepId === "qa")?.status).toBe("failed");
-
     // Preserve today's boundary: a returned wake result alone does not suppress the next sync.
     await syncWorkflowRunForIssue(db, producerIssueId);
     expect(heartbeatWakeup).toHaveBeenCalledTimes(2);
     expect(await recheckComments()).toHaveLength(2);
     expect(await recheckActivities()).toHaveLength(2);
-
     // Existing succeeded-heartbeat suppression is preserved; it is not proof of current-input QA.
     await db.insert(heartbeatRuns).values({
       companyId, agentId, issueId: qaIssueId, status: "succeeded",
@@ -258,12 +244,15 @@ describeEP("C02 14A: real replacement rejection to immutable correction delivery
     await owned.db.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, verdict.heartbeatRunId)); await owned.db.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
     await owned.db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.companyId, s.p.companyId));
     await owned.db.update(agents).set({ status: "active", adapterType: "codex_local", adapterConfig: { cwd: owned.root },
-      runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, producerHb!.agentId));
+      runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(inArray(agents.id, [producerHb!.agentId, qaHb!.agentId]));
     actualDelivery.enabled = true; vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk"); vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", path.join(owned.root, "storage"));
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "11".repeat(32)); let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
-    let notifiedAfterCommit = false; adapter.mockImplementation(async () => {
-      const [committed] = await peer.select().from(workflowRuns).where(eq(workflowRuns.id, target.id));
-      notifiedAfterCommit = Boolean((committed?.metadata.replacementStart as Record<string, unknown> | undefined)?.deliveredAt);
+    const executed: Array<{ heartbeatRunId: string; agentId: string; wakeupRequestId: string | null; ref: unknown }> = [];
+    const dbKinds = { root: owned.db.constructor.name, peer: peer.constructor.name, nested: "" }; expect(is(owned.db, PgTransaction)).toBe(false);
+    let notifiedAfterCommit = false; adapter.mockImplementation(async (ctx: { runId: string; agent: { id: string } }) => {
+      const [running] = await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, ctx.runId)); const [wake] = running?.wakeupRequestId ? await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, running.wakeupRequestId)) : [];
+      executed.push({ heartbeatRunId: ctx.runId, agentId: ctx.agent.id, wakeupRequestId: running?.wakeupRequestId ?? null, ref: wake?.payload?.qaCorrectionFollowup ?? null });
+      const [committed] = await peer.select().from(workflowRuns).where(eq(workflowRuns.id, target.id)); notifiedAfterCommit = Boolean((committed?.metadata.replacementStart as Record<string, unknown> | undefined)?.deliveredAt);
       await held; return { exitCode: 1, signal: null, timedOut: false, errorMessage: "isolated", usage: null, provider: "test", model: "test", resultJson: null, runtimeServices: [] };
     });
     const sync = (db: Db = owned.db) => syncWorkflowRunState(db, target.id); const events = () => peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowRunId, target.id));
@@ -275,7 +264,7 @@ describeEP("C02 14A: real replacement rejection to immutable correction delivery
       if (fail) { fail = false; throw failure; } return originalWriter(...args);
     });
     try {
-      await expect(owned.db.transaction(tx => sync(tx as unknown as Db))).rejects.toMatchObject({ request: { runId: target.id, producerStepRunId: producer.id, qaStepRunIds: [qa.id], verdictEventIds: [verdict.eventId] } });
+      await expect(owned.db.transaction(tx => { dbKinds.nested = tx.constructor.name; expect(is(tx, PgTransaction)).toBe(true); return sync(tx as unknown as Db); })).rejects.toMatchObject({ request: { runId: target.id, producerStepRunId: producer.id, qaStepRunIds: [qa.id], verdictEventIds: [verdict.eventId] } });
       expect((await events()).filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(0); expect(writer).not.toHaveBeenCalled();
       await expect(sync()).rejects.toBe(failure); expect((await receipt()).deliveredAt).toBeNull();
       expect((await events()).filter(e => e.eventType === "qa_correction_followup_requested")).toHaveLength(0);
@@ -289,12 +278,23 @@ describeEP("C02 14A: real replacement rejection to immutable correction delivery
       expect(await readFile(s.file)).toEqual(original); const issued = (await events()).find(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))!;
       const applied = parseQaCorrectionEventPayload("qa_remediation_applied", issued.payload), revision = applied.revisions[0]!;
       expect(JSON.parse(await readFile(path.join(revision.root, revision.mainRelativePath), "utf8")).title).toBe("new");
-      expect((await events()).filter(e => e.eventType === "qa_correction_followup_delivered")).toHaveLength(1);
+      const requestedRows = (await events()).filter(e => e.eventType === "qa_correction_followup_requested"); expect(requestedRows).toHaveLength(1); const requested = parseQaCorrectionEventPayload("qa_correction_followup_requested", requestedRows[0]!.payload);
+      const deliveries = (await events()).filter(e => e.eventType === "qa_correction_followup_delivered"); expect(deliveries).toHaveLength(1);
+      const delivered = qaCorrectionDeliverySchema.parse(deliveries[0]!.payload);
+      expect(delivered).toMatchObject({ ref: { companyId: s.p.companyId, workflowRunId: target.id, appliedEventId: issued.id, requestId: requested.requestId }, followupEventId: requestedRows[0]!.id });
+      const [wake] = await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, delivered.wakeupRequestId)); const [running] = await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, delivered.heartbeatRunId));
+      expect(wake).toMatchObject({ agentId: qaHb!.agentId, issueId: qa.issueId, workflowRunId: target.id, workflowStepRunId: qa.id, workflowExecutionGeneration: qa.executionGeneration, runId: delivered.heartbeatRunId, idempotencyKey: "qa-correction-wake:" + requested.requestId, requestedByActorId: "workflow:qa-remediation", payload: { qaCorrectionFollowup: delivered.ref } });
+      expect(running).toMatchObject({ agentId: qaHb!.agentId, issueId: qa.issueId, workflowStepRunId: qa.id, workflowExecutionGeneration: qa.executionGeneration, wakeupRequestId: wake!.id }); expect(executed).toEqual([{ heartbeatRunId: running!.id, agentId: qaHb!.agentId, wakeupRequestId: wake!.id, ref: delivered.ref }]);
+      expect((await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, target.id))).filter(w => w.issueId === qa.issueId)).toHaveLength(1);
       const costs = () => peer.select().from(costEvents).where(eq(costEvents.companyId, s.p.companyId)).orderBy(costEvents.id); const state = await commitDbState(s), costBefore = await costs(); await sync();
-      const repeated = await commitDbState(s); expect(repeated.products).toEqual(state.products); expect(repeated.usage).toEqual(state.usage);
-      expect(repeated.events.filter(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))).toHaveLength(1); expect(repeated.events.filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(1);
+      const repeated = await commitDbState(s); expect(repeated.products).toEqual(state.products); expect(repeated.pins).toEqual(state.pins); expect(repeated.usage).toEqual(state.usage); expect(repeated.groups).toEqual(state.groups); expect(repeated.receipts).toEqual(state.receipts);
+      expect(repeated.events.filter(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))).toHaveLength(1); expect(repeated.events.filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(1); expect(repeated.events.filter(e => e.eventType === "qa_correction_followup_requested")).toHaveLength(1); expect(repeated.events.filter(e => e.eventType === "qa_correction_followup_delivered")).toHaveLength(1);
       expect(repeated.wakes).toEqual(state.wakes); expect(repeated.heartbeats).toEqual(state.heartbeats); expect(adapter).toHaveBeenCalledTimes(1); expect(await costs()).toEqual(costBefore);
-    } finally { writer.mockRestore(); release(); await waitForHeartbeatExecutionsToDrain(owned.db);
-      actualDelivery.enabled = false; adapter.mockReset(); vi.unstubAllEnvs(); }
+    } finally { writer.mockRestore(); release(); let drained = false; try { await waitForHeartbeatExecutionsToDrain(owned.db); drained = true;
+      const wakes = await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, target.id));
+      const runs = await peer.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, wakeupRequestId: heartbeatRuns.wakeupRequestId, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, error: heartbeatRuns.error }).from(heartbeatRuns).where(eq(heartbeatRuns.issueId, qa.issueId!));
+      console.info("C02 delivery execution evidence", JSON.stringify({ dbKinds, executed, drained, heartbeats: runs, wakes: wakes.map(w => ({ id: w.id, agentId: w.agentId, issueId: w.issueId, runId: w.runId, status: w.status, error: w.error, ref: w.payload?.qaCorrectionFollowup ?? null })) })); }
+      catch (error) { console.info("C02 delivery execution evidence", JSON.stringify({ dbKinds, executed, drained, error: error instanceof Error ? error.message : String(error) })); throw error; }
+      finally { actualDelivery.enabled = false; adapter.mockReset(); vi.unstubAllEnvs(); } }
   }, 120000);
 });

@@ -31,7 +31,7 @@ import { measureQaCorrectionSources } from "./qa-correction-measure.js";
 import { storeQaCorrection } from "./qa-correction-storage.js";
 import { commitQaCorrection } from "./qa-correction-commit.js";
 import { qaCorrectionProductPointerSchema, readIssuedQaCorrection } from "./qa-correction-reader.js";
-import { readQaCorrectionFollowupDb } from "./qa-correction-followup.js";
+import { readQaCorrectionFollowupDb, readQaCorrectionFollowupConsumption } from "./qa-correction-followup.js";
 import { readQaCorrectionDelivery, type CorrectionDeliveryInput } from "./qa-correction-delivery-receipt.js";
 import { collectQaRemediationEligibility } from "./qa-remediation-qualification.js";
 import type { TryQaRemediationInput, QaRemediationPassResult } from "./qa-remediation-contract.js";
@@ -46,12 +46,64 @@ const attempt = (s: Step): QaCorrectionAttempt => ({ stepRunId: s.id, stepId: s.
   executionGeneration: s.executionGeneration, retryCount: s.retryCount, iterationIndex: s.iterationIndex });
 const ids = (values: string[]) => [...values].sort();
 
+const requestFor = (p: QaCorrectionPreparation): Request => ({ runId: p.workflowRunId,
+  producerStepRunId: p.producer.stepRunId, qaStepRunIds: ids(p.authority.verdicts.map(v => v.qa.stepRunId)),
+  verdictEventIds: ids(p.authority.verdicts.map(v => v.eventId)) });
+
+/** History identifies pending B; current DB checks still fence its delivery, never certify QA of B. */
+async function currentIssued(db: Db, run: typeof workflowRuns.$inferSelect, steps: readonly Step[]) {
+  const found: Array<{ p: QaCorrectionPreparation; appliedEventId: string; targets: string[] }> = [];
+  if (!run.missionId || ["completed", "cancelled", "aborted", "failed", "timed-out"].includes(run.status)) return found;
+  const rows = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, run.id),
+    eq(workflowTransitionEvents.eventType, "qa_correction_prepared")));
+  const pins = await db.select().from(workflowStepOutputBindings).where(and(
+    eq(workflowStepOutputBindings.companyId, run.companyId), eq(workflowStepOutputBindings.workflowRunId, run.id)));
+  for (const row of rows) {
+    const p = parseQaCorrectionPreparationRow(row);
+    if (p.missionId !== run.missionId || p.dispatchAuthorityVersion !== run.dispatchAuthorityVersion
+      || p.authority.kind !== "workflow_qa" || !p.bindings.length
+      || p.sources.some(s => s.provenance.kind === "registered_legacy")
+      || !steps.some(s => same(attempt(s), p.producer))
+      || !p.authority.verdicts.every(v => steps.some(s => same(attempt(s), v.qa)))) continue;
+    const [applied] = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, run.id),
+      eq(workflowTransitionEvents.idempotencyKey, qaCorrectionAppliedKey(p.correctionId))));
+    if (!applied) continue;
+    const proof = await readIssuedQaCorrection(db, { companyId: run.companyId, workflowRunId: run.id, appliedEventId: applied.id });
+    requireQaCorrection(same(proof.preparation, p), "record");
+    if (!proof.applied.bindingChanges.every(c => pins.some(b => b.id === c.bindingId && b.workProductId === c.toProductId))) continue;
+    const targets: string[] = [];
+    for (const f of proof.followups) {
+      const ref = { companyId: run.companyId, workflowRunId: run.id, appliedEventId: applied.id, requestId: f.requestId };
+      if (await readQaCorrectionFollowupConsumption(db, ref, readIssuedQaCorrection)) continue;
+      await readQaCorrectionFollowupDb(db, ref, readIssuedQaCorrection);
+      targets.push(f.target.stepRunId);
+    }
+    if (targets.length) found.push({ p, appliedEventId: applied.id, targets });
+  }
+  return found;
+}
+
+/** Only a proven pending correction (queued or delivered) suppresses the competing ordinary recheck. */
+export async function queueCurrentIssuedQaCorrectionTargets(db: Db, run: typeof workflowRuns.$inferSelect, steps: readonly Step[]) {
+  const issueIds = new Set<string>();
+  for (const issued of await currentIssued(db, run, steps)) {
+    await acceptIssued(db, issued.p, issued.appliedEventId);
+    for (const id of issued.targets) issueIds.add(steps.find(s => s.id === id)!.issueId!);
+  }
+  return issueIds;
+}
+
 /** Registered proof/bindings opt in; unsupported legacy callers keep their existing path. */
 async function discover(input: Input) {
   const { db, run, producerRun } = input;
   if (run.status === "cancelled" || !run.missionId || !producerRun.issueId) return null;
   const [currentRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, run.id));
   requireQaCorrection(currentRun && currentRun.companyId === run.companyId, "scope");
+  const issued = (await currentIssued(db, currentRun, [producerRun,
+    ...input.rejectedQas.flatMap(q => q.qaRun ? [q.qaRun] : [])])).find(i => i.p.producer.stepRunId === producerRun.id);
+  if (issued) return { p: issued.p, request: requestFor(issued.p) };
   const verdicts: QaCorrectionPreparation["authority"]["verdicts"] = [];
   for (const rejected of input.rejectedQas) {
     const qa = rejected.qaRun;
@@ -118,6 +170,7 @@ async function queueIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: s
   for (const followup of proof.followups) {
     const t = followup.target, ref = { companyId: p.companyId, workflowRunId: p.workflowRunId,
       appliedEventId, requestId: followup.requestId };
+    if (await readQaCorrectionFollowupConsumption(db, ref, readIssuedQaCorrection)) continue;
     const [issue] = await db.select().from(issues).where(eq(issues.id, t.issueId));
     const origin = p.authority.verdicts.find(v => v.qa.stepRunId === t.stepRunId);
     const [heartbeat] = origin ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, origin.heartbeatRunId)) : [];
@@ -159,9 +212,15 @@ export async function tryQaCorrectionFollowup(input: Input): Promise<QaRemediati
     eq(workflowTransitionEvents.companyId, p.companyId), eq(workflowTransitionEvents.workflowRunId, p.workflowRunId),
     eq(workflowTransitionEvents.idempotencyKey, qaCorrectionAppliedKey(p.correctionId))));
   if (!applied) throw new QaCorrectionReconcileRequired(request);
+  await acceptIssued(db, p, applied.id);
+  return { outcome: "waiting", detail: "issued correction followups have durable delivery or pending queue records" };
+}
+
+async function acceptIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: string) {
+  const request = requestFor(p);
   if (is(db, PgTransaction)) {
     if (!currentReplacementRootNotifications(db)) throw new QaCorrectionReconcileRequired(request);
-    await queueIssued(db, p, applied.id);
+    await queueIssued(db, p, appliedEventId);
   }
   else {
     const notifications = currentReplacementRootNotifications(db);
@@ -171,10 +230,9 @@ export async function tryQaCorrectionFollowup(input: Input): Promise<QaRemediati
       await tx.select().from(missions).where(eq(missions.id, p.missionId)).for("no key update");
       await tx.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId)).for("no key update");
       await withReplacementRootNotificationDb(tx as unknown as Db, notifications,
-        () => queueIssued(tx as unknown as Db, p, applied.id));
+        () => queueIssued(tx as unknown as Db, p, appliedEventId));
     });
   }
-  return { outcome: "waiting", detail: "issued correction followups have durable delivery or pending queue records" };
 }
 
 async function reconcile(db: Db, request: Request) {

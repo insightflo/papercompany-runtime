@@ -31,7 +31,8 @@ import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, o
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { createQaRemediationRefire } from "./control-flow/qa-remediation.js";
-import { withQaCorrectionFollowupReconcile } from "./control-flow/qa-correction-followup-reconcile.js";
+import { withQaCorrectionFollowupReconcile,
+  queueCurrentIssuedQaCorrectionTargets } from "./control-flow/qa-correction-followup-reconcile.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
@@ -927,20 +928,13 @@ async function syncStepRunsFromIssueState(
     .map((stepRun) => stepRun.issueId)
     .filter((issueId): issueId is string => Boolean(issueId));
   if (issueIds.length === 0) return stepRuns;
-
-  const issueRows = await db
-    .select({
-      id: issues.id,
-      companyId: issues.companyId,
-      status: issues.status,
-      startedAt: issues.startedAt,
-      completedAt: issues.completedAt,
-      cancelledAt: issues.cancelledAt,
-      title: issues.title,
-      originKind: issues.originKind,
-    })
-    .from(issues)
-    .where(inArray(issues.id, issueIds));
+  // Preserve status/verdict sync; reserve only the issued agent targets from ordinary recheck.
+  const correctionIssueIds = context ? await queueCurrentIssuedQaCorrectionTargets(db, context.run,
+    stepRuns.filter(s => !correctionToolIds.has(s.id))) : new Set<string>();
+  const issueRows = await db.select({
+    id: issues.id, companyId: issues.companyId, status: issues.status, startedAt: issues.startedAt,
+    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, title: issues.title, originKind: issues.originKind,
+  }).from(issues).where(inArray(issues.id, issueIds));
   const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
   const issueById = new Map(issueRows
     .filter(issue => issue.status === "cancelled" || !correctionToolIssueIds.has(issue.id))
@@ -975,8 +969,9 @@ async function syncStepRunsFromIssueState(
     stepRuns,
     stepById,
     issueById,
-    validationCandidateIssueIds,
-    latestValidationVerdictByIssueId,
+    validationCandidateIssueIds: validationCandidateIssueIds.filter(id => !correctionIssueIds.has(id)),
+    // The callee iterates stepRuns; its private verdict view is the actual wake fence.
+    latestValidationVerdictByIssueId: new Map([...latestValidationVerdictByIssueId].filter(([id]) => !correctionIssueIds.has(id))),
     context,
   }, { isValidationGateCandidate, collectGateValidatedProducerStepIds });
 
