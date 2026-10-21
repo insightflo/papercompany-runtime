@@ -9,33 +9,12 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { resolveEdges } from "./control-flow/edge-condition.js";
 import { reviveConditionalSkip } from "./conditional-skip-settlement.js";
 import { WORKFLOW_SYNC_SOURCES } from "./workflow-sync-source.js";
-import type { WorkflowStep } from "./dag-engine.js";
+import { orderedGraph, permitsRecordedCascadeRecovery } from "./failure-cascade-provenance.js";
 import type { WorkflowRecoveryAuthorityRow } from "./run-recovery-authority.js";
 
 type Step = typeof workflowStepRuns.$inferSelect;
 type Run = typeof workflowRuns.$inferSelect;
 type Event = typeof workflowTransitionEvents.$inferSelect;
-
-function orderedGraph(steps: WorkflowStep[], rows: Step[]): WorkflowStep[] | null {
-  const definitions = new Map(steps.map(step => [step.id, step]));
-  if (definitions.size !== steps.length || rows.length !== steps.length
-    || new Set(rows.map(row => row.stepId)).size !== rows.length
-    || rows.some(row => !definitions.has(row.stepId))) return null;
-  const visiting = new Set<string>(), visited = new Set<string>(), ordered: WorkflowStep[] = [];
-  function visit(id: string): boolean {
-    if (visiting.has(id)) return false;
-    if (visited.has(id)) return true;
-    const step = definitions.get(id);
-    if (!step) return false;
-    visiting.add(id);
-    for (const edge of resolveEdges(step)) if (!visit(edge.stepId)) return false;
-    visiting.delete(id);
-    visited.add(id);
-    ordered.push(step);
-    return true;
-  }
-  return steps.every(step => visit(step.id)) ? ordered : null;
-}
 
 function unlaunched(row: Step): boolean {
   return row.startedAt === null && row.lastDispatchAttemptAt === null
@@ -143,6 +122,7 @@ export async function reviveAuthorizedFailureCascade(db: Db, input: {
     const deadlock = event.reasonCode === "workflow_deadlock_reconciler"
       && metadata.controlFlowSkipped === true && metadata.failureCascadeSkipped !== true;
     if (!cascade && !deadlock) continue;
+    if (!permitsRecordedCascadeRecovery(row, failedStep, observedRun, definition.definitionHash, event.reasonCode)) continue;
     if (row.issueId) {
       const issue = linked.find(issue => issue.id === row.issueId && issue.missionId === run.missionId);
       if (!issue || ["done", "cancelled"].includes(issue.status)) continue;

@@ -6,6 +6,7 @@ import { and, asc, eq, like, sql } from "drizzle-orm";
 import { stableStringify } from "../issue-execution-cards/hash.js";
 import { isTerminalRunStatus, type TerminalStepRunRef } from "./run-terminal-boundary.js";
 import { recordWorkflowStepStatusTransition } from "./workflow-sync-source.js";
+import { captureFailureCascadeProvenance } from "./failure-cascade-provenance.js";
 
 export type CascadeTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export type FailureCascadeRun = Pick<typeof workflowRuns.$inferSelect,
@@ -98,11 +99,13 @@ export async function lockCascadeObservation(
 export async function writeStuckCascade(
   tx: CascadeTx, run: FailureCascadeRun, pendingSteps: FailureCascadeStep[], now: Date,
 ): Promise<void> {
+  const provenance = await captureFailureCascadeProvenance(tx, run, pendingSteps, "workflow_reconciler");
   for (const step of pendingSteps) {
     const metadata = step.metadata && typeof step.metadata === "object" && !Array.isArray(step.metadata)
       ? step.metadata as Record<string, unknown> : {};
     const [updated] = await tx.update(workflowStepRuns)
-      .set({ status: "skipped", completedAt: now, metadata: { ...metadata, failureCascadeSkipped: true } })
+      .set({ status: "skipped", completedAt: now, metadata: { ...metadata, failureCascadeSkipped: true,
+        failureCascadeProvenance: provenance.get(step.id)! } })
       .where(eq(workflowStepRuns.id, step.id))
       .returning({ id: workflowStepRuns.id, transitionVersion: workflowStepRuns.statusTransitionVersion });
     if (updated) {
@@ -124,10 +127,12 @@ export async function writeStuckCascade(
 export async function writeDeadlockCascade(
   tx: CascadeTx, run: FailureCascadeRun, stepsToSkip: FailureCascadeStep[], now: Date,
 ): Promise<void> {
+  const provenance = await captureFailureCascadeProvenance(tx, run, stepsToSkip, "workflow_deadlock_reconciler");
   for (const step of stepsToSkip) {
     const priorMetadata = (step.metadata as Record<string, unknown> | null) ?? {};
     const [updated] = await tx.update(workflowStepRuns)
-      .set({ status: "skipped", completedAt: now, metadata: { ...priorMetadata, controlFlowSkipped: true } })
+      .set({ status: "skipped", completedAt: now, metadata: { ...priorMetadata, controlFlowSkipped: true,
+        failureCascadeProvenance: provenance.get(step.id)! } })
       .where(eq(workflowStepRuns.id, step.id))
       .returning({ id: workflowStepRuns.id, transitionVersion: workflowStepRuns.statusTransitionVersion });
     if (updated) {
