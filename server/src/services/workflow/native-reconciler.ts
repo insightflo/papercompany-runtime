@@ -1,4 +1,6 @@
-import type { Db } from "@paperclipai/db";
+import { and, eq, sql } from "drizzle-orm";
+import { workflowRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { syncWorkflowRunState } from "./dag-engine.js";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 import { reconcileWorkflow } from "./reconciler.js";
 import { recoverTerminalUnsettledRuns } from "../heartbeat-finalization/recovery.js";
@@ -67,6 +69,36 @@ export function createNativeWorkflowReconciler(
     }
     tickInFlight = true;
     try {
+      // C02/14B: durable requests are discovery hints; public sync reuses the current
+      // issuance/target readers and root after-commit drain, including tool/agent routing.
+      const pendingCorrections = await options.db.selectDistinct({ runId: workflowRuns.id })
+        .from(workflowTransitionEvents)
+        .innerJoin(workflowRuns, and(
+          eq(workflowRuns.id, workflowTransitionEvents.workflowRunId),
+          eq(workflowRuns.companyId, workflowTransitionEvents.companyId),
+        ))
+        .where(and(
+          eq(workflowRuns.status, "running"),
+          eq(workflowTransitionEvents.eventType, "qa_correction_followup_requested"),
+          sql`exists (select 1 from workflow_transition_events prepared
+            where prepared.company_id = ${workflowTransitionEvents.companyId}
+              and prepared.workflow_run_id = ${workflowTransitionEvents.workflowRunId}
+              and prepared.event_type = 'qa_correction_prepared'
+              and prepared.payload->>'correctionId' = ${workflowTransitionEvents.payload}->>'correctionId'
+              and prepared.payload->'authority'->>'kind' = 'workflow_qa')`,
+          sql`not exists (select 1 from workflow_transition_events consumed
+            where consumed.company_id = ${workflowTransitionEvents.companyId}
+              and consumed.workflow_run_id = ${workflowTransitionEvents.workflowRunId}
+              and consumed.event_type = 'qa_correction_followup_consumed'
+              and consumed.payload->>'followupEventId' = ${workflowTransitionEvents.id}::text)`,
+        )).orderBy(workflowRuns.id);
+      for (const { runId } of pendingCorrections) {
+        try { await syncWorkflowRunState(options.db, runId); }
+        catch (error) {
+          log.warn({ runId, err: error instanceof Error ? error.message : String(error) },
+            "Issued QA correction reconciliation failed; durable request retained");
+        }
+      }
       const result = await reconcileWorkflow(options.db, { timeoutMinutes });
       tickCount += 1;
       lastTickAt = now.toISOString();

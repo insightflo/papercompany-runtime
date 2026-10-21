@@ -127,24 +127,21 @@ async function commentOnValidationRecheckQueued(input: {
   });
 }
 
-// [Patch 3 recheck idempotency] validation issue 별 latest succeeded heartbeat finishedAt.
-//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 실행 요청을 만들지 않도록 한다:
-//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재요청 금지" 판정 재료.
-//   A1 RES-424 사례: 재실행 run 은 succeeded 였으나 explicit PASS verdict 가 없어 latestValidationVerdict
-//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 실행 요청이 반복되던 stale duplicate.
-async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
+// A successful execution suppresses duplicate requests only if it STARTED after the
+// current producer completed. A late finish of an older input is not a recheck.
+// Retain the latest start across all successes: an older A can finish after B's recheck.
+// This is request deduplication only, never an official verdict or correction consumption.
+async function loadLatestSucceededHeartbeatStartedAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
   const latest = new Map<string, Date>();
   if (issueIds.length === 0) return latest;
   const rows = await db
-    .select({ issueId: heartbeatRuns.issueId, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
+    .select({ issueId: heartbeatRuns.issueId, startedAt: heartbeatRuns.startedAt })
     .from(heartbeatRuns)
     .where(and(inArray(heartbeatRuns.issueId, issueIds), eq(heartbeatRuns.status, "succeeded")))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
+    .orderBy(desc(heartbeatRuns.startedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
   for (const row of rows) {
-    if (!row.issueId) continue;
-    if (latest.has(row.issueId)) continue; // desc 정렬 → 첫 행이 최신
-    const at = row.finishedAt ?? row.createdAt;
-    if (at) latest.set(row.issueId, at);
+    if (!row.issueId || !row.startedAt || latest.has(row.issueId)) continue;
+    latest.set(row.issueId, row.startedAt);
   }
   return latest;
 }
@@ -167,8 +164,8 @@ export async function recheckValidationStepIssues(input: {
 }): Promise<void> {
   const { db, stepRuns, stepById, issueById, validationCandidateIssueIds, latestValidationVerdictByIssueId, context } = input;
   const { isValidationGateCandidate, collectGateValidatedProducerStepIds } = callbacks;
-  // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
-  const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
+  // Successful START evidence is only a duplicate-request fence, not a current-input verdict.
+  const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatStartedAt(db, validationCandidateIssueIds);
 
   const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
   for (const stepRun of stepRuns) {
@@ -207,13 +204,12 @@ export async function recheckValidationStepIssues(input: {
       }
     }
     if (freshnessMaxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
-    // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
-    //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
-    //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
-    //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
+    // Preserve same-generation request deduplication only for a success started at/after
+    // producer completion. An A execution finishing late cannot suppress the B request.
+    // A later producer completion re-arms the request; official QA still needs its own proof.
     const dependencyMaxCompletedAt = freshnessMaxCompletedAt;
-    const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
-    if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
+    const latestRecheckStartedAt = latestSucceededHeartbeatByIssueId.get(issue.id);
+    if (latestRecheckStartedAt && latestRecheckStartedAt.getTime() >= dependencyMaxCompletedAt) continue;
 
     if (!context) continue;
     // [recheck priority] Load the structured findings from the latest REQUEST_CHANGES
