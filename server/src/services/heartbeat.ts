@@ -219,7 +219,7 @@ import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
 import { assertDeliveryInput, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
 import { currentReplacementRootNotifications, isQaCorrectionRootOwnerRequired, validateAndRegisterQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
-import { withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
+import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import {
@@ -4735,10 +4735,17 @@ export function heartbeatService(db: Db) {
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
     if (is(db, PgTransaction)) {
       // Validate correction ancestry before registering; a savepoint cannot own execution.
-      await withQaCorrectionClaimRoot(db, run,
-        tx => assertHeartbeatRecoveryAdmission(tx, run), async () => {
-          currentReplacementRootNotifications(db)?.agentIds.add(run.agentId);
-        });
+      try {
+        await withQaCorrectionClaimRoot(db, run,
+          tx => assertHeartbeatRecoveryAdmission(tx, run), async () => {
+            currentReplacementRootNotifications(db)?.agentIds.add(run.agentId);
+          });
+      } catch (error) {
+        // Preserve the ordinary claim refusal contract while correction errors still abort.
+        if (isQaCorrectionRootOwnerRequired(error) || error instanceof QaCorrectionClaimRejected) throw error;
+        await cancelRunInternal(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
+        return { kind: "not_claimed" as const };
+      }
       // Keep the durable row queued for the owning root drain or scheduler after commit.
       return { kind: "root_deferred" as const };
     }
