@@ -1,16 +1,16 @@
 // server/src/services/quality/native-delivery.ts
 //
 // [purpose] T4 실제 실행 수락·취소. deliverQualityIntent 는 정식 binding(T3)을 얻어
-//   기존 native 경로(dag-engine wakeExistingWorkflowStepIssue → queueIssueAssignmentWakeup
-//   → heartbeat.wakeup → 기존 대기열 → adapter.execute)로 전달하고, admission tx 가
-//   기록한 qualityAcceptance 원문만 수락 증거로 읽는다. 통신 재전송은 같은 attempt,
+//   기존 native 경로(legacy: dag-engine wakeExistingWorkflowStepIssue → queueIssueAssignmentWakeup
+//   → heartbeat.wakeup → adapter.execute, C03: 발급된 동일 요청의 root 전달)로 연결하고, admission tx 가
+//   기록한 qualityAcceptance 또는 C03 전달 영수증을 수락 증거로 읽는다. 통신 재전송은 같은 attempt,
 //   새 기술 시도는 기존 step retry tx 의 유한 예약 후 새 키다(이 파일은 새 기술 시도를
 //   스스로 만들지 않는다). 취소는 intent 차단을 먼저 저장한 뒤 기존 cancelRun 정리를
 //   호출하고 요청과 확인을 구분한다.
 // [ordering] §3.3: 잠금은 usage → group → action. 취소 tx 안에서 감사 행까지 저장하고,
 //   커밋 후에만 cancelRun 정리를 호출한다.
 
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
@@ -21,6 +21,7 @@ import {
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
+  workflowTransitionEvents,
 } from "@paperclipai/db";
 import { qualityKeySchema, qualityPolicySchema, retryEnvelopeSchema, type QualityKey } from "@paperclipai/shared";
 import { parseEvidence } from "./contract.js";
@@ -32,6 +33,11 @@ import { buildCompanyWorkflowExecutionSteps } from '../workflow/company-executio
 import { ensureCanonicalQualityExecution } from "./native-records.js";
 import { QUALITY_EXECUTE_STEP_ID } from "./native-definition.js";
 import { isAddendumWithdrawnForTarget } from "./rollback.js";
+import { applyCurrentOutputCorrection } from "./current-output.js";
+import { parseQaCorrectionPreparationRow } from "../workflow/control-flow/qa-correction-authority.js";
+import { qaCorrectionAppliedKey } from "../workflow/control-flow/qa-correction-contract.js";
+import { acceptIssued, queueIssued, withQaCorrectionFollowupReconcile } from "../workflow/control-flow/qa-correction-followup-reconcile.js";
+import { readQaCorrectionDelivery, readDeliveryWakeCandidates, type CorrectionDeliveryInput } from "../workflow/control-flow/qa-correction-delivery-receipt.js";
 import {
   findQualityWakeRowByExactKey,
   mapQualityWakeRow,
@@ -71,9 +77,38 @@ async function assertNativeOwnershipActive(db: Db, action: ActionRow): Promise<v
   }
 }
 
+async function readQualityCorrectionInputs(db: Db, key: QualityKey) {
+  const [row] = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, key.companyId), eq(workflowTransitionEvents.eventType, "qa_correction_prepared"),
+    sql`${workflowTransitionEvents.payload}->'authority'->>'actionId' = ${key.actionId}`));
+  if (!row) return null;
+  const p = parseQaCorrectionPreparationRow(row);
+  const [applied] = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, key.companyId), eq(workflowTransitionEvents.workflowRunId, p.workflowRunId),
+    eq(workflowTransitionEvents.idempotencyKey, qaCorrectionAppliedKey(p.correctionId))));
+  if (!applied) return null;
+  const inputs: CorrectionDeliveryInput[] = [];
+  await queueIssued(db, p, applied.id, inputs, true);
+  return { p, appliedEventId: applied.id, inputs };
+}
+
+/** Cancellation keeps its existing cleanup, including C03 runs without a separate quality wake. */
+async function qualityHeartbeatRuns(db: Db, action: ActionRow, latestFirst = false) {
+  const key = { companyId: action.companyId, actionId: action.id };
+  const rows = await qualityAttemptRows(db, { ...key, stepRunId: action.canonicalBinding!.stepRunId });
+  const issued = action.kind === "current_output" ? await readQualityCorrectionInputs(db, key) : null;
+  const deliveries = issued ? await Promise.all(issued.inputs.map(input => readQaCorrectionDelivery(db, input))) : [];
+  const ids = [...rows.filter(row => row.qualityAcceptance && row.runId).map(row => row.runId!),
+    ...deliveries.flatMap(delivery => delivery ? [delivery.heartbeatRunId] : [])];
+  if (!ids.length) return [];
+  return db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, key.companyId), inArray(heartbeatRuns.id, ids)))
+    .orderBy(...(latestFirst ? [desc(heartbeatRuns.createdAt)] : []));
+}
+
 /**
  * quality intent 를 실제 native 경로로 전달한다.
- * - accepted: admission tx 가 기록한 수락 원문이 있는 경우(빠른 완료 후에도 동일 영수증).
+ * - accepted: admission 수락 원문 또는 C03 전달 영수증(현재 B의 검사 완료를 뜻하지 않는다).
  * - waiting: 대기열에 살아 있으나 아직 수락되지 않은 경우(deferred·paused 대기).
  * - blocked: 거절(정책·취소·한도·정의 불변 위반). 새 기술 시도는 retry 경로 소관이다.
  */
@@ -97,6 +132,28 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
   }
   try {
     await assertNativeOwnershipActive(db, action);
+    if (action.kind === "current_output") {
+      const correction = await applyCurrentOutputCorrection(db, parsed);
+      if (correction.status === "source_preserved") return { status: "blocked", receiptId: null };
+      if (correction.status === "verification_pending") {
+        const issued = await readQualityCorrectionInputs(db, parsed);
+        if (issued) {
+          const { p, appliedEventId, inputs } = issued;
+          await withQaCorrectionFollowupReconcile(db, p.workflowRunId, () => acceptIssued(db, p, appliedEventId));
+          // A delivery receipt accepts B's request; only the official consumption reader can certify B's QA.
+          const outcomes = await Promise.all(inputs.map(async input => {
+            const delivered = await readQaCorrectionDelivery(db, input);
+            if (delivered) return { status: "accepted" as const, receiptId: delivered.wakeupRequestId };
+            const [wake] = await readDeliveryWakeCandidates(db, input);
+            return wake && ["queued", "deferred_issue_execution"].includes(wake.status)
+              ? { status: "waiting" as const, receiptId: wake.id }
+              : { status: "blocked" as const, receiptId: null };
+          }));
+          return outcomes.find(o => o.status === "blocked") ?? outcomes.find(o => o.status === "waiting")
+            ?? outcomes[0] ?? { status: "blocked", receiptId: null };
+        }
+      }
+    }
     await ensureCanonicalQualityExecution(db, parsed); // 실행 직전 정의 해시 재검증 포함(T3)
   } catch (error) {
     if (error instanceof HttpError && error.status === 409) return { status: "blocked", receiptId: null };
@@ -211,15 +268,8 @@ export async function cancelQualityIntent(db: Db, key: QualityKey, input?: { now
     }
     // 현재 살아 있는 수용 실행(수락 원문이 있고 run 이 queued/running 인 시도).
     if (action.canonicalBinding) {
-      const attemptRows = await qualityAttemptRows(tx as unknown as Db, {
-        companyId: parsed.companyId, actionId: parsed.actionId, stepRunId: action.canonicalBinding.stepRunId,
-      });
-      const acceptedRows = attemptRows.filter((row) => row.qualityAcceptance && row.runId);
-      if (acceptedRows.length > 0) {
-        const runs = await tx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns)
-          .where(and(eq(heartbeatRuns.companyId, parsed.companyId), inArray(heartbeatRuns.id, acceptedRows.map((row) => row.runId!))));
-        liveRunId = runs.find((run) => run.status === "queued" || run.status === "running")?.id ?? null;
-      }
+      const runs = await qualityHeartbeatRuns(tx as unknown as Db, action);
+      liveRunId = runs.find(run => run.status === "queued" || run.status === "running")?.id ?? null;
     }
   });
   // 커밋 후 정리: 기존 cancelRun cleanup. 요청 저장과 실제 취소 확인은 구분된다.
@@ -241,16 +291,8 @@ export async function readQualityCancellation(db: Db, key: QualityKey): Promise<
   if (!action) throw notFound("quality_action_not_found");
   let runStatus: string | null = null;
   if (action.canonicalBinding) {
-    const attemptRows = await qualityAttemptRows(db, {
-      companyId: parsed.companyId, actionId: parsed.actionId, stepRunId: action.canonicalBinding.stepRunId,
-    });
-    const acceptedRunIds = attemptRows.filter((row) => row.qualityAcceptance && row.runId).map((row) => row.runId!);
-    if (acceptedRunIds.length > 0) {
-      const runs = await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.companyId, parsed.companyId), inArray(heartbeatRuns.id, acceptedRunIds)))
-        .orderBy(desc(heartbeatRuns.createdAt));
-      runStatus = runs[0]?.status ?? null;
-    }
+    const runs = await qualityHeartbeatRuns(db, action, true);
+    runStatus = runs[0]?.status ?? null;
   }
   const requested = action.cancelRequestedAt !== null;
   const cancelledConfirmed = requested && runStatus === "cancelled";

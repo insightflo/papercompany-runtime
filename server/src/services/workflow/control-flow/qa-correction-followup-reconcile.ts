@@ -169,12 +169,13 @@ export async function discoverQaCorrection(input: Input) {
 }
 
 /** DB-only acceptance. Receipt/queue/current readers, rather than a boolean wake return, justify waiting. */
-async function queueIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: string) {
+export async function queueIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: string, inputs?: CorrectionDeliveryInput[], readOnly = false) {
   const proof = await readIssuedQaCorrection(db, { companyId: p.companyId, workflowRunId: p.workflowRunId, appliedEventId });
   for (const followup of proof.followups) {
     const t = followup.target, ref = { companyId: p.companyId, workflowRunId: p.workflowRunId,
       appliedEventId, requestId: followup.requestId };
-    if (await readQaCorrectionFollowupConsumption(db, ref, readIssuedQaCorrection)) continue;
+    const consumed = await readQaCorrectionFollowupConsumption(db, ref, readIssuedQaCorrection);
+    if (consumed && !inputs) continue;
     const [issue] = await db.select().from(issues).where(eq(issues.id, t.issueId));
     const origin = p.authority.verdicts.find(v => v.qa.stepRunId === t.stepRunId);
     const [heartbeat] = origin ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, origin.heartbeatRunId)) : [];
@@ -192,7 +193,8 @@ async function queueIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: s
       issueId: t.issueId, missionId: p.missionId, workflowRunId: p.workflowRunId,
       workflowStepRunId: t.stepRunId, workflowExecutionGeneration: t.executionGeneration,
       candidateWakeupRequestId: null, request };
-    if (await readQaCorrectionDelivery(db, input)) continue;
+    inputs?.push(input);
+    if (readOnly || consumed || await readQaCorrectionDelivery(db, input)) continue;
     await readQaCorrectionFollowupDb(db, ref, readIssuedQaCorrection);
     const wakes = await db.select().from(agentWakeupRequests).where(and(
       eq(agentWakeupRequests.companyId, p.companyId), eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey)));
@@ -220,16 +222,12 @@ export async function tryQaCorrectionFollowup(input: Input): Promise<QaRemediati
   return { outcome: "waiting", detail: "issued correction followups have durable delivery or pending queue records" };
 }
 
-async function acceptIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: string) {
-  const request = requestFor(p);
-  if (is(db, PgTransaction)) {
-    if (!currentReplacementRootNotifications(db)) throw new QaCorrectionReconcileRequired(request);
-    await queueIssued(db, p, appliedEventId);
-  }
+export async function acceptIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: string) {
+  const notifications = currentReplacementRootNotifications(db);
+  // A direct legacy loop-driver caller has no owning root drain; never manufacture a waiting result.
+  if (!notifications) throw new QaCorrectionReconcileRequired(requestFor(p));
+  if (is(db, PgTransaction)) await queueIssued(db, p, appliedEventId);
   else {
-    const notifications = currentReplacementRootNotifications(db);
-    // A direct legacy loop-driver caller has no owning root drain; never manufacture a waiting result.
-    if (!notifications) throw new QaCorrectionReconcileRequired(request);
     await db.transaction(async tx => {
       await tx.select().from(missions).where(eq(missions.id, p.missionId)).for("no key update");
       await tx.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId)).for("no key update");
