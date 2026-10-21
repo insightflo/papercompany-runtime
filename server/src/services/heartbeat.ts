@@ -37,6 +37,7 @@ import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
+import { createHeartbeatAgentCancellation } from "./heartbeat-agent-cancellation.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
@@ -10403,85 +10404,11 @@ export function heartbeatService(db: Db) {
     return wakeupIds.length;
   }
 
-  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", resumeQueue = true) {
-    const run = await getRun(runId);
-    if (!run) throw notFound("Heartbeat run not found");
-    if (run.status !== "running" && run.status !== "queued") return run;
-
-    const running = runningProcesses.get(run.id);
-    if (running) {
-      running.child.kill("SIGTERM");
-      const graceMs = Math.max(1, running.graceSec) * 1000;
-      setTimeout(() => {
-        if (!running.child.killed) {
-          running.child.kill("SIGKILL");
-        }
-      }, graceMs);
-    } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
-      setTimeout(() => {
-        terminateRecordedProcess(run.processPid, "SIGKILL");
-      }, 5_000);
-    }
-
-    const cancelled = await setRunStatus(run.id, "cancelled", {
-      finishedAt: new Date(),
-      error: reason,
-      errorCode: "cancelled",
-    }, { expectedStatuses: ["queued", "running"] });
-
-    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-      finishedAt: new Date(),
-      error: reason,
-    });
-
-    if (cancelled) {
-      await appendRunEvent(cancelled, 1, {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "warn",
-        message: "run cancelled",
-      });
-      await releaseIssueExecutionAndPromote(cancelled, { resumeQueue });
-    }
-
-    runningProcesses.delete(run.id);
-    await finalizeAgentStatus(run.agentId, "cancelled");
-    if (resumeQueue) await startNextQueuedRunForAgent(run.agentId);
-    return cancelled;
-  }
-
-  async function cancelActiveForAgentInternal(agentId: string, reason = "Cancelled due to agent pause") {
-    const runs = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])));
-
-    for (const run of runs) {
-      await setRunStatus(run.id, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-        errorCode: "cancelled",
-      }, { expectedStatuses: ["queued", "running"] });
-
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-      });
-
-      const running = runningProcesses.get(run.id);
-      if (running) {
-        running.child.kill("SIGTERM");
-        runningProcesses.delete(run.id);
-      } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
-        setTimeout(() => {
-          terminateRecordedProcess(run.processPid, "SIGKILL");
-        }, 5_000);
-      }
-      await releaseIssueExecutionAndPromote(run);
-    }
-
-    return runs.length;
-  }
+  const { cancelRunInternal, cancelActiveForAgentInternal } = createHeartbeatAgentCancellation({
+    db, getRun, setRunStatus, setWakeupStatus, appendRunEvent,
+    releaseIssueExecutionAndPromote, finalizeAgentStatus, startNextQueuedRunForAgent,
+    terminateRecordedProcess, runningProcesses,
+  });
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
     if (scope.scopeType === "agent") {
