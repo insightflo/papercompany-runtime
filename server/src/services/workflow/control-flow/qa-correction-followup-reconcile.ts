@@ -100,7 +100,7 @@ export async function queueCurrentIssuedQaCorrectionTargets(db: Db, run: typeof 
 }
 
 /** Registered proof/bindings opt in; unsupported legacy callers keep their existing path. */
-async function discover(input: Input) {
+export async function discoverQaCorrection(input: Input) {
   const { db, run, producerRun } = input;
   if (run.status === "cancelled" || !run.missionId || !producerRun.issueId) return null;
   const [currentRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, run.id));
@@ -209,7 +209,7 @@ async function queueIssued(db: Db, p: QaCorrectionPreparation, appliedEventId: s
 }
 
 export async function tryQaCorrectionFollowup(input: Input): Promise<QaRemediationPassResult | null> {
-  const found = await discover(input);
+  const found = await discoverQaCorrection(input);
   if (!found) return null;
   const { db } = input, { p, request } = found;
   const [applied] = await db.select().from(workflowTransitionEvents).where(and(
@@ -264,7 +264,7 @@ async function reconcile(db: Db, request: Request) {
       ? await loadPriorRejectedFindings({ ...scope, notAfter: producerRun.completedAt }) : null;
     findingsByQaStepId.set(q.qaRun.stepId, findings ? applyRecurrencePromotion(findings, prior).findings : null);
   }
-  const found = await discover({ db, run, steps: execution.steps, producerStep, producerRun, rejectedQas, findingsByQaStepId });
+  const found = await discoverQaCorrection({ db, run, steps: execution.steps, producerStep, producerRun, rejectedQas, findingsByQaStepId });
   requireQaCorrection(found && same(found.request, request), "stale");
   const prepared = await beginQaCorrection(db, found.p);
   if (prepared.status === "already_applied") return;
