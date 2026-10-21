@@ -239,17 +239,25 @@ describe("C02/C03 source recovery and native request atomicity", () => {
         agent: (await peer.select({ spent: agents.spentMonthlyCents }).from(agents).where(eq(agents.id, world.agentId)))[0],
         company: (await peer.select({ spent: companies.spentMonthlyCents }).from(companies).where(eq(companies.id, world.companyId)))[0],
       });
-      const totals = await usage();
-      expect(settled.heartbeats).toHaveLength(1);
-      expect(settled.heartbeats[0]).toMatchObject({ id: heartbeat.id, wakeupRequestId: wake.id, status: "succeeded" });
-      expect(settled.costs).toHaveLength(1);
-      expect(settled.costs[0]).toMatchObject({ costCents: 1, inputTokens: 17, outputTokens: 5 });
+      const totals = await usage(), executionCount = adapter.mock.calls.length;
+      // C02/C03 require one execution of this recovery request; successors may run after release.
+      const targetWakes = settled.wakes.filter(row =>
+        row.workflowStepRunId === world.stepRunIdsByStep.upstream || row.issueId === world.issueIdsByStep.upstream);
+      expect(targetWakes).toHaveLength(1);
+      expect(targetWakes[0]!.id).toBe(wake.id);
+      const targetHeartbeats = settled.heartbeats.filter(row => row.wakeupRequestId === wake.id);
+      expect(targetHeartbeats).toHaveLength(1);
+      expect(targetHeartbeats[0]).toMatchObject({ id: heartbeat.id, wakeupRequestId: wake.id, status: "succeeded" });
+      const targetCosts = settled.costs.filter(row => row.heartbeatRunId === heartbeat.id);
+      expect(targetCosts).toHaveLength(1);
+      expect(targetCosts[0]).toMatchObject({ costCents: 1, inputTokens: 17, outputTokens: 5 });
       await service.resumeQueuedRuns();
       await service.resumeQueuedRuns();
       for (const root of roots) await waitForHeartbeatExecutionsToDrain(root);
       expect(await state(peer, world)).toEqual(settled);
       expect(await usage()).toEqual(totals);
-      expect(adapter).toHaveBeenCalledTimes(1);
+      expect(executions.filter(row => row.runId === heartbeat.id && row.wakeId === wake.id)).toHaveLength(1);
+      expect(adapter).toHaveBeenCalledTimes(executionCount);
     } finally {
       release();
       drain?.mockRestore();
