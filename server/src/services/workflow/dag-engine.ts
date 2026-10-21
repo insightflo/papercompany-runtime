@@ -30,6 +30,8 @@ import path from "node:path";
 import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
+import { createQaRemediationRefire } from "./control-flow/qa-remediation.js";
+import { withQaCorrectionFollowupReconcile } from "./control-flow/qa-correction-followup-reconcile.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
@@ -3121,7 +3123,8 @@ async function loadIssueStatusesForStepRuns(
 
 export async function syncWorkflowRunStateWithOutcome(db: Db, runId: string, source: WorkflowSyncSource = "workflow_sync",
   options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean }): Promise<WorkflowSyncOutcome> {
-  return withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options));
+  return withQaCorrectionFollowupReconcile(db, runId, () =>
+    withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options)));
 }
 async function syncWorkflowRunStateCore(
   db: Db,
@@ -3337,27 +3340,8 @@ async function syncWorkflowRunStateCore(
       stepRuns,
       predsByStepId: reworkPredsByStepId,
       validationVerdictsByIssueId,
-      // [qa mechanical remediation] QA 스텝 재실행(wake) 주입 — loop-driver 는 dag-engine 을 import
-      //   하지 않으므로 여기서 래핑한다. 기존 validation-recheck 와 동일한 wake 경로/조건을 재사용해
-      //   재발행 세션 강제(fresh session)로 현재 산출물만 재검증한다.
-      refireQaStep: async (qa) => {
-        const stepDef = context.steps.find((s) => s.id === qa.stepId);
-        if (!stepDef || !qa.issueId) return false;
-        const qaRun = stepRuns.find((sr) => sr.id === qa.stepRunId);
-        return wakeExistingWorkflowStepIssue({
-          db,
-          run: context.run,
-          definition: context.definition,
-          step: stepDef,
-          stepRunId: qa.stepRunId,
-          stepRunMetadata: qaRun?.metadata,
-          issueId: qa.issueId,
-          allowCompletedIssue: true,
-          allowBlockedIssue: true,
-          forceFreshSession: true,
-          idempotencyKey: `qa-remediation-refire:${context.run.id}:${qa.stepRunId}`,
-        });
-      },
+      refireQaStep: createQaRemediationRefire({ db, run: context.run, definition: context.definition,
+        steps: context.steps, stepRuns }),
     });
     stepRuns = reworkResult.stepRuns;
   }

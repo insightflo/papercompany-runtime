@@ -17,11 +17,15 @@
 //   - bounded: QA stepRun 당 remediation 시도(이벤트 수) 상한. 초과/실패 시 기존 생산자 재작업 경로로 폴백.
 //   - fail-closed: 어떤 조건이든 증명되지 않으면 not_applicable — caller(loop-driver)는 기존 재작업 경로 유지.
 //
-// [ordering] 일반 경로: wake(QA 재실행) 먼저 → 파일 기록 → 이벤트 기록. wake 가 거부되면 아무것도 쓰지 않는다.
-//   파일 기록 실패 시 write_failed 이벤트를 남기고 폴백한다. Quality current_output 경로
-//   (services/quality/current-output.ts)는 아래 export 된 자격검사/기록 코어를 재사용하되 깨우지 않는다.
+// [ordering] C02의 생산자 증명·binding 지원 경로는 불변 파일 저장→발급→내구 큐→확정 후 전달한다.
+//   지원되지 않는 legacy 경로는 기존 wake→직접 기록·실패 폴백을 유지한다. Quality current_output은
+//   기존 export 코어를 재사용하며 해당 호출자 이전은 별도 단계다.
 
 import { writeFile } from "node:fs/promises";
+import type { WorkflowStep } from "../dag-engine.js";
+import type { workflowDefinitions, workflowRuns, workflowStepRuns, Db } from "@paperclipai/db";
+import { wakeExistingWorkflowStepIssue } from "../workflow-step-wake.js";
+import { tryQaCorrectionFollowup } from "./qa-correction-followup-reconcile.js";
 import { workflowTransitionEvents } from "@paperclipai/db";
 import { logger } from "../../../middleware/logger.js";
 import {
@@ -109,12 +113,32 @@ export async function writeQaRemediationPatches(input: Pick<TryQaRemediationInpu
   return { writeError };
 }
 
+/** Existing DAG refire contract, kept here with the remediation owner to avoid a runtime DAG import. */
+export function createQaRemediationRefire(input: {
+  db: Db; run: typeof workflowRuns.$inferSelect; definition: typeof workflowDefinitions.$inferSelect;
+  steps: readonly WorkflowStep[]; stepRuns: readonly (typeof workflowStepRuns.$inferSelect)[];
+}): TryQaRemediationInput["refireQaStep"] {
+  return async (qa) => {
+    const step = input.steps.find(s => s.id === qa.stepId);
+    if (!step || !qa.issueId) return false;
+    const qaRun = input.stepRuns.find(sr => sr.id === qa.stepRunId);
+    return wakeExistingWorkflowStepIssue({
+      db: input.db, run: input.run, definition: input.definition, step,
+      stepRunId: qa.stepRunId, stepRunMetadata: qaRun?.metadata, issueId: qa.issueId,
+      allowCompletedIssue: true, allowBlockedIssue: true, forceFreshSession: true,
+      idempotencyKey: `qa-remediation-refire:${input.run.id}:${qa.stepRunId}`,
+    });
+  };
+}
+
 /**
  * [purpose] fresh 반려 QA 전원이 기계 remediable 이면 결정론적 패치 + QA 재실행, 아니면 not_applicable.
  *   "waiting" = 이 verdict 들은 이미 remediation 이 적용된 상태(재실행 대기 중) — caller 는 재작업도 스킵.
  */
 export async function tryQaRemediationPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {
   const { db, run } = input;
+  const correction = await tryQaCorrectionFollowup(input);
+  if (correction) return correction;
   const prepared = await collectQualifiableQaRemediations(input);
   if (prepared.status !== "qualified") return { outcome: prepared.status, detail: prepared.detail };
   const { qualified, fileBuffers } = prepared;

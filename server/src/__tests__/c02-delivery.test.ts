@@ -1,24 +1,35 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import path from "node:path";
+import { readFile } from "node:fs/promises";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, heartbeatRuns, issueComments, issueWorkProducts, issues, missions,
-  workflowStepRuns, workflowTransitionEvents, type Db,
+  activityLog, costEvents, heartbeatRuns, issueComments, issueWorkProducts, issues, missions,
+  workflowDefinitions, workflowRuns, workflowStepOutputBindings, workflowTerminalDecisions,
+  agents, agentWakeupRequests, workflowStepRuns, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 
-const { heartbeatWakeup } = vi.hoisted(() => ({ heartbeatWakeup: vi.fn() }));
+const { heartbeatWakeup, actualDelivery, adapter } = vi.hoisted(() => ({
+  heartbeatWakeup: vi.fn(), actualDelivery: { enabled: false }, adapter: vi.fn(),
+}));
+vi.mock("../adapters/index.js", async original => ({
+  ...await original<typeof import("../adapters/index.js")>(),
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: adapter }),
+}));
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
-  return { ...actual, heartbeatService: () => ({ wakeup: heartbeatWakeup }) };
+  return { ...actual, heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) =>
+    actualDelivery.enabled ? actual.heartbeatService(...args) : { wakeup: heartbeatWakeup } };
 });
 vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>();
   return {
     ...actual,
     queueIssueAssignmentWakeup: (input: Parameters<typeof actual.queueIssueAssignmentWakeup>[0]) =>
-      actual.queueIssueAssignmentWakeup({ ...input, heartbeat: { wakeup: heartbeatWakeup } }),
+      actualDelivery.enabled ? actual.queueIssueAssignmentWakeup(input)
+        : actual.queueIssueAssignmentWakeup({ ...input, heartbeat: { wakeup: heartbeatWakeup } }),
   };
 });
 
@@ -27,7 +38,18 @@ import {
   seedWorkflowDefinition, startExecutionDefinitionFixture, stepRunsOf,
   type ExecutionDefinitionFixture,
 } from "./helpers/workflow-frozen-execution-fixture.js";
-import { syncWorkflowRunForIssue } from "../services/workflow/dag-engine.js";
+import { syncWorkflowRunForIssue, syncWorkflowRunState } from "../services/workflow/dag-engine.js";
+import { createCommitSourceHarness, makeCommitSource, commitDbState } from "./qa-correction-commit-fixture.js";
+import { appendQaVerdict } from "./helpers/qa-correction-fixture.js";
+import { admittedProducer } from "./helpers/admitted-producer.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
+import { proposeReplacement, approveReplacement } from "../services/workflow/replacement-approval.js";
+import { admitReplacement } from "../services/workflow/replacement-admission.js";
+import { claimPlainWorkflowStart } from "../services/workflow/plain-start-claim.js";
+import { activatePlanningMissionForWorkflowRun } from "../services/missions/mission-workflow-lifecycle.js";
+import { parseQaCorrectionEventPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
+import * as artifactWriter from "../services/workflow/artifact-writer.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -193,4 +215,86 @@ describeEP("C02 stage 1: preserve validation recheck delivery boundary", () => {
     expect(await recheckComments()).toHaveLength(2);
     expect(await recheckActivities()).toHaveLength(2);
   });
+});
+describeEP("C02 14A: real replacement rejection to immutable correction delivery", () => {
+  let owned: Awaited<ReturnType<typeof createCommitSourceHarness>>; afterAll(async () => { if (owned) await owned.close(); });
+  it("unwinds nested locks, retries storage and delivers one issued B after first-delivery commit", async () => {
+    owned = await createCommitSourceHarness(); const peer = owned.connect(); const s = await makeCommitSource(owned.db, owned.root, "content-only"), original = await readFile(s.file);
+    const [source] = await owned.db.select().from(workflowRuns).where(eq(workflowRuns.id, s.p.workflowRunId)); const [definition] = await owned.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, source!.workflowId));
+    const [producerHb] = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, s.f.producerHeartbeatId)); const [qaHb] = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, s.f.verdictHeartbeatId));
+    const steps = (definition!.stepsJson as Array<Record<string, unknown>>).map(raw => {
+      const { toolArtifactContract: _contract, ...step } = raw; return step; });
+    await owned.db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.id, definition!.id));
+    await owned.db.update(workflowRuns).set({ status: "failed" }).where(eq(workflowRuns.id, source!.id));
+    await owned.db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.companyId, s.p.companyId));
+    await owned.db.insert(workflowTerminalDecisions).values({ companyId: s.p.companyId, workflowRunId: source!.id,
+      decidedAuthorityVersion: 0, decision: "failed", policyCause: "recovery_deadline_hard", discoveryPath: "stuck_diagnostic", origin: "reconciler", reason: "test", recoveryGate: {} });
+    const owner = await recordMissionOwnerDecision({ db: owned.db, issue: { id: s.p.producer.issueId,
+      companyId: s.p.companyId, missionId: s.p.missionId }, heartbeatRunId: s.f.producerHeartbeatId, submission: {
+      decision: "restart_from_start", recoveryTarget: { kind: "tool_step", workflowRunId: source!.id, stepRunId: s.f.qa.id,
+        expectedAuthorityVersion: 0, expectedExecutionGeneration: 0, failedDispatchRequestId: s.request.requestId } } });
+    const board = { type: "board", source: "local_implicit", userId: "local-board", isInstanceAdmin: true } as const;
+    const approval = await proposeReplacement(owned.db, s.p.companyId, board, { sourceRunId: source!.id,
+      decisionEventId: owner.eventId, idempotencyKey: "c02-14a", metadata: {}, externalEffects: "operator_reconciled" });
+    await approveReplacement(owned.db, s.p.companyId, approval.id, board); const target = (await admitReplacement(owned.db, { workflowId: source!.workflowId, companyId: s.p.companyId,
+      missionId: s.p.missionId, triggeredBy: "agent", metadata: {}, replacementIntent: { schemaVersion: 1, sourceRunId: source!.id,
+        expectedSourceAuthorityVersion: 0, decisionEventId: owner.eventId, approvalId: approval.id, idempotencyKey: "c02-14a" } },
+      { type: "agent", agentId: producerHb!.agentId, companyId: s.p.companyId })).run;
+    expect(await claimPlainWorkflowStart(owned.db, target.id, { activateMission: activatePlanningMissionForWorkflowRun } as never)).toBe("started");
+    const before = new Date(Date.now() - 1000), now = new Date(); const issueRows = await owned.db.insert(issues).values([producerHb!, qaHb!].map((hb, i) => ({
+      companyId: s.p.companyId, missionId: s.p.missionId, title: i ? "[QA] Check" : "Produce", status: "done",
+      assigneeAgentId: hb.agentId, originKind: "workflow_execution", originRunId: target.id, completedAt: i ? now : before }))).returning();
+    const rows = await owned.db.insert(workflowStepRuns).values(issueRows.map((issue, i) => ({
+      workflowRunId: target.id, stepId: i ? "qa-check" : "produce", issueId: issue.id,
+      status: i ? "running" : "completed", completedAt: i ? null : before }))).returning();
+    const producer = rows.find(r => r.stepId === "produce")!, qa = rows.find(r => r.stepId === "qa-check")!, producerId = randomUUID();
+    await admittedProducer(owned.db, { companyId: s.p.companyId, agentId: producerHb!.agentId, issueId: producer.issueId, stepRunId: producer.id, heartbeatId: producerId });
+    await owned.db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.companyId, s.p.companyId));
+    await owned.db.update(issueWorkProducts).set({ issueId: producer.issueId!, createdByRunId: producerId,
+      metadata: { path: s.file, workflowProducer: { ...s.producer, workflowRunId: target.id, stepRunId: producer.id, heartbeatRunId: producerId } } }).where(eq(issueWorkProducts.id, s.productId));
+    await owned.db.insert(workflowStepOutputBindings).values({ companyId: s.p.companyId, workflowRunId: target.id,
+      consumerStepRunId: qa.id, referencedStepId: "produce", workProductId: s.productId });
+    const verdict = await appendQaVerdict(owned.db, { ...s.f, producer, qa, preparation: { ...s.p, workflowRunId: target.id } }, "request_changes");
+    await owned.db.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, verdict.heartbeatRunId)); await owned.db.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
+    await owned.db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.companyId, s.p.companyId));
+    await owned.db.update(agents).set({ status: "active", adapterType: "codex_local", adapterConfig: { cwd: owned.root },
+      runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, producerHb!.agentId));
+    actualDelivery.enabled = true; vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk"); vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", path.join(owned.root, "storage"));
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "11".repeat(32)); let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    let notifiedAfterCommit = false; adapter.mockImplementation(async () => {
+      const [committed] = await peer.select().from(workflowRuns).where(eq(workflowRuns.id, target.id));
+      notifiedAfterCommit = Boolean((committed?.metadata.replacementStart as Record<string, unknown> | undefined)?.deliveredAt);
+      await held; return { exitCode: 1, signal: null, timedOut: false, errorMessage: "isolated", usage: null, provider: "test", model: "test", resultJson: null, runtimeServices: [] };
+    });
+    const sync = (db: Db = owned.db) => syncWorkflowRunState(db, target.id); const events = () => peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowRunId, target.id));
+    const receipt = async () => (await peer.select().from(workflowRuns).where(eq(workflowRuns.id, target.id)))[0]!.metadata.replacementStart as Record<string, unknown>;
+    const originalWriter = artifactWriter.createArtifactDirectory, failure = Error("C02 storage fault"); let fail = true; const writer = vi.spyOn(artifactWriter, "createArtifactDirectory").mockImplementation(async (...args) => {
+      await peer.transaction(async tx => { await tx.execute(sql`SET LOCAL lock_timeout='250ms'`);
+        await tx.execute(sql`select id from missions where id=${s.p.missionId} for update nowait`);
+        await tx.execute(sql`select id from workflow_runs where id=${target.id} for update nowait`); });
+      if (fail) { fail = false; throw failure; } return originalWriter(...args);
+    });
+    try {
+      await expect(owned.db.transaction(tx => sync(tx as unknown as Db))).rejects.toMatchObject({ request: { runId: target.id, producerStepRunId: producer.id, qaStepRunIds: [qa.id], verdictEventIds: [verdict.eventId] } });
+      expect((await events()).filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(0); expect(writer).not.toHaveBeenCalled();
+      await expect(sync()).rejects.toBe(failure); expect((await receipt()).deliveredAt).toBeNull();
+      expect((await events()).filter(e => e.eventType === "qa_correction_followup_requested")).toHaveLength(0);
+      const gate = "c02_" + randomUUID().replaceAll("-", "");
+      await peer.execute(sql.raw(`CREATE FUNCTION ${gate}() RETURNS trigger LANGUAGE plpgsql AS $c02$ BEGIN IF NEW.workflow_run_id='${target.id}'::uuid AND NEW.request_kind <> 'workflow_resume' THEN RAISE EXCEPTION 'C02 queue fault'; END IF; RETURN NEW; END $c02$; CREATE TRIGGER ${gate} BEFORE INSERT ON agent_wakeup_requests FOR EACH ROW EXECUTE FUNCTION ${gate}();`));
+      try { await sync(); expect((await receipt()).deliveredAt).toEqual(expect.any(String)); }
+      finally { await peer.execute(sql.raw(`DROP TRIGGER ${gate} ON agent_wakeup_requests; DROP FUNCTION ${gate}();`)); }
+      expect((await events()).filter(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))).toHaveLength(1);
+      await sync();
+      await vi.waitFor(() => { expect(adapter).toHaveBeenCalledTimes(1); expect(notifiedAfterCommit).toBe(true); }, { timeout: 5000 });
+      expect(await readFile(s.file)).toEqual(original); const issued = (await events()).find(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))!;
+      const applied = parseQaCorrectionEventPayload("qa_remediation_applied", issued.payload), revision = applied.revisions[0]!;
+      expect(JSON.parse(await readFile(path.join(revision.root, revision.mainRelativePath), "utf8")).title).toBe("new");
+      expect((await events()).filter(e => e.eventType === "qa_correction_followup_delivered")).toHaveLength(1);
+      const costs = () => peer.select().from(costEvents).where(eq(costEvents.companyId, s.p.companyId)).orderBy(costEvents.id); const state = await commitDbState(s), costBefore = await costs(); await sync();
+      const repeated = await commitDbState(s); expect(repeated.products).toEqual(state.products); expect(repeated.usage).toEqual(state.usage);
+      expect(repeated.events.filter(e => e.idempotencyKey?.startsWith("qa-correction-applied:"))).toHaveLength(1); expect(repeated.events.filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(1);
+      expect(repeated.wakes).toEqual(state.wakes); expect(repeated.heartbeats).toEqual(state.heartbeats); expect(adapter).toHaveBeenCalledTimes(1); expect(await costs()).toEqual(costBefore);
+    } finally { writer.mockRestore(); release(); await waitForHeartbeatExecutionsToDrain(owned.db);
+      actualDelivery.enabled = false; adapter.mockReset(); vi.unstubAllEnvs(); }
+  }, 120000);
 });
