@@ -127,6 +127,7 @@ export async function prepareNextC02Input(previous: C02Case): Promise<CommitSour
   request.input.path = file;
   request.input.sha256 = main.sha256;
   request.input.byteSize = main.byteSize;
+  if (revision.assetsRelativeRoot === undefined) throw Error("registered B assets layout required");
   request.input.assetsRoot = request.input.mode === "html" ? ""
     : revision.assetsRelativeRoot === null ? "" : path.resolve(revision.root, revision.assetsRelativeRoot);
   request.input.assetManifest = facts.filter(fact => fact.role === "asset").map(fact => ({
