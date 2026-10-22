@@ -34,6 +34,7 @@ import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
 import { lockFailureObservationScope, persistFailedToolDispatch } from "./tool-dispatch-failure.js";
+import { settleToolQueueMetadata } from "./tool-queue-settle.js";
 import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
 import {
   dispatchWorkflowChildStep,
@@ -2455,6 +2456,8 @@ async function completeToolStepRunFromCache(input: {
     },
   };
   delete metadata.concurrencyBlocked;
+  // [종료 시 toolQueue 정리] 캐시 히트 완료도 종료 전이다 — 큐 기록을 settled 로 남긴다.
+  const settledCacheMetadata = settleToolQueueMetadata(metadata, input.now.toISOString());
 
   // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
   await setWorkflowStepRunStatus(input.db, {
@@ -2463,7 +2466,7 @@ async function completeToolStepRunFromCache(input: {
     patch: {
       startedAt: input.stepRun.startedAt ?? input.now,
       completedAt: input.now,
-      metadata,
+      metadata: settledCacheMetadata,
     },
     expectedStatuses: [input.stepRun.status],
   });
@@ -3173,6 +3176,10 @@ export async function completeWorkflowToolStepFromResult(
       retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
     }
     : { ...existingMetadata, toolResult, ...(toolArtifactReceipt ? { toolArtifactReceipt } : {}) };
+  // [종료 시 toolQueue 정리 — 2026-10-22] 완료/실패 전이와 함께 큐 기록을 settled 로 바꾼다.
+  //   종료 행에 queued/claimed 가 남아 resume 검사기·복구 뷰가 잔여를 계속 읽는 것을 막는다.
+  //   toolQueue 기록이 없으면 키를 만들지 않는다(settleToolQueueMetadata 불변식).
+  resultMetadata = settleToolQueueMetadata(resultMetadata, now.toISOString());
   if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
   const completionPlan = planStructuralCompletion({
     step: stepForGuard, success: input.success, data: input.data,
