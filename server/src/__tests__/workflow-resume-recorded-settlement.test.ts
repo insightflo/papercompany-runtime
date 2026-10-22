@@ -176,7 +176,6 @@ describe("checkRecordedHeartbeatSettlements — rule 2 terminal status", () => {
 
 describe("checkRecordedHeartbeatSettlements — rule 3 durable settlement proof", () => {
   const cases: Array<[string, (records: SettlementRecords) => void]> = [
-    ["finalizationVersion 0", (r) => void (r.heartbeat.finalizationVersion = 0)],
     ["unknown finalizationVersion 2", (r) => void (r.heartbeat.finalizationVersion = 2)],
     ["settledAt null", (r) => void (r.heartbeat.settledAt = null)],
     ["settledAt invalid date", (r) => void (r.heartbeat.settledAt = new Date("not-a-date"))],
@@ -197,6 +196,38 @@ describe("checkRecordedHeartbeatSettlements — rule 3 durable settlement proof"
     const records = base();
     mutate(records);
     expectSingleBlocked(records, "active_work", "settlement_unproven");
+  });
+});
+
+describe("checkRecordedHeartbeatSettlements — rule 2.5 legacy (engine never governed)", () => {
+  it("accepts a terminal legacy (version 0) heartbeat with valid finishedAt as proven-terminal", () => {
+    const records = base();
+    records.heartbeat.finalizationVersion = 0;
+    expect(check(records)).toEqual([]);
+  });
+
+  it("accepts a terminal legacy (null version) heartbeat with valid finishedAt as proven-terminal", () => {
+    const records = base();
+    records.heartbeat.finalizationVersion = null;
+    expect(check(records)).toEqual([]);
+  });
+
+  it("blocks a legacy terminal heartbeat without finishedAt as settlement_unproven", () => {
+    const records = base();
+    records.heartbeat.finalizationVersion = 0;
+    records.heartbeat.finishedAt = null;
+    expect(check(records)).toEqual([
+      { code: "active_work", heartbeatRunId: HB, reason: "settlement_unproven" },
+    ]);
+  });
+
+  it("still blocks a legacy nonterminal status before rule 2.5 (heartbeat_not_terminal)", () => {
+    const records = base();
+    records.heartbeat.finalizationVersion = 0;
+    records.heartbeat.status = "running";
+    expect(check(records)).toEqual([
+      { code: "active_work", heartbeatRunId: HB, reason: "heartbeat_not_terminal" },
+    ]);
   });
 });
 

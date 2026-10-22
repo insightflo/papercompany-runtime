@@ -5,10 +5,12 @@
  *   1) running→active_work, completed→executed_step, pending/failed/skipped 이외→
  *      unsupported_status(cancelled/canceled/unknown 포함).
  *   2) hasOwner→active_work(모든 kind, 겉보기 미실행이어도).
- *   3) agent/tool: issueId|startedAt|hasAttempt|hasQueue|hasExternalResult 중 하나라도
- *      기록되면 executed_step — 미발화처럼 보이는 status 가 이력을 가리는 것을 막는다.
- *      executionGeneration 단독은 이력이 아니다. 이력이 없으면 effect unknown→
- *      external_effect_unknown, 알려진 effect(external 포함)는 미래 미실행으로 허용.
+ *   3) agent/tool: pending(미실행 예정)인데 issueId|startedAt|hasAttempt|hasQueue|
+ *      hasExternalResult 흔적이 있으면 executed_step(상태 불일치 — 미발화를 가리는 이력 차단).
+ *      failed/skipped 종료 스텝의 흔적은 preview→apply 의 공식 reset 재실행 경로가 지원하므로
+ *      효과가 검토된(unknown 아닌) 경우 재실행 대상이 될 수 있다(외부 효과·게시는 검토 정책의
+ *      승인/게시 매핑이 담당 — 2026-10-22 liveness 교정). executionGeneration 단독은 이력이 아니다.
+ *      이력이 없으면 effect unknown→external_effect_unknown, 알려진 effect(external 포함)는 허용.
  *   4) control: issueId|hasExternalResult→executed_step. effect external/unknown→
  *      control_tool_effects_unverified(none/read_only 만 허용). pending 인데
  *      startedAt/hasAttempt/hasQueue 잔존→executed_step(불일치 미종료 과거).
@@ -34,13 +36,12 @@ export function checkStepEligibility(history: StepHistory): StepEligibilityBlock
   if (history.hasOwner) return "active_work";
 
   if (history.kind === "agent" || history.kind === "tool") {
-    if (
-      history.issueId !== null ||
-      history.startedAt !== null ||
-      history.hasAttempt ||
-      history.hasQueue ||
-      history.hasExternalResult
-    ) {
+    const hasRecordedHistory = history.issueId !== null
+      || history.startedAt !== null
+      || history.hasAttempt
+      || history.hasQueue
+      || history.hasExternalResult;
+    if (hasRecordedHistory && history.status === "pending") {
       return "executed_step";
     }
     if (history.effect === "unknown") return "external_effect_unknown";

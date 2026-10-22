@@ -21,7 +21,7 @@ import type { StepHistory } from "./types.js";
  *   이력 팩트 확정, 기존 checker 3종 결과를 그대로 blocker 로 변환, SnapshotState/factsHash 조립.
  * [명시적 한계 — 빈 blocker 는 적격이 아니다] delegation 은 status allowlist 를 발명하지 않고 행
  *   존재 자체를 잠정 active_work 로 본다(상위가 전환 소스를 좁히기 전까지의 conservative proof
- *   gap — settled 아님). toolQueue 도 prose 해석 없이 own property + nonnull 만 본다. checker
+ *   gap — settled 아님). toolQueue 는 미종료 스텝에서만 own property + nonnull 로 활성 판정하고 종료 스텝의 예약 기록은 과거 흔적로 본다(2026-10-22 liveness 교정). checker
  *   빈 결과는 "그 검사 통과" 하나일 뿐이다. resumeEpoch malformed 은 missing(0) 과 달리
  *   unsupported_status 로 거부한다.
  */
@@ -34,6 +34,11 @@ type StepRow = ResumeWorkspaceMissionHistory["missionSteps"][number];
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const ACTIVE_EXECUTION_STATES: ReadonlySet<string> = new Set(["queued", "running"]);
+
+/** [liveness 교정 2026-10-22] 잔여 흔적 판정용 종료 상태 어휘 — 스텝/하트비트/웨이크업. */
+const TERMINAL_STEP_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "skipped"]);
+const TERMINAL_HEARTBEAT_STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const TERMINAL_WAKEUP_STATUSES: ReadonlySet<string> = new Set(["coalesced", "skipped", "completed", "failed", "cancelled", "timed_out"]);
 
 /** checker reason → 사람 판독용 한국어 메시지(실행 권위 아님 — code 가 권위다). */
 const CHECKER_MESSAGES: Readonly<Record<string, string>> = {
@@ -127,18 +132,15 @@ export function wholeMissionBlockers(
     if (step.status === "running") {
       blockers.push(activeWork("미션 전체에서 아직 실행 중인 스텝이 있습니다", { stepRunId: step.id }));
     }
-    if (step.dispatchOwnerWakeupRequestId !== null || step.dispatchOwnerHeartbeatRunId !== null) {
-      blockers.push(activeWork("스텝에 웨이크업/하트비트 소유권이 남아 있습니다", { stepRunId: step.id }));
-    }
-    if (hasOwnNonNull(step.metadata, "toolQueue")) {
-      blockers.push(activeWork("스텝에 도구 큐 잔존 기록이 있습니다", { stepRunId: step.id }));
-    }
   }
-  for (const issue of history.history.issues) {
-    if (issue.checkoutRunId !== null || issue.executionRunId !== null || issue.status === "in_progress") {
-      blockers.push(activeWork("이슈에 활성 실행/체크아웃 흔적이 남아 있습니다", { issueId: issue.id }));
-    }
-  }
+  // [liveness 교정 2026-10-22] 종료 스텝/이슈의 잔여 참조(도구 큐 예약·소유권·체크아웃/실행)는
+  //   참조된 wakeup/heartbeat 의 실제 상태를 읽어 활성일 때만 차단한다.
+  blockers.push(...activeResidueBlockers(
+    history.missionSteps,
+    history.history.issues,
+    new Map(history.history.wakeups.map((row) => [row.id, row.status])),
+    new Map(history.history.heartbeats.map((row) => [row.id, row.status])),
+  ));
   for (const delegation of history.history.delegations) {
     // [임시 conservative proof gap] status allowlist 를 발명하지 않는다 — delegation 존재 자체가
     // active_work. 상위가 실제 전환 소스를 확정하기 전까지 settled 아니다.
@@ -152,6 +154,65 @@ export function wholeMissionBlockers(
   for (const execution of executions) {
     if (ACTIVE_EXECUTION_STATES.has(execution.state)) {
       blockers.push(activeWork("재개 실행이 아직 대기/진행 중입니다", { executionId: execution.id }));
+    }
+  }
+  return blockers;
+}
+
+/** [liveness 교정 2026-10-22] 잔여 흔적 판정용 좁은 구조 — 전체 행에서 id/status/참조만 읽는다. */
+export interface StepResidueFacts {
+  id: string;
+  status: string;
+  dispatchOwnerWakeupRequestId: string | null;
+  dispatchOwnerHeartbeatRunId: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface IssueResidueFacts {
+  id: string;
+  status: string;
+  checkoutRunId: string | null;
+  executionRunId: string | null;
+}
+
+/**
+ * 미션 전체 잔여 흔적의 활성 판정 — 종료 스텝의 toolQueue/소유권 참조와 이슈 체크아웃/실행 참조는
+ * 참조된 wakeup/heartbeat 가 실제 활성(비종말)일 때만 active_work 로 차단한다. 종료 기록 참조는
+ * 과거 흔적이고, 참조가 수집 집합에서 누락되면 증명 불가로 활성 취급한다(fail-closed 유지).
+ */
+export function activeResidueBlockers(
+  steps: StepResidueFacts[],
+  issues: IssueResidueFacts[],
+  wakeupStatusById: ReadonlyMap<string, string>,
+  heartbeatStatusById: ReadonlyMap<string, string>,
+): ResumePreviewBlocker[] {
+  const blockers: ResumePreviewBlocker[] = [];
+  const wakeupActive = (id: string | null): boolean => {
+    if (id === null) return false;
+    const status = wakeupStatusById.get(id);
+    return status === undefined || !TERMINAL_WAKEUP_STATUSES.has(status);
+  };
+  const heartbeatActive = (id: string | null): boolean => {
+    if (id === null) return false;
+    const status = heartbeatStatusById.get(id);
+    return status === undefined || !TERMINAL_HEARTBEAT_STATUSES.has(status);
+  };
+  for (const step of steps) {
+    const stepTerminal = TERMINAL_STEP_STATUSES.has(step.status);
+    if (step.dispatchOwnerWakeupRequestId !== null || step.dispatchOwnerHeartbeatRunId !== null) {
+      if (!stepTerminal
+        || wakeupActive(step.dispatchOwnerWakeupRequestId)
+        || heartbeatActive(step.dispatchOwnerHeartbeatRunId)) {
+        blockers.push(activeWork("스텝에 웨이크업/하트비트 소유권이 남아 있습니다", { stepRunId: step.id }));
+      }
+    }
+    if (!stepTerminal && hasOwnNonNull(step.metadata, "toolQueue")) {
+      blockers.push(activeWork("스텝에 도구 큐 잔존 기록이 있습니다", { stepRunId: step.id }));
+    }
+  }
+  for (const issue of issues) {
+    if (heartbeatActive(issue.checkoutRunId) || heartbeatActive(issue.executionRunId) || issue.status === "in_progress") {
+      blockers.push(activeWork("이슈에 활성 실행/체크아웃 흔적이 남아 있습니다", { issueId: issue.id }));
     }
   }
   return blockers;

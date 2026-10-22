@@ -22,6 +22,9 @@ import {
  *   stopped process is never certified. Full DB-row typed factories only (no `as any`);
  *   duplicate-aware identity rules live in the links test file; real embedded-PG reader
  *   integration lives in workflow-resume-observed-resource-db.test.ts.
+ *   2026-10-22 liveness 교정: 비종말 workspace operation 도 참조 heartbeat 가 공급 이력에서
+ *   종결로 확인되면 유령 기록(stale bookkeeping)으로 모든 blocker 를 면제한다. null/미해결
+ *   참조·비종말 heartbeat·service/mission runtime 은 기존 규칙 그대로(fail-closed 유지).
  */
 
 const COMPANY = "11111111-1111-4111-8111-111111111111";
@@ -99,10 +102,20 @@ describe("checkObservedResourceConflicts — accepted records (rule 4 states, no
 });
 
 describe("checkObservedResourceConflicts — rule 4 nonterminal/unknown state blocks", () => {
-  it.each(["running", "queued", "mystery_unknown_status"])("blocks operation status %s as not_terminal", (status) => {
-    const operation = validOperation({ status });
-    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_not_terminal");
-  });
+  it.each(["running", "queued", "mystery_unknown_status"])(
+    "blocks operation status %s as not_terminal while the linked heartbeat is NONTERMINAL",
+    (status) => {
+      const operation = validOperation({ status });
+      expectSole(
+        check({
+          ...baseInput(),
+          heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+          workspaceOperations: [operation],
+        }),
+        "active_work", "workspace_operation", operation.id, "resource_not_terminal",
+      );
+    },
+  );
 
   it.each(["running", "starting"])("blocks service status %s even with populated stoppedAt", (status) => {
     const service = validService({ status, stoppedAt: T1 });
@@ -231,7 +244,15 @@ describe("checkObservedResourceConflicts — rule 6 recorded terminal timestamps
 describe("checkObservedResourceConflicts — first-failed-rule precedence", () => {
   it("rule 1 scope beats later rules in every category", () => {
     const operation = validOperation({ companyId: OTHER_COMPANY, status: "running" });
-    expectSole(checkOperation(operation), "scope_mismatch", "workspace_operation", operation.id, "resource_scope_mismatch");
+    // 참조 heartbeat 를 비종말로 둬야 유령 게이팅 없이 규칙 1 우선순위가 그대로 검증된다.
+    expectSole(
+      check({
+        ...baseInput(),
+        heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+        workspaceOperations: [operation],
+      }),
+      "scope_mismatch", "workspace_operation", operation.id, "resource_scope_mismatch",
+    );
     const service = validService({ companyId: OTHER_COMPANY, status: "starting" });
     expectSole(checkService(service), "scope_mismatch", "workspace_service", service.id, "resource_scope_mismatch");
     const runtime = validRuntime({ missionId: OTHER_MISSION, queueDepth: 2 });
@@ -256,6 +277,40 @@ describe("checkObservedResourceConflicts — first-failed-rule precedence", () =
     expectSole(checkService(service), "active_work", "workspace_service", service.id, "resource_not_terminal");
     const runtime = validRuntime({ status: "stopped", stoppedAt: null, queueDepth: 5 });
     expectSole(checkRuntime(runtime), "active_work", "mission_runtime", runtime.id, "resource_owner_present");
+  });
+});
+
+describe("checkObservedResourceConflicts — 2026-10-22 liveness gating (ghost operations)", () => {
+  it("nonterminal operation + terminal (succeeded) linked heartbeat is stale bookkeeping → [] (all blockers waived, even scope)", () => {
+    const ghost = validOperation({ status: "running", companyId: OTHER_COMPANY });
+    expect(checkOperation(ghost)).toEqual([]);
+  });
+
+  it("nonterminal operation + null heartbeatRunId keeps existing rules (lineage fires first)", () => {
+    const operation = validOperation({ status: "running", heartbeatRunId: null });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_lineage_unproven");
+  });
+
+  it("nonterminal operation + unresolved heartbeatRunId keeps existing rules", () => {
+    const operation = validOperation({ status: "running", heartbeatRunId: RUN });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_lineage_unproven");
+  });
+
+  it("nonterminal operation + nonterminal linked heartbeat keeps existing rules", () => {
+    const operation = validOperation({ status: "running" });
+    expectSole(
+      check({
+        ...baseInput(),
+        heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+        workspaceOperations: [operation],
+      }),
+      "active_work", "workspace_operation", operation.id, "resource_not_terminal",
+    );
+  });
+
+  it("terminal operation rows are never ghost-gated — rule 6 timestamp checks still apply", () => {
+    const operation = validOperation({ status: "succeeded", finishedAt: null });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_terminal_record_unproven");
   });
 });
 
