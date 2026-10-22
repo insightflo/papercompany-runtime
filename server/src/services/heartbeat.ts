@@ -207,6 +207,7 @@ import {
 import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
 import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
+import { createPauseExecutionObservation, finishPauseExecution } from "./heartbeat-pause-quiescence.js";
 import {
   assertIssueResumeScopeIdentity,
   recordResumeStaleResultRejected,
@@ -6097,6 +6098,7 @@ export function heartbeatService(db: Db) {
     }
 
     activeRunExecutions.add(run.id);
+    const pauseExecution = createPauseExecutionObservation();
 
     try {
     const agent = await getAgent(run.agentId);
@@ -7484,7 +7486,7 @@ export function heartbeatService(db: Db) {
           provider: readNonEmptyString(runtimeConfig.provider) ?? null,
         },
         attemptRunId: run.id,
-        execute: () => executeHeartbeatWithRecoveryGuard(db, run, () =>
+        execute: () => executeHeartbeatWithRecoveryGuard(db, run, () => pauseExecution.execute(run, () =>
           adapter.execute({
             runId: run.id,
             agent: { ...agent, adapterConfig: runtimeConfig },
@@ -7498,7 +7500,7 @@ export function heartbeatService(db: Db) {
               await persistRunProcessMetadata(run.id, meta);
             },
             authToken: authToken ?? undefined,
-          })),
+          }))),
       });
       if (fencedAdapterExecution.outcome === "skipped_replay") {
         throw Object.assign(
@@ -8200,38 +8202,10 @@ export function heartbeatService(db: Db) {
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
           await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
         } finally {
-          await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
-          activeRunExecutions.delete(run.id);
-          const terminalRun = await getRun(run.id).catch(() => null);
-          if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
-            await settleHeartbeatAfterExecution(db, terminalRun, new Date()).catch((settlementErr) => {
-              logger.warn({ err: settlementErr, runId: run.id }, "failed to settle heartbeat after execution cleanup");
-            });
-            // [CMP-199] 런 행이 종말이 된 뒤 이 런에 coalesce 되어 있던 operator-decision-wake 깨움을
-            // queued 로 되돌린다. 아래 startNextQueuedRunForAgent 가 같은 호출에서 승격하게 하기 위해
-            // 그 전에 실행한다. 재큐 실패가 finalization 을 깨뜨리지 않게 격리한다.
-            try {
-              const requeuedCount = await requeueCoalescedWakeupsForFinishedRun(db, {
-                companyId: terminalRun.companyId,
-                runId: terminalRun.id,
-              });
-              if (requeuedCount > 0) {
-                logger.info(
-                  { runId: terminalRun.id, requeuedCount },
-                  "requeued coalesced operator-decision wakeups for finished run",
-                );
-              }
-            } catch (err) {
-              logger.warn({ err, runId: terminalRun.id }, "failed to requeue coalesced wakeups for finished run");
-            }
-            // The earlier status finalization intentionally keeps an unsettled v1 run in the slot.
-            // Recompute after cleanup so settlement releases it; not_ready remains occupied by design.
-            await finalizeAgentStatus(
-              run.agentId,
-              terminalRun.status as "succeeded" | "failed" | "cancelled" | "timed_out",
-            ).catch(() => undefined);
-          }
-          await startNextQueuedRunForAgent(run.agentId);
+          await finishPauseExecution({
+            db, releaseRuntimeServicesForRun, activeRunExecutions, getRun, settleHeartbeatAfterExecution,
+            requeueCoalescedWakeupsForFinishedRun, finalizeAgentStatus, startNextQueuedRunForAgent,
+          }, run, pauseExecution);
         }
   }
 
