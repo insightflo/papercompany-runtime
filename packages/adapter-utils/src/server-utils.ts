@@ -9,6 +9,7 @@ import type {
 import { joinPromptSections, renderTemplate } from "./prompt-utils.js";
 import { materializeProviderSkills, resolveProviderSkillsDir } from "./skills.js";
 import { sanitizeInheritedPaperclipEnv } from "./paperclip-env.js";
+import { createChildProcessOutput } from "./child-process-output.js";
 
 export {
   type BuildPaperclipEnvOptions,
@@ -49,13 +50,7 @@ type ChildProcessWithEvents = ChildProcess & {
 
 export const runningProcesses = new Map<string, RunningProcess>();
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
-/**
- * 자식 프로세스 stdout 총 출력이 이 바이트를 넘으면 runaway(폭발) 로 판정해 자식을 종료한다.
- * appendWithCap(MAX_CAPTURE_BYTES) 는 캡처 버퍼를 4MB 로 잘라 event loop 를 보호하지만,
- * 자식이 stdout 을 닫지 않고 계속 뿜으면 on data 이벤트 자체가 무한히 발생해 event loop 를
- * 독점한다(opencode/glm-5.2 stdout 폭발 → 서버 hang 사례). 정상 run 의 긴 출력은 보호하려
- * 64MB 로 넉넉히 잡는다.
- */
+/** Legacy compatibility value; output volume no longer terminates children. */
 export const STDOUT_KILL_BYTES = 64 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;
@@ -948,12 +943,6 @@ export async function runChildProcess(
 
         let timedOut = false;
         let idleTimedOut = false;
-        let stdout = "";
-        let stderr = "";
-        let totalStdoutBytes = 0;
-        let stdoutKillTriggered = false;
-        let logError: Error | null = null;
-        let logChain: Promise<void> = Promise.resolve();
 
         const terminateChild = () => {
           child.kill("SIGTERM");
@@ -964,20 +953,19 @@ export async function runChildProcess(
           }, Math.max(1, opts.graceSec) * 1000);
         };
 
-        const handleLogFailure = (err: unknown, stream: "stdout" | "stderr") => {
-          onLogError(err, runId, `failed to append ${stream} log chunk`);
-          if (!opts.fatalOnLogError || logError) {
-            return;
-          }
-          const message = err instanceof Error ? err.message : String(err);
-          logError = new Error(message || `failed to append ${stream} log chunk`);
-          if (!child.killed) {
-            child.kill("SIGTERM");
-            setTimeout(() => {
-              if (!child.killed) child.kill("SIGKILL");
-            }, Math.max(1, opts.graceSec) * 1000);
-          }
-        };
+        const output = createChildProcessOutput({
+          stdout: child.stdout,
+          stderr: child.stderr,
+          appendWithCap,
+          onLog: opts.onLog,
+          onLogError: (err, stream) => {
+            onLogError(err, runId, `failed to append ${stream} log chunk`);
+          },
+          fatalOnLogError: opts.fatalOnLogError,
+          terminate: () => {
+            if (!child.killed) terminateChild();
+          },
+        });
 
         const timeout =
           opts.timeoutSec > 0
@@ -996,10 +984,7 @@ export async function runChildProcess(
             idleTimedOut = true;
             timedOut = true;
             const text = `[paperclip] No process output for ${idleTimeoutSec}s; terminating child process.\n`;
-            stderr = appendWithCap(stderr, text);
-            logChain = logChain
-              .then(() => opts.onLog("stderr", text))
-              .catch((err) => handleLogFailure(err, "stderr"));
+            output.accept("stderr", text);
             terminateChild();
           }, idleTimeoutSec * 1000);
         };
@@ -1007,32 +992,12 @@ export async function runChildProcess(
 
         child.stdout?.on("data", (chunk: unknown) => {
           refreshIdleTimeout();
-          const text = String(chunk);
-          totalStdoutBytes += text.length;
-          stdout = appendWithCap(stdout, text);
-          // stdout 폭발 방어: 자식이 stdout 을 닫지 않고 계속 뿜으면 on data 가 무한 발생해
-          // event loop 를 독점한다. STDOUT_KILL_BYTES(64MB) 초과 시 자식을 종료해 흐름을 끊는다.
-          if (!stdoutKillTriggered && !child.killed && totalStdoutBytes >= STDOUT_KILL_BYTES) {
-            stdoutKillTriggered = true;
-            const killMsg = `[paperclip] Child stdout exceeded ${STDOUT_KILL_BYTES} bytes (runaway output); terminating child process.\n`;
-            stderr = appendWithCap(stderr, killMsg);
-            logChain = logChain
-              .then(() => opts.onLog("stderr", killMsg))
-              .catch((err) => handleLogFailure(err, "stderr"));
-            terminateChild();
-          }
-          logChain = logChain
-            .then(() => opts.onLog("stdout", text))
-            .catch((err) => handleLogFailure(err, "stdout"));
+          output.accept("stdout", chunk);
         });
 
         child.stderr?.on("data", (chunk: unknown) => {
           refreshIdleTimeout();
-          const text = String(chunk);
-          stderr = appendWithCap(stderr, text);
-          logChain = logChain
-            .then(() => opts.onLog("stderr", text))
-            .catch((err) => handleLogFailure(err, "stderr"));
+          output.accept("stderr", chunk);
         });
 
         child.on("error", (err: Error) => {
@@ -1052,22 +1017,19 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           if (idleTimeout) clearTimeout(idleTimeout);
           runningProcesses.delete(runId);
-          void logChain.finally(() => {
-            if (logError) {
-              reject(logError);
-              return;
-            }
-            resolve({
+          void output.drain().then(
+            () => resolve({
               exitCode: code,
               signal,
               timedOut,
               idleTimedOut,
-              stdout,
-              stderr,
+              stdout: output.stdout,
+              stderr: output.stderr,
               pid: child.pid ?? null,
               startedAt,
-            });
-          });
+            }),
+            reject,
+          );
         });
       })
       .catch(reject);
