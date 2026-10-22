@@ -9,11 +9,13 @@ import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
 import { budgetBlockers } from "./workflow/resume/preview-facts.js";
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import { claimQueuedHeartbeatRun } from "./heartbeat-finalization/shadow-writes.js";
+import { preparePauseChildAdmission, assertCurrentPauseChild, type PauseChildAdmission } from "./heartbeat-pause-admission.js";
 
 type Scope = {
   companyId: string;
   agentId: string;
   issueId?: string | null;
+  missionId?: string | null;
   workflowRunId?: string | null;
   workflowStepRunId?: string | null;
   contextSnapshot?: unknown;
@@ -50,10 +52,15 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
       eq(issues.companyId, input.companyId), inArray(issues.id, issueIds), eq(issues.originKind, "workflow_execution")));
     for (const origin of origins) if (origin.runId) runIds.add(origin.runId);
   }
-  if (!runIds.size) return;
+  if (!runIds.size && !input.missionId) return;
   const runs = await db.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, input.companyId), inArray(workflowRuns.id, [...runIds])));
   if (runs.length !== runIds.size) throw conflict("heartbeat_workflow_scope_missing");
   runs.sort((a, b) => (a.missionId ?? "").localeCompare(b.missionId ?? "") || a.id.localeCompare(b.id));
+  // A pause receipt can carry an explicit original mission without borrowing a workflow from context.
+  if (input.missionId && !runs.some(r => r.missionId === input.missionId)) {
+    await db.select().from(missions).where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.companyId))).for("no key update");
+    await assertMissionRuntimeAcceptsWork(db, { companyId: input.companyId, missionId: input.missionId });
+  }
   for (const run of runs) {
     // NO KEY UPDATE conflicts with replacement's UPDATE lock but permits FK key-share
     // reads by the existing session initializer on its separate connection.
@@ -80,7 +87,10 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
 
 /** Claim and replacement admission serialize on the same mission/source-run locks. */
 async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
-  return withQaCorrectionClaimRoot(db, run, t => assertHeartbeatRecoveryAdmission(t, run), async t => {
+  let pause: PauseChildAdmission | null = null;
+  return withQaCorrectionClaimRoot(db, run, async t => {
+    pause = await preparePauseChildAdmission(t, run, missionId => assertHeartbeatRecoveryAdmission(t, { ...run, missionId }));
+  }, async t => {
     const [agent] = await t.select().from(agents).where(eq(agents.id, run.agentId));
     if (!agent || ["paused", "terminated", "pending_approval"].includes(agent.status)) throw conflict("Cancelled because the agent is not invokable");
     const context = record(run.contextSnapshot);
@@ -88,6 +98,7 @@ async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, clai
     if (block) throw conflict(block.reason);
     const missionId = text(context.missionId);
     if (missionId) await assertMissionRuntimeAcceptsWork(t, { companyId: run.companyId, missionId });
+    await assertCurrentPauseChild(t, run, pause);
     return claimQueuedHeartbeatRun(t, run, claimedAt);
   });
 }
@@ -108,8 +119,11 @@ function executionIdentity(run: typeof heartbeatRuns.$inferSelect) {
  * The returned box prevents Promise assimilation until after the transaction commits.
  */
 export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof heartbeatRuns.$inferSelect, execute: () => Promise<T>): Promise<T> {
-  const started = await withQaCorrectionClaimRoot(db, run,
-    t => assertHeartbeatRecoveryAdmission(t, run), async t => {
+  let pause: PauseChildAdmission | null = null;
+  const started = await withQaCorrectionClaimRoot(db, run, async t => {
+    pause = await preparePauseChildAdmission(t, run, missionId => assertHeartbeatRecoveryAdmission(t, { ...run, missionId }));
+  }, async t => {
+    await assertCurrentPauseChild(t, run, pause);
     const [current] = await t.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).for("share");
     if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(run)) {
       throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });

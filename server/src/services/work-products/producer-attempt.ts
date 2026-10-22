@@ -5,6 +5,7 @@ import { conflict } from "../../errors.js";
 import { qualityProducerRetryCount } from "./quality-producer-attempt.js";
 import { readWorkflowAttemptProof } from "../heartbeat-finalization/workflow-attempt-proof.js";
 import { readQaCorrectionProducerAttempt } from "./qa-correction-producer-attempt.js";
+import { readPauseChildProof } from "../heartbeat-pause-admission.js";
 
 // Separate from technical ancestry: history readers can reenter through a verdict on the same heartbeat.
 const activeAttempts = new AsyncLocalStorage<ReadonlySet<string>>();
@@ -70,6 +71,25 @@ async function readProducerAttempt(db: Pick<Db, "select">, heartbeat: typeof hea
     });
     let retryCount: number;
     let root = { rootHeartbeatRunId: heartbeat.id, rootWakeupRequestId: wake.id };
+    const pause = await readPauseChildProof(db, heartbeat, true);
+    if (pause) {
+      const frozen = pause.receipt.identity.workflow;
+      if (!frozen || frozen.stepRunId !== step.id || frozen.runId !== step.workflowRunId
+        || frozen.stepId !== step.stepId || frozen.executionGeneration !== step.executionGeneration
+        || frozen.retryCount !== step.retryCount || frozen.iterationIndex !== step.iterationIndex) return reject();
+      // Only this exact stopped/delivered receipt permits a never-started original.
+      // Older pause scopes remain history; the recovery guard separately proves current permission.
+      const parent = pause.parent;
+      const parentAttempt = await runProducerAttempt(db, { ...parent, workflowStepRunId: frozen.stepRunId,
+        workflowExecutionGeneration: frozen.executionGeneration }, {
+        identity: { ...step, executionGeneration: frozen.executionGeneration,
+          retryCount: frozen.retryCount, iterationIndex: frozen.iterationIndex },
+        qualityStep: input.qualityStep ? { ...input.qualityStep, executionGeneration: frozen.executionGeneration,
+          retryCount: frozen.retryCount, iterationIndex: frozen.iterationIndex } : null,
+      }, ancestors, !parent.startedAt);
+      if (parentAttempt.retryCount !== proof.retryCount || parentAttempt.iterationIndex !== proof.iterationIndex) return reject();
+      return parentAttempt;
+    }
     if (heartbeat.retryOfRunId) {
       if (wake.idempotencyKey !== null || !["process_lost_retry", "adapter_failed_retry", "adapter_fallback"].includes(wake.requestKind ?? "")
         || wake.reason !== wake.requestKind || wake.source !== "automation" || wake.requestedByActorType !== "system") return reject();
