@@ -1,5 +1,6 @@
 // 기존 입장 검사와 후보 선택을 보존한다. 실행 시작과 이벤트 발행은 호출자 책임이다.
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, is, sql } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, workflowTransitionEvents, withTxTimeout, type Db } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
 import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
@@ -15,6 +16,7 @@ import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.j
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, QueuedWakeupPromotionInput } from "./heartbeat-followup-promotion.js";
 import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
+import { deliverPauseResume, selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
 /** Only the identical unconditional rejection update; callers keep their own continue/return. */
 export async function failFollowupWake(tx: FollowupTx, id: string, error: string) {
@@ -22,6 +24,15 @@ export async function failFollowupWake(tx: FollowupTx, id: string, error: string
     status: "failed", finishedAt: new Date(), error, updatedAt: new Date(),
   }).where(eq(agentWakeupRequests.id, id));
   return null;
+}
+/** Existing recovery sweep, including durable pause intents with no queued run/wake yet. */
+export async function selectQueuedAgentIds(db: Db) {
+  const queuedRuns = await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
+    .where(eq(heartbeatRuns.status, "queued"));
+  const queuedWakeups = await db.select({ agentId: agentWakeupRequests.agentId }).from(agentWakeupRequests)
+    .where(and(eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
+  const pauseReceipts = await selectPauseResumeCandidates(db);
+  return [...new Set([...queuedRuns, ...queuedWakeups, ...pauseReceipts].map(r => r.agentId))];
 }
 type AgentRow = typeof agents.$inferSelect;
 type RunRow = typeof heartbeatRuns.$inferSelect;
@@ -49,6 +60,20 @@ export async function promoteQueuedWakeupRequestsForAgent(
     if (promotedRuns.length >= limit) break;
     const promoted = await promoteQueuedWakeupRequest(deps, agent, pendingRequest.id);
     if (promoted) promotedRuns.push(promoted);
+  }
+  // Ordinary queued requests keep their order and slots. A savepoint cannot own pause delivery.
+  if (!is(db, PgTransaction) && promotedRuns.length < limit) {
+    for (const candidate of await selectPauseResumeCandidates(db, agent.id)) {
+      if (promotedRuns.length >= limit) break;
+      try {
+        const child = await deliverPauseResume(db, candidate.id);
+        // A concurrent winner may already be running: never present it as a new claim/start.
+        if (child?.status === "queued") promotedRuns.push(child);
+      } catch (err) {
+        // The writer rolled back. Preserve intent and allow independent ordinary work to proceed.
+        logger.warn({ err, agentId: agent.id, pauseReceiptId: candidate.id }, "pause resume delivery deferred");
+      }
+    }
   }
   return promotedRuns;
 }

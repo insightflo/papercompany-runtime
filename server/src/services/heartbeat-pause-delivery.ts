@@ -51,6 +51,27 @@ export async function readPauseControls(db: Reader, agentId: string) {
   }
   return records;
 }
+/** SELECT-only hints for the existing queue, never approval or proof of current scope.
+ * Delivery re-reads the exact receipt under its established admission/control locks.
+ */
+export async function selectPauseResumeCandidates(db: Reader, agentId?: string) {
+  return db.select({ id: agentWakeupRequests.id, agentId: agentWakeupRequests.agentId })
+    .from(agentWakeupRequests).where(and(
+      agentId ? eq(agentWakeupRequests.agentId, agentId) : undefined,
+      eq(agentWakeupRequests.source, PAUSE_CONTROL_COLUMNS.source),
+      eq(agentWakeupRequests.requestedByActorType, PAUSE_CONTROL_COLUMNS.requestedByActorType),
+      eq(agentWakeupRequests.requestedByActorId, PAUSE_CONTROL_COLUMNS.requestedByActorId),
+      eq(agentWakeupRequests.requestKind, PAUSE_CONTROL_COLUMNS.requestKind),
+      eq(agentWakeupRequests.status, PAUSE_CONTROL_COLUMNS.status),
+      sql`${agentWakeupRequests.runId} is null`,
+      sql`${agentWakeupRequests.payload} ->> 'kind' = 'receipt'`,
+      sql`${agentWakeupRequests.payload} ->> 'cause' = 'manual_pause'`,
+      sql`${agentWakeupRequests.payload} ->> 'resumeScopeId' = ${agentWakeupRequests.payload} ->> 'ownerScopeId'`,
+      sql`${agentWakeupRequests.payload} -> 'stopped' <> 'null'::jsonb`,
+      sql`${agentWakeupRequests.payload} -> 'invalidated' = 'null'::jsonb`,
+      sql`${agentWakeupRequests.payload} -> 'delivery' = 'null'::jsonb`,
+    )).orderBy(agentWakeupRequests.requestedAt, agentWakeupRequests.id);
+}
 export function pauseExecutionIdentity(h: Run) {
   return { scopeKind: h.executionScopeKind, epoch: h.executionEpoch, token: h.executionToken,
     retryOfRunId: h.retryOfRunId, processLossRetryCount: h.processLossRetryCount,

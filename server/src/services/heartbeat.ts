@@ -215,7 +215,7 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
-import { promoteQueuedWakeupRequestsForAgent, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
+import { promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
@@ -5873,25 +5873,8 @@ export function heartbeatService(db: Db) {
     return { reaped, skippedLiveLock, skippedLiveSuccessor, skippedLiveIssueRun, skipped };
   }
   async function resumeQueuedRuns(agentId?: string) {
-    if (agentId) {
-      await startNextQueuedRunForAgent(agentId);
-      return;
-    }
-    const queuedRuns = await db
-      .select({ agentId: heartbeatRuns.agentId })
-      .from(heartbeatRuns)
-      .where(eq(heartbeatRuns.status, "queued"));
-    const queuedWakeups = await db
-      .select({ agentId: agentWakeupRequests.agentId })
-      .from(agentWakeupRequests)
-      .where(and(
-        eq(agentWakeupRequests.status, "queued"),
-        sql`${agentWakeupRequests.runId} is null`,
-      ));
-
-    const agentIds = [...new Set([...queuedRuns, ...queuedWakeups].map((r) => r.agentId))];
-    for (const agentId of agentIds) {
-      await startNextQueuedRunForAgent(agentId);
+    for (const targetAgentId of agentId ? [agentId] : await selectQueuedAgentIds(db)) {
+      await startNextQueuedRunForAgent(targetAgentId);
     }
   }
 
