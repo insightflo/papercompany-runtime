@@ -3,6 +3,7 @@ import { agentApiKeys, agents, agentWakeupRequests, heartbeatRuns, type Db } fro
 import type { runningProcesses } from "../adapters/index.js";
 import { conflict, notFound } from "../errors.js";
 import { agentService } from "./agents.js";
+import { commitAgentResume } from "./heartbeat-agent-resume.js";
 import { lockPauseFacts, recordPauseScope } from "./heartbeat-pause-intents.js";
 import type { publishLiveEvent } from "./live-events.js";
 
@@ -225,6 +226,7 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
   const control = {
     cancelRun: (runId: string) => cancelRunInternal(runId),
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
+    resumeAgent: (agentId: string) => commitAgentResume(db, agentId),
     pauseAgent: (agentId: string) => controlAgent(agentId, "manual_pause"),
     terminateAgent: (agentId: string) => controlAgent(agentId, "terminate"),
   };

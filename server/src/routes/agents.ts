@@ -1885,7 +1885,7 @@ export function agentRoutes(db: Db) {
   router.post("/agents/:id/resume", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    const agent = await svc.resume(id);
+    const agent = await heartbeat.resumeAgent(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
