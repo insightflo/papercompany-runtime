@@ -86,7 +86,8 @@ export async function verifyOutsidePredecessorArtifact(input: {
     workflowRunId: input.workflowRunId,
     stepId: input.stepRun.stepId,
   });
-  if (!isPathInsideOrEqual(artifactPath, stepOutputDir)) {
+  // 단계 산출 디렉터리를 특정할 수 없으면 범위 안임을 확인할 수 없다(검증 불가 = 범위 밖 취급).
+  if (!stepOutputDir || !isPathInsideOrEqual(artifactPath, stepOutputDir)) {
     return { kind: "unverified", reason: "path_out_of_scope" };
   }
   let fileInfo;
