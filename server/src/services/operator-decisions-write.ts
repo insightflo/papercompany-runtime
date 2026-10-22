@@ -1,10 +1,11 @@
-import { and, eq, getTableColumns, isNull, sql } from "drizzle-orm"; import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-language.js";
+import { and, desc, eq, getTableColumns, isNull, sql } from "drizzle-orm"; import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-language.js";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog, companies,
   agents,
   issueComments,
   issues,
+  missionPlanArtifacts,
   missions,
   operatorDecisionContinuations,
   operatorDecisions,
@@ -57,6 +58,24 @@ function readTargetSnapshot(sourceContext: unknown): OperatorDecisionTargetSnaps
   const candidate = (sourceContext as Record<string, unknown>).targetSnapshot;
   if (candidate === null || typeof candidate !== "object") return null;
   return candidate as OperatorDecisionTargetSnapshot;
+}
+
+// [승인=시작 묶음 2026-10-22] 미션의 현재 활성 계획 결정 해시. moi 카드 create 에서 서버가 sourceContext
+//   .planDecisionHash 로 기록한다(요청자 제공 값은 무시·위조 불가). 이 해시가 수정 런 시작 권한의
+//   묶음 기준이다 — 계획이 바뀌면 해시가 바뀌어 과거 승인은 더 이정 시작을 권한 부여하지 않는다.
+const MISSION_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function activePlanDecisionHash(db: Db, companyId: string, missionId: string): Promise<string | null> {
+  // uuid 컬럼 조회 전 형식 가드 — uuid 가 아닌 missionId(테스트 픽스처 등)는 계획이 없는 것으로 취급한다.
+  if (!MISSION_ID_UUID_RE.test(missionId)) return null;
+  const [plan] = await db.select({ refs: missionPlanArtifacts.refs }).from(missionPlanArtifacts)
+    .where(and(eq(missionPlanArtifacts.companyId, companyId), eq(missionPlanArtifacts.missionId, missionId),
+      eq(missionPlanArtifacts.status, "active")))
+    .orderBy(desc(missionPlanArtifacts.revision)).limit(1);
+  const refs = plan?.refs !== null && typeof plan?.refs === "object" && !Array.isArray(plan?.refs)
+    ? plan.refs as Record<string, unknown> : {};
+  const owner = refs.ownerPlanDecision !== null && typeof refs.ownerPlanDecision === "object"
+    && !Array.isArray(refs.ownerPlanDecision) ? refs.ownerPlanDecision as Record<string, unknown> : {};
+  return typeof owner.decisionHash === "string" && owner.decisionHash !== "" ? owner.decisionHash : null;
 }
 
 // [currentness gate] 스냅샷과 현재 DB 상태를 비교해 mismatch 필드 목록만 반환한다(판정 순수 함수).
@@ -236,6 +255,13 @@ export function operatorDecisionWriteService(db: Db) {
     }
 
     let id: string;
+    // [승인=시작 묶음 2026-10-22] moi 카드는 서버가 현재 활성 계획 해시를 찍어 저장한다. 생성 스키마가
+    //   strict 하므로 요청자가 이 키를 넣을 수 없고, 넣어도 검증 후 여기서 서버 값으로만 기록된다.
+    let storedSourceContext: typeof operatorDecisions.$inferInsert.sourceContext = validated.input.sourceContext;
+    if (validated.input.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE && validated.input.sourceContext.missionId) {
+      storedSourceContext = { ...storedSourceContext,
+        planDecisionHash: await activePlanDecisionHash(db, companyId, validated.input.sourceContext.missionId) };
+    }
     try {
       id = await db.transaction(async (tx) => {
         const [created] = await tx.insert(operatorDecisions).values({
@@ -249,7 +275,7 @@ export function operatorDecisionWriteService(db: Db) {
           description: validated.input.description,
           sourceType: validated.input.sourceType,
           sourceId: validated.input.sourceId,
-          sourceContext: validated.input.sourceContext,
+          sourceContext: storedSourceContext,
           issueId: validated.input.issueId,
           requestedByAgentId: actor.type === "agent" ? actor.id : null,
           requestedByUserId: actor.type === "user" ? actor.id : null,

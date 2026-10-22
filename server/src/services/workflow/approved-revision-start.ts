@@ -14,14 +14,16 @@ export interface ApprovedRevisionStartResult {
 
 const ALREADY_STARTED = new Set(["workflow_revision_board_start_not_ready", "workflow_revision_already_started"]);
 
-/** 사람이 "승인"한 수정 미션의 대기 중 실행을 시작한다(보드 버튼과 같은 trigger 경로).
- *  대기 객체가 없거나(이미 시작됨 포함) 승인 기록이 없으면 아무것도 하지 않는다(멱등). */
+/** 사람이 “승인”한 수정 미션의 대기 중 실행을 시작한다(보드 버튼과 같은 trigger 경로).
+ *  승인은 현재 대기 해시에 묶여 있다 — 카드 생성 시 서버가 찍은 planDecisionHash 가 현재 해시와
+ *  일치하는 승인만 권한을 부여한다. 대기 객체가 없거나(이미 시작됨 포함) 인정할 승인이 없으면
+ *  아무것도 하지 않는다(멱등·fail-closed). */
 export async function startApprovedRevisionRun(db: Db, input: {
   companyId: string; missionId: string;
 }): Promise<ApprovedRevisionStartResult> {
   const waiting = await loadRevisionBoardWait(db, input.companyId, input.missionId);
   if (!waiting) return { started: false, reason: "not_waiting" };
-  if (!await hasResolvedRevisionApproval(db, input.companyId, input.missionId)) {
+  if (!await hasResolvedRevisionApproval(db, input.companyId, input.missionId, waiting.decisionHash)) {
     return { started: false, reason: "no_approval" };
   }
   try {

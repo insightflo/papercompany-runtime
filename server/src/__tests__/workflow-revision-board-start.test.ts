@@ -68,10 +68,12 @@ async function approvedWaitWorld() {
   return { ...f, definition };
 }
 
-function resolveDecision(companyId: string, missionId: string, outcome: "approve" | "reject" | "hold") {
+function resolveDecision(companyId: string, missionId: string, outcome: "approve" | "reject" | "hold",
+  planDecisionHash?: string) {
   return db.insert(operatorDecisions).values({ companyId, requestKey: randomUUID(), requestHash: "c".repeat(64),
     interactionType: "single_select", title: "승인 요청", sourceType: "mission_owner_human_input", sourceId: randomUUID(),
-    sourceContext: { missionId, workflowId: null, workflowRunId: null, artifactRefs: [] },
+    sourceContext: { missionId, workflowId: null, workflowRunId: null, artifactRefs: [],
+      ...(planDecisionHash === undefined ? {} : { planDecisionHash }) },
     definition: { options: [{ id: outcome, label: outcome, description: null, facts: [], evidenceRefs: [] }],
       actions: [{ id: outcome, label: outcome, outcome, tone: "primary", requiresSelection: true }],
       selection: { min: 1, max: 1 }, comment: { mode: "optional", label: null, placeholder: null, maxLength: 2000 },
@@ -82,12 +84,29 @@ function resolveDecision(companyId: string, missionId: string, outcome: "approve
 
 const agentActor = (f: { agentId: string; companyId: string }) => ({ type: "agent" as const, agentId: f.agentId, companyId: f.companyId });
 
-it("resolved approval lets a non-board actor start the waiting revision run", async () => {
+const PLAN_HASH = "b".repeat(64);
+
+it("resolved approval bound to the current plan hash lets a non-board actor start", async () => {
   const f = await approvedWaitWorld();
-  await resolveDecision(f.companyId, f.revision.id, "approve");
+  await resolveDecision(f.companyId, f.revision.id, "approve", PLAN_HASH);
   const run = await createAdmittedWorkflowRun(db, { ...f.input, workflowId: f.definition.id, seedFromRun: undefined }, agentActor(f));
   expect(run.missionId).toBe(f.revision.id);
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toHaveLength(1);
+});
+
+it("approval stamped for a stale plan hash does not authorize the start", async () => {
+  const f = await approvedWaitWorld();
+  await resolveDecision(f.companyId, f.revision.id, "approve", "d".repeat(64));
+  await expect(createAdmittedWorkflowRun(db, { ...f.input, workflowId: f.definition.id, seedFromRun: undefined }, agentActor(f)))
+    .rejects.toThrow("workflow_revision_board_start_required");
+  expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toHaveLength(0);
+});
+
+it("pre-binding approval card without a plan hash does not authorize the start", async () => {
+  const f = await approvedWaitWorld();
+  await resolveDecision(f.companyId, f.revision.id, "approve");
+  await expect(createAdmittedWorkflowRun(db, { ...f.input, workflowId: f.definition.id, seedFromRun: undefined }, agentActor(f)))
+    .rejects.toThrow("workflow_revision_board_start_required");
 });
 
 it.each(["reject", "hold"] as const)("%s resolution does not authorize the revision start", async outcome => {
@@ -105,9 +124,9 @@ it("approval for a different mission does not authorize the start", async () => 
     .rejects.toThrow("workflow_revision_board_start_required");
 });
 
-it("sweep starts an approved waiting revision exactly once", async () => {
+it("sweep starts a hash-bound approved waiting revision exactly once", async () => {
   const f = await approvedWaitWorld();
-  await resolveDecision(f.companyId, f.revision.id, "approve");
+  await resolveDecision(f.companyId, f.revision.id, "approve", PLAN_HASH);
   expect(await sweepApprovedRevisionStarts(db)).toBe(1);
   expect(await db.select().from(workflowRuns).where(eq(workflowRuns.missionId, f.revision.id))).toHaveLength(1);
   expect(await startApprovedRevisionRun(db, { companyId: f.companyId, missionId: f.revision.id })).toMatchObject({ started: false });
