@@ -148,8 +148,11 @@ export async function lockCurrentScope(tx: Db, agentId: string, expectedScopeId?
         const [child] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipt.delivery.heartbeatRunId));
         if (!child || child.wakeupRequestId !== wake.id || wake.runId !== child.id
           || child.retryOfRunId !== original.id || child.companyId !== agent.companyId || child.agentId !== agentId
-          || child.issueId !== original.issueId || child.workflowStepRunId !== (receipt.identity.workflow?.stepRunId ?? null)
-          || child.workflowExecutionGeneration !== (receipt.identity.workflow?.executionGeneration ?? null)) return reject();
+          || child.issueId !== original.issueId
+          || !((child.workflowStepRunId === (receipt.identity.workflow?.stepRunId ?? null)
+            && child.workflowExecutionGeneration === (receipt.identity.workflow?.executionGeneration ?? null))
+            || (child.startedAt === null && child.workflowStepRunId === null
+              && child.workflowExecutionGeneration === null))) return reject();
       } else if (wake.runId !== null) return reject();
     }
   }

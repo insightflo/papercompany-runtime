@@ -129,6 +129,22 @@ it.each(["invalidated", "scope", "permission", "generation"])("C05 %s wins befor
   }
 });
 
+// C05 storage fence: only an unstarted, wholly untyped child may use the pre-claim form.
+it.each(["started-null", "step-null", "generation-null"])("C05 rejects %s delivered child at scope storage", async kind => {
+  const w = await ordinary();
+  await db.update(heartbeatRuns).set({
+    status: kind === "started-null" ? "running" : "queued",
+    startedAt: kind === "started-null" ? new Date() : null,
+    workflowStepRunId: kind === "generation-null" ? w.step.id : null,
+    workflowExecutionGeneration: kind === "step-null" ? w.step.executionGeneration : null,
+  }).where(eq(heartbeatRuns.id, w.child.id));
+  const before = await readRun(w.child.id);
+  await expect(change(w, "scope")).rejects.toThrow("heartbeat_pause_scope_unproven_or_changed");
+  const [head] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, w.headId));
+  expect(head!.payload).toMatchObject({ scopeId: w.p.ownerScopeId });
+  expect(await readRun(w.child.id)).toEqual(before);
+});
+
 it.each(["public", "parent", "delivery", "stop", "counter", "missing-wake", "duplicate"])("C05 rejects %s evidence", async kind => {
   const w = await ordinary();
   if (kind === "public") await db.update(agentWakeupRequests).set({ source: "on_demand", requestedByActorType: "user", requestedByActorId: "operator" })
