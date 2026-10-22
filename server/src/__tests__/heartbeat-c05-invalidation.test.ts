@@ -73,7 +73,7 @@ async function work(w: Awaited<ReturnType<typeof world>>) {
   const projectId = randomUUID(), missionId = randomUUID(), issueId = randomUUID();
   await db.insert(projects).values({ id: projectId, companyId: w.companyId, name: "scope" });
   await db.insert(missions).values({ id: missionId, companyId: w.companyId, ownerAgentId: w.agentId,
-    projectId, title: "independent mission", status: "running" });
+    projectId, title: "independent mission", status: "active" });
   await db.insert(issues).values({ id: issueId, companyId: w.companyId, projectId, missionId,
     title: "C05 work", status: "in_progress", assigneeAgentId: w.agentId });
   const parent = await heartbeatService(db).wakeup(w.agentId, { source: "on_demand", triggerDetail: "manual",
