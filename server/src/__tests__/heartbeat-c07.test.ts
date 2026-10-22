@@ -18,7 +18,7 @@ vi.mock("../adapters/index.js", () => ({
 	})),
 	runningProcesses: new Map(),
 }));
-import { heartbeatService } from "../services/heartbeat.ts";
+import { heartbeatService } from "../services/heartbeat.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
