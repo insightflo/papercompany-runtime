@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   heartbeatRuns,
@@ -1018,7 +1018,13 @@ export async function reapStaleBusyMissionRuntimes(db: Db, opts?: {
       .where(and(
         eq(missionAgentRuntimes.id, runtime.id),
         eq(missionAgentRuntimes.status, "busy"),
-        eq(missionAgentRuntimes.updatedAt, runtime.updatedAt),
+        // [µs 정밀도 CAS 관용 — 2026-10-22] updated_at 기본값 now() 는 마이크로초로 저장되고
+        // JS Date 는 밀리초로 반올림되어, 정확 일치 CAS 는 해당 행을 영원히 못 이긴다(재개
+        // 파견이 만든 busy 런타임이 casLost 무한 반복하며 회수 불능이 된 실측 사례).
+        // 스냅샷 밀리초 ±1ms 창으로 비교한다 — 동시 갱신은 updated_at 을 훨씬 앞으로 밀므로
+        // 경합 감지(동시 완료 승리)는 그대로 유지된다.
+        gte(missionAgentRuntimes.updatedAt, new Date(runtime.updatedAt.getTime() - 1)),
+        lte(missionAgentRuntimes.updatedAt, new Date(runtime.updatedAt.getTime() + 1)),
       ))
       .returning({ id: missionAgentRuntimes.id });
     if (updated.length === 0) {

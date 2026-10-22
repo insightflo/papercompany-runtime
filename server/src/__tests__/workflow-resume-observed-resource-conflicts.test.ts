@@ -296,6 +296,25 @@ describe("checkObservedResourceConflicts — first-failed-rule precedence", () =
       "scope_mismatch", "workspace_operation", contaminated.id, "resource_scope_mismatch");
   });
 
+  it("[2026-10-22 liveness] 실행 이력 없는 비활성 런타임(runCount 0, lastRunId null, 소유 없음)은 계보 blocker 없음", () => {
+    // 재개 파견이 만든 뒤 도구 큐 실패로 아무 실행도 붙지 않은 예약 행 — 증명할 계보가 없다.
+    expect(checkRuntime(validRuntime({ lastRunId: null }))).toEqual([]);
+    expect(checkRuntime(validRuntime({ lastRunId: null, status: "stopped", stoppedAt: T1 }))).toEqual([]);
+  });
+
+  it("[2026-10-22 liveness] 실행 이력이 있으면(runCount>0) lastRunId null 은 여전히 lineage_unproven", () => {
+    const runtime = validRuntime({ lastRunId: null, runCount: 3 });
+    expectSole(checkRuntime(runtime), "active_work", "mission_runtime", runtime.id, "resource_lineage_unproven");
+  });
+
+  it("[2026-10-22 liveness] 미실행 런타임이라도 busy 거나 소유가 있으면 면제 없음", () => {
+    const busyRow = validRuntime({ lastRunId: null });
+    expectSole(check({ ...baseInput(), missionAgentRuntimes: [{ ...busyRow, status: "busy" }] }),
+      "active_work", "mission_runtime", busyRow.id, "resource_lineage_unproven");
+    const owned = validRuntime({ lastRunId: null, currentIssueId: ISSUE });
+    expectSole(checkRuntime(owned), "active_work", "mission_runtime", owned.id, "resource_lineage_unproven");
+  });
+
   it("rule 4 state beats rule 6 timestamps for services; rule 5 beats rule 6 for runtimes", () => {
     const service = validService({ status: "running", stoppedAt: null });
     expectSole(checkService(service), "active_work", "workspace_service", service.id, "resource_not_terminal");
