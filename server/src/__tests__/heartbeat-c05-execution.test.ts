@@ -6,7 +6,7 @@ import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, qualityA
 import { admittedProducer } from "./helpers/admitted-producer.js";
 import { createCommitSourceHarness } from "./helpers/c02-fixture.js";
 import { createClaimFixture } from "./helpers/c02-claim-race-fixture.js";
-import { correctionRows } from "./helpers/c02-delivery-fixture.js";
+import { correctionRows, deliveryWriter } from "./helpers/c02-delivery-fixture.js";
 import { qualityProducerFixture } from "./helpers/quality-producer-fixture.js";
 import { lockPauseFacts, recordPauseScope } from "../services/heartbeat-pause-intents.js";
 import { pauseControlSchema, readPauseControl, type PauseReceipt } from "../services/heartbeat-pause-contract.js";
@@ -15,7 +15,7 @@ import { deliverPauseResume } from "../services/heartbeat-pause-delivery.js";
 import { insertWorkflowWakeRequest } from "../services/heartbeat-workflow-wake.js";
 import { readWorkflowAttemptProof } from "../services/heartbeat-finalization/workflow-attempt-proof.js";
 import { claimHeartbeatWithRecoveryGuard, executeHeartbeatWithRecoveryGuard } from "../services/heartbeat-recovery-guard.js";
-import { producerAttemptDetail } from "../services/work-products/producer-attempt.js";
+import { producerAttempt, producerAttemptDetail } from "../services/work-products/producer-attempt.js";
 import { markRetryDispatching } from "../services/workflow/retry-dispatch-state.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -86,7 +86,8 @@ async function usage(companyId: string) {
   return { usage: await db.select().from(qualityPolicyUsage).where(eq(qualityPolicyUsage.companyId, companyId)).orderBy(qualityPolicyUsage.id),
     groups: await db.select().from(qualityActionGroups).where(eq(qualityActionGroups.companyId, companyId)).orderBy(qualityActionGroups.id) };
 }
-async function assertChild(w: Awaited<ReturnType<typeof paused>>, h: Run, expected: { retryCount: number; iterationIndex: number }) {
+async function assertChild(w: Awaited<ReturnType<typeof paused>>, h: Run,
+  expected: { retryCount: number; iterationIndex: number }, nativeQuality = false) {
   expect(h).toMatchObject({ status: "queued", retryOfRunId: w.parent.id,
     processLossRetryCount: w.parent.processLossRetryCount, startedAt: null });
   const request = await wake(h.wakeupRequestId!);
@@ -97,7 +98,8 @@ async function assertChild(w: Awaited<ReturnType<typeof paused>>, h: Run, expect
   expect((await savedReceipt(w.p.id)).delivery).toEqual({ wakeupRequestId: request.id, heartbeatRunId: h.id });
   const claimed = await claimHeartbeatWithRecoveryGuard(db, h, new Date());
   expect(claimed).not.toBeNull();
-  expect(await producerAttemptDetail(db, claimed!, w.step)).toEqual({ ...expected,
+  if (nativeQuality) expect(await producerAttempt(db, claimed!, w.step)).toEqual(expected);
+  else expect(await producerAttemptDetail(db, claimed!, w.step)).toEqual({ ...expected,
     rootHeartbeatRunId: w.parent.id, rootWakeupRequestId: w.parent.wakeupRequestId });
   const execute = vi.fn(async () => "started");
   await expect(executeHeartbeatWithRecoveryGuard(db, claimed!, execute)).resolves.toBe("started");
@@ -122,7 +124,14 @@ it.each([false, true])("C05 actual writer preserves a started/unclaimed original
 }, 30_000);
 
 it.each([false, true])("C05 issued QA root, unclaimed=%s: writer and existing claim/start share the real history", async unstarted => {
-  const { c } = await createClaimFixture(owned, x => x, [], []).world(true);
+  const fixture = createClaimFixture(owned, x => x, [], []);
+  const world = unstarted ? await fixture.world(true, false) : await fixture.world(true);
+  const { c } = world;
+  if (unstarted) {
+    await fixture.pending(world);
+    const request = (await correctionRows(c)).wakes[0]!;
+    await db.transaction(tx => deliveryWriter(c)(tx, request));
+  }
   const original = (await correctionRows(c)).heartbeats[0]!;
   const parent = unstarted ? original : (await claimHeartbeatWithRecoveryGuard(db, original, new Date()))!;
   if (unstarted) expect(parent).toMatchObject({ startedAt: null, workflowStepRunId: null, workflowExecutionGeneration: null });
@@ -161,7 +170,7 @@ it("C05 native-quality original reuses its existing reservation and input admiss
   await db.update(qualityActions).set({ target: action!.target }).where(eq(qualityActions.id, f.actionId));
   const h = await deliverPauseResume(db, w.p.id);
   expect(h).not.toBeNull();
-  await assertChild(w, h!, { retryCount: 1, iterationIndex: 0 });
+  await assertChild(w, h!, { retryCount: 1, iterationIndex: 0 }, true);
   expect(await usage(f.companyId)).toEqual(before);
 }, 30_000);
 
