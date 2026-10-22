@@ -24,7 +24,9 @@ import {
  *   integration lives in workflow-resume-observed-resource-db.test.ts.
  *   2026-10-22 liveness 교정: 비종말 workspace operation 도 참조 heartbeat 가 공급 이력에서
  *   종결로 확인되면 유령 기록(stale bookkeeping)으로 모든 blocker 를 면제한다. null/미해결
- *   참조·비종말 heartbeat·service/mission runtime 은 기존 규칙 그대로(fail-closed 유지).
+ *   참조·비종말 heartbeat·service 는 기존 규칙 그대로(fail-closed 유지). 타 미션 mission
+ *   runtime 도 lastRunId 참조가 전부 종말이고 활성 소유가 없으면 과거 교차 링크로 면제한다.
+ *   비종말 참조·활성 소유(queueDepth/currentIssueId)가 있으면 기존 규칙 그대로.
  */
 
 const COMPANY = "11111111-1111-4111-8111-111111111111";
@@ -256,6 +258,28 @@ describe("checkObservedResourceConflicts — first-failed-rule precedence", () =
     const service = validService({ companyId: OTHER_COMPANY, status: "starting" });
     expectSole(checkService(service), "scope_mismatch", "workspace_service", service.id, "resource_scope_mismatch");
     const runtime = validRuntime({ missionId: OTHER_MISSION, queueDepth: 2 });
+    expectSole(checkRuntime(runtime), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
+  });
+
+  it("[2026-10-22 liveness] 타 미션 런타임의 종료 lastRunId 교차 링크는 과거 흔적 — blocker 없음", () => {
+    // 공유 에이전트의 마지막 실행이 다른 미션 런타임에 기록된 경우: 참조 하트비트 종말 +
+    // 활성 소유 없음(currentIssueId null, queueDepth 0)이면 stale bookkeeping.
+    expect(checkRuntime(validRuntime({ missionId: OTHER_MISSION }))).toEqual([]);
+    // stopped 상태(소유 없음)여도 같다.
+    expect(checkRuntime(validRuntime({ missionId: OTHER_MISSION, status: "stopped", stoppedAt: T1 }))).toEqual([]);
+  });
+
+  it("[2026-10-22 liveness] 교차 링크가 비종말 하트비트를 참조하면 여전히 scope_mismatch (fail-closed)", () => {
+    const runtime = validRuntime({ missionId: OTHER_MISSION });
+    expectSole(check({
+      ...baseInput(),
+      heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+      missionAgentRuntimes: [runtime],
+    }), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
+  });
+
+  it("[2026-10-22 liveness] 활성 소유(currentIssueId)가 있는 타 미션 런타임은 과거 흔적 면제 없음", () => {
+    const runtime = validRuntime({ missionId: OTHER_MISSION, currentIssueId: ISSUE });
     expectSole(checkRuntime(runtime), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
   });
 

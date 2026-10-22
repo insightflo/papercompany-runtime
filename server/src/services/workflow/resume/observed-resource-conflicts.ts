@@ -42,8 +42,13 @@ import {
  *      후보가 종말(succeeded|failed|cancelled|timed_out)로 확인되면 stale bookkeeping(유령
  *      기록)으로 그 행의 모든 blocker 를 내지 않는다. heartbeatRunId 가 null/미해결이거나
  *      어떤 후보라도 비종말이면 기존 규칙을 그대로 적용한다(fail-closed 유지).
- *      workspace service/mission runtime 검사는 이번 교정에서 의도적으로 변경하지 않는다
+ *      workspace service 검사는 이번 교정에서 의도적으로 변경하지 않는다
  *      (보수적 유지). 빈 결과의 의미는 변하지 않는다 — 적격/정적 플래그가 아니다.
+ * [2026-10-22 liveness 교정 — 타 미션 런타임 과거 교차 링크] 공유 에이전트의 마지막 실행이
+ *      다른 미션 런타임 행의 lastRunId 로 남을 수 있다(에이전트는 미션 간 공유). 그 참조
+ *      하트비트가 공급 이력에서 전부 종말이고 런타임이 활성 소유(currentIssueId/queueDepth)
+ *      를 갖지 않으면 stale bookkeeping 으로 그 행의 blocker 를 내지 않는다. 하나라도
+ *      비종말이거나 소유가 있으면 기존 contamination 규칙 그대로(fail-closed 유지).
  */
 
 export type ObservedResourceKind = "workspace_operation" | "workspace_service" | "mission_runtime";
@@ -203,6 +208,19 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
     return linked.every((heartbeat) => TERMINAL_HEARTBEAT_STATES.has(heartbeat.status));
   }
 
+  // [2026-10-22 liveness 교정] 타 미션 런타임의 과거 교차 링크 판정 — 공유 에이전트의 마지막 실행이
+  // 다른 미션 런타임 행의 lastRunId 로 남는 구조에서, 그 참조 하트비트가 전부 종말이고 활성
+  // 소유(currentIssueId/queueDepth)가 없으면 stale bookkeeping 이다(이 미션 resume 의 영구
+  // 차단 금지). 참조가 하나라도 비종말이거나 소유가 있으면 기존 규칙 그대로 fail-closed.
+  function isStaleCrossMissionRuntimeLink(row: RuntimeRow): boolean {
+    if (row.missionId === scope.missionId) return false;
+    if (row.lastRunId === null) return false;
+    const linked = heartbeatsById.get(row.lastRunId);
+    if (linked === undefined) return false;
+    if (!linked.every((heartbeat) => TERMINAL_HEARTBEAT_STATES.has(heartbeat.status))) return false;
+    return row.currentIssueId === null && row.queueDepth === 0;
+  }
+
   function checkWorkspaceOperation(row: OperationRow): void {
     if (isStaleOperationBookkeeping(row)) return; // 유령 기록 — 과거 흔적, blocker 없음
     if (contaminatedOperationIds.has(row.id)) {
@@ -273,6 +291,7 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
   }
 
   function checkMissionRuntime(row: RuntimeRow): void {
+    if (isStaleCrossMissionRuntimeLink(row)) return; // 타 미션 종료 링크 — 과거 흔적, blocker 없음
     if (contaminatedRuntimeIds.has(row.id)) {
       emit("scope_mismatch", "mission_runtime", row.id, "resource_scope_mismatch");
       return;
