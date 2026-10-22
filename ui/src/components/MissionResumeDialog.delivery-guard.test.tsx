@@ -101,22 +101,29 @@ describe("MissionResumeDialog — delivery guards", () => {
     expect(posts()).toHaveLength(1);
   });
 
-  it("전달 완료(accepted) 후에는 재개 버튼 대신 닫기 버튼 — 추가 POST 없음", async () => {
+  it("전달 대기 중에는 '기다려 달라' 안내와 전달 중 버튼 — 완료 후 닫기로 전환", async () => {
+    let getRequestCount = 0;
     setRoute(async (url, init) => {
       if (url.includes("/workflow-resume-preview?")) return { status: 200, body: previewFixture() };
       if (init?.method === "POST") return { status: 202, body: requestViewFixture("pending_delivery") };
-      if (url.endsWith("/workflow-resume-requests/req-1")) return { status: 200, body: requestViewFixture("accepted") };
+      if (url.endsWith("/workflow-resume-requests/req-1")) {
+        getRequestCount += 1;
+        return { status: 200, body: requestViewFixture(getRequestCount <= 1 ? "pending_delivery" : "accepted") };
+      }
       throw new Error(`unexpected: ${init?.method} ${url}`);
     });
     await mountDialog();
     await selectAndPreview(STEP_A);
     typeReason(REASON);
     await click(button("이 지점부터 재개"));
-    await waitFor(() => text().includes("재개 요청이 실행기에 전달되었습니다"));
-    // 전달 뒤 재개 버튼은 사라지고 닫기로 주 행동이 바뀐다.
-    expect(() => button("이 지점부터 재개")).toThrow();
+    // 전달 대기 구간: 눈에 띄는 대기 안내 + 전달 중 버튼 문구(위 X 로 닫는 실수 방지).
+    await waitFor(() => text().includes("전달이 완료될 때까지 이 창을 닫지 말고"));
+    expect(button("전달 중… 창을 닫지 말아 주세요").disabled).toBe(true);
+    // 전달 완료 후: 대기 안내 사라지고 주 행동이 닫기로 바뀐다. (폴링 주기 2초를 넘긴다)
+    await waitFor(() => text().includes("재개 요청이 실행기에 전달되었습니다"), 350);
+    expect(text()).not.toContain("전달이 완료될 때까지");
     await click(button("닫기"));
-    expect(posts()).toHaveLength(1); // 닫기로 추가 POST 를 만들지 않는다
-    expect(dialogOpen()).toBe(false); // 닫힘이 부모(onOpenChange)로 전파된다
+    expect(posts()).toHaveLength(1);
+    expect(dialogOpen()).toBe(false);
   });
 });

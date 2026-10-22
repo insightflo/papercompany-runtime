@@ -299,7 +299,7 @@ export function MissionResumeDialog({
               </Button>
             ) : (
               <Button type="button" onClick={handleConfirm} disabled={!canConfirm}>
-                이 지점부터 재개
+                {requestInFlight ? "전달 중… 창을 닫지 말아 주세요" : "이 지점부터 재개"}
               </Button>
             )}
           </div>
