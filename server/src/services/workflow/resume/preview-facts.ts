@@ -272,7 +272,8 @@ export function jsonSafe(value: unknown): unknown {
   return value;
 }
 
-/** 계약 8 — factsHash 원천 raw 레코드 전체(registry/policy/product/request 포함). */
+/** 계약 8 — factsHash 원천 raw 레코드 전체(registry/policy/product/request 포함).
+ *   evidence 는 outside predecessor 검증 통과 항목(id=step run id, sha256=산출물 바이트 해시)이다. */
 export interface SnapshotStateFacts {
   company: typeof companies.$inferSelect;
   workProducts: (typeof issueWorkProducts.$inferSelect)[];
@@ -280,13 +281,15 @@ export interface SnapshotStateFacts {
   executions: ResumeExecutionRow[];
   registryRows: (typeof toolDefinitions.$inferSelect)[];
   policy: ReviewedResumePolicy | null;
+  evidence: Array<{ id: string; sha256: string }>;
 }
 
 function isoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 /**
- * 계약 8 — SnapshotState 를 정확 키로 조립한다. evidence 는 항상 [](내구 검증기 미연결),
+ * 계약 8 — SnapshotState 를 정확 키로 조립한다. evidence 는 검증 통과한 outside predecessor
+ *   산출물 목록(facts.evidence, id 오름차순 가정),
  * approvals 는 policy 필수 목록 중 affected 안의 것(현재 generation+1, bindingHash null),
  * resumeEpoch 은 run.metadata 의 own valid safe int(없으면 0, malformed 면 unsupported_status
  * blocker 기록). factsHash 는 현재 벽시계/run.updatedAt 를 포함하지 않는다.
@@ -353,7 +356,7 @@ export function buildSnapshotState(
       dispatchOwnerHeartbeatRunId: row.dispatchOwnerHeartbeatRunId,
       lastDispatchRequestId: row.lastDispatchRequestId,
     })),
-    evidence: [],
+    evidence: facts.evidence,
     approvals,
     resumeEpoch,
     factsHash,
