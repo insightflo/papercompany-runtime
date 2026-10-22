@@ -108,13 +108,14 @@ describeEP("checkRecordedHeartbeatSettlements — embedded PG reader integration
     });
   }, 30_000);
 
-  it("blocks legacy version0 and historical nonterminal heartbeats with id-sorted deterministic output; rows unchanged", async () => {
+  it("proves legacy version0 terminal heartbeats (2026-10-22 liveness 교정) and blocks historical nonterminal; rows unchanged", async () => {
     const { graph, scope, producer } = await seedProducerGraph();
     const [stepA] = graph.definitionStepIds;
     const stepARunId = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, producer.heartbeat.id)))[0]!
       .workflowStepRunId!;
 
-    // legacy v0 heartbeat — 인증된 내구 정산 증거가 없는 구세대(같은 step run 에 연결).
+    // legacy v0 heartbeat — 정산 엔진이 관여한 적 없는 구세대. 교정 후 terminal status + 유효한
+    // finishedAt 로 종료가 증명되므로 무차단(활성 자원 검사는 observed resource/wakeup 담당).
     const legacy = acceptedSettlementRecords({
       id: randomUUID(),
       companyId: graph.companyId,
@@ -143,17 +144,14 @@ describeEP("checkRecordedHeartbeatSettlements — embedded PG reader integration
     await seedSettlementRecords(db, legacy);
     await seedSettlementRecords(db, historical);
 
-    // producer 는 blocker 가 없어야 하므로 기대 id 목록은 legacy+historical 두 개(정렬)뿐이다.
-    const expectedIds = [legacy.heartbeat.id, historical.heartbeat.id]
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    // producer·legacy 는 blocker 가 없어야 하므로 기대 id 목록은 historical 하나뿐이다.
+    const expectedIds = [historical.heartbeat.id];
     await expectCanonicalUnchanged(scope, async () => {
       const blockers = await checkHistoryReadonly(scope);
       expect(blockers.map((blocker) => blocker.heartbeatRunId)).toEqual(expectedIds);
       // producer 는 blocker 없음 — legacy/historical 만 정렬 순서로 나온다.
       expect(blockers.filter((blocker) => blocker.heartbeatRunId === producer.heartbeat.id)).toEqual([]);
-      expect(blockers.filter((blocker) => blocker.heartbeatRunId === legacy.heartbeat.id)).toEqual([
-        { code: "active_work", heartbeatRunId: legacy.heartbeat.id, reason: "settlement_unproven" },
-      ]);
+      expect(blockers.filter((blocker) => blocker.heartbeatRunId === legacy.heartbeat.id)).toEqual([]);
       expect(blockers.filter((blocker) => blocker.heartbeatRunId === historical.heartbeat.id)).toEqual([
         { code: "active_work", heartbeatRunId: historical.heartbeat.id, reason: "heartbeat_not_terminal" },
       ]);

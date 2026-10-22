@@ -22,6 +22,11 @@ import {
  *   stopped process is never certified. Full DB-row typed factories only (no `as any`);
  *   duplicate-aware identity rules live in the links test file; real embedded-PG reader
  *   integration lives in workflow-resume-observed-resource-db.test.ts.
+ *   2026-10-22 liveness 교정: 비종말 workspace operation 도 참조 heartbeat 가 공급 이력에서
+ *   종결로 확인되면 유령 기록(stale bookkeeping)으로 모든 blocker 를 면제한다. null/미해결
+ *   참조·비종말 heartbeat·service 는 기존 규칙 그대로(fail-closed 유지). 타 미션 mission
+ *   runtime 도 lastRunId 참조가 전부 종말이고 활성 소유가 없으면 과거 교차 링크로 면제한다.
+ *   비종말 참조·활성 소유(queueDepth/currentIssueId)가 있으면 기존 규칙 그대로.
  */
 
 const COMPANY = "11111111-1111-4111-8111-111111111111";
@@ -99,10 +104,20 @@ describe("checkObservedResourceConflicts — accepted records (rule 4 states, no
 });
 
 describe("checkObservedResourceConflicts — rule 4 nonterminal/unknown state blocks", () => {
-  it.each(["running", "queued", "mystery_unknown_status"])("blocks operation status %s as not_terminal", (status) => {
-    const operation = validOperation({ status });
-    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_not_terminal");
-  });
+  it.each(["running", "queued", "mystery_unknown_status"])(
+    "blocks operation status %s as not_terminal while the linked heartbeat is NONTERMINAL",
+    (status) => {
+      const operation = validOperation({ status });
+      expectSole(
+        check({
+          ...baseInput(),
+          heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+          workspaceOperations: [operation],
+        }),
+        "active_work", "workspace_operation", operation.id, "resource_not_terminal",
+      );
+    },
+  );
 
   it.each(["running", "starting"])("blocks service status %s even with populated stoppedAt", (status) => {
     const service = validService({ status, stoppedAt: T1 });
@@ -231,10 +246,40 @@ describe("checkObservedResourceConflicts — rule 6 recorded terminal timestamps
 describe("checkObservedResourceConflicts — first-failed-rule precedence", () => {
   it("rule 1 scope beats later rules in every category", () => {
     const operation = validOperation({ companyId: OTHER_COMPANY, status: "running" });
-    expectSole(checkOperation(operation), "scope_mismatch", "workspace_operation", operation.id, "resource_scope_mismatch");
+    // 참조 heartbeat 를 비종말로 둬야 유령 게이팅 없이 규칙 1 우선순위가 그대로 검증된다.
+    expectSole(
+      check({
+        ...baseInput(),
+        heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+        workspaceOperations: [operation],
+      }),
+      "scope_mismatch", "workspace_operation", operation.id, "resource_scope_mismatch",
+    );
     const service = validService({ companyId: OTHER_COMPANY, status: "starting" });
     expectSole(checkService(service), "scope_mismatch", "workspace_service", service.id, "resource_scope_mismatch");
     const runtime = validRuntime({ missionId: OTHER_MISSION, queueDepth: 2 });
+    expectSole(checkRuntime(runtime), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
+  });
+
+  it("[2026-10-22 liveness] 타 미션 런타임의 종료 lastRunId 교차 링크는 과거 흔적 — blocker 없음", () => {
+    // 공유 에이전트의 마지막 실행이 다른 미션 런타임에 기록된 경우: 참조 하트비트 종말 +
+    // 활성 소유 없음(currentIssueId null, queueDepth 0)이면 stale bookkeeping.
+    expect(checkRuntime(validRuntime({ missionId: OTHER_MISSION }))).toEqual([]);
+    // stopped 상태(소유 없음)여도 같다.
+    expect(checkRuntime(validRuntime({ missionId: OTHER_MISSION, status: "stopped", stoppedAt: T1 }))).toEqual([]);
+  });
+
+  it("[2026-10-22 liveness] 교차 링크가 비종말 하트비트를 참조하면 여전히 scope_mismatch (fail-closed)", () => {
+    const runtime = validRuntime({ missionId: OTHER_MISSION });
+    expectSole(check({
+      ...baseInput(),
+      heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+      missionAgentRuntimes: [runtime],
+    }), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
+  });
+
+  it("[2026-10-22 liveness] 활성 소유(currentIssueId)가 있는 타 미션 런타임은 과거 흔적 면제 없음", () => {
+    const runtime = validRuntime({ missionId: OTHER_MISSION, currentIssueId: ISSUE });
     expectSole(checkRuntime(runtime), "scope_mismatch", "mission_runtime", runtime.id, "resource_scope_mismatch");
   });
 
@@ -251,11 +296,64 @@ describe("checkObservedResourceConflicts — first-failed-rule precedence", () =
       "scope_mismatch", "workspace_operation", contaminated.id, "resource_scope_mismatch");
   });
 
+  it("[2026-10-22 liveness] 실행 이력 없는 비활성 런타임(runCount 0, lastRunId null, 소유 없음)은 계보 blocker 없음", () => {
+    // 재개 파견이 만든 뒤 도구 큐 실패로 아무 실행도 붙지 않은 예약 행 — 증명할 계보가 없다.
+    expect(checkRuntime(validRuntime({ lastRunId: null }))).toEqual([]);
+    expect(checkRuntime(validRuntime({ lastRunId: null, status: "stopped", stoppedAt: T1 }))).toEqual([]);
+  });
+
+  it("[2026-10-22 liveness] 실행 이력이 있으면(runCount>0) lastRunId null 은 여전히 lineage_unproven", () => {
+    const runtime = validRuntime({ lastRunId: null, runCount: 3 });
+    expectSole(checkRuntime(runtime), "active_work", "mission_runtime", runtime.id, "resource_lineage_unproven");
+  });
+
+  it("[2026-10-22 liveness] 미실행 런타임이라도 busy 거나 소유가 있으면 면제 없음", () => {
+    const busyRow = validRuntime({ lastRunId: null });
+    expectSole(check({ ...baseInput(), missionAgentRuntimes: [{ ...busyRow, status: "busy" }] }),
+      "active_work", "mission_runtime", busyRow.id, "resource_lineage_unproven");
+    const owned = validRuntime({ lastRunId: null, currentIssueId: ISSUE });
+    expectSole(checkRuntime(owned), "active_work", "mission_runtime", owned.id, "resource_lineage_unproven");
+  });
+
   it("rule 4 state beats rule 6 timestamps for services; rule 5 beats rule 6 for runtimes", () => {
     const service = validService({ status: "running", stoppedAt: null });
     expectSole(checkService(service), "active_work", "workspace_service", service.id, "resource_not_terminal");
     const runtime = validRuntime({ status: "stopped", stoppedAt: null, queueDepth: 5 });
     expectSole(checkRuntime(runtime), "active_work", "mission_runtime", runtime.id, "resource_owner_present");
+  });
+});
+
+describe("checkObservedResourceConflicts — 2026-10-22 liveness gating (ghost operations)", () => {
+  it("nonterminal operation + terminal (succeeded) linked heartbeat is stale bookkeeping → [] (all blockers waived, even scope)", () => {
+    const ghost = validOperation({ status: "running", companyId: OTHER_COMPANY });
+    expect(checkOperation(ghost)).toEqual([]);
+  });
+
+  it("nonterminal operation + null heartbeatRunId keeps existing rules (lineage fires first)", () => {
+    const operation = validOperation({ status: "running", heartbeatRunId: null });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_lineage_unproven");
+  });
+
+  it("nonterminal operation + unresolved heartbeatRunId keeps existing rules", () => {
+    const operation = validOperation({ status: "running", heartbeatRunId: RUN });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_lineage_unproven");
+  });
+
+  it("nonterminal operation + nonterminal linked heartbeat keeps existing rules", () => {
+    const operation = validOperation({ status: "running" });
+    expectSole(
+      check({
+        ...baseInput(),
+        heartbeats: [settlementHeartbeatRow({ id: HB, companyId: COMPANY, status: "running" })],
+        workspaceOperations: [operation],
+      }),
+      "active_work", "workspace_operation", operation.id, "resource_not_terminal",
+    );
+  });
+
+  it("terminal operation rows are never ghost-gated — rule 6 timestamp checks still apply", () => {
+    const operation = validOperation({ status: "succeeded", finishedAt: null });
+    expectSole(checkOperation(operation), "active_work", "workspace_operation", operation.id, "resource_terminal_record_unproven");
   });
 });
 

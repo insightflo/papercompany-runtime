@@ -51,6 +51,13 @@ import type { ResumeExecutionHistory } from "./read-model.js";
  *   typed identity/scope/reference 진단이다. 정렬은 codepoint 오름차순
  *   resourceKind/resourceId/code/reason(`<`/`>` 비교, localeCompare 금지), caller 배열/행
  *   변이 없음, 구분자 연결 문자열 키 없이 중첩 Map/Set 만 사용한다.
+ * [2026-10-22 liveness 교정 — 과거 흔적 게이팅] 행 자체와 실제 edge 로 연결된 상대가 모두
+ *   종말 상태(위 종료 집합)면 그 행의 무결성 위반(scope/identity/link/기록)은 종료된 과거
+ *   기록의 흔적으로 취급해 그 행의 모든 blocker 를 내지 않는다. live 판정의 "연결된 상대"는
+ *   규칙 5 와 같은 양방향 edge 이웃 집합으로 잡는다(역방향 활성 heartbeat 가 게이팅으로
+ *   새는 것을 막는다). 활성(비종말) 행이거나 활성 상대를 가진 행은 기존 규칙·우선순위·행당
+ *   최대 1개 blocker 를 그대로 적용한다(fail-closed 유지). 빈 결과의 의미는 변하지 않는다 —
+ *   여전히 적격/정적 플래그가 아니다.
  */
 
 export type ObservedWakeupConflictsInput = Pick<
@@ -250,8 +257,32 @@ export function checkObservedWakeupConflicts(input: ObservedWakeupConflictsInput
       || !(row.claimedAt === null || isValidDate(row.claimedAt)));
   }
 
+  // [2026-10-22 liveness 교정] 과거 흔적 게이팅용 live 판정 — 자기 후보 중 하나라도 비종말이거나
+  //   규칙 5 와 같은 양방향 edge 이웃의 후보 중 하나라도 비종말이면 활성이다. 행 자체와 연결된
+  //   상대가 모두 종말이면 그 행의 blocker 를 내지 않는다(종료 과거 흔적).
+  function wakeRowLive(wakeId: string): boolean {
+    if (candidatesOf.wake(wakeId).some((row) => !TERMINAL_WAKE_STATES.has(row.status))) return true;
+    for (const heartbeatId of heartbeatNeighborsOfWake.get(wakeId) ?? []) {
+      if (candidatesOf.heartbeat(heartbeatId).some((row) => !TERMINAL_HEARTBEAT_STATES.has(row.status))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function heartbeatRowLive(heartbeatId: string): boolean {
+    if (candidatesOf.heartbeat(heartbeatId).some((row) => !TERMINAL_HEARTBEAT_STATES.has(row.status))) {
+      return true;
+    }
+    for (const wakeId of wakeupNeighborsOfHeartbeat.get(heartbeatId) ?? []) {
+      if (candidatesOf.wake(wakeId).some((row) => !TERMINAL_WAKE_STATES.has(row.status))) return true;
+    }
+    return false;
+  }
+
   const blockers: ObservedWakeupBlocker[] = [];
   for (const [wakeId] of wakeupsById) {
+    if (!wakeRowLive(wakeId)) continue; // 종료 과거 흔적 — 모든 blocker 면제(활성 행만 규칙 적용)
     if (wakeIdentityScopeViolation(wakeId)) {
       blockers.push({ code: "scope_mismatch", resourceKind: "wakeup", resourceId: wakeId, reason: "wakeup_scope_mismatch" });
       continue;
@@ -278,6 +309,7 @@ export function checkObservedWakeupConflicts(input: ObservedWakeupConflictsInput
   }
   // 규칙 4-6 은 heartbeat-kind blocker 를 내지 않는다(링크/identity/scope 진단만).
   for (const [heartbeatId] of heartbeatsById) {
+    if (!heartbeatRowLive(heartbeatId)) continue; // 종료 과거 흔적 — 모든 blocker 면제
     if (heartbeatIdentityScopeViolation(heartbeatId)) {
       blockers.push({ code: "scope_mismatch", resourceKind: "heartbeat", resourceId: heartbeatId, reason: "wakeup_scope_mismatch" });
       continue;

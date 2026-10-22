@@ -37,6 +37,18 @@ import {
  *      service started<=stopped, runtime 은 모든 nonnull 시각 유한 + stopped 에서만 stoppedAt
  *      필수와 started<=stopped 순서 비교(idle/crashed 는 순서를 비교하지 않는다).
  *      위반 → active_work/resource_terminal_record_unproven.
+ * [2026-10-22 liveness 교정 — 유령 operation 게이팅] workspace operation 이 비종말 상태로
+ *      기록되어도 heartbeatRunId 가 null 이 아니고 공급된 heartbeats 입력에서 그 id 의 모든
+ *      후보가 종말(succeeded|failed|cancelled|timed_out)로 확인되면 stale bookkeeping(유령
+ *      기록)으로 그 행의 모든 blocker 를 내지 않는다. heartbeatRunId 가 null/미해결이거나
+ *      어떤 후보라도 비종말이면 기존 규칙을 그대로 적용한다(fail-closed 유지).
+ *      workspace service 검사는 이번 교정에서 의도적으로 변경하지 않는다
+ *      (보수적 유지). 빈 결과의 의미는 변하지 않는다 — 적격/정적 플래그가 아니다.
+ * [2026-10-22 liveness 교정 — 타 미션 런타임 과거 교차 링크] 공유 에이전트의 마지막 실행이
+ *      다른 미션 런타임 행의 lastRunId 로 남을 수 있다(에이전트는 미션 간 공유). 그 참조
+ *      하트비트가 공급 이력에서 전부 종말이고 런타임이 활성 소유(currentIssueId/queueDepth)
+ *      를 갖지 않으면 stale bookkeeping 으로 그 행의 blocker 를 내지 않는다. 하나라도
+ *      비종말이거나 소유가 있으면 기존 contamination 규칙 그대로(fail-closed 유지).
  */
 
 export type ObservedResourceKind = "workspace_operation" | "workspace_service" | "mission_runtime";
@@ -65,8 +77,15 @@ export type ObservedResourceConflictsInput = Pick<
 type OperationRow = ResumeExecutionHistory["workspaceOperations"][number];
 type ServiceRow = ResumeExecutionHistory["workspaceRuntimeServices"][number];
 type RuntimeRow = ResumeExecutionHistory["missionAgentRuntimes"][number];
+type HeartbeatRow = ResumeExecutionHistory["heartbeats"][number];
 
 const TERMINAL_OPERATION_STATES: ReadonlySet<string> = new Set(["succeeded", "failed", "skipped"]);
+const TERMINAL_HEARTBEAT_STATES: ReadonlySet<string> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
 const RECORDED_TERMINAL_SERVICE_STATES: ReadonlySet<string> = new Set(["stopped", "failed"]);
 const INACTIVE_RUNTIME_BOOKKEEPING_STATES: ReadonlySet<string> = new Set(["idle", "stopped", "crashed"]);
 
@@ -151,6 +170,13 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
   const scope = input.scope;
   const links = buildHistoryLinkIndex(scope, input.issues, input.heartbeats);
   const { blockers, emit } = createBlockerSink();
+  // [2026-10-22 liveness 교정] 유령 operation 판정용 heartbeat 후보 그룹(새 배열 — caller 변이 없음).
+  const heartbeatsById = new Map<string, HeartbeatRow[]>();
+  for (const heartbeat of input.heartbeats) {
+    const group = heartbeatsById.get(heartbeat.id);
+    if (group) group.push(heartbeat);
+    else heartbeatsById.set(heartbeat.id, [heartbeat]);
+  }
   const duplicatedOperationIds = duplicatedIdsInCategory(input.workspaceOperations);
   const duplicatedServiceIds = duplicatedIdsInCategory(input.workspaceRuntimeServices);
   const duplicatedRuntimeIds = duplicatedIdsInCategory(input.missionAgentRuntimes);
@@ -171,7 +197,32 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
     || (row.currentIssueId !== null && links.issueResolves(row.currentIssueId)
       && links.issueOutOfScope(row.currentIssueId)));
 
+  // [2026-10-22 liveness 교정] 유령 operation 게이팅 — 비종말 상태로 기록되어도 참조 heartbeat
+  //   후보 전부가 종말로 확인되면 stale bookkeeping 이다(그 행의 모든 blocker 면제).
+  //   null/미해결 참조나 비종말 후보가 하나라도 있으면 기존 규칙을 그대로 적용한다.
+  function isStaleOperationBookkeeping(row: OperationRow): boolean {
+    if (TERMINAL_OPERATION_STATES.has(row.status)) return false;
+    if (row.heartbeatRunId === null) return false;
+    const linked = heartbeatsById.get(row.heartbeatRunId);
+    if (linked === undefined) return false;
+    return linked.every((heartbeat) => TERMINAL_HEARTBEAT_STATES.has(heartbeat.status));
+  }
+
+  // [2026-10-22 liveness 교정] 타 미션 런타임의 과거 교차 링크 판정 — 공유 에이전트의 마지막 실행이
+  // 다른 미션 런타임 행의 lastRunId 로 남는 구조에서, 그 참조 하트비트가 전부 종말이고 활성
+  // 소유(currentIssueId/queueDepth)가 없으면 stale bookkeeping 이다(이 미션 resume 의 영구
+  // 차단 금지). 참조가 하나라도 비종말이거나 소유가 있으면 기존 규칙 그대로 fail-closed.
+  function isStaleCrossMissionRuntimeLink(row: RuntimeRow): boolean {
+    if (row.missionId === scope.missionId) return false;
+    if (row.lastRunId === null) return false;
+    const linked = heartbeatsById.get(row.lastRunId);
+    if (linked === undefined) return false;
+    if (!linked.every((heartbeat) => TERMINAL_HEARTBEAT_STATES.has(heartbeat.status))) return false;
+    return row.currentIssueId === null && row.queueDepth === 0;
+  }
+
   function checkWorkspaceOperation(row: OperationRow): void {
+    if (isStaleOperationBookkeeping(row)) return; // 유령 기록 — 과거 흔적, blocker 없음
     if (contaminatedOperationIds.has(row.id)) {
       emit("scope_mismatch", "workspace_operation", row.id, "resource_scope_mismatch");
       return;
@@ -240,6 +291,7 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
   }
 
   function checkMissionRuntime(row: RuntimeRow): void {
+    if (isStaleCrossMissionRuntimeLink(row)) return; // 타 미션 종료 링크 — 과거 흔적, blocker 없음
     if (contaminatedRuntimeIds.has(row.id)) {
       emit("scope_mismatch", "mission_runtime", row.id, "resource_scope_mismatch");
       return;
@@ -250,6 +302,19 @@ export function checkObservedResourceConflicts(input: ObservedResourceConflictsI
       || (row.currentIssueId !== null && links.isDuplicateIssue(row.currentIssueId))
     ) {
       emit("scope_mismatch", "mission_runtime", row.id, "resource_identity_ambiguous");
+      return;
+    }
+    // [2026-10-22 liveness 교정] 실행 이력이 전혀 없는 비활성 런타임(runCount 0, lastRunId
+    // null, 소유 없음)은 비어 있는 예약 행이다 — 계보를 증명할 실행이 애초에 없다(재개 파견이
+    // 만든 뒤 스텝이 도구 큐로 실패해 아무 실행도 붙지 않은 행 등). busy·활성 소유·한 번이라도
+    // 실행된(runCount>0) 행은 기존 규칙 그대로 fail-closed.
+    if (
+      INACTIVE_RUNTIME_BOOKKEEPING_STATES.has(row.status)
+      && row.runCount === 0
+      && row.lastRunId === null
+      && row.currentIssueId === null
+      && row.queueDepth === 0
+    ) {
       return;
     }
     // [규칙 3] lastRunId 필수이고 currentIssueId 의 해석은 소유 규칙보다 먼저 — dangling 소유는

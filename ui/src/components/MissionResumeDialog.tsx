@@ -86,6 +86,10 @@ export function MissionResumeDialog({
 
   const runs = Array.isArray(workflowRuns) ? workflowRuns : [];
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
+  // 전달 완료(accepted)는 재개 요청의 실질 종점 — 실행기가 받았으므로 같은 범위로 다시
+  // POST 할 이유가 없다. 이 시점부터 주 행동은 닫기다(범위/사유를 바꾸면 시도 상태가
+  // 초기화되어 새 요청을 만들 수 있다).
+  const requestDelivered = requestView?.state === "accepted";
 
   const applyMutation = useMutation({
     mutationFn: (body: ResumeRequestBody) => workflowResumeApi.createRequest(companyId, missionId, body),
@@ -289,9 +293,15 @@ export function MissionResumeDialog({
           />
 
           <div className="flex justify-end">
-            <Button type="button" onClick={handleConfirm} disabled={!canConfirm}>
-              이 지점부터 재개
-            </Button>
+            {requestDelivered ? (
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                닫기
+              </Button>
+            ) : (
+              <Button type="button" onClick={handleConfirm} disabled={!canConfirm}>
+                {requestInFlight ? "전달 중… 창을 닫지 말아 주세요" : "이 지점부터 재개"}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>

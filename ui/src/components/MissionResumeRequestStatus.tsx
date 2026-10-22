@@ -56,7 +56,13 @@ export function MissionResumeRequestStatus({
           <p className="font-medium">재개 요청 상태: {REQUEST_STATE_LABEL[requestView.state]}</p>
           {requestView.code && <p className="text-xs text-muted-foreground">코드: {requestView.code}</p>}
           {requestView.state === "pending_delivery" && (
-            <p className="text-xs text-muted-foreground">실행기에 전달되는 동안 상태를 자동 확인합니다.</p>
+            <div
+              className="mt-1 rounded-md border border-amber-600/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400"
+              role="status"
+              data-testid="mission-resume-delivery-waiting"
+            >
+              재개 요청을 실행기에 전달하는 중입니다. 전달이 완료될 때까지 이 창을 닫지 말고 잠시만 기다려 주세요 — 상태는 자동으로 확인됩니다.
+            </div>
           )}
           {requestView.state === "accepted" && (
             <p className="text-xs text-emerald-600">{ACCEPTED_MESSAGE}</p>

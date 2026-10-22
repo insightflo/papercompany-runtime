@@ -22,6 +22,8 @@ import {
   type ResumePreviewBlocker,
   type SnapshotStateFacts,
 } from "./preview-facts.js";
+import { resolveCompanyWorkProductRoot } from "../../work-products/output-paths.js";
+import { verifyOutsidePredecessorArtifact } from "./predecessor-artifact-evidence.js";
 import {
   effectForStep,
   generationPossible,
@@ -33,11 +35,13 @@ import { snapshotScopeSchema, type SnapshotState } from "./snapshot-state.js";
 /**
  * [파일 목적] Task6a SELECT-only resume preview 서비스 — 실제 REPEATABLE READ READ ONLY 트랜잭션
  *   안에서 whole-mission 이력·검토 정책·예산·기록 checker 근거로 SnapshotState/HMAC 토큰 조립.
- * [명시적 한계 — 이 preview 는 목표 인수가 아니다] 외부 predecessor 내구 산출물 검증기가 미연결이라
- *   모든 outside predecessor 에 missing_evidence, evidence 는 항상 [](metadata 해시/agent JSON 을
- *   검증으로 인정하지 않는다 — 미완성 통합). REVIEWED_RESUME_POLICIES 미검토 시 external_effect_unknown
- *   fail-closed. apply/dispatcher 와 POST route 는 이후 슬라이스다. Catch 는 알려진 오류만 — DB 실패를
- *   광역 마스킹하지 않는다. scope 부재 404, 잘못된 입력 400.
+ * [명시적 한계 — 이 preview 는 목표 인수가 아니다] outside predecessor 는 toolResult 계약
+ *   (artifactPath/artifactSha256)의 현재 파일 바이트 재검증(predecessor-artifact-evidence)을
+ *   통과해야 evidence 로 승인된다. agent 스텝의 work product 기반 검증은 별도 계약이 완성될 때까지
+ *   missing_evidence 로 남는다(metadata 해시/work product metadata 주장은 근거로 인정하지 않는다).
+ *   REVIEWED_RESUME_POLICIES 미검토 시 external_effect_unknown fail-closed. apply/dispatcher 와
+ *   POST route 는 이후 슬라이스다. Catch 는 알려진 오류만 — DB 실패를 광역 마스킹하지 않는다.
+ *   scope 부재 404, 잘못된 입력 400.
  */
 
 const SNAPSHOT_TTL_MS = 300_000;
@@ -228,19 +232,35 @@ export async function assembleResumePreview(
     }
   }
 
+  const workProductRoot = await resolveCompanyWorkProductRoot(tx, { companyId: validated.companyId });
+  const evidence: Array<{ id: string; sha256: string }> = [];
   for (const stepId of [...outside].sort()) {
     const row = stepRowByStepId.get(stepId);
     if (!row || row.status !== "completed") {
       blockers.push(previewBlocker("outside_predecessor_invalid",
         "재개 대상 밖 선행 스텝이 완료 상태가 아닙니다", { stepId }));
     }
-    // [명시적 미완성 통합] 내구 검증기 미연결 — 근거 유무와 무관하게 항상 missing_evidence.
-    blockers.push(previewBlocker("missing_evidence", "선행 스텝의 내구 산출물이 아직 검증되지 않았습니다", { stepId }));
+    // outside 선행은 toolResult 계약의 현재 파일 바이트 재검증을 통과해야 evidence 로 승인된다.
+    // 검증 실패(계약·스코프·파일·해시 불일치)는 missing_evidence 로 fail-closed 된다.
+    const verification = row
+      ? await verifyOutsidePredecessorArtifact({
+          stepRun: { id: row.id, stepId: row.stepId, metadata: row.metadata },
+          missionId: validated.missionId,
+          workflowRunId: validated.workflowRunId,
+          workProductRoot,
+        })
+      : ({ kind: "unverified", reason: "no_tool_result" } as const);
+    if (verification.kind === "verified" && row) {
+      evidence.push({ id: row.id, sha256: verification.sha256 });
+    } else {
+      blockers.push(previewBlocker("missing_evidence", "선행 스텝의 내구 산출물이 아직 검증되지 않았습니다", { stepId }));
+    }
   }
 
   const facts: SnapshotStateFacts = {
     company, workProducts, requests: requestRows, executions: executionRows,
     registryRows: policyView.registryRows, policy: policyView.policy,
+    evidence: evidence.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
   };
   const state = buildSnapshotState(history, validated, affected, facts, blockers);
 

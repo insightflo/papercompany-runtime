@@ -3,6 +3,8 @@ import {
   settlementHeartbeatRow,
   wakeupInput,
   wakeupRow,
+  WAKEUP_OTHER_COMPANY,
+  WAKEUP_OTHER_MISSION,
 } from "./helpers/workflow-resume-wakeup-fixture.js";
 import {
   checkObservedWakeupConflicts,
@@ -18,6 +20,9 @@ import {
  *   factories only (no `as any`); typed link/duplicate-identity regressions live in
  *   workflow-resume-wakeup-links.test.ts; scope edges, adversarial dates, immutability and
  *   deterministic sorting live in workflow-resume-wakeup-boundaries.test.ts.
+ *   2026-10-22 liveness 교정: wakeup 자체와 연결된 heartbeat(양방향 edge)가 모두 종말이면
+ *   무결성 위반은 종료 과거 흔적으로 차단하지 않고, 활성(비종말) 행·활성 상대는 기존
+ *   규칙을 그대로 적용한다(fail-closed 유지).
  */
 
 const T0 = new Date("2024-06-01T00:00:00.000Z");
@@ -101,7 +106,11 @@ describe("checkObservedWakeupConflicts — per-identity rule precedence", () => 
 
   it("rule 2 identity ambiguity outranks missing links", () => {
     const input = wakeupInput();
-    input.wakeups = [wakeupRow({ runId: "hb-gone" }), wakeupRow({ runId: "hb-gone" })];
+    // 2026-10-22 liveness 교정 이후에도 규칙 우선순위를 계속 검증하도록 활성(queued) 행으로 유지한다.
+    input.wakeups = [
+      wakeupRow({ status: "queued", runId: "hb-gone", finishedAt: T1 }),
+      wakeupRow({ status: "queued", runId: "hb-gone", finishedAt: T1 }),
+    ];
     expectSole(check(input), "scope_mismatch", "wakeup", "wake-1", "wakeup_identity_ambiguous");
   });
 
@@ -126,10 +135,11 @@ describe("checkObservedWakeupConflicts — per-identity rule precedence", () => 
 
   it("scope outranks duplicates even when the contaminated linked candidate appears LAST", () => {
     const input = wakeupInput();
+    // heartbeat 후보를 활성(running)으로 둬야 양쪽 identity 모두 liveness 게이팅 없이 규칙 1이 적용된다.
     input.wakeups = [wakeupRow({ runId: "hb-1" }), wakeupRow({ runId: "hb-1", companyId: "company-2" })];
     input.heartbeats = [
-      settlementHeartbeatRow({ id: "hb-1", companyId: input.scope.companyId }),
-      settlementHeartbeatRow({ id: "hb-1", companyId: "company-2" }),
+      settlementHeartbeatRow({ id: "hb-1", companyId: input.scope.companyId, status: "running" }),
+      settlementHeartbeatRow({ id: "hb-1", companyId: "company-2", status: "running" }),
     ];
     expect(check(input)).toEqual([
       { code: "scope_mismatch", resourceKind: "heartbeat", resourceId: "hb-1", reason: "wakeup_scope_mismatch" },
@@ -153,5 +163,57 @@ describe("checkObservedWakeupConflicts — per-identity rule precedence", () => 
     const input = wakeupInput();
     input.wakeups = [wakeupRow({ status: "queued", runId: "hb-gone", claimedAt: new Date("nope") })];
     expect(check(input)).toHaveLength(1);
+  });
+});
+
+describe("checkObservedWakeupConflicts — 2026-10-22 liveness gating (terminal past traces)", () => {
+  it("terminal wakeup + terminal linked heartbeat with company/mission mismatch → [] (past trace)", () => {
+    const input = wakeupInput();
+    input.wakeups = [wakeupRow({
+      companyId: WAKEUP_OTHER_COMPANY,
+      missionId: WAKEUP_OTHER_MISSION,
+      runId: "hb-1",
+    })];
+    input.heartbeats = [settlementHeartbeatRow({
+      id: "hb-1", companyId: WAKEUP_OTHER_COMPANY, status: "succeeded", wakeupRequestId: "wake-1",
+    })];
+    expect(check(input)).toEqual([]);
+  });
+
+  it("terminal wakeup + terminal heartbeat with heartbeat-side company mismatch only → []", () => {
+    const input = wakeupInput();
+    input.wakeups = [wakeupRow({ runId: "hb-1" })];
+    input.heartbeats = [settlementHeartbeatRow({
+      id: "hb-1", companyId: WAKEUP_OTHER_COMPANY, status: "succeeded", wakeupRequestId: "wake-1",
+    })];
+    expect(check(input)).toEqual([]);
+  });
+
+  it("terminal wakeup whose runId points at duplicated terminal heartbeats → [] (ambiguous bookkeeping is a past trace)", () => {
+    const input = wakeupInput();
+    input.wakeups = [wakeupRow({ runId: "hb-1" })];
+    input.heartbeats = [
+      settlementHeartbeatRow({ id: "hb-1", companyId: input.scope.companyId, status: "succeeded", wakeupRequestId: null }),
+      settlementHeartbeatRow({ id: "hb-1", companyId: input.scope.companyId, status: "succeeded", wakeupRequestId: null }),
+    ];
+    expect(check(input)).toEqual([]);
+  });
+
+  it("terminal wakeup + NONTERMINAL (running) linked heartbeat still blocks — fail-closed kept", () => {
+    const input = wakeupInput();
+    input.wakeups = [wakeupRow({ runId: "hb-1" })];
+    input.heartbeats = [settlementHeartbeatRow({
+      id: "hb-1", companyId: input.scope.companyId, status: "running", wakeupRequestId: "wake-1",
+    })];
+    expectSole(check(input), "active_work", "wakeup", "wake-1", "wakeup_linked_heartbeat_not_terminal");
+  });
+
+  it("NONTERMINAL (queued) wakeup + terminal linked heartbeat still blocks — fail-closed kept", () => {
+    const input = wakeupInput();
+    input.wakeups = [wakeupRow({ status: "queued", runId: "hb-1", finishedAt: T1 })];
+    input.heartbeats = [settlementHeartbeatRow({
+      id: "hb-1", companyId: input.scope.companyId, status: "succeeded", wakeupRequestId: "wake-1",
+    })];
+    expectSole(check(input), "active_work", "wakeup", "wake-1", "wakeup_not_terminal");
   });
 });
