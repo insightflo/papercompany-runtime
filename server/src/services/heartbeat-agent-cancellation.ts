@@ -6,6 +6,8 @@ import { agentService } from "./agents.js";
 import { commitAgentResume } from "./heartbeat-agent-resume.js";
 import { lockPauseFacts, recordPauseScope } from "./heartbeat-pause-intents.js";
 import type { publishLiveEvent } from "./live-events.js";
+import { commitPauseInvalidation, type PauseInvalidationTarget, type PauseInvalidationCause } from "./heartbeat-pause-invalidation.js";
+import type { BudgetEnforcementScope } from "./budgets.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 
@@ -81,26 +83,13 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
     terminateRecordedProcess, runningProcesses,
   } = deps;
 
+  // Only the existing claim-refusal callback uses this path; it does not invalidate resume intent.
   async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", resumeQueue = true) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (run.status !== "running" && run.status !== "queued") return run;
 
-    const running = runningProcesses.get(run.id);
-    if (running) {
-      running.child.kill("SIGTERM");
-      const graceMs = Math.max(1, running.graceSec) * 1000;
-      setTimeout(() => {
-        if (!running.child.killed) {
-          running.child.kill("SIGKILL");
-        }
-      }, graceMs);
-    } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
-      setTimeout(() => {
-        terminateRecordedProcess(run.processPid, "SIGKILL");
-      }, 5_000);
-    }
-
+    stopSingleRun(run);
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: new Date(),
       error: reason,
@@ -128,29 +117,53 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
     return cancelled;
   }
 
-  async function cancelActiveForAgentInternal(agentId: string, reason = "Cancelled due to agent pause") {
-    const runs = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])));
-
-    for (const run of runs) {
-      await setRunStatus(run.id, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
-        errorCode: "cancelled",
-      }, { expectedStatuses: ["queued", "running"] });
-
-      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-        finishedAt: new Date(),
-        error: reason,
+  /** Public revocation is typed; the claim-refusal callback never grants user-cancel authority. */
+  async function cancelControlled(target: PauseInvalidationTarget, cause: PauseInvalidationCause,
+    reason: string, bulk: boolean) {
+    const committed = await commitPauseInvalidation(db, target, cause, reason, setTransactionalRunStatus);
+    // The root has committed every receipt/HB/wake before any process signal or queue progress.
+    for (const { original, cancelled } of committed.changed) {
+      publishRunStatus(cancelled);
+      if (bulk) stopBulkRun(original); else stopSingleRun(original);
+    }
+    for (const { original, cancelled } of committed.changed) {
+      if (!bulk) await appendRunEvent(cancelled, 1, {
+        eventType: "lifecycle", stream: "system", level: "warn", message: "run cancelled",
       });
+      await releaseIssueExecutionAndPromote(bulk ? original : cancelled, { resumeQueue: bulk });
+    }
+    if (!bulk) {
+      for (const agentId of new Set(committed.changed.map(({ original }) => original.agentId))) {
+        await finalizeAgentStatus(agentId, "cancelled");
+        await startNextQueuedRunForAgent(agentId);
+      }
+    }
+    return committed;
+  }
 
-      stopBulkRun(run);
-      await releaseIssueExecutionAndPromote(run);
+  async function cancelActiveForAgentInternal(agentId: string) {
+    const result = await cancelControlled({ kind: "agent", id: agentId }, "user_cancel",
+      "Cancelled due to agent pause", true);
+    return result.changed.length;
+  }
+
+  function stopSingleRun(run: HeartbeatRun) {
+    const running = runningProcesses.get(run.id);
+    if (running) {
+      running.child.kill("SIGTERM");
+      const graceMs = Math.max(1, running.graceSec) * 1000;
+      setTimeout(() => {
+        if (!running.child.killed) {
+          running.child.kill("SIGKILL");
+        }
+      }, graceMs);
+    } else if (terminateRecordedProcess(run.processPid, "SIGTERM")) {
+      setTimeout(() => {
+        terminateRecordedProcess(run.processPid, "SIGKILL");
+      }, 5_000);
     }
 
-    return runs.length;
+    runningProcesses.delete(run.id);
   }
 
   function stopBulkRun(run: HeartbeatRun) {
@@ -224,11 +237,17 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
   }
 
   const control = {
-    cancelRun: (runId: string) => cancelRunInternal(runId),
+    cancelRun: async (runId: string) => {
+      const result = await cancelControlled({ kind: "run", id: runId }, "user_cancel", "Cancelled by control plane", false);
+      return result.changed.find(({ original }) => original.id === runId)?.cancelled ?? result.requested ?? null;
+    },
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
     resumeAgent: (agentId: string) => commitAgentResume(db, agentId),
     pauseAgent: (agentId: string) => controlAgent(agentId, "manual_pause"),
     terminateAgent: (agentId: string) => controlAgent(agentId, "terminate"),
   };
-  return { cancelRunInternal, cancelActiveForAgentInternal, control };
+  const cancelBudgetScope = async (scope: BudgetEnforcementScope) => {
+    await cancelControlled({ kind: "budget", scope }, "budget", "Cancelled due to budget pause", scope.scopeType === "agent");
+  };
+  return { cancelRunInternal, cancelBudgetScope, control };
 }

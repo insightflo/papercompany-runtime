@@ -4528,7 +4528,8 @@ export function heartbeatService(db: Db) {
     await db
       .update(agentWakeupRequests)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+      .where(and(eq(agentWakeupRequests.id, wakeupRequestId), status === "cancelled"
+        ? undefined : not(eq(agentWakeupRequests.status, "cancelled"))));
   }
 
   // [Task 6C] queue/run 상태전이를 workflow_transition_events 에 mirror (append-only).
@@ -10246,106 +10247,7 @@ export function heartbeatService(db: Db) {
     return admission.run;
   }
 
-  async function listProjectScopedRunIds(companyId: string, projectId: string) {
-    const runIssueId = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text, ${heartbeatRuns.contextSnapshot} ->> 'issueId')`;
-    const effectiveProjectId = sql<string | null>`coalesce(${heartbeatRuns.contextSnapshot} ->> 'projectId', ${issues.projectId}::text)`;
-
-    const rows = await db
-      .selectDistinctOn([heartbeatRuns.id], { id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .leftJoin(
-        issues,
-        and(
-          eq(issues.companyId, companyId),
-          sql`${issues.id}::text = ${runIssueId}`,
-        ),
-      )
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, companyId),
-          inArray(heartbeatRuns.status, ["queued", "running"]),
-          sql`${effectiveProjectId} = ${projectId}`,
-        ),
-      );
-
-    return rows.map((row) => row.id);
-  }
-
-  async function listProjectScopedWakeupIds(companyId: string, projectId: string) {
-    const wakeIssueId = sql<string | null>`${agentWakeupRequests.payload} ->> 'issueId'`;
-    const effectiveProjectId = sql<string | null>`coalesce(${agentWakeupRequests.payload} ->> 'projectId', ${issues.projectId}::text)`;
-
-    const rows = await db
-      .selectDistinctOn([agentWakeupRequests.id], { id: agentWakeupRequests.id })
-      .from(agentWakeupRequests)
-      .leftJoin(
-        issues,
-        and(
-          eq(issues.companyId, companyId),
-          sql`${issues.id}::text = ${wakeIssueId}`,
-        ),
-      )
-      .where(
-        and(
-          eq(agentWakeupRequests.companyId, companyId),
-          inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
-          sql`${agentWakeupRequests.runId} is null`,
-          sql`${effectiveProjectId} = ${projectId}`,
-        ),
-      );
-
-    return rows.map((row) => row.id);
-  }
-
-  async function cancelPendingWakeupsForBudgetScope(scope: BudgetEnforcementScope) {
-    const now = new Date();
-    let wakeupIds: string[] = [];
-
-    if (scope.scopeType === "company") {
-      wakeupIds = await db
-        .select({ id: agentWakeupRequests.id })
-        .from(agentWakeupRequests)
-        .where(
-          and(
-            eq(agentWakeupRequests.companyId, scope.companyId),
-            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
-            sql`${agentWakeupRequests.runId} is null`,
-          ),
-        )
-        .then((rows) => rows.map((row) => row.id));
-    } else if (scope.scopeType === "agent") {
-      wakeupIds = await db
-        .select({ id: agentWakeupRequests.id })
-        .from(agentWakeupRequests)
-        .where(
-          and(
-            eq(agentWakeupRequests.companyId, scope.companyId),
-            eq(agentWakeupRequests.agentId, scope.scopeId),
-            inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
-            sql`${agentWakeupRequests.runId} is null`,
-          ),
-        )
-        .then((rows) => rows.map((row) => row.id));
-    } else {
-      wakeupIds = await listProjectScopedWakeupIds(scope.companyId, scope.scopeId);
-    }
-
-    if (wakeupIds.length === 0) return 0;
-
-    await db
-      .update(agentWakeupRequests)
-      .set({
-        status: "cancelled",
-        finishedAt: now,
-        error: "Cancelled due to budget pause",
-        updatedAt: now,
-      })
-      .where(inArray(agentWakeupRequests.id, wakeupIds));
-
-    return wakeupIds.length;
-  }
-
-  const { cancelRunInternal, cancelActiveForAgentInternal, control } = createHeartbeatAgentCancellation({
+  const { cancelRunInternal, cancelBudgetScope, control } = createHeartbeatAgentCancellation({
     db, getRun, setRunStatus, setWakeupStatus, appendRunEvent,
     setTransactionalRunStatus: setHeartbeatRunStatus,
     publishRunStatus: (run) => publishHeartbeatRunStatus(publishLiveEvent, run),
@@ -10354,31 +10256,7 @@ export function heartbeatService(db: Db) {
   });
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
-    if (scope.scopeType === "agent") {
-      await cancelActiveForAgentInternal(scope.scopeId, "Cancelled due to budget pause");
-      await cancelPendingWakeupsForBudgetScope(scope);
-      return;
-    }
-
-    const runIds =
-      scope.scopeType === "company"
-        ? await db
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(
-            and(
-              eq(heartbeatRuns.companyId, scope.companyId),
-              inArray(heartbeatRuns.status, ["queued", "running"]),
-            ),
-          )
-          .then((rows) => rows.map((row) => row.id))
-        : await listProjectScopedRunIds(scope.companyId, scope.scopeId);
-
-    for (const runId of runIds) {
-      await cancelRunInternal(runId, "Cancelled due to budget pause");
-    }
-
-    await cancelPendingWakeupsForBudgetScope(scope);
+    await cancelBudgetScope(scope);
   }
 
   return {
