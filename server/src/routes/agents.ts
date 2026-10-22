@@ -1864,13 +1864,11 @@ export function agentRoutes(db: Db) {
   router.post("/agents/:id/pause", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    const agent = await svc.pause(id);
+    const agent = await heartbeat.pauseAgent(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-
-    await heartbeat.cancelActiveForAgent(id);
 
     await logActivity(db, {
       companyId: agent.companyId,
@@ -1910,13 +1908,11 @@ export function agentRoutes(db: Db) {
   router.post("/agents/:id/terminate", async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
-    const agent = await svc.terminate(id);
+    const agent = await heartbeat.terminateAgent(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-
-    await heartbeat.cancelActiveForAgent(id);
 
     await logActivity(db, {
       companyId: agent.companyId,

@@ -37,7 +37,7 @@ import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
-import { createHeartbeatAgentCancellation } from "./heartbeat-agent-cancellation.js";
+import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./heartbeat-agent-cancellation.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
@@ -3377,7 +3377,7 @@ export async function setHeartbeatRunStatus(
   runId: string,
   status: string,
   patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-  opts?: { expectedStatuses?: string[] },
+  opts?: { expectedStatuses?: string[]; deferLiveEvent?: boolean },
 ) {
   const expectedStatuses = opts?.expectedStatuses?.length ? opts.expectedStatuses : null;
   const updated = await db
@@ -3395,23 +3395,7 @@ export async function setHeartbeatRunStatus(
   }
   if (updated) await recordHeartbeatTerminalOutcomeShadow(db, updated);
 
-  if (updated) {
-    publishLiveEvent({
-      companyId: updated.companyId,
-      type: "heartbeat.run.status",
-      payload: {
-        runId: updated.id,
-        agentId: updated.agentId,
-        status: updated.status,
-        invocationSource: updated.invocationSource,
-        triggerDetail: updated.triggerDetail,
-        error: updated.error ?? null,
-        errorCode: updated.errorCode ?? null,
-        startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
-        finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
-      },
-    });
-  }
+  if (updated && !opts?.deferLiveEvent) publishHeartbeatRunStatus(publishLiveEvent, updated);
 
   // [Task 6C] queue_run_completed event for terminal status
   if (updated) await recordHeartbeatRunTerminalTransitionEvent(db, updated);
@@ -10404,8 +10388,10 @@ export function heartbeatService(db: Db) {
     return wakeupIds.length;
   }
 
-  const { cancelRunInternal, cancelActiveForAgentInternal } = createHeartbeatAgentCancellation({
+  const { cancelRunInternal, cancelActiveForAgentInternal, control } = createHeartbeatAgentCancellation({
     db, getRun, setRunStatus, setWakeupStatus, appendRunEvent,
+    setTransactionalRunStatus: setHeartbeatRunStatus,
+    publishRunStatus: (run) => publishHeartbeatRunStatus(publishLiveEvent, run),
     releaseIssueExecutionAndPromote, finalizeAgentStatus, startNextQueuedRunForAgent,
     terminateRecordedProcess, runningProcesses,
   });
@@ -10688,10 +10674,9 @@ export function heartbeatService(db: Db) {
       return { checked, enqueued, skipped };
     },
 
-    cancelRun: (runId: string) => cancelRunInternal(runId),
     finalizeLinkedRunsForIssueStatus,
 
-    cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
+    ...control,
 
     cancelBudgetScopeWork,
 
