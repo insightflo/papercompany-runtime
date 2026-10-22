@@ -104,14 +104,14 @@ async function settle(w: Awaited<ReturnType<typeof manual>>, enabled: boolean) {
   if (enabled) await settleHeartbeatAfterExecution(db, await readRun(w.id), new Date());
 }
 
-// Independent C05 oracle: adopted plan:112-117 and revision1:60-66.
-// Same pause -> resume ONCE input: while alive/no cleanup => stopped=null;
-// actual exit + all original resources stopped => only that exact attempt gains proof.
-// Existing tests/expectations are unchanged. Queue delivery is a later C05 obligation.
-it.each([false, true])("real executeRun cleanup records an exact proof with finalization=%s", async enabled => {
+// Independent C05 oracle: adopted plan:46-52,112-117,143.
+// Same pause -> resume ONCE input: while alive/no cleanup => stopped=null and zero successors;
+// actual exit + all original resources stopped => exact proof and one completed successor.
+// The final contract replaces the earlier stage's delivery=null / one total execution expectation.
+it.each([false, true])("real executeRun cleanup proves the exact stop and resumes once, finalization=%s", async enabled => {
   const w = await world(enabled);
   let child: ChildProcess | undefined;
-  adapter.mockImplementation(async (ctx: AdapterExecutionContext) => {
+  adapter.mockResolvedValue(completed).mockImplementationOnce(async (ctx: AdapterExecutionContext) => {
     child = await childProcess(); runningProcesses.set(ctx.runId, { child, graceSec: 1 }); runIds.add(ctx.runId);
     await ctx.onSpawn?.({ pid: child.pid!, startedAt: new Date().toISOString() });
     await once(child, "close"); runningProcesses.delete(ctx.runId); return completed;
@@ -127,15 +127,41 @@ it.each([false, true])("real executeRun cleanup records an exact proof with fina
   expect(child!.exitCode).toBeNull(); expect(child!.signalCode).toBeNull();
   expect(runningProcesses.has(original.id)).toBe(false); // Pause deletes the handle before exit.
   expect(await recordPauseQuiescence(peer, original)).toBe(0);
+  await heartbeatService(peer).resumeQueuedRuns(w.agentId);
+  expect(child!.exitCode).toBeNull(); expect(child!.signalCode).toBeNull();
+  expect((await receipts(w.agentId))[0]).toMatchObject({ stopped: null, delivery: null });
+  expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, w.agentId))).toHaveLength(1);
+  expect(adapter).toHaveBeenCalledTimes(1);
+  expect((await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, w.agentId)))
+    .filter(r => r.requestKind === "agent_pause_resume")).toHaveLength(0);
   await exit(child!); await waitForHeartbeatExecutionsToDrain(db);
-  const [receipt] = await receipts(w.agentId), ended = await readRun(original.id);
+  const saved = await receipts(w.agentId); expect(saved).toHaveLength(1);
+  const [receipt] = saved, ended = await readRun(original.id);
   expect(receipt.stopped).toMatchObject({ heartbeatRunId: original.id, executionEpoch: original.executionEpoch,
     executionToken: original.executionToken, method: enabled ? "finalization_quiescence" : "legacy_execution_cleanup" });
-  expect(receipt.resumeScopeId).toBe(receipt.ownerScopeId); expect(receipt.delivery).toBeNull();
-  expect(ended.settledAt === null).toBe(!enabled); expect(adapter).toHaveBeenCalledTimes(1);
-  const saved = await receipts(w.agentId);
+  expect(receipt.resumeScopeId).toBe(receipt.ownerScopeId);
+  expect(ended.settledAt === null).toBe(!enabled); expect(adapter).toHaveBeenCalledTimes(2);
+  const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, w.agentId));
+  expect(runs).toHaveLength(2);
+  const successors = runs.filter(r => r.retryOfRunId === original.id);
+  expect(successors).toHaveLength(1);
+  const [successor] = successors;
+  expect(successor).toMatchObject({ status: "succeeded", retryOfRunId: original.id });
+  expect((adapter.mock.calls[1][0] as AdapterExecutionContext).runId).toBe(successor.id);
+  expect(receipt.identity).toMatchObject({ heartbeatRunId: original.id, wakeupRequestId: original.wakeupRequestId });
+  expect(receipt.delivery).toEqual({ heartbeatRunId: successor.id, wakeupRequestId: successor.wakeupRequestId });
+  const wakes = (await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, w.agentId)))
+    .filter(r => r.requestKind === "agent_pause_resume");
+  expect(wakes).toHaveLength(1);
+  expect(wakes[0]).toMatchObject({ id: successor.wakeupRequestId, runId: successor.id,
+    source: "automation", requestKind: "agent_pause_resume", reason: "agent_pause_resume" });
   expect(await recordPauseQuiescence(peer, original)).toBe(0); expect(await receipts(w.agentId)).toEqual(saved);
-  expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, w.agentId))).toHaveLength(1);
+  await w.service.resumeQueuedRuns(w.agentId); await heartbeatService(peer).resumeQueuedRuns();
+  await Promise.all([waitForHeartbeatExecutionsToDrain(db), waitForHeartbeatExecutionsToDrain(peer)]);
+  expect(adapter).toHaveBeenCalledTimes(2); expect(await receipts(w.agentId)).toEqual(saved);
+  expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, w.agentId))).toHaveLength(2);
+  expect((await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, w.agentId)))
+    .filter(r => r.requestKind === "agent_pause_resume")).toEqual(wakes);
 }, 30_000);
 
 it.each([false, true])("exit without each resource's cleanup never records a stop, finalization=%s", async enabled => {
