@@ -142,4 +142,61 @@ export const REVIEWED_RESUME_POLICIES: readonly ReviewedResumePolicy[] = [
       "build-youtube-report-content",
     ],
   },
+  /**
+   * [검토 근거 — 2026-10-23] 원본 정의: workflow_definitions 069c62ab-ad12-448a-87d8-521b1bb32237
+   *   (dsh-purge 수정 미션 PAQO 실행 정의, 2026-10-21 생성). 검토 대상 스냅샷: workflow_run_definitions
+   *   run 9c6cf35d-0878-4b59-a2ba-d4670988ddfe (definition_hash 아래, captured 2026-10-22T09:30:24Z,
+   *   6스텝). 스텝 효과는 frozen 스텝 서술·도구 계약·위 youtube-report 검토(동일 builtin 도구)로 확인했다.
+   *   - action-1-4ae1f74ba7 (agent, 보존 초안 완성·보안 사전점검 증거 재등록): 보존 산출물 상속·
+   *     내부 산출물/증거 등록만 수행, 외부 쓰기 없음 → none.
+   *   - qa-2-cd874c856d (agent QA, F1 해소 검증·회귀 재검토): 등록 산출물 대조 검증 → none.
+   *   - qa-3-bb9e492d5f (builtin manual-onboarding-qa): 등록 본문 기계 검사, 결과 JSON 을
+   *     워크스페이스에 기록. 외부 쓰기 없음 → none. 발행 직전 기계 게이트 → requiredGateStepIds.
+   *   - action-4-64dcc548f7 (builtin manual-onboarding-publish): CMS manuals 섹션 외부 발행 →
+   *     external + publicationStepIds.
+   *   - qa-5-a57c357b38 (builtin manual-onboarding-verify): 공개 상태 readback 확인 읽기 → read_only.
+   *   - qa-e4612efd83 (agent QA, Verify mission result): 판정만 반환 → none.
+   *   generationStepIds: 새 초안/증거를 산출하는 action-1 만. 검증 스텝은 제외.
+   * [바인딩 채취] 도구는 youtube-report 검토(2026-10-22)와 같은 회사 tool_definitions 행 3건이며
+   *   2026-10-23 A1 실측으로 updated_at 불변 확인(qa 9512da2f 2026-10-02T00:02:12.308Z,
+   *   publish db36b402 2026-10-03T07:21:49.187Z, verify 2523e587 2026-10-02T00:02:12.723Z) —
+   *   configHash 는 동일 검토 시점 값을 재사용한다(행 불변). 행이 바뀌면 binding 이 자동 무효화된다.
+   */
+  {
+    schemaVersion: 1,
+    companyId: "ff3e3efd-e30c-45c2-b893-497164405629",
+    definitionHash: "d57fd45e6eb9d7aeee24d2742f0a2a3a09f7d8d4d988abe2681b610addce42bb",
+    steps: {
+      "action-1-4ae1f74ba7": { effect: "none", toolBindings: [] },
+      "qa-2-cd874c856d": { effect: "none", toolBindings: [] },
+      "qa-3-bb9e492d5f": {
+        effect: "none",
+        toolBindings: [{
+          id: "9512da2f-46af-4ddb-86e4-21bd1c152094",
+          updatedAt: "2026-10-02T00:02:12.308Z",
+          configHash: "91be83e8546bf63c2b11c37873d6f0b5b7940f60e3ea02748b300f0822473f50",
+        }],
+      },
+      "action-4-64dcc548f7": {
+        effect: "external",
+        toolBindings: [{
+          id: "db36b402-5e7c-4efe-a6d9-ee9bfa1fde43",
+          updatedAt: "2026-10-03T07:21:49.187Z",
+          configHash: "ec9bd5eda6af5c3e6db2c2f342e4899290f00cebf2d62b05c1056488589cb993",
+        }],
+      },
+      "qa-5-a57c357b38": {
+        effect: "read_only",
+        toolBindings: [{
+          id: "2523e587-77a8-4a93-ba2f-b1cac07bb777",
+          updatedAt: "2026-10-02T00:02:12.723Z",
+          configHash: "4f16e4ad1884ae70782afe12baf91075e066cef41187ef2fe373c5e16504eb3d",
+        }],
+      },
+      "qa-e4612efd83": { effect: "none", toolBindings: [] },
+    },
+    requiredGateStepIds: ["qa-3-bb9e492d5f"],
+    publicationStepIds: ["action-4-64dcc548f7"],
+    generationStepIds: ["action-1-4ae1f74ba7"],
+  },
 ];

@@ -10,10 +10,10 @@
 //   - sanitize: human comment + workflowTransitionEvents payload 모두 한 줄 bounded. control char/JSON-fragment/raw stderr·error body 제거.
 //   - terminal failure status: approved failed/timed_out 만(cancelled 제외).
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { type SystemLanguage } from "./system-language.js";
-import { activityLog, issueComments, issues, missions, operatorDecisions, workflowRuns, workflowTransitionEvents, companies } from "@paperclipai/db";
+import { activityLog, issueComments, issues, missions, operatorDecisions, toolDefinitions, workflowRunDefinitions, workflowRuns, workflowTransitionEvents, companies } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import {
   materializeHumanOperatorRequestPayload,
@@ -30,6 +30,8 @@ import {
   type ValidationVerdictObservation,
   type WorkflowContinuationStepRow,
 } from "./terminal-mission-workflow-continuation.js";
+import { bindingResolves } from "../workflow/resume/preview-policy.js";
+import { REVIEWED_RESUME_POLICIES, type ReviewedResumePolicy } from "../workflow/resume/reviewed-policy.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
@@ -47,6 +49,42 @@ const FAILED_RUN_AGGREGATE_MAX = 8;
 // 공유한다(텍스트 변경 금지: 기존 발신 문구 그대로).
 const TERMINAL_NEXT_ACTION_EN = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
 const TERMINAL_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다.";
+
+// [재개 경로 안내 2026-10-23] 실패 실행의 frozen 정의가 검토된 재개 정책으로 완전히 resolve 되면
+//   next-action 에 실제 클릭 경로(보드 '이 실행 이어서 진행')를 덧붙인다. 정책 부재·binding 불일치면
+//   안내하지 않는다(preview 가 fail-closed 로 거절할 것이므로 거짓 안내가 되지 않게).
+const TERMINAL_RESUME_GUIDANCE_KO = "이 미션의 실패 실행은 검토된 재개 경로가 있습니다: 미션 상세 화면의 '이 실행 이어서 진행'(재개) 버튼으로 실패한 단계부터 이어서 실행할 수 있습니다.";
+const TERMINAL_RESUME_GUIDANCE_EN = "A reviewed resume path is available for this mission's failed run: use the '이 실행 이어서 진행' (resume) action on the mission detail page to continue from the failed step.";
+
+export function terminalResumeGuidanceText(available: boolean, language: "ko" | "en" | SystemLanguage): string | null {
+  if (!available) return null;
+  return language === "ko" ? TERMINAL_RESUME_GUIDANCE_KO : TERMINAL_RESUME_GUIDANCE_EN;
+}
+
+/** 정책의 모든 tool binding 이 현재 registry 행과 정확히 resolve 되는가(하나라도 어긋나면 false). */
+export function reviewedResumePolicyFullyResolves(
+  policy: ReviewedResumePolicy,
+  registryRows: (typeof toolDefinitions.$inferSelect)[],
+): boolean {
+  return Object.values(policy.steps).every((step) =>
+    (step.toolBindings ?? []).every((binding) => bindingResolves(binding, registryRows)));
+}
+
+/** 실패 실행들의 frozen 정의 중 검토된 재개 정책이 온전히 resolve 되는 것이 있는가(보드 재개 버튼이 실제로 작동함). */
+async function terminalResumePathAvailable(db: Db, companyId: string, failedRunIds: readonly string[]): Promise<boolean> {
+  if (failedRunIds.length === 0) return false;
+  const rows = await db.select({ definitionHash: workflowRunDefinitions.definitionHash })
+    .from(workflowRunDefinitions)
+    .where(inArray(workflowRunDefinitions.workflowRunId, [...failedRunIds]));
+  const hashes = [...new Set(rows.map((row) => row.definitionHash).filter((hash): hash is string => typeof hash === "string"))];
+  if (hashes.length === 0) return false;
+  const registryRows = await db.select().from(toolDefinitions).where(eq(toolDefinitions.companyId, companyId));
+  return hashes.some((hash) => {
+    const matched = REVIEWED_RESUME_POLICIES.filter((policy) =>
+      policy.schemaVersion === 1 && policy.companyId === companyId && policy.definitionHash === hash);
+    return matched.length === 1 && reviewedResumePolicyFullyResolves(matched[0]!, registryRows);
+  });
+}
 
 export type TerminalMissionOwnerActionIssue = {
   id: string;
@@ -126,6 +164,8 @@ export type TerminalMissionHumanOperatorCommentInput = {
   retryMaxRetries?: number | null;
   /** [provider 403 ladder] 소진된 scheduled 재시도 요약(구조화). 표시 텍스트는 이 값에서만 파생. */
   provider403Ladder?: { attempts: number; delaysMin: number[] } | null;
+  /** [재개 경로 안내 2026-10-23] 검토된 재개 정책이 resolve 되는 경우의 실제 클릭 안내(null 이면 미표시). */
+  resumeGuidance?: string | null;
 };
 
 
@@ -170,6 +210,7 @@ export function buildTerminalMissionHumanOperatorComment(
     `Source issue: ${sourceToken}`,
     input.language === "ko" ? "Reason: 자동으로 계속할 수 없습니다. 작업 흐름 또는 복구 업무가 실패로 종결됐고, 실행 중인 작업이나 재개 요청, 실행 가능한 다음 단계가 남아 있지 않습니다." : "Reason: Mission cannot continue automatically. The workflow or its owner-action recovery reached a terminal failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
     input.language === "ko" ? `Next action: ${TERMINAL_NEXT_ACTION_KO}` : `Next action: ${TERMINAL_NEXT_ACTION_EN}`,
+    ...(input.resumeGuidance ? [`Resume path: ${input.resumeGuidance}`] : []),
     `Evidence: ${evidence}`,
   ].join("\n");
 }
@@ -327,6 +368,8 @@ export async function emitTerminalMissionHumanOperatorReport(
     workflowRunId: input.workflowRunId,
     failedRuns: terminalFailedRuns,
   });
+  const resumePathAvailable = await terminalResumePathAvailable(db, input.expectedCompanyId,
+    terminalFailedRuns.map((run) => run.id));
   const body = buildTerminalMissionHumanOperatorComment({
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,
@@ -336,6 +379,7 @@ export async function emitTerminalMissionHumanOperatorReport(
     retryAttempts: input.retryAttempts,
     retryMaxRetries: input.retryMaxRetries,
     provider403Ladder: input.provider403Ladder ?? null,
+    resumeGuidance: terminalResumeGuidanceText(resumePathAvailable, "en"),
   });
   const sanitizedFailedRunsPayload = terminalFailedRuns
     .slice(0, FAILED_RUN_AGGREGATE_MAX)
@@ -370,7 +414,9 @@ export async function emitTerminalMissionHumanOperatorReport(
         .limit(1);
       verifiedRunId = runRow?.id ?? null;
     }
-    const nextActionText = locked.language === "ko" ? TERMINAL_NEXT_ACTION_KO : TERMINAL_NEXT_ACTION_EN;
+    const nextActionText = [locked.language === "ko" ? TERMINAL_NEXT_ACTION_KO : TERMINAL_NEXT_ACTION_EN,
+      terminalResumeGuidanceText(resumePathAvailable, locked.language === "ko" ? "ko" : "en")]
+      .filter(Boolean).join(" ");
     const evidenceText = buildTerminalMissionEvidenceToken({
       issueId: input.issue.id,
       issueIdentifier: input.issue.identifier,
@@ -447,7 +493,7 @@ export async function emitTerminalMissionHumanOperatorReport(
         issueId: input.issue.id,
         authorAgentId: null,
         authorUserId: null,
-        body: locked.language === "ko" ? buildTerminalMissionHumanOperatorComment({ ...input, issueId: input.issue.id, issueIdentifier: input.issue.identifier, failedRuns: terminalFailedRuns, language: "ko" }) : body,
+        body: locked.language === "ko" ? buildTerminalMissionHumanOperatorComment({ ...input, issueId: input.issue.id, issueIdentifier: input.issue.identifier, failedRuns: terminalFailedRuns, language: "ko", resumeGuidance: terminalResumeGuidanceText(resumePathAvailable, "ko") }) : body,
       })
       .returning();
     void comment;
