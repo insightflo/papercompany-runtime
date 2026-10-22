@@ -24,6 +24,7 @@ import {
 } from "./operator-decision-result.js";
 import { operatorDecisionContinuationRetryService } from "./operator-decision-continuation-retry.js";
 import { operatorDecisionReadService } from "./operator-decisions-read.js";
+import { startApprovedRevisionRun } from "./workflow/approved-revision-start.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
@@ -378,6 +379,14 @@ export function operatorDecisionWriteService(db: Db) {
         operatorDecisionId: id, language: normalizeSystemLanguage(before.defaultLanguage),
         selectedOptions: resolveSelectedOptions(decision.definition, result.selectedOptionIds),
       });
+    }
+    // [승인=시작 2026-10-22] "승인"은 대기 중 수정 실행의 시작 권한이다. resolve 트랜잭션 커밋 후
+    //   비동기로 시작하며(응답 지연 없음), 실패·경합은 모니터 sweep 이 소급 재시도한다.
+    if (applied && result.outcome === "approve" && decision.sourceContext.missionId) {
+      const missionId = decision.sourceContext.missionId;
+      void startApprovedRevisionRun(db, { companyId: decision.companyId, missionId })
+        .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId },
+          "approved revision start after decision resolve failed"));
     }
     return { decision, applied, continuation: decision.continuation };
   }

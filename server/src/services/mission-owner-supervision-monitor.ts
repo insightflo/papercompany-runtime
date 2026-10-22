@@ -3,6 +3,7 @@ import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
+import { sweepApprovedRevisionStarts } from "./workflow/approved-revision-start.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
 import { createMissionOversightLivenessLane, type MissionOversightLivenessGhostWakeRequestedHandler } from "./mission-oversight-liveness-lane.js";
 
@@ -97,6 +98,13 @@ export function createMissionOwnerSupervisionMonitor(
       await recordActiveMissionCadenceShadow(db, new Date());
     } catch (err) {
       logger.warn({ err }, "Mission oversight cadence shadow observation failed");
+    }
+    // [승인=시작 2026-10-22] 이미 승인됐지만 실행이 시작되지 않은 수정 미션을 소급 시작한다.
+    //   기존 sweep 이후·가드 밖에서 실행하며, 실패가 감독 주기를 막지 않는다.
+    try {
+      await sweepApprovedRevisionStarts(db);
+    } catch (err) {
+      logger.warn({ err }, "approved revision start sweep failed");
     }
   }
 
