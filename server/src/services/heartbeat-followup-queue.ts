@@ -17,6 +17,7 @@ import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-mana
 import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, QueuedWakeupPromotionInput } from "./heartbeat-followup-promotion.js";
 import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
 import { deliverPauseResume, selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
+import { recheckPauseQuiescence } from "./heartbeat-pause-quiescence.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
 /** Only the identical unconditional rejection update; callers keep their own continue/return. */
 export async function failFollowupWake(tx: FollowupTx, id: string, error: string) {
@@ -66,6 +67,7 @@ export async function promoteQueuedWakeupRequestsForAgent(
     for (const candidate of await selectPauseResumeCandidates(db, agent.id)) {
       if (promotedRuns.length >= limit) break;
       try {
+        if (!await recheckPauseQuiescence(db, candidate.id)) continue;
         const child = await deliverPauseResume(db, candidate.id);
         // A concurrent winner may already be running: never present it as a new claim/start.
         if (child?.status === "queued") promotedRuns.push(child);

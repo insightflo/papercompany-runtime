@@ -11,6 +11,7 @@ import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, instan
 import { runningProcesses } from "../adapters/index.js";
 import type { AdapterExecutionContext } from "../adapters/types.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { logger } from "../middleware/logger.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { readPauseControl, type PauseReceipt } from "../services/heartbeat-pause-contract.js";
 import { createPauseExecutionObservation, recordPauseQuiescence } from "../services/heartbeat-pause-quiescence.js";
@@ -108,8 +109,10 @@ async function settle(w: Awaited<ReturnType<typeof manual>>, enabled: boolean) {
 // Same pause -> resume ONCE input: while alive/no cleanup => stopped=null and zero successors;
 // actual exit + all original resources stopped => exact proof and one completed successor.
 // The final contract replaces the earlier stage's delivery=null / one total execution expectation.
-it.each([false, true])("real executeRun cleanup proves the exact stop and resumes once, finalization=%s", async enabled => {
-  const w = await world(enabled);
+it.each([false, true].flatMap(enabled => [false, true].map(storageFailure => ({ enabled, storageFailure }))))(
+  "real executeRun cleanup and requery resume once, finalization=$enabled, storageFailure=$storageFailure", async ({ enabled, storageFailure }) => {
+  const w = await world(enabled), warn = vi.spyOn(logger, "warn");
+  onTestFinished(() => { warn.mockRestore(); });
   let child: ChildProcess | undefined;
   adapter.mockResolvedValue(completed).mockImplementationOnce(async (ctx: AdapterExecutionContext) => {
     child = await childProcess(); runningProcesses.set(ctx.runId, { child, graceSec: 1 }); runIds.add(ctx.runId);
@@ -126,7 +129,7 @@ it.each([false, true])("real executeRun cleanup proves the exact stop and resume
   await paused(w);
   expect(child!.exitCode).toBeNull(); expect(child!.signalCode).toBeNull();
   expect(runningProcesses.has(original.id)).toBe(false); // Pause deletes the handle before exit.
-  expect(await recordPauseQuiescence(peer, original)).toBe(0);
+  if (!storageFailure) expect(await recordPauseQuiescence(peer, original)).toBe(0);
   await heartbeatService(peer).resumeQueuedRuns(w.agentId);
   expect(child!.exitCode).toBeNull(); expect(child!.signalCode).toBeNull();
   expect((await receipts(w.agentId))[0]).toMatchObject({ stopped: null, delivery: null });
@@ -134,7 +137,30 @@ it.each([false, true])("real executeRun cleanup proves the exact stop and resume
   expect(adapter).toHaveBeenCalledTimes(1);
   expect((await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, w.agentId)))
     .filter(r => r.requestKind === "agent_pause_resume")).toHaveLength(0);
+  const before = await receipts(w.agentId), controlId = before[0].id;
+  if (storageFailure) {
+    onTestFinished(async () => {
+      await db.$client.unsafe("DROP TRIGGER IF EXISTS c05_stop_failure ON agent_wakeup_requests; DROP FUNCTION IF EXISTS c05_stop_failure()");
+    });
+    await db.$client.unsafe("CREATE FUNCTION c05_stop_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+      + "IF NEW.id='" + controlId + "' THEN RAISE EXCEPTION 'c05 stop middle write'; END IF; RETURN NEW; END $$;"
+      + "CREATE TRIGGER c05_stop_failure BEFORE UPDATE ON agent_wakeup_requests FOR EACH ROW EXECUTE FUNCTION c05_stop_failure()");
+  }
   await exit(child!); await waitForHeartbeatExecutionsToDrain(db);
+  if (storageFailure) {
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ runId: original.id }), "failed to record pause execution quiescence");
+    const failures = warn.mock.calls.filter(call => call[1] === "failed to record pause execution quiescence");
+    expect(failures).toHaveLength(1);
+    let error = (failures[0][0] as { err: unknown }).err;
+    const messages: string[] = [];
+    while (error instanceof Error) { messages.push(error.message); error = (error as Error & { cause?: unknown }).cause; }
+    expect(messages.join("\n")).toContain("c05 stop middle write");
+    expect(await receipts(w.agentId)).toEqual(before); expect(adapter).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, w.agentId))).toHaveLength(1);
+    await db.$client.unsafe("DROP TRIGGER c05_stop_failure ON agent_wakeup_requests; DROP FUNCTION c05_stop_failure()");
+    // C05 adopted:116,143,147: no second resume/direct proof writer; a new service must recover this same intent.
+    await heartbeatService(peer).resumeQueuedRuns(); await waitForHeartbeatExecutionsToDrain(peer);
+  }
   const saved = await receipts(w.agentId); expect(saved).toHaveLength(1);
   const [receipt] = saved, ended = await readRun(original.id);
   expect(receipt.stopped).toMatchObject({ heartbeatRunId: original.id, executionEpoch: original.executionEpoch,
@@ -155,7 +181,8 @@ it.each([false, true])("real executeRun cleanup proves the exact stop and resume
   expect(wakes).toHaveLength(1);
   expect(wakes[0]).toMatchObject({ id: successor.wakeupRequestId, runId: successor.id,
     source: "automation", requestKind: "agent_pause_resume", reason: "agent_pause_resume" });
-  expect(await recordPauseQuiescence(peer, original)).toBe(0); expect(await receipts(w.agentId)).toEqual(saved);
+  if (!storageFailure) expect(await recordPauseQuiescence(peer, original)).toBe(0);
+  expect(await receipts(w.agentId)).toEqual(saved);
   await w.service.resumeQueuedRuns(w.agentId); await heartbeatService(peer).resumeQueuedRuns();
   await Promise.all([waitForHeartbeatExecutionsToDrain(db), waitForHeartbeatExecutionsToDrain(peer)]);
   expect(adapter).toHaveBeenCalledTimes(2); expect(await receipts(w.agentId)).toEqual(saved);
@@ -204,18 +231,6 @@ it.each([false, true])("missing PID and OS query errors preserve intent, finaliz
   expect(await receipts(w.agentId)).toEqual(before);
 }, 30_000);
 
-it.each([false, true])("failed receipt storage rolls back then saves once, finalization=%s", async enabled => {
-  const w = await manual(enabled); await exit(w.child); await settle(w, enabled);
-  const before = await receipts(w.agentId), controlId = before[0].id;
-  await db.$client.unsafe("CREATE FUNCTION c05_stop_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
-    + "IF NEW.id='" + controlId + "' THEN RAISE EXCEPTION 'c05 stop middle write'; END IF; RETURN NEW; END $$;"
-    + "CREATE TRIGGER c05_stop_failure BEFORE UPDATE ON agent_wakeup_requests FOR EACH ROW EXECUTE FUNCTION c05_stop_failure()");
-  try { await expect(recordPauseQuiescence(db, w.original)).rejects.toThrow("c05 stop middle write"); }
-  finally { await db.$client.unsafe("DROP TRIGGER c05_stop_failure ON agent_wakeup_requests; DROP FUNCTION c05_stop_failure()"); }
-  expect(await receipts(w.agentId)).toEqual(before);
-  expect((await Promise.all([recordPauseQuiescence(db, w.original), recordPauseQuiescence(peer, w.original)])).sort()).toEqual([0, 1]);
-}, 30_000);
-
 it("scope replacement and execution epoch/token changes cannot stamp the older observation", async () => {
   const w = await manual(false); await exit(w.child);
   const lock = intents.lockPauseFacts, spy = vi.spyOn(intents, "lockPauseFacts");
@@ -234,11 +249,15 @@ it("scope replacement and execution epoch/token changes cannot stamp the older o
 
 it("an unresolved actual adapter promise cannot be replaced by PID absence or handle deletion", async () => {
   const w = await manual(false); await exit(w.child);
-  await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, w.id));
   const observation = createPauseExecutionObservation();
   let release!: () => void;
   const execution = observation.execute(w.original, () => new Promise<void>(resolve => { release = resolve; }));
-  try { expect(await recordPauseQuiescence(db, w.original, observation)).toBe(0); }
+  try {
+    await heartbeatService(peer).resumeQueuedRuns(); // Even an absent recorded PID cannot outrun the actual pending adapter.
+    expect((await receipts(w.agentId))[0].stopped).toBeNull();
+    await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, w.id));
+    expect(await recordPauseQuiescence(db, w.original, observation)).toBe(0);
+  }
   finally { release(); await execution; }
   expect((await receipts(w.agentId))[0].stopped).toBeNull();
   expect(await recordPauseQuiescence(db, w.original, observation)).toBe(1);

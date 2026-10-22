@@ -38,8 +38,14 @@ export function createPauseExecutionObservation() {
   return {
     async execute<T>(run: Run, invoke: () => Promise<T>): Promise<T> {
       invocation = attempt(run); pending = true; returned = false;
+      pendingExecutions.set(run.id, (pendingExecutions.get(run.id) ?? 0) + 1);
       try { return await invoke(); }
-      finally { pending = false; returned = true; }
+      finally {
+        pending = false; returned = true;
+        const remaining = (pendingExecutions.get(run.id) ?? 1) - 1;
+        if (remaining) pendingExecutions.set(run.id, remaining);
+        else pendingExecutions.delete(run.id);
+      }
     },
     state(run: Run): "pending" | "returned" | "unknown" {
       if (pending) return "pending";
@@ -48,10 +54,12 @@ export function createPauseExecutionObservation() {
   };
 }
 type Observation = ReturnType<typeof createPauseExecutionObservation>;
+// An actual pending adapter vetoes every service instance; this is never positive stop evidence.
+const pendingExecutions = new Map<string, number>();
 
 function executorStopped(run: Run, observation?: Observation): boolean {
   const state = observation?.state(run);
-  if (state === "pending") return false;
+  if (state === "pending" || pendingExecutions.has(run.id)) return false;
   const tracked = runningProcesses.get(run.id);
   if (tracked && tracked.child.exitCode === null && tracked.child.signalCode === null) return false;
   if (run.processPid !== null) {
@@ -157,6 +165,19 @@ export async function recordPauseQuiescence(db: Db, observed: Run, observation?:
     if (!saved || !isDeepStrictEqual(readPauseControl(saved), payload)) return changed();
     return 1;
   });
+}
+
+/** Requery discovers intent only. The existing writer owns locks, exact identity and stop/resource checks. */
+export async function recheckPauseQuiescence(db: Db, receiptId: string): Promise<boolean> {
+  const [row] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receiptId));
+  if (!row) return false;
+  const receipt = readPauseControl(row);
+  if (receipt.kind !== "receipt" || receipt.cause !== "manual_pause"
+    || receipt.invalidated || receipt.delivery || receipt.resumeScopeId !== receipt.ownerScopeId) return false;
+  if (receipt.stopped) return true;
+  const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipt.identity.heartbeatRunId));
+  if (!run) return changed();
+  return await recordPauseQuiescence(db, run) === 1;
 }
 
 type Cleanup = {

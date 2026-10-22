@@ -51,8 +51,8 @@ export async function readPauseControls(db: Reader, agentId: string) {
   }
   return records;
 }
-/** SELECT-only hints for the existing queue, never approval or proof of current scope.
- * Delivery re-reads the exact receipt under its established admission/control locks.
+/** SELECT-only hints, including intents whose stop proof failed to save; never approval or proof.
+ * The queue rechecks quiescence before delivery re-reads the exact receipt under its admission/control locks.
  */
 export async function selectPauseResumeCandidates(db: Reader, agentId?: string) {
   return db.select({ id: agentWakeupRequests.id, agentId: agentWakeupRequests.agentId })
@@ -67,7 +67,6 @@ export async function selectPauseResumeCandidates(db: Reader, agentId?: string) 
       sql`${agentWakeupRequests.payload} ->> 'kind' = 'receipt'`,
       sql`${agentWakeupRequests.payload} ->> 'cause' = 'manual_pause'`,
       sql`${agentWakeupRequests.payload} ->> 'resumeScopeId' = ${agentWakeupRequests.payload} ->> 'ownerScopeId'`,
-      sql`${agentWakeupRequests.payload} -> 'stopped' <> 'null'::jsonb`,
       sql`${agentWakeupRequests.payload} -> 'invalidated' = 'null'::jsonb`,
       sql`${agentWakeupRequests.payload} -> 'delivery' = 'null'::jsonb`,
     )).orderBy(agentWakeupRequests.requestedAt, agentWakeupRequests.id);
