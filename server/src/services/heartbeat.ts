@@ -35,12 +35,13 @@ import {
 import { HttpError, conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
-import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
+import { getRunLogStore } from "./run-log-store.js";
+import { createHeartbeatRunLog } from "./heartbeat-run-log.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./heartbeat-agent-cancellation.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
-import { parseObject, asBoolean, asNumber, appendWithCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
+import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { costService } from "./costs.js";
 import { mergeAgentConfig } from "./agents.js";
 import {
@@ -54,8 +55,7 @@ import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
 import { toolService } from "./tools/registry.js";
 import { knowledgeService } from "./knowledge/base.js";
-import { finalizeHermesChatRun, hermesChatService } from "./hermes-chat.js";
-import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
+import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
@@ -115,8 +115,6 @@ import {
   resolveNoProgressAutoBlockThreshold,
   resolveNoProgressWindowMs,
   resolveQaStepActiveExecutionTimeoutMs,
-  resolveRunawayAdvisorySoftBytes,
-  resolveRunawayLogLimitBytes,
   resolveStepAwareActiveExecutionTimeoutMs,
 } from "./heartbeat-stability.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
@@ -132,7 +130,6 @@ import {
   evaluateSessionFileStaleness,
   parseFileViewStalenessRotationPolicy,
 } from "./file-view-session-staleness.js";
-import { evaluateRuntimeBroadScanHook } from "./runtime-broad-scan-hook.js";
 import { buildRuntimeSearchPathPermissions } from "./runtime-search-path-permissions.js";
 import { isPathInsideOrEqual, resolveMissionWorkProductPaths } from "./work-products/output-paths.js";
 import {
@@ -241,8 +238,6 @@ export {
 
 type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
-const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
-const RUN_ACTIVITY_TOUCH_INTERVAL_MS = 15 * 1000;
 const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
@@ -481,10 +476,6 @@ const heartbeatRunListColumns = {
   createdAt: heartbeatRuns.createdAt,
   updatedAt: heartbeatRuns.updatedAt,
 } as const;
-
-function appendExcerpt(prev: string, chunk: string) {
-  return appendWithCap(prev, chunk, MAX_EXCERPT_BYTES);
-}
 
 function normalizeMaxConcurrentRuns(value: unknown) {
   const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
@@ -6890,19 +6881,20 @@ export function heartbeatService(db: Db) {
     refreshStepInputManifest(context, taskKey);
 
     let seq = 1;
-      let handle: RunLogHandle | null = null;
-      let stdoutExcerpt = "";
-      let stderrExcerpt = "";
-      let stdoutGuardBuffer = "";
-      let stderrGuardBuffer = "";
-      // [run stability] 폭주 가드 — 성공 run 실측 최대 2.6MB vs 실패 run 8MB+.
-      //   run 로그 누적 바이트가 상한을 넘으면 자식을 죽고 errorCode=runaway_context 로
-      //   종료시킨다. 상한은 env/agent adapterConfig 로 조정 가능(heartbeat-stability).
-      const runawayLogLimitBytes = resolveRunawayLogLimitBytes(resolvedConfig);
-      const runawayAdvisorySoftBytes = resolveRunawayAdvisorySoftBytes(runawayLogLimitBytes);
-      let runawayLogBytes = 0;
-      let runawayTriggered = false;
-      let runawayAdvisoryEmitted = false;
+    const runLog = createHeartbeatRunLog({
+      db,
+      getRun: () => run,
+      adapterType: agent.adapterType,
+      context,
+      config: resolvedConfig,
+      store: runLogStore,
+      getRedactionOptions: getCurrentUserRedactionOptions,
+      appendEvent: (event) => appendRunEvent(run, seq++, event),
+      appendBroadScanEvent: async (details) => {
+        await appendBroadScanBlockEvent(run, seq, details);
+        seq++;
+      },
+    });
     try {
       const startedAt = run.startedAt ?? new Date();
       const runningWithSession = await db
@@ -6945,174 +6937,9 @@ export function heartbeatService(db: Db) {
         message: "run started",
       });
 
-      handle = await runLogStore.begin({
-        companyId: run.companyId,
-        agentId: run.agentId,
-        runId,
-      });
-
-      await db
-        .update(heartbeatRuns)
-        .set({
-          logStore: handle.store,
-          logRef: handle.logRef,
-          updatedAt: new Date(),
-        })
-        .where(eq(heartbeatRuns.id, runId));
-
-      const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
-      const evaluateRuntimeGuardLines = (stream: "stdout" | "stderr", text: string, flush = false) => {
-        const currentBuffer = stream === "stdout" ? stdoutGuardBuffer : stderrGuardBuffer;
-        const nextBuffer = currentBuffer + text;
-        const lines = nextBuffer.split(/\r?\n/);
-        const remaining = flush ? "" : (lines.pop() ?? "");
-        if (stream === "stdout") stdoutGuardBuffer = remaining;
-        else stderrGuardBuffer = remaining;
-        return lines.filter((line) => line.trim().length > 0);
-      };
-      const hermesChatContext = parseObject(context.paperclipHermesChat);
-      const hermesChatAssistantMessageId = readNonEmptyString(hermesChatContext.assistantMessageId);
-      const hermesChat = hermesChatAssistantMessageId ? hermesChatService(db) : null;
-      let lastHermesChatProgressText = "";
-      let lastHermesChatProgressUpdateMs = 0;
-      const maybeUpdateHermesChatProgress = async (now: Date) => {
-        if (!hermesChat || !hermesChatAssistantMessageId || agent.adapterType !== "hermes_local") return;
-        const progressText = parseHermesProgressText(stdoutExcerpt);
-        if (!progressText || progressText === lastHermesChatProgressText) return;
-        if (now.getTime() - lastHermesChatProgressUpdateMs < 2_000) return;
-        lastHermesChatProgressText = progressText;
-        lastHermesChatProgressUpdateMs = now.getTime();
-        try {
-          await hermesChat.updateAssistantProgress(hermesChatAssistantMessageId, progressText);
-        } catch (err) {
-          logger.warn({ err, runId: run.id }, "failed to update Hermes chat progress");
-        }
-      };
-      let lastActivityTouchMs = 0;
-      const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
-        let sanitizedChunk = redactCurrentUserText(chunk, currentUserRedactionOptions);
-        const now = new Date();
-        const ts = now.toISOString();
-        for (const line of evaluateRuntimeGuardLines(stream, sanitizedChunk)) {
-          const hook = await evaluateRuntimeBroadScanHook(db, {
-            adapterType: agent.adapterType,
-            line,
-            ts,
-            context,
-            runId: run.id,
-          });
-          if (hook.intercepted) {
-            // Runtime broad-scan hook (audit-not-block): black-box CLI adapters
-            // run outside heartbeat's stdio pipe — the synthetic output is
-            // appended to runLogStore/excerpt/liveEvent for operator audit and
-            // next-turn guidance only; it does NOT replace the agent's tool
-            // result. The run continues (no throw) so the agent can retry with
-            // a declared path or missionSearch. Only the current streaming chunk
-            // is replaced (break at most one chunk); remaining output in this
-            // callback is intentionally not forwarded — the agent's own context
-            // is unaffected. Trade-off vs preflight hard-block is documented in
-            // runtime-broad-scan-hook.ts file header.
-            await appendBroadScanBlockEvent(run, seq, {
-              reason: hook.reason ?? "Broad-scan command intercepted; synthetic audit output injected (agent tool result unchanged)",
-              errorCode: "manifest_broad_scan_hook_intercepted",
-              phase: "runtime_hook",
-              stream,
-              matchedCommand: hook.rewrittenCommand ?? null,
-              line,
-            });
-            seq++;
-            sanitizedChunk = hook.syntheticOutput ?? "";
-            break;
-          }
-        }
-        if (stream === "stdout") stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
-        if (stream === "stderr") stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
-        if (stream === "stdout") await maybeUpdateHermesChatProgress(now);
-
-        if (handle) {
-          await runLogStore.append(handle, {
-            stream,
-            chunk: sanitizedChunk,
-            ts,
-          });
-        }
-        if (!runawayTriggered && runawayLogLimitBytes > 0) {
-          runawayLogBytes += Buffer.byteLength(sanitizedChunk, "utf8");
-          // [runaway advisory] 소프트 경고 — kill 전에 한 번, 감사 이벤트로 기록한다.
-          //   (commandcode는 stdin이 ignore로 스폰되어 실행 중 주입은 불가; 대신 다음 실행
-          //   웨이크의 paperclipRunawayRecoveryBrief가 회복 지시를 보장한다.)
-          if (
-            !runawayAdvisoryEmitted &&
-            runawayAdvisorySoftBytes > 0 &&
-            runawayLogBytes >= runawayAdvisorySoftBytes
-          ) {
-            runawayAdvisoryEmitted = true;
-            await appendRunEvent(run, seq++, {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: `Runaway advisory: run log reached ${runawayLogBytes} bytes (soft threshold ${runawayAdvisorySoftBytes}, hard limit ${runawayLogLimitBytes}); the run will be terminated if output growth continues`,
-              payload: {
-                runawayLogBytes,
-                runawayAdvisorySoftBytes,
-                runawayLogLimitBytes,
-              },
-            }).catch(() => undefined);
-          }
-        }
-        if (
-          !runawayTriggered &&
-          runawayLogLimitBytes > 0 &&
-          runawayLogBytes > runawayLogLimitBytes
-        ) {
-          runawayTriggered = true;
-          const tracked = runningProcesses.get(run.id);
-          if (tracked) {
-            tracked.child.kill("SIGTERM");
-            setTimeout(() => {
-              if (!tracked.child.killed) {
-                tracked.child.kill("SIGKILL");
-              }
-            }, Math.max(1, tracked.graceSec) * 1000);
-            runningProcesses.delete(run.id);
-          }
-          await appendRunEvent(run, seq++, {
-            eventType: "lifecycle",
-            stream: "system",
-            level: "error",
-            message: `Runaway log guard: run log exceeded ${runawayLogLimitBytes} bytes (wrote ${runawayLogBytes}); terminating adapter child`,
-            payload: {
-              runawayLogBytes,
-              runawayLogLimitBytes,
-            },
-          }).catch(() => undefined);
-        }
-        if (now.getTime() - lastActivityTouchMs >= RUN_ACTIVITY_TOUCH_INTERVAL_MS) {
-          lastActivityTouchMs = now.getTime();
-          await db
-            .update(heartbeatRuns)
-            .set({ updatedAt: now })
-            .where(eq(heartbeatRuns.id, run.id));
-        }
-
-        const payloadChunk =
-          sanitizedChunk.length > MAX_LIVE_LOG_CHUNK_BYTES
-            ? sanitizedChunk.slice(sanitizedChunk.length - MAX_LIVE_LOG_CHUNK_BYTES)
-            : sanitizedChunk;
-
-        publishLiveEvent({
-          companyId: run.companyId,
-          type: "heartbeat.run.log",
-          payload: {
-            runId: run.id,
-            agentId: run.agentId,
-            ts,
-            stream,
-            chunk: payloadChunk,
-            truncated: payloadChunk.length !== sanitizedChunk.length,
-          },
-        });
-      };
+      await runLog.begin();
+      const currentUserRedactionOptions = runLog.redactionOptions;
+      const { onLog } = runLog;
       for (const warning of runtimeWorkspaceWarnings) {
         const logEntry = formatRuntimeWorkspaceWarningLog(warning);
         await onLog(logEntry.stream, logEntry.chunk);
@@ -7495,41 +7322,7 @@ export function heartbeatService(db: Db) {
         );
       }
       const adapterResult = fencedAdapterExecution.value;
-      for (const line of [
-        ...evaluateRuntimeGuardLines("stdout", "", true),
-        ...evaluateRuntimeGuardLines("stderr", "", true),
-      ]) {
-        const hook = await evaluateRuntimeBroadScanHook(db, {
-          adapterType: agent.adapterType,
-          line,
-          ts: new Date().toISOString(),
-          context,
-          runId: run.id,
-        });
-        if (hook.intercepted) {
-          // Final-flush hook intercept: adapter has already returned, so this
-          // is a retroactive audit only (no throw — marking the run failed over
-          // a trailing broad scan would be punitive). Synthetic output is
-          // appended to the run log for operator visibility. See
-          // runtime-broad-scan-hook.ts header for the audit-not-block trade-off.
-          if (handle) {
-            try {
-              await runLogStore.append(handle, { stream: "stdout", chunk: hook.syntheticOutput ?? "", ts: new Date().toISOString() });
-            } catch {
-              // non-fatal — the audit event below still records the interception
-            }
-          }
-          await appendBroadScanBlockEvent(run, seq, {
-            reason: hook.reason ?? "Broad-scan command intercepted; synthetic audit output injected (agent tool result unchanged)",
-            errorCode: "manifest_broad_scan_hook_intercepted",
-            phase: "runtime_hook",
-            matchedCommand: hook.rewrittenCommand ?? null,
-            line,
-          });
-          seq++;
-          break;
-        }
-      }
+      await runLog.flushRuntimeGuardLines();
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
         ? await persistAdapterManagedRuntimeServices({
             db,
@@ -7624,15 +7417,12 @@ export function heartbeatService(db: Db) {
               adapterType: agent.adapterType,
               errorCode: adapterResult.errorCode ?? null,
               errorMessage: adapterResult.errorMessage ?? null,
-              stdoutExcerpt,
-              stderrExcerpt,
+              stdoutExcerpt: runLog.stdoutExcerpt,
+              stderrExcerpt: runLog.stderrExcerpt,
             })
           : null;
 
-      let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
-      if (handle) {
-        logSummary = await runLogStore.finalize(handle);
-      }
+      const logSummary = await runLog.finalize();
 
       const status =
         outcome === "succeeded"
@@ -7778,8 +7568,8 @@ export function heartbeatService(db: Db) {
         usageJson,
         resultJson: adapterResult.resultJson ?? null,
         sessionIdAfter: persistedSessionIdAfter,
-        stdoutExcerpt,
-        stderrExcerpt,
+        stdoutExcerpt: runLog.stdoutExcerpt,
+        stderrExcerpt: runLog.stderrExcerpt,
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
@@ -7801,7 +7591,7 @@ export function heartbeatService(db: Db) {
               : outcome === "cancelled"
                 ? "cancelled"
                 : outcome === "failed"
-                  ? runawayTriggered
+                  ? runLog.runawayTriggered
                     ? "runaway_context"
                     : (adapterResult.errorCode ?? "adapter_failed")
                   : null,
@@ -8006,21 +7796,14 @@ export function heartbeatService(db: Db) {
       const errorCode = resolveHeartbeatFailureCode(err, "adapter_failed");
       logger.error({ err, runId }, "heartbeat execution failed");
 
-      let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
-      if (handle) {
-        try {
-          logSummary = await runLogStore.finalize(handle);
-        } catch (finalizeErr) {
-          logger.warn({ err: finalizeErr, runId }, "failed to finalize run log after error");
-        }
-      }
+      const logSummary = await runLog.finalizeAfterError();
 
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
         errorCode,
         finishedAt: new Date(),
-        stdoutExcerpt,
-        stderrExcerpt,
+        stdoutExcerpt: runLog.stdoutExcerpt,
+        stderrExcerpt: runLog.stderrExcerpt,
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
