@@ -8,7 +8,9 @@ import { conflict } from "../errors.js";
 import { budgetBlockers } from "./workflow/resume/preview-facts.js";
 import { budgetService } from "./budgets.js";
 import { asBoolean, parseObject } from "../adapters/utils.js";
-import { PAUSE_CONTROL_COLUMNS, readPauseControl, type PauseControl, type PauseReceipt } from "./heartbeat-pause-contract.js";
+import { type PauseReceipt } from "./heartbeat-pause-contract.js";
+import { readPauseControls as controls, pauseExecutionIdentity as execution, pauseLinked as linked,
+  readStoppedPauseOriginal, readPauseDeliveryOriginal, comparePauseDelivery, type PauseDeliveryOriginal } from "./heartbeat-pause-delivery.js";
 import { readWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
 import { parseQualityWakeKey, qualityWakeKey } from "./quality/native-wake.js";
 import { lockQualityAttemptBudget } from "./quality/retry-budget.js";
@@ -21,50 +23,7 @@ type Wake = typeof agentWakeupRequests.$inferSelect;
 type Reader = Pick<Db, "select">;
 const reject = (): never => { throw conflict("heartbeat_pause_child_unproven_or_changed"); };
 const sorted = (ids: string[]) => [...new Set(ids)].sort();
-const marker = (agentId: string) => and(eq(agentWakeupRequests.agentId, agentId), or(
-  eq(agentWakeupRequests.source, PAUSE_CONTROL_COLUMNS.source),
-  eq(agentWakeupRequests.requestedByActorId, PAUSE_CONTROL_COLUMNS.requestedByActorId)));
-async function controls(db: Reader, agentId: string) {
-  const records = (await db.select().from(agentWakeupRequests).where(marker(agentId))
-    .orderBy(agentWakeupRequests.id)).map(readPauseControl);
-  const heads = records.filter(p => p.kind === "head"), scopes = records.filter(p => p.kind === "scope");
-  if (records.length && (heads.length !== 1 || (heads[0]!.scopeId === null
-    ? scopes.length !== 0 : !scopes.some(p => p.id === heads[0]!.scopeId)))) return reject();
-  for (const scope of scopes) {
-    const seen = new Set<string>();
-    let cursor: typeof scope | undefined = scope;
-    while (cursor) {
-      if (seen.has(cursor.id)) return reject();
-      seen.add(cursor.id);
-      const previous: string | null = cursor.previousScopeId;
-      cursor = previous ? scopes.find(p => p.id === previous) : undefined;
-      if (previous && !cursor) return reject();
-    }
-  }
-  const originals = new Set<string>();
-  for (const p of records) {
-    if (p.kind !== "receipt") continue;
-    if (originals.has(p.identity.heartbeatRunId)) return reject();
-    originals.add(p.identity.heartbeatRunId);
-    if (![p.originScopeId, p.ownerScopeId, ...(p.resumeScopeId ? [p.resumeScopeId] : [])]
-      .every(id => scopes.some(s => s.id === id && s.receiptIds.includes(p.id)))) return reject();
-  }
-  return records;
-}
-function execution(h: Run) {
-  return { scopeKind: h.executionScopeKind, epoch: h.executionEpoch, token: h.executionToken,
-    retryOfRunId: h.retryOfRunId, processLossRetryCount: h.processLossRetryCount,
-    ownerId: h.executorOwnerId, ownerLeaseEpoch: h.executorOwnerLeaseEpoch, ownerLeaseToken: h.executorOwnerLeaseToken };
-}
-function typed(h: Run, w: Wake) {
-  return (h.workflowStepRunId === w.workflowStepRunId && h.workflowExecutionGeneration === w.workflowExecutionGeneration)
-    || (!h.startedAt && h.workflowStepRunId === null && h.workflowExecutionGeneration === null);
-}
-function linked(h: Run, w: Wake) {
-  return w.companyId === h.companyId && w.agentId === h.agentId && w.issueId === h.issueId
-    && h.wakeupRequestId === w.id && w.runId === h.id && w.status !== "coalesced" && typed(h, w);
-}
-type Proof = { receipt: PauseReceipt; parent: Run; wake: Wake; originalWake: Wake; records: PauseControl[] };
+type Proof = PauseDeliveryOriginal & { wake: Wake };
 
 /** SELECT only. Historical delivery proves ancestry; only the current guard grants execution permission. */
 export async function readPauseChildProof(db: Reader, h: Run, historical = false): Promise<Proof | null> {
@@ -83,55 +42,30 @@ export async function readPauseChildProof(db: Reader, h: Run, historical = false
   if (!reserved && !matches.length) return null;
   if (matches.length !== 1 || !reserved) return reject();
   const receipt = matches[0]!, i = receipt.identity, f = i.workflow;
-  const heads = records.filter(p => p.kind === "head");
-  const scope = (id: string) => records.find(p => p.kind === "scope" && p.id === id);
-  const origin = scope(receipt.originScopeId), owner = scope(receipt.ownerScopeId);
-  if (records.some(p => p.companyId !== h.companyId) || heads.length !== 1
-    || receipt.companyId !== h.companyId || receipt.agentId !== h.agentId || receipt.cause !== "manual_pause"
-    || origin?.kind !== "scope" || owner?.kind !== "scope" || origin.cause !== "manual_pause" || owner.cause !== "manual_pause"
-    || !origin.receiptIds.includes(receipt.id) || !owner.receiptIds.includes(receipt.id)
-    || receipt.resumeScopeId !== owner.id || !receipt.stopped
-    || !receipt.delivery || receipt.delivery.heartbeatRunId !== h.id || receipt.delivery.wakeupRequestId !== wake.id
-    || h.retryOfRunId !== i.heartbeatRunId || !linked(h, wake) || wake.source !== "automation"
+  const original = await readStoppedPauseOriginal(db, receipt), { parent } = original;
+  const heads = original.records.filter(p => p.kind === "head");
+  if (i.companyId !== h.companyId || i.agentId !== h.agentId || !receipt.delivery || receipt.delivery.heartbeatRunId !== h.id || receipt.delivery.wakeupRequestId !== wake.id
+    || h.retryOfRunId !== parent.id || !linked(h, wake) || wake.source !== "automation"
     || wake.requestedByActorType !== "system" || wake.requestKind !== "agent_pause_resume"
     || wake.reason !== wake.requestKind || wake.idempotencyKey !== null
     || Object.hasOwn(wake.payload ?? {}, "qaCorrectionFollowup") || wake.qualityAcceptance !== null
-    || h.processLossRetryCount !== i.execution.processLossRetryCount) return reject();
-  if (!historical && (heads[0]!.scopeId !== owner.id || receipt.invalidated)) return reject();
-  const [parent] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, i.heartbeatRunId));
-  const [originalWake] = i.wakeupRequestId ? await db.select().from(agentWakeupRequests)
-    .where(eq(agentWakeupRequests.id, i.wakeupRequestId)) : [];
-  if (!parent || !originalWake || !linked(parent, originalWake) || parent.companyId !== h.companyId
-    || parent.agentId !== h.agentId || parent.issueId !== i.issueId || h.issueId !== i.issueId
-    || parent.wakeupRequestId !== i.wakeupRequestId || !same(execution(parent), i.execution)
-    || !["cancelled", "failed", "succeeded", "timed_out"].includes(parent.status)
+    || h.processLossRetryCount !== i.execution.processLossRetryCount
     || parent.createdAt > h.createdAt || (parent.startedAt && parent.startedAt > wake.requestedAt)
-    || wake.requestedAt < new Date(receipt.stopped.observedAt)
-    || (h.startedAt && h.startedAt < wake.requestedAt)
-    || originalWake.missionId !== i.missionId || wake.missionId !== i.missionId) return reject();
-  for (const w of [wake, originalWake]) {
-    if (w.source === PAUSE_CONTROL_COLUMNS.source || w.workflowRunId !== (f?.runId ?? null)
-      || w.workflowStepRunId !== (f?.stepRunId ?? null)
-      || w.workflowExecutionGeneration !== (f?.executionGeneration ?? null)) return reject();
-    if (f) {
-      const p = readWorkflowAttemptProof(w);
-      if (p.retryCount !== f.retryCount || p.iterationIndex !== f.iterationIndex
-        || p.executionGeneration !== f.executionGeneration
-        || p.parentHeartbeatRunId !== (w.id === wake.id ? parent.id : i.execution.retryOfRunId)) return reject();
-    }
-  }
+    || wake.requestedAt < new Date(receipt.stopped!.observedAt)
+    || (h.startedAt && h.startedAt < wake.requestedAt) || wake.missionId !== i.missionId
+    || wake.workflowRunId !== (f?.runId ?? null) || wake.workflowStepRunId !== (f?.stepRunId ?? null)
+    || wake.workflowExecutionGeneration !== (f?.executionGeneration ?? null)) return reject();
+  if (!historical && (heads[0]!.scopeId !== receipt.ownerScopeId || receipt.invalidated)) return reject();
   if (f) {
-    const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.stepRunId));
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
-    if (!step || !run || run.companyId !== h.companyId || run.workflowId !== f.workflowId
-      || run.missionId !== i.missionId || step.workflowRunId !== f.runId
-      || step.stepId !== f.stepId || step.issueId !== i.issueId) return reject();
+    const p = readWorkflowAttemptProof(wake);
+    if (p.retryCount !== f.retryCount || p.iterationIndex !== f.iterationIndex
+      || p.executionGeneration !== f.executionGeneration || p.parentHeartbeatRunId !== parent.id) return reject();
   }
-  return { receipt, parent, wake, originalWake, records };
+  return { ...original, wake };
 }
 
 type Entry = { run: Run; wake: Wake; pause: Proof | null };
-async function discover(db: Reader, supplied: Run) {
+async function discover(db: Reader, supplied: Run, pending?: PauseDeliveryOriginal) {
   const entries: Entry[] = [], seen = new Set<string>();
   let id: string | null = supplied.id, missingWake = false;
   while (id) {
@@ -148,7 +82,7 @@ async function discover(db: Reader, supplied: Run) {
     } else entries.push({ run, wake, pause: await readPauseChildProof(db, run, true) });
     id = run.retryOfRunId;
   }
-  if (!entries.some(e => e.pause)) return null;
+  if (!pending && !entries.some(e => e.pause)) return null;
   if (missingWake || entries.some(e => !linked(e.run, e.wake))) return reject();
   for (const [index, e] of entries.entries()) {
     if (!e.run.retryOfRunId || e.pause) continue;
@@ -158,21 +92,21 @@ async function discover(db: Reader, supplied: Run) {
       || !["process_lost_retry", "adapter_failed_retry", "adapter_fallback"].includes(w.requestKind ?? "")
       || w.reason !== w.requestKind || w.source !== "automation" || w.requestedByActorType !== "system") return reject();
   }
-  const first = entries.find(e => e.pause)!.pause!, f = first.receipt.identity.workflow;
+  const first = pending ?? entries.find(e => e.pause)!.pause!, f = first.receipt.identity.workflow;
   const root = entries[entries.length - 1]!, ref = readQaCorrectionWakeRef(root.wake);
   // Correction roots have parent=null. Historical source products never supply extra quality locks.
   if (ref && (root.run.retryOfRunId !== null || !f || ref.companyId !== supplied.companyId
     || ref.workflowRunId !== f.runId || entries.some(e => e.wake.workflowStepRunId !== f.stepRunId
       || e.wake.issueId !== first.receipt.identity.issueId))) return reject();
   const native = ref ? null : parseQualityWakeKey(root.wake.idempotencyKey);
-  if (native && qualityWakeKey(native) !== root.wake.idempotencyKey) return reject();
+  if (native && (!f || qualityWakeKey(native) !== root.wake.idempotencyKey)) return reject();
   const [step] = f ? await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.stepRunId)) : [];
   if (f) {
     if (!step) return reject();
     const { producerAttempt } = await import("./work-products/producer-attempt.js");
     await producerAttempt(db, { ...entries[0]!.run, workflowStepRunId: f.stepRunId,
       workflowExecutionGeneration: f.executionGeneration }, { ...step, executionGeneration: f.executionGeneration,
-      retryCount: f.retryCount, iterationIndex: f.iterationIndex }, new Set(), supplied.status === "queued");
+      retryCount: f.retryCount, iterationIndex: f.iterationIndex }, new Set(), supplied.status === "queued" || (!!pending && supplied.id === pending.parent.id && !supplied.startedAt));
   }
   return { entries, first, root, qa: !!ref, native };
 }
@@ -192,6 +126,55 @@ export async function preparePauseChildAdmission(tx: Db, run: Run, admit: (missi
   await tx.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId))).for("share");
   return { ...found, tx };
 }
+const deliveryObservations = new WeakMap<PauseDeliveryObservation, Discovery>();
+export type PauseDeliveryObservation = { readonly receiptId: string };
+function captured(observation: PauseDeliveryObservation) {
+  const found = deliveryObservations.get(observation);
+  if (!found) return reject();
+  return found;
+}
+async function deliveryDiscovery(db: Reader, receiptId: string) {
+  const original = await readPauseDeliveryOriginal(db, receiptId);
+  const [child] = original.receipt.delivery?.heartbeatRunId ? await db.select().from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, original.receipt.delivery.heartbeatRunId)) : [];
+  if (original.receipt.delivery && (!child || !await readPauseChildProof(db, child))) return reject();
+  const found = await discover(db, child ?? original.parent, original);
+  if (!found) return reject();
+  return found;
+}
+export async function observePauseDeliveryAdmission(db: Reader, receiptId: string): Promise<PauseDeliveryObservation> {
+  const found = await deliveryDiscovery(db, receiptId), handle = Object.freeze({ receiptId });
+  deliveryObservations.set(handle, found);
+  return handle;
+}
+export function pauseDeliveryRun(observation: PauseDeliveryObservation) {
+  return structuredClone(captured(observation).entries[0]!.run);
+}
+export function pauseDeliveryAncestors(plan: PauseChildAdmission) { return plan.entries.map(e => e.run.id); }
+/** This separate reader alone permits an unstarted terminal original, proved by its exact saved receipt. */
+export async function provePauseDeliveryAttempt(db: Reader, observation: PauseDeliveryObservation,
+  run: Run, step: typeof workflowStepRuns.$inferSelect) {
+  const old = captured(observation), fresh = await deliveryDiscovery(db, observation.receiptId);
+  comparePauseDelivery(old.first, fresh.first);
+  if (!same(fresh.entries.map(identity), old.entries.map(identity)) || !same(identity({ ...old.entries[0]!, run }), identity(old.entries[0]!))) return reject();
+  const f = fresh.first.receipt.identity.workflow;
+  if (!f || step.id !== f.stepRunId || step.executionGeneration !== f.executionGeneration
+    || step.retryCount !== f.retryCount || step.iterationIndex !== f.iterationIndex) return reject();
+  const { producerAttempt } = await import("./work-products/producer-attempt.js");
+  await producerAttempt(db, { ...run, workflowStepRunId: f.stepRunId, workflowExecutionGeneration: f.executionGeneration },
+    step, new Set(), run.status === "queued" || (run.id === fresh.first.parent.id && !run.startedAt));
+}
+export async function preparePauseDeliveryAdmission(tx: Db, observation: PauseDeliveryObservation,
+  admit: (missionId: string | null) => Promise<void>): Promise<PauseChildAdmission> {
+  transaction(tx);
+  const found = captured(observation), run = found.entries[0]!.run;
+  if (found.native) await lockQualityAttemptBudget(tx as unknown as Parameters<typeof lockQualityAttemptBudget>[0],
+    { companyId: run.companyId, actionId: found.native.actionId, now: new Date() });
+  await admit(found.first.receipt.identity.missionId);
+  await tx.select().from(companies).where(eq(companies.id, run.companyId)).for("share");
+  await tx.select().from(agents).where(eq(agents.id, run.agentId)).for("share");
+  return { ...found, tx };
+}
 function identity(e: Entry) {
   const h = e.run, w = e.wake;
   return [h.id, h.companyId, h.agentId, h.issueId, h.wakeupRequestId, h.workflowStepRunId,
@@ -199,6 +182,9 @@ function identity(e: Entry) {
     w.missionId, w.workflowRunId, w.workflowStepRunId, w.workflowExecutionGeneration, w.runId,
     w.source, w.requestKind, w.reason, w.idempotencyKey, w.payload, w.qualityAcceptance];
 }
+const deliveryIdentity = (e: Entry) => [identity(e), e.run.contextSnapshot, e.run.invocationSource,
+  e.run.status, e.run.startedAt, e.run.createdAt, e.wake.requestedAt, e.wake.status,
+  e.wake.requestedByActorType, e.wake.requestedByActorId];
 async function nativeCurrent(tx: Db, run: Run, p: Discovery, step: typeof workflowStepRuns.$inferSelect) {
   if (!p.native) return;
   const [action] = await tx.select().from(qualityActions).where(and(eq(qualityActions.id, p.native.actionId),
@@ -228,13 +214,7 @@ async function nativeCurrent(tx: Db, run: Run, p: Discovery, step: typeof workfl
       workflowStepRunId: step.id, workflowExecutionGeneration: step.executionGeneration }, step) !== step.retryCount) return reject();
 }
 
-/** Transaction only; called AFTER QA current-input/owner checks, immediately before claim/start.
- * QA already locks these exact lineage IDs through its target; never add earlier-order locks there.
- */
-export async function assertCurrentPauseChild(tx: Db, run: Run, plan: PauseChildAdmission | null) {
-  transaction(tx);
-  if (!plan) { if (await discover(tx, run)) return reject(); return; }
-  if (plan.tx !== tx || !same(identity({ ...plan.entries[0]!, run }), identity(plan.entries[0]!))) return reject();
+async function lockAdmission(tx: Db, plan: PauseChildAdmission, mode: "share" | "update", beforeControls: () => Promise<void>) {
   const ids = sorted(plan.entries.map(e => e.run.id));
   const issueIds = sorted(plan.entries.flatMap(e => e.run.issueId ? [e.run.issueId] : []));
   const stepIds = sorted(plan.entries.flatMap(e => e.wake.workflowStepRunId ? [e.wake.workflowStepRunId] : []));
@@ -244,14 +224,23 @@ export async function assertCurrentPauseChild(tx: Db, run: Run, plan: PauseChild
     await tx.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, ids)).orderBy(heartbeatRuns.id).for("update");
     if (issueIds.length) await tx.select().from(issues).where(inArray(issues.id, issueIds)).orderBy(issues.id).for("update");
     if (stepIds.length) await tx.select().from(workflowStepRuns).where(inArray(workflowStepRuns.id, stepIds)).orderBy(workflowStepRuns.id).for("share");
-    await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakeIds)).orderBy(agentWakeupRequests.id).for("share");
+    await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, wakeIds)).orderBy(agentWakeupRequests.id).for(mode);
   }
+  await beforeControls();
   const records = plan.first.records, heads = records.filter(p => p.kind === "head");
-  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, heads.map(p => p.id))).for("share");
-  const scopes = sorted(plan.entries.flatMap(e => e.pause ? [e.pause.receipt.originScopeId, e.pause.receipt.ownerScopeId] : []));
-  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, scopes)).orderBy(agentWakeupRequests.id).for("share");
-  const receipts = sorted(plan.entries.flatMap(e => e.pause ? [e.pause.receipt.id] : []));
-  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, receipts)).orderBy(agentWakeupRequests.id).for("share");
+  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, heads.map(p => p.id))).for(mode);
+  const scopes = sorted([plan.first.receipt.originScopeId, plan.first.receipt.ownerScopeId, ...plan.entries.flatMap(e => e.pause ? [e.pause.receipt.originScopeId, e.pause.receipt.ownerScopeId] : [])]);
+  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, scopes)).orderBy(agentWakeupRequests.id).for(mode);
+  const receipts = sorted([plan.first.receipt.id, ...plan.entries.flatMap(e => e.pause ? [e.pause.receipt.id] : [])]);
+  await tx.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, receipts)).orderBy(agentWakeupRequests.id).for(mode);
+}
+
+/** Transaction only; QA owns its earlier lock set before claim/start reaches this guard. */
+export async function assertCurrentPauseChild(tx: Db, run: Run, plan: PauseChildAdmission | null) {
+  transaction(tx);
+  if (!plan) { if (await discover(tx, run)) return reject(); return; }
+  if (plan.tx !== tx || !same(identity({ ...plan.entries[0]!, run }), identity(plan.entries[0]!))) return reject();
+  await lockAdmission(tx, plan, "share", async () => {});
   const fresh = await discover(tx, run);
   // Any new lineage/quality/lock target requires rollback; no late prefix or attempt locks.
   if (!fresh || !same(fresh.entries.map(identity), plan.entries.map(identity))
@@ -259,7 +248,25 @@ export async function assertCurrentPauseChild(tx: Db, run: Run, plan: PauseChild
     || !same(fresh.entries.map(e => e.pause?.receipt), plan.entries.map(e => e.pause?.receipt))) return reject();
   const current = await readPauseChildProof(tx, fresh.entries.find(e => e.pause)!.run);
   if (!current || current.receipt.id !== plan.first.receipt.id) return reject();
-  const i = current.receipt.identity, f = i.workflow;
+  await assertRuntime(tx, run, fresh, current.receipt);
+}
+export async function assertCurrentPauseDelivery(tx: Db, observation: PauseDeliveryObservation,
+  plan: PauseChildAdmission, beforeControls: () => Promise<void>) {
+  transaction(tx);
+  const old = captured(observation), run = old.entries[0]!.run;
+  if (plan.tx !== tx || !same(plan.entries.map(identity), old.entries.map(identity))) return reject();
+  await lockAdmission(tx, plan, "update", beforeControls);
+  const fresh = await deliveryDiscovery(tx, observation.receiptId);
+  comparePauseDelivery(old.first, fresh.first);
+  if (!same(fresh.entries.map(deliveryIdentity), old.entries.map(deliveryIdentity)) || fresh.qa !== plan.qa
+    || !same(fresh.native, plan.native) || !same(fresh.entries.map(e => e.pause?.receipt), plan.entries.map(e => e.pause?.receipt))) return reject();
+  await assertRuntime(tx, fresh.entries[0]!.run, fresh, fresh.first.receipt);
+  return fresh.first;
+}
+async function assertRuntime(tx: Db, run: Run, plan: Discovery, receipt: PauseReceipt) {
+  const i = receipt.identity, f = i.workflow;
+  const ids = sorted(plan.entries.map(e => e.run.id));
+  const issueIds = sorted(plan.entries.flatMap(e => e.run.issueId ? [e.run.issueId] : []));
   const [company] = await tx.select().from(companies).where(eq(companies.id, run.companyId));
   const [agent] = await tx.select().from(agents).where(eq(agents.id, run.agentId));
   if (!company || !agent || budgetBlockers(company).length || budgetBlockers(agent).length
@@ -286,6 +293,6 @@ export async function assertCurrentPauseChild(tx: Db, run: Run, plan: PauseChild
     if (!step || !workflow || workflow.dispatchAuthorityVersion !== f.observedAuthorityVersion
       || workflow.status === "cancelled" || step.executionGeneration !== f.executionGeneration
       || step.retryCount !== f.retryCount || step.iterationIndex !== f.iterationIndex) return reject();
-    await nativeCurrent(tx, run, fresh, step);
+    await nativeCurrent(tx, run, plan, step);
   }
 }

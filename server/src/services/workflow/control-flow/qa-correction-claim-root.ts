@@ -8,6 +8,7 @@ import { asBoolean, parseObject } from "../../../adapters/utils.js";
 import { isQaCorrectionRootOwnerRequired, registerQaCorrectionRootDrain } from "../../issue-assignment-wakeup.js";
 import { lockQualityAttemptBudget } from "../../quality/retry-budget.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
+import { pauseDeliveryRun, provePauseDeliveryAttempt, type PauseDeliveryObservation } from "../../heartbeat-pause-admission.js";
 import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 import { readIssuedQaCorrectionFollowupForAttempt, type IssuedQaCorrection } from "./qa-correction-reader.js";
 import { createQaCorrectionHistorySession } from "./qa-correction-history-session.js";
@@ -61,7 +62,7 @@ async function lineage(db: Connection, run: Run) {
 type Lineage = Awaited<ReturnType<typeof lineage>>;
 
 /** Historical counters come from issuance; mutable display counters cannot restamp the original proof. */
-async function prove(db: Connection, run: Run, l: Lineage) {
+async function prove(db: Connection, run: Run, l: Lineage, pause: PauseDeliveryObservation | null) {
   requireClaim(l.ref && !l.missingWake && same(identity(l.chain[0]!), identity(run)));
   const h = await readIssuedQaCorrectionFollowupForAttempt(db, l.ref!), target = h.followup.target;
   const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, target.stepRunId));
@@ -70,10 +71,11 @@ async function prove(db: Connection, run: Run, l: Lineage) {
   const first = l.chain[0]!, wake = l.wakes[0]!;
   requireClaim((first.workflowStepRunId === null || first.workflowStepRunId === wake.workflowStepRunId)
     && (first.workflowExecutionGeneration === null || first.workflowExecutionGeneration === wake.workflowExecutionGeneration));
-  await producerAttempt(db, { ...first, workflowStepRunId: wake.workflowStepRunId,
-    workflowExecutionGeneration: wake.workflowExecutionGeneration },
-    { ...step!, executionGeneration: target.executionGeneration, retryCount: target.retryCount,
-      iterationIndex: target.iterationIndex }, new Set(), first.status === "queued");
+  const frozen = { ...step!, executionGeneration: target.executionGeneration, retryCount: target.retryCount,
+    iterationIndex: target.iterationIndex };
+  if (pause) await provePauseDeliveryAttempt(db, pause, first, frozen);
+  else await producerAttempt(db, { ...first, workflowStepRunId: wake.workflowStepRunId,
+    workflowExecutionGeneration: wake.workflowExecutionGeneration }, frozen, new Set(), first.status === "queued");
   return h;
 }
 /** Correction history has no technical-retry limit. Collect every historical proof's lock dependencies. */
@@ -186,6 +188,15 @@ async function currentPermission(tx: DeliveryTx, run: Run, o: Observation) {
 /** No files or root impersonation in a savepoint. Real roots observe afresh at BOTH execution boundaries. */
 export async function withQaCorrectionClaimRoot<T>(db: Db, run: Run,
   admit: (db: Db) => Promise<void>, write: (db: Db) => Promise<T>): Promise<Boundary<T>> {
+  return claimRoot(db, run, null, admit, write);
+}
+/** Same history, bytes, quality prefix and owner checks, with a persisted stopped-original proof. */
+export async function withPausedQaCorrectionDeliveryRoot<T>(db: Db, observation: PauseDeliveryObservation,
+  admit: (db: Db) => Promise<void>, write: (db: Db) => Promise<T>): Promise<Boundary<T>> {
+  return claimRoot(db, pauseDeliveryRun(observation), observation, admit, write);
+}
+async function claimRoot<T>(db: Db, run: Run, pause: PauseDeliveryObservation | null,
+  admit: (db: Db) => Promise<void>, write: (db: Db) => Promise<T>): Promise<Boundary<T>> {
   const l = await lineage(db, run);
   if (!l.ref) {
     return db.transaction(async tx => {
@@ -195,7 +206,7 @@ export async function withQaCorrectionClaimRoot<T>(db: Db, run: Run,
     });
   }
   try {
-    await prove(db, run, l);
+    await prove(db, run, l, pause);
     if (is(db, PgTransaction)) {
       registerQaCorrectionRootDrain(db, run.agentId);
       return { kind: "root_deferred" };
@@ -205,7 +216,7 @@ export async function withQaCorrectionClaimRoot<T>(db: Db, run: Run,
       if (!await lock(tx, run, l, o, admit)) return { kind: "not_claimed" as const };
       const fresh = await lineage(tx, run);
       requireClaim(same(fresh, l));
-      await prove(tx, run, fresh);
+      await prove(tx, run, fresh, pause);
       await currentPermission(tx, run, o);
       return { kind: "performed" as const, value: await write(tx as unknown as Db) };
     });
