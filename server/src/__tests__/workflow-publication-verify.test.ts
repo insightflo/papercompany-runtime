@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { expect, it } from 'vitest';
-import { toolDefinitions, workflowStepRuns } from '@paperclipai/db';
+import { issues, toolDefinitions, workflowRuns, workflowStepRuns } from '@paperclipai/db';
 import type { ArtifactContract } from '@paperclipai/shared';
 import { fixture, database } from './helpers/qa-receipt-fixture.js';
 import { freezeArtifactAttempt } from '../services/workflow/artifact-contract-runtime.js';
 import { executeCoreWorkflowTool } from '../services/workflow/core-tool-executor.js';
+import { resolveWorkflowToolStepArgs } from '../services/workflow/tool-step-args.js';
+import { workProductService } from '../services/work-products.js';
 
 // Explicit machine producer doubles; these do not claim the unavailable external verifier's format.
 async function setup(receiptParam = 'publishResultPath', mutation = '') {
@@ -115,4 +117,34 @@ it('rejects another run/company publication path even when the file is valid', a
   expect(result.status).toBe(500);
   expect(result.body.error).toBe('qa_artifact_consumer_receipt_required');
   expect(result.body.invocationProvenance).toBeNull();
+}, 45000);
+
+// [발행검증 영수증 우선 2026-10-22] 발행 스텝 이슈에 등록된 산출물 사본(work product)이
+//   {$steps.X.workProductPath} 참조를 가로채도, publication-verify 스텝의 영수증 파라미터는
+//   정식 기계 영수증 경로(metadata.toolResult.artifactPath)로 렌더돼야 한다.
+//   재현 근거: dsh-purge 수정 런 9c6cf35d — PAQO 액션 발행 스텝이 “발행 결과를 workProduct로
+//   남긴다” 계약으로 단계 폴더 사본을 등록했고 readback 검증이 qa_artifact_consumer_receipt_required 반려.
+it('renders the verify receipt from the canonical artifact path, not a registered work product copy', async () => {
+  const f = await setup(), db = database();
+  const [publishRow] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, f.publishId));
+  const [runRow] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
+  // 발행 스텝 이슈에 사본 산출물 등록 — 예전 해석은 이 경로로 참조를 가로챘다.
+  const copyPath = path.join(path.dirname(f.published.artifactPath!), '..', 'copy', 'published.json');
+  await mkdir(path.dirname(copyPath), { recursive: true });
+  await writeFile(copyPath, await readFile(f.published.artifactPath!, 'utf8'));
+  const [publishIssue] = await db.insert(issues).values({ companyId: f.companyId, missionId: f.missionId,
+    title: 'Publish', status: 'done' }).returning();
+  await db.update(workflowStepRuns).set({ issueId: publishIssue.id }).where(eq(workflowStepRuns.id, f.publishId));
+  await workProductService(db).createForIssue(publishIssue.id, f.companyId, { provider: 'local_file', type: 'document',
+    title: 'published.json', status: 'active', metadata: { path: copyPath } });
+  const publicationContract = (publishRow.metadata.artifactExecution as { contract: ArtifactContract }).contract;
+  const verifyContract: ArtifactContract = { ...publicationContract, role: 'publication-verify', resultFileName: 'verified.json',
+    consumerParams: { receipt: 'publishResultPath' }, publication: { ...publicationContract.publication!,
+    identity: undefined, bindings: undefined, publishedAt: undefined, command: 'verify' } };
+  const publisherStep = { id: 'publisher', toolArtifactContract: publicationContract };
+  const verifyStep = { id: 'inspector', dependsOn: ['publisher'], toolArtifactContract: verifyContract,
+    toolArgs: { publishResultPath: '{$steps.publisher.workProductPath}' } };
+  const parameters = await resolveWorkflowToolStepArgs({ db, run: runRow, step: verifyStep,
+    workflowSteps: [publisherStep, verifyStep], consumerStepRunId: f.verifyId });
+  expect((parameters as Record<string, unknown>).publishResultPath).toBe(f.published.artifactPath);
 }, 45000);

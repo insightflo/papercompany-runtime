@@ -48,6 +48,23 @@ export function stringifyWorkflowRunMetadataValue(value: unknown): string | null
   return typeof json === "string" ? json : null;
 }
 
+/** [발행검증 영수증 우선 2026-10-22] 이 스텝이 publication-verify 계약이면 영수증 파라미터 값이
+ *  참조하는 조상 단계들 — 이 참조들은 발행 정식 영수증 경로로만 해석된다(work product 사본 불가). */
+function readVerifyReceiptReferences(step: WorkflowArgStep, args: unknown, references: Set<string>): Set<string> {
+  const contract = step.toolArtifactContract;
+  if (contract === null || typeof contract !== "object") return new Set();
+  const declared = contract as Record<string, unknown>;
+  if (declared.role !== "publication-verify") return new Set();
+  const consumerParams = declared.consumerParams;
+  if (consumerParams === null || typeof consumerParams !== "object") return new Set();
+  const receiptParam = (consumerParams as Record<string, unknown>).receipt;
+  if (typeof receiptParam !== "string" || typeof args !== "object" || args === null) return new Set();
+  const receiptValue = (args as Record<string, unknown>)[receiptParam];
+  if (receiptValue === undefined) return new Set();
+  const receiptRefs = collectArtifactReferences(receiptValue);
+  return new Set(Array.from(references).filter(id => receiptRefs.has(id)));
+}
+
 
 export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (input: {
   db: Db;
@@ -71,6 +88,16 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   }
 
   const pathsByStepId = new Map<string, string>();
+  // [발행검증 영수증 우선 2026-10-22] publication-verify 스텝의 영수증 파라미터(consumerParams.receipt)는
+  //   발행 스텝의 정식 기계 영수증(metadata.toolResult.artifactPath — 바이트·스코프 검증됨)만 의미한다.
+  //   이슈 산출물(work product) 사본이 이 참조를 가로채면 소비자는 반드시 거절한다(실제 사례:
+  //   PAQO 액션 발행 스텝이 “발행 결과를 workProduct로 남긴다” 계약으로 단계 폴더 사본을 등록 →
+  //   readback 검증 qa_artifact_consumer_receipt_required 반려, 2026-10-22 dsh-purge 수정 런 9c6cf35d).
+  //   영수증 참조는 정식 경로 해석을 우선하고 핀·폴백 산출물 해석 대상에서 제외한다.
+  const verifyReceiptRefs = readVerifyReceiptReferences(input.step, args, references);
+  if (verifyReceiptRefs.size > 0) {
+    await resolveToolResultPaths(input, Array.from(verifyReceiptRefs), pathsByStepId);
+  }
   const pinByStepRun = input.consumerStepRunId
     ? Boolean(input.step.workProductSelectors) || await isWorkProductBindingEnabled(input.db)
     : false;
@@ -102,6 +129,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
         inArray(workflowStepOutputBindings.referencedStepId, Array.from(references)),
       ));
     for (const pinned of pinnedRows) {
+      if (verifyReceiptRefs.has(pinned.referencedStepId)) continue; // 영수증 참조는 핀 경로를 쓰지 않는다
       pinIds.set(pinned.referencedStepId, pinned.workProductId);
       pinnedTargets.set(pinned.referencedStepId, { type: pinned.type, title: pinned.title });
       pathsByStepId.set(
@@ -119,6 +147,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   const declaredSelectors = input.step.workProductSelectors as Record<string, unknown> | undefined;
   const selectorlessSeedless = new Set<string>();
   for (const stepId of references) {
+    if (verifyReceiptRefs.has(stepId)) continue; // 영수증 참조는 산출물 소비 게이트의 대상이 아니다
     if (declaredSelectors?.[stepId] !== undefined) continue;
     if (await findWorkflowSeed(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId })) continue;
     selectorlessSeedless.add(stepId);
