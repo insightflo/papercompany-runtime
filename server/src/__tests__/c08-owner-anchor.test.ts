@@ -78,7 +78,6 @@ describeDb("C08 source anchor producer", () => {
     return ownerHumanLifetimeSchema.parse((await events(w)).find((row) =>
       row.id === pointer.payload!.lifetimeId)!.payload);
   };
-
   it("creates one new anchor/lifetime/key/pending card and preserves original author, bytes and history", async () => {
     const w = await world(), old = await currentLifetime(w), before = await snapshot(w);
     const next = await produce(w), now = await currentLifetime(w);
@@ -105,7 +104,6 @@ describeDb("C08 source anchor producer", () => {
     expect(after[2].find((row) => row.id === w.oldId)).toEqual(before[2].find((row) => row.id === w.oldId));
     expect(after[0].filter((row) => row.eventType === "mission_owner_decision")).toHaveLength(1);
   });
-
   it("serializes independent connections, replays after response loss and notifies only after commit", async () => {
     const w = await world();
     const notify = vi.fn<NonNullable<MissionServiceDeps["onOwnerActionCreated"]>>(async ({ issue }) => {
@@ -123,7 +121,6 @@ describeDb("C08 source anchor producer", () => {
     expect(await snapshot(w)).toEqual(before); expect(notify).toHaveBeenCalledTimes(1);
     expect((await anchors(w))).toHaveLength(2); expect(await cards(w)).toHaveLength(2);
   });
-
   it("rolls the anchor, issue counter, lifetime, ending, pointer, card and audit back on real link write failure", async () => {
     const w = await world(), before = await snapshot(w), notify = vi.fn();
     // Owned isolated DB only; the real writer reaches this CHECK after creating its card.
@@ -138,19 +135,24 @@ describeDb("C08 source anchor producer", () => {
     const next = await produce(w);
     expect(next.id).not.toBe(w.oldId); expect(await cards(w)).toHaveLength(2);
   });
-
-  it("retains real past approval/result/continuation and gives the renewed request a pending card", async () => {
+  it("retains real past approval/result/continuation when unresolved retry renews and reuses the current anchor", async () => {
     const w = await world(true, false, false, "todo"), [oldCard] = await cards(w);
     await operatorDecisionWriteService(db).resolve(oldCard!.id,
       { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
     await issueService(db).update(w.oldId, { status: "done" });
     await issueService(db).update(w.sourceId, { status: "blocked" });
-    const before = await snapshot(w), next = await produce(w), after = await snapshot(w);
+    const before = await snapshot(w), old = await currentLifetime(w), notify = vi.fn(), actions = createOwnerActions({ db, deps: { onOwnerActionCreated: notify } });
+    const recover = () => actions.reopenUnresolvedRetryOwnerAction({ mission: w.mission, ownerActionIssue: before[2].find((row) => row.id === w.oldId)!,
+      retryTargetIssue: { ...w.source, status: "done" }, retryTargetLabel: "producer", blockedIssue: { ...w.source, status: "blocked" }, marker: "unresolved", dispatchWakeup: true });
+    await recover(); const next = await produce(w, db, { onOwnerActionCreated: notify }); await recover(); const after = await snapshot(w);
+    expect(notify).toHaveBeenCalledTimes(1); expect(notify.mock.calls[0]![0].issue.id).toBe(next.id);
+    expect(after[2].find((row) => row.id === w.oldId)).toEqual(before[2].find((row) => row.id === w.oldId));
+    expect((await anchors(w)).filter((row) => !["done", "cancelled"].includes(row.status))).toHaveLength(1);
+    expect((await currentLifetime(w)).requestKey).not.toBe(old.requestKey);
     expect(after[1].find((row) => row.id === oldCard!.id)).toEqual(before[1][0]);
     expect(after[4]).toEqual(before[4]); expect(after[3]).toEqual(before[3]);
     expect(after[1].find((row) => row.issueId === next.id)).toMatchObject({ status: "pending", result: null });
   });
-
   it("current GET and exact POST replay use the renewed anchor while retaining the original decision", async () => {
     const w = await world(), old = await currentLifetime(w), next = await produce(w), runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId,
@@ -248,14 +250,12 @@ describeDb("C08 source anchor producer", () => {
     expect(after[2].find((row) => row.id === w.oldId)).toEqual(before[2].find((row) => row.id === w.oldId));
     expect(after[3].find((row) => row.id === w.heartbeatId)).toEqual(before[3][0]);
   });
-
   it("preserves legacy open unassigned anchors for the existing supervision wake path", async () => {
     const w = await world(false, false, false);
     await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, w.oldId));
     const before = await snapshot(w);
     expect((await produce(w)).id).toBe(w.oldId); expect(await snapshot(w)).toEqual(before);
   });
-
   it("never revives a settled source, cancelled/completed mission, lost owner or nonblocked human request", async () => {
     for (const mode of ["source_done", "source_cancelled", "cancelled", "completed", "owner", "todo"] as const) {
       const w = await world();

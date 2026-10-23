@@ -558,11 +558,12 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
     marker: string;
     dispatchWakeup: boolean;
   }): Promise<MissionOwnerDecisionWakeupDispatchStatus> {
-    if (input.ownerActionIssue.status !== "todo") {
-      await issueService(db).update(input.ownerActionIssue.id, { status: "todo" });
-    }
+    // The canonical producer owns renewal and creation-only notification, never the predecessor.
+    const anchor = await ensureMainExecutorUnblockIssue(input.mission, input.blockedIssue, {
+      notifyOwner: input.dispatchWakeup,
+    });
     await issueService(db).addComment(
-      input.ownerActionIssue.id,
+      anchor.id,
       [
         "### Mission owner retry unresolved\nThe requested recovery has not resolved the source issue. Next action: check the source run and structured recovery record before requesting another retry.",
         `<!-- ${input.marker} -->`,
@@ -574,15 +575,8 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
       ].join("\n"),
       { agentId: input.mission.ownerAgentId },
     );
-    if (!input.dispatchWakeup) return "not_requested";
-    if (!deps.onOwnerActionCreated) return "failed";
-    await deps.onOwnerActionCreated({
-      mission: input.mission,
-      issue: input.ownerActionIssue,
-      sourceIssue: input.blockedIssue,
-      reason: "mission_unblock_action_stalled",
-    });
-    return "dispatched";
+    // No separate retry wakeup: an existing current anchor must not be notified again.
+    return "not_requested";
   }
 
   async function closeDuplicateToolStepRecoveryIssue(input: {
