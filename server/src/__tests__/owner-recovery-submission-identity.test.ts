@@ -158,17 +158,31 @@ describe("owner recovery submission identity before checkout writes", () => {
   });
 
   it("does not treat foreign-scope or unsupported-version links as this card", async () => {
-    for (const variant of ["foreign_mission", "unsupported_version"] as const) {
+    for (const variant of ["foreign_company", "foreign_mission", "unsupported_version"] as const) {
       const s = await seed();
       await toolCard(s);
-      if (variant === "foreign_mission") {
+      if (variant === "foreign_company") {
+        const other = await seed();
+        await db.update(workflowTransitionEvents).set({ companyId: other.companyId }).where(eq(workflowTransitionEvents.issueId, s.issueId));
+      } else if (variant === "foreign_mission") {
         const [other] = await db.insert(missions).values({ companyId: s.companyId, ownerAgentId: s.agentId, title: "other" }).returning();
         await db.update(workflowTransitionEvents).set({ missionId: other.id }).where(eq(workflowTransitionEvents.issueId, s.issueId));
       } else {
-        await db.update(workflowTransitionEvents).set({ payload: { schemaVersion: 2, kind: "tool_step" } }).where(eq(workflowTransitionEvents.issueId, s.issueId));
+        await db.update(workflowTransitionEvents).set({ payload: { schemaVersion: 99, kind: "tool_step" } }).where(eq(workflowTransitionEvents.issueId, s.issueId));
       }
       expect((await postDecision(s, { decision: "retry_source_issue" })).eventId).toBeTruthy();
     }
+  });
+
+  it("rejects malformed supported v2 links rather than treating them as legacy", async () => {
+    const s = await seed();
+    await toolCard(s);
+    await db.update(workflowTransitionEvents).set({ payload: { schemaVersion: 2, kind: "tool_step" } })
+      .where(eq(workflowTransitionEvents.issueId, s.issueId));
+    const before = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.companyId, s.companyId));
+    await expect(postDecision(s, { decision: "retry_source_issue" })).rejects.toMatchObject({ status: 409,
+      details: { reason: "owner_human_request_authority_mismatch" } });
+    expect(await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.companyId, s.companyId))).toEqual(before);
   });
 
   it("rejects a different mission owner and a closed owner action without writes", async () => {

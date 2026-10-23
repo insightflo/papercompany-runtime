@@ -180,10 +180,19 @@ async function assertResponseChild(db: Db, run: Run, wake: Wake) {
 }
 
 async function responseForRun(db: Db, supplied: OwnerResponseRun) {
+  const [candidateWake] = supplied.wakeupRequestId ? await db.select().from(agentWakeupRequests)
+    .where(eq(agentWakeupRequests.id, supplied.wakeupRequestId)) : [];
+  const marker = readMarker({ ...candidateWake, companyId: supplied.companyId, agentId: supplied.agentId,
+    operatorDecisionStoredAdmission: true }, record(supplied.contextSnapshot));
+  const decisionIds = marker?.ids.filter(id => z.string().uuid().safeParse(id).success) ?? [];
+  if (!decisionIds.length) return null;
+  // Classification is not authority: only a durable owner card activates the strict C08 checks below.
+  const [ownerCard] = await db.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
+    inArray(operatorDecisions.id, decisionIds), eq(operatorDecisions.sourceType, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE)));
+  if (!ownerCard) return null;
   const seen = new Set<string>(), wakes: Wake[] = [];
   let run: OwnerResponseRun | undefined = supplied;
   while (run) {
-    if (!run.wakeupRequestId && !seen.size && !run.retryOfRunId) return null;
     if (seen.has(run.id) || seen.size >= 32 || !run.wakeupRequestId) {
       throw conflict("owner_human_response_lineage_invalid");
     }

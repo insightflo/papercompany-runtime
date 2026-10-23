@@ -15,6 +15,7 @@ import { operatorDecisionWriteService } from "../services/operator-decisions-wri
 import { publishLiveEvent } from "../services/live-events.js";
 import { saveOwnerExecutionIntent } from "../services/missions/mission-owner-execute-intent.js";
 import { ownerPlanExecutionIntentCurrent } from "../services/missions/mission-owner-execution-state.js";
+import { acceptOwnerHumanResponseAtClaim } from "../services/missions/owner-human-response.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 const support = await getEmbeddedPostgresTestSupport();
@@ -127,6 +128,16 @@ describeDb("C08 owner response consumption", () => {
 
   const events = (w: World, kind: string) => db.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, w.companyId), eq(workflowTransitionEvents.eventType, kind)));
+
+  it.each(["missing_wake", "companyId", "agentId", "issueId", "id"] as const)("rejects actual C08 response %s damage", async damage => {
+    const w = await world(), response = await responseRun(w);
+    const run = { ...response.run, [damage === "missing_wake" ? "wakeupRequestId" : damage]: randomUUID() };
+    await expect(db.transaction(tx => acceptOwnerHumanResponseAtClaim(tx as unknown as Db, run)))
+      .rejects.toMatchObject({ status: 409, message: damage === "missing_wake" || damage === "companyId"
+        ? "owner_human_response_wake_missing" : "owner_human_response_run_identity_mismatch" });
+    expect(await events(w, "owner_human_consumed_v1")).toHaveLength(0);
+    expect(await events(w, "owner_human_adapter_start_v1")).toHaveLength(0);
+  });
 
   it("records adapter start separately and consumes only with the structured owner submission", async () => {
     const w = await world(), response = await responseRun(w), execute = vi.fn(async () => "started");

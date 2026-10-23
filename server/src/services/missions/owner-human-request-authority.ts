@@ -43,8 +43,11 @@ export function validateOwnerToolIdentity(row: typeof workflowTransitionEvents.$
 }
 
 export async function readOwnerToolIdentity(tx: OwnerHumanTx, companyId: string, missionId: string, anchorId: string) {
-  // Include malformed headers/keys rather than silently treating a damaged card as legacy.
+  // Classify scoped, supported links first; malformed headers/keys within that set still fail closed.
   const rows = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.missionId, missionId),
+    sql`(${workflowTransitionEvents.payload} @> '{"schemaVersion":1}'::jsonb
+      or ${workflowTransitionEvents.payload} @> '{"schemaVersion":2}'::jsonb)`,
     or(eq(workflowTransitionEvents.issueId, anchorId),
       sql`${workflowTransitionEvents.payload}->>'anchorIssueId' = ${anchorId}`),
     or(eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1"),
@@ -98,9 +101,9 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
   const runId = tool?.workflowRunId ?? source?.originRunId ?? null;
   let run: typeof workflowRuns.$inferSelect | undefined;
   if (runId) {
-    [run] = await tx.select().from(workflowRuns).where(and(eq(workflowRuns.id, runId),
-      eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.missionId, input.missionId))).for("update");
-    if (!run) return reject();
+    [run] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, runId)).for("update");
+    // Legacy source origins may name a heartbeat, not a workflow. Tool links must name a real workflow.
+    if ((!run && tool) || (run && (run.companyId !== input.companyId || run.missionId !== input.missionId))) return reject();
   }
   const [heartbeat] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.heartbeatRunId)).for("share");
   const locked = new Map<string, typeof issues.$inferSelect>();
