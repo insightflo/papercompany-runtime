@@ -1,11 +1,11 @@
-// C08 plan:112–116 and parent PLAN:1435. This is the real DB state primitive,
-// not producer/card/GET integration. Only initial authority/target facts are seeded.
+// C08 plan:112–129 and parent PLAN:1435–1436: real state and renewal/card writers.
+// Producer anchor creation remains stage 13C. Only initial authority/target facts are seeded.
 // Original decisions use the existing writer; terminal anchors use the native issue service.
 // No heartbeat success, renewal result, approval or delivery is inserted as a fixture.
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues, missions, operatorDecisions,
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { activityLog, agents, companies, createDb, heartbeatRuns, issues, missions, operatorDecisions, operatorDecisionContinuations,
   workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.js";
@@ -14,6 +14,13 @@ import { lockOwnerHumanRequestAuthority } from "../services/missions/owner-human
 import { readOwnerHumanCurrent, renewOwnerHumanRequest, saveOwnerHumanRequest,
   type OwnerHumanCurrentRecord } from "../services/missions/owner-human-request-state.js";
 import { ownerHumanEndKey, ownerHumanLifetimeSchema } from "../services/missions/owner-human-request-contract.js";
+
+import { renewOwnerHumanRequestWithCard } from "../services/missions/owner-human-request-renew.js";
+import { createMissionOwnerHumanInputDecisionCard } from "../services/missions/mission-owner-human-input-card.js";
+import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
+import { readOwnerHumanRequest } from "../services/missions/owner-human-request-read.js";
+import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
+vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -67,13 +74,21 @@ describeDb("C08 explicit anchor renewal state", () => {
     connection.transaction(async (tx) => renewOwnerHumanRequest(
       await lockOwnerHumanRequestAuthority(tx, authority(w, expected)),
       { requestKey: key, expectedCurrentLifetimeId: expected }));
+  const renewalInput = (w: World, key: string) => ({ companyId: w.companyId,
+    previousLifetimeId: w.original.lifetime.lifetimeId, anchorIssueId: w.nextId, requestKey: key });
+  const renewCard = (w: World, key: string, connection = db) =>
+    connection.transaction((tx) => renewOwnerHumanRequestWithCard(tx, renewalInput(w, key)));
+  const createCard = (saved: OwnerHumanCurrentRecord, connection = db) =>
+    createMissionOwnerHumanInputDecisionCard(connection, { ...saved.lifetime.cardInput, lifetimeId: saved.lifetime.lifetimeId });
   const events = (w: World, connection = db) => connection.select().from(workflowTransitionEvents)
     .where(eq(workflowTransitionEvents.companyId, w.companyId)).orderBy(workflowTransitionEvents.id);
   const snapshot = (w: World) => Promise.all([events(w),
     db.select().from(issues).where(eq(issues.companyId, w.companyId)).orderBy(issues.id),
     db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, w.companyId)).orderBy(heartbeatRuns.id),
     db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, w.companyId)),
-    db.select().from(missions).where(eq(missions.id, w.missionId))]);
+    db.select().from(missions).where(eq(missions.id, w.missionId)),
+    db.select().from(activityLog).where(eq(activityLog.companyId, w.companyId)).orderBy(activityLog.id),
+    db.select().from(operatorDecisionContinuations).where(eq(operatorDecisionContinuations.companyId, w.companyId))]);
   async function unchanged(w: World, operation: () => Promise<unknown>) {
     const before = await snapshot(w);
     await expect(operation()).rejects.toMatchObject({ status: 409 });
@@ -216,5 +231,67 @@ describeDb("C08 explicit anchor renewal state", () => {
     expect(saved.lifetime.decisionEventId).toBe(w.original.lifetime.decisionEventId);
     const old = (await events(w)).find((row) => row.id === w.original.lifetime.lifetimeId)!;
     expect(ownerHumanLifetimeSchema.parse(old.payload)).toEqual(w.original.lifetime);
+  });
+
+  it("creates a new pending card without copying real past approval, result, continuation or links", async () => {
+    const w = await world(false), old = await createCard(w.original);
+    await operatorDecisionWriteService(db).resolve(old.decision.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
+    await issueService(db).update(w.oldId, { status: "cancelled" });
+    const before = await snapshot(w), key = randomUUID(), saved = await renewCard(w, key);
+    expect(saved.cardCreated).toBe(true);
+    expect(saved.card).toMatchObject({ status: "pending", result: null, resolvedAt: null,
+      resolvedByUserId: null, cancelledAt: null, requestedByAgentId: w.agentId,
+      issueId: w.nextId, sourceId: w.original.lifetime.decisionEventId,
+      requestKey: `moi2:${saved.current.lifetime.lifetimeId}` });
+    const after = await snapshot(w);
+    expect(after[3].find((card) => card.id === old.decision.id)).toEqual(before[3][0]);
+    expect(after[6]).toEqual(before[6]);
+    expect(after[2]).toEqual(before[2]);
+    for (const row of before[5]) expect(after[5].find((event) => event.id === row.id)).toEqual(row);
+    for (const row of before[0].filter((event) => event.eventType !== "owner_human_current_v1")) {
+      expect(after[0].find((event) => event.id === row.id)).toEqual(row);
+    }
+    expect(after[0].filter((event) => event.eventType === "owner_human_card_v1")).toHaveLength(2);
+    expect(after[0].find((event) => event.idempotencyKey ===
+      `owner-human-card:v1:${saved.current.lifetime.lifetimeId}`)).toMatchObject({
+        issueId: w.nextId, heartbeatRunId: w.heartbeatId,
+        payload: { lifetimeId: saved.current.lifetime.lifetimeId, operatorDecisionId: saved.card.id } });
+    expect((await createCard(saved.current, other)).decision.id).toBe(saved.card.id);
+    expect((await renewCard(w, key, other)).cardCreated).toBe(false);
+    expect(await snapshot(w)).toEqual(after);
+  });
+
+  it("rolls back lifetime, pointer, card, binding and audit if the owning transaction fails", async () => {
+    const w = await world(), before = await snapshot(w), key = randomUUID();
+    await expect(db.transaction(async (tx) => {
+      await renewOwnerHumanRequestWithCard(tx, renewalInput(w, key));
+      throw new Error("renewal card interrupted");
+    })).rejects.toThrow("renewal card interrupted");
+    expect(await snapshot(w)).toEqual(before);
+    const [a, b] = await Promise.all([renewCard(w, key), renewCard(w, key, other)]);
+    expect(a.card.id).toBe(b.card.id);
+    expect([a.cardCreated, b.cardCreated].sort()).toEqual([false, true]);
+    expect((await snapshot(w))[3]).toHaveLength(1);
+  });
+
+  it("keeps current GET/POST exact replay distinct from the original issuing heartbeat", async () => {
+    const w = await world(), saved = await renewCard(w, randomUUID()), runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId,
+      agentId: w.agentId, issueId: w.nextId, status: "running" }); // Current caller authority only.
+    await issueService(db).checkout(w.nextId, w.agentId, ["todo"], runId);
+    const actor = { actorType: "agent" as const, actorId: w.agentId, agentId: w.agentId, runId };
+    const projection = await readOwnerHumanRequest({ db, companyId: w.companyId, issueId: w.nextId, actor });
+    expect(projection.card?.id).toBe(saved.card.id);
+    expect(projection.resubmit).toEqual({ ...submission, humanRequest: { schemaVersion: 1,
+      requestKey: saved.current.lifetime.requestKey, expectedCurrentLifetimeId: saved.current.lifetime.lifetimeId } });
+    const replay = await submitMissionOwnerDecision({ db, issueId: w.nextId, actor, data: projection.resubmit! });
+    expect(replay).toMatchObject({ eventId: w.original.lifetime.decisionEventId,
+      lifetimeId: saved.current.lifetime.lifetimeId, operatorDecisionId: saved.card.id, submission });
+    expect((await snapshot(w))[3]).toHaveLength(1);
+    expect((await events(w)).filter((row) => row.eventType === "mission_owner_decision")).toHaveLength(1);
+    await db.delete(workflowTransitionEvents).where(eq(workflowTransitionEvents.id,
+      (await events(w)).find((row) => row.eventType === "owner_human_card_v1")!.id));
+    await unchanged(w, () => renewCard(w, saved.current.lifetime.requestKey, other));
   });
 });

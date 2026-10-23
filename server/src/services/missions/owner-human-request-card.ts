@@ -9,7 +9,7 @@ import { conflict } from "../../errors.js";
 import type { OperatorDecisionActor } from "../operator-decision-create.js";
 import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
 import { buildMissionOwnerHumanInputDecisionCard, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "./mission-owner-human-input-card.js";
-import { lockOwnerHumanRequestAuthority } from "./owner-human-request-authority.js";
+import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
 import { readOwnerHumanCurrent, type OwnerHumanCurrentRecord } from "./owner-human-request-state.js";
 import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, ownerHumanLifetimeSchema,
   sameOwnerHumanValue, type OwnerHumanTx } from "./owner-human-request-contract.js";
@@ -43,10 +43,9 @@ function assertCard(card: Card, input: CreateOperatorDecisionInput, authorAgentI
     || card.qualityActionId !== null || card.qualityBinding !== null) fail();
 }
 
-// No earlier lock is acquired after the pointer. The authority helper retains the existing order:
-// quality prefix (if present in the caller) -> mission/run/heartbeat/sorted issues/step -> pointer -> card.
-// settle purpose permits the original heartbeat to have finished; this operation still requires
-// an active recovery pointer and nonterminal mission/anchor. It neither adopts checkout nor settles.
+// A renewed lifetime retains the issuing heartbeat's original anchor. Acquire the complete
+// native prefix using its predecessor, then validate the current target separately. A forged
+// new-anchor/old-heartbeat pair without the stored renewal chain still fails closed.
 export async function lockOwnerHumanRequestCard(tx: OwnerHumanTx, companyId: string,
   input: CreateOperatorDecisionInput, actor: OperatorDecisionActor): Promise<Guard | null> {
   if (!isOwnerHumanLifetimeCard(input)) return null;
@@ -57,20 +56,48 @@ export async function lockOwnerHumanRequestCard(tx: OwnerHumanTx, companyId: str
   const parsed = ownerHumanLifetimeSchema.safeParse(discovered?.payload);
   if (!parsed.success || actor.type !== "agent" || actor.id !== parsed.data.authorAgentId) return fail();
   const lifetime = parsed.data;
+  let origin = lifetime;
+  if (lifetime.renewal) {
+    const [row] = await tx.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.id, lifetime.renewal.previousLifetimeId)));
+    const parent = ownerHumanLifetimeSchema.safeParse(row?.payload);
+    if (!parent.success || parent.data.lifetimeId !== lifetime.renewal.previousLifetimeId) return fail();
+    origin = parent.data;
+  }
   const auth = await lockOwnerHumanRequestAuthority(tx, {
-    companyId, missionId: lifetime.scope.missionId, ownerActionIssueId: lifetime.anchorIssueId,
+    companyId, missionId: lifetime.scope.missionId, ownerActionIssueId: origin.anchorIssueId,
     agentId: actor.id, heartbeatRunId: lifetime.heartbeatRunId,
-    recoveryTarget: lifetime.submission.recoveryTarget, purpose: "settle",
+    recoveryTarget: lifetime.submission.recoveryTarget, purpose: lifetime.renewal ? "renew" : "settle",
+    ...(lifetime.renewal ? { renewal: { previousLifetimeId: lifetime.renewal.previousLifetimeId,
+      anchorIssueId: lifetime.anchorIssueId } } : {}),
   });
-  const [mission] = await tx.select().from(missions).where(and(
-    eq(missions.companyId, companyId), eq(missions.id, lifetime.scope.missionId)));
-  if (!mission || ["completed", "cancelled"].includes(mission.status)
-    || ["done", "cancelled"].includes(auth.anchor.status)
-    || !sameOwnerHumanValue(auth.scope, lifetime.scope)) return fail();
+  return lockOwnerHumanCurrentCard(auth, input, actor);
+}
+
+// Used by the renewal writer after it owns the full prefix and pointer. No earlier locks are
+// acquired here. State validation proves the immutable origin, every replaced ending and the
+// current pointer; the author is retained while the card is bound to today's recovery anchor.
+export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
+  input: CreateOperatorDecisionInput, actor: OperatorDecisionActor): Promise<Guard> {
+  const { tx } = auth, companyId = auth.scope.companyId;
   const current = await readOwnerHumanCurrent(auth);
-  if (!current || !current.pointer.recoveryNeeded || current.pointer.lifetimeId !== id.data
-    || current.pointer.anchorIssueId !== auth.anchor.id
-    || !sameOwnerHumanValue(current.lifetime, lifetime)) return fail();
+  const lifetime = current?.lifetime;
+  const anchor = auth.purpose === "renew" ? auth.renewalAnchor : auth.anchor;
+  const [mission] = await tx.select().from(missions).where(and(
+    eq(missions.companyId, companyId), eq(missions.id, auth.scope.missionId)));
+  if (!current || !lifetime || !anchor || !mission || ["completed", "cancelled"].includes(mission.status)
+    || mission.ownerAgentId !== auth.agentId || ["done", "cancelled"].includes(anchor.status)
+    || anchor.assigneeAgentId !== auth.agentId
+    || actor.type !== "agent" || actor.id !== lifetime.authorAgentId || actor.id !== auth.agentId
+    || lifetime.heartbeatRunId !== auth.heartbeatRunId || !isOwnerHumanLifetimeCard(input)
+    || input.requestKey !== `moi2:${lifetime.lifetimeId}`
+    || !sameOwnerHumanValue(auth.scope, lifetime.scope)
+    || !current.pointer.recoveryNeeded || current.pointer.anchorIssueId !== anchor.id
+    || lifetime.anchorIssueId !== anchor.id) return fail();
+  if (lifetime.renewal ? auth.purpose !== "renew"
+    || auth.renewal?.previousLifetimeId !== lifetime.renewal.previousLifetimeId
+    : auth.purpose !== "settle") return fail();
   // Rebuild from the saved input, never from today's display title/status or the caller's prose.
   const expected = validateAndHashOperatorDecisionCreate(buildMissionOwnerHumanInputDecisionCard({
     ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
