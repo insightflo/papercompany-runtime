@@ -2,8 +2,8 @@
 //
 // [목적] mission owner 결정 API의 사람 핸드오프 결정(request_input/escalate)을 operator decision
 //   card 로 브리지한다(계획 2026-10-17-human-decision-escalation-contract Stage 1).
-// [계약] D2 requestKey=`moi1:{decisionEventId}` + sourceId=decisionEventId(decisionEventId 는
-//   sourceContext strict 스키마에 없으므로 넣지 않는다), D3 기본 approve/hold/reject 선택지(reject
+// [계약] D2 legacy requestKey=moi1:{decisionEventId}, C08 수명은 moi2:{lifetimeId}. sourceId 는
+//   원 결정 이벤트다(sourceContext 에 decisionEventId 를 넣지 않는다). D3 기본 approve/hold/reject 선택지(reject
 //   포함이라 comment required)+humanReview 패킷 필수 매핑, D5 스냅샷 앵커=owner-action 이슈
 //   issueId+issueStatus, workflowRunId 는 실제 workflowRuns 행이 확인된 id 만 호출부가 전달한다.
 // [fail-closed] 판단 근거(앵커)를 해석할 수 없으면 카드 입력을 만들지 않고 422 로 제출을 거부해
@@ -38,6 +38,8 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly companyId: string;
   readonly missionId: string;
   readonly decisionEventId: string;
+  /** C08 persisted lifetime; omitted by existing moi1 callers. Creation rechecks its authority. */
+  readonly lifetimeId?: string;
   readonly decision: "request_input" | "escalate";
   readonly ownerActionIssueId: string;
   readonly ownerActionIssueStatus: string;
@@ -122,8 +124,8 @@ function buildDefaultDefinition(evidenceRefs: { label: string; href: string }[])
 
 /**
  * [D2/D3/D5 순수 빌더] 카드 create 입력을 만든다. 앵커 해석 불가 시 422(mapping_failed).
- * 결정적(deterministic)이라 같은 결정 이벤트 재제출 시 같은 requestHash 가 나와 requestKey 멱등
- * replay 이 성립한다.
+ * 같은 legacy 결정 이벤트 또는 같은 수명의 불변 입력은 같은 requestHash 를 만든다.
+ * C08 수명 입력은 create 트랜잭션에서 저장된 원문과 현재 권위를 다시 대조한다.
  */
 export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHumanInputCardSpec): CreateOperatorDecisionInput {
   if (!present(input.decisionEventId)) mappingFailure("결정 이벤트 식별자 없음");
@@ -180,7 +182,9 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   ];
   return {
     schemaVersion: 1,
-    requestKey: buildHumanInputDecisionCardRequestKey(decisionEventId),
+    requestKey: input.lifetimeId !== undefined
+      ? `moi2:${input.lifetimeId}`
+      : buildHumanInputDecisionCardRequestKey(decisionEventId),
     priority: "high",
     interactionType: "single_select",
     title: clip(`사람 결정 승인 요청 — ${decisionLabel}`, 200),

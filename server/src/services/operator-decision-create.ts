@@ -7,6 +7,7 @@ import { publishLiveEvent } from "./live-events.js";
 import { validateAndHashOperatorDecisionCreate } from "./operator-decision-result.js";
 import { readTargetSnapshot } from "./operator-decision-currentness.js";
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
+import { connectOwnerHumanRequestCard, isOwnerHumanLifetimeCard, lockOwnerHumanRequestCard } from "./missions/owner-human-request-card.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
@@ -46,13 +47,17 @@ export function operatorDecisionCreateService(db: Db, { read, conflictFor }: Ope
   async function create(companyId: string, rawInput: unknown, actor: OperatorDecisionActor) {
     const validated = validateAndHashOperatorDecisionCreate(rawInput);
     await assertCreateOwnership(companyId, validated.input, actor);
-    const replay = await loadReplay(companyId, validated.input.requestKey, validated.requestHash);
-    if (replay) return replay;
+    const lifetimeCard = isOwnerHumanLifetimeCard(validated.input);
+    // Lifetime replay must pass the same locked authority/binding checks as a new create.
+    if (!lifetimeCard) {
+      const replay = await loadReplay(companyId, validated.input.requestKey, validated.requestHash);
+      if (replay) return replay;
+    }
 
     // [결정 가능성 게이트] 판단 정보 패킷(definition.humanReview)이 없는 카드는 UI 버튼 잠금과
     // resolve 422(human_review_packet_required)로 결정 불가능한 죽은 카드가 된다(실제 사례:
     // 2026-10-06 rebind 승인 요청 2건). 생성 단계에서 거부해 요청자가 패킷을 갖춰 다시 만들게 한다.
-    // replay 는 멱등 유지를 위해 게이트 앞에서 반환된다(기존 행은 cancel 경로로 정리).
+    // 일반/구형 replay 는 이 게이트 앞에서 반환한다. 새 수명 카드는 아래 잠금 검사를 거친다.
     if (!validated.input.definition.humanReview) {
       throw unprocessable(
         "판단 주제, 근거 원본 위치, 해석, 영향과 다음 단계(definition.humanReview)가 없는 결정 카드는 만들 수 없습니다. 패킷을 갖춰 다시 요청해 주세요.",
@@ -70,9 +75,11 @@ export function operatorDecisionCreateService(db: Db, { read, conflictFor }: Ope
       );
     }
 
-    let id: string;
+    let committed: { id: string; replayed: boolean };
     try {
-      id = await db.transaction(async (tx) => {
+      committed = await db.transaction(async (tx) => {
+        const ownerCard = await lockOwnerHumanRequestCard(tx, companyId, validated.input, actor);
+        if (ownerCard?.card) return { id: ownerCard.card.id, replayed: true };
         const [created] = await tx.insert(operatorDecisions).values({
           companyId,
           requestKey: validated.input.requestKey,
@@ -111,13 +118,23 @@ export function operatorDecisionCreateService(db: Db, { read, conflictFor }: Ope
             continuationMode: validated.input.continuationMode,
           },
         });
-        return created!.id;
+        await connectOwnerHumanRequestCard(tx, ownerCard, created!.id);
+        return { id: created!.id, replayed: false };
       });
     } catch (error) {
-      const concurrentReplay = await loadReplay(companyId, validated.input.requestKey, validated.requestHash);
+      // A transaction error/response loss is not permission to replay an obsolete lifetime.
+      const currentCardId = lifetimeCard ? await db.transaction(async (tx) => {
+        const current = await lockOwnerHumanRequestCard(tx, companyId, validated.input, actor);
+        return current?.card?.id ?? null;
+      }) : null;
+      const concurrentReplay = lifetimeCard
+        ? currentCardId ? { decision: await read.getRequired(currentCardId), replayed: true } : null
+        : await loadReplay(companyId, validated.input.requestKey, validated.requestHash);
       if (concurrentReplay) return concurrentReplay;
       throw error;
     }
+    const { id, replayed } = committed;
+    if (replayed) return { decision: await read.getRequired(id), replayed: true };
     // [card alert] 신규 생성(비-replay)에만 발행한다 — replay 는 이미 알림을 받았으므로 멱등하게 스킵.
     publishLiveEvent({
       companyId,
