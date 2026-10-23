@@ -1,6 +1,7 @@
 import { and, eq, inArray, is, or } from "drizzle-orm";
-import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, operatorDecisionContinuations, operatorDecisions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { PgTransaction } from "drizzle-orm/pg-core";
+import { z } from "zod";
 import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
 import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { conflict } from "../errors.js";
@@ -10,30 +11,87 @@ import { budgetBlockers } from "./workflow/resume/preview-facts.js";
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import { claimQueuedHeartbeatRun } from "./heartbeat-finalization/shadow-writes.js";
 import { preparePauseChildAdmission, assertCurrentPauseChild, type PauseChildAdmission } from "./heartbeat-pause-admission.js";
+import { assertOwnerHumanDecisionCurrent, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "./operator-decision-currentness.js";
+import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
+import type { OwnerHumanTx } from "./missions/owner-human-request-contract.js";
 
 type Scope = {
-  companyId: string;
-  agentId: string;
-  issueId?: string | null;
-  missionId?: string | null;
-  workflowRunId?: string | null;
-  workflowStepRunId?: string | null;
-  contextSnapshot?: unknown;
-  wakeupRequestId?: string | null;
+  companyId: string; agentId: string;
+  issueId?: string | null; missionId?: string | null;
+  workflowRunId?: string | null; workflowStepRunId?: string | null;
+  contextSnapshot?: unknown; wakeupRequestId?: string | null; idempotencyKey?: string | null;
+  source?: string | null; reason?: string | null; payload?: unknown;
+  requestedByActorType?: string | null; requestedByActorId?: string | null;
+  operatorDecisionInitialAdmission?: boolean; operatorDecisionOnly?: boolean;
 };
 function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function text(value: unknown): string | null { return typeof value === "string" && value.trim() ? value : null; }
+
+const resolutionRef = z.object({ operatorDecisionId: z.string().uuid(), options: z.array(z.object({
+  id: z.string(), label: z.string(), description: z.string().nullable(),
+}).strict()) }).strict();
+function sameJson(left: unknown, right: unknown) { return JSON.stringify(left) === JSON.stringify(right); }
+function readDeliveryMarker(input: Scope, context: Record<string, unknown>) {
+  if (!input.operatorDecisionInitialAdmission) return null;
+  const payload = record(input.payload), rawPayload = payload.paperclipOperatorDecisionResolution,
+    rawContext = context.paperclipOperatorDecisionResolution;
+  const marked = input.idempotencyKey?.startsWith(OPERATOR_DECISION_WAKE_PREFIX) || input.reason === "operator_decision_resolved"
+    || payload.kind === "operator_decision_resolution" || context.wakeReason === "operator_decision_resolved"
+    || payload.operatorDecisionId !== undefined || context.operatorDecisionId !== undefined || rawPayload !== undefined || rawContext !== undefined;
+  if (!marked) return null;
+  const keyId = input.idempotencyKey?.startsWith(OPERATOR_DECISION_WAKE_PREFIX)
+    ? input.idempotencyKey.slice(OPERATOR_DECISION_WAKE_PREFIX.length).split(":g")[0] : null;
+  const ids = [...new Set([payload.operatorDecisionId, context.operatorDecisionId, record(rawPayload).operatorDecisionId,
+    record(rawContext).operatorDecisionId, keyId].filter((value): value is string => typeof value === "string" && value.length > 0))];
+  return { ids, rawPayload, rawContext };
 }
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
+async function assertOperatorDecisionDelivery(db: Db, input: Scope, marker: ReturnType<typeof readDeliveryMarker>) {
+  if (!marker) return false;
+  const validIds = marker.ids.filter(id => z.string().uuid().safeParse(id).success);
+  const decisions = validIds.length ? await db.select().from(operatorDecisions).where(and(
+    eq(operatorDecisions.companyId, input.companyId), inArray(operatorDecisions.id, validIds))) : [];
+  if (!marker.ids.length || validIds.length !== marker.ids.length || !decisions.length) throw conflict("operator_decision_delivery_reference_invalid");
+  const ownerCards = decisions.filter(row => row.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE);
+  if (!ownerCards.length) return false;
+  const decision = ownerCards[0]!, decisionId = decision.id;
+  const fromPayload = resolutionRef.safeParse(marker.rawPayload), fromContext = resolutionRef.safeParse(marker.rawContext);
+  if (ownerCards.length !== 1 || marker.ids.some(id => id !== decisionId) || !fromPayload.success
+    || !fromContext.success || !sameJson(fromPayload.data, fromContext.data)) throw conflict("operator_decision_delivery_reference_invalid");
+  const resolution = fromPayload.data;
+  await assertOwnerHumanDecisionCurrent(db as unknown as OwnerHumanTx, decision);
+  const [continuation] = await db.select().from(operatorDecisionContinuations).where(and(
+    eq(operatorDecisionContinuations.companyId, input.companyId), eq(operatorDecisionContinuations.operatorDecisionId, decisionId))).for("update");
+  const payload = record(input.payload), context = record(input.contextSnapshot);
+  const selectedOptionIds = decision.result?.selectedOptionIds ?? [];
+  const byId = new Map(decision.definition.options.map(option => [option.id, option]));
+  const expectedResolution = { operatorDecisionId: decision.id, options: selectedOptionIds.map(id => {
+    const option = byId.get(id); return option ? { id: option.id, label: option.label, description: option.description }
+      : { id, label: id, description: null }; }) };
+  const expectedKey = continuation
+    ? `${OPERATOR_DECISION_WAKE_PREFIX}${decisionId}:g${continuation.generation}:a${continuation.attemptCount}` : null;
+  if (decision.status !== "resolved" || !decision.result || !sameJson(resolution, expectedResolution)
+    || payload.operatorDecisionId !== decisionId || context.operatorDecisionId !== decisionId
+    || input.missionId !== decision.sourceContext.missionId || context.missionId !== decision.sourceContext.missionId
+    || payload.actionId !== decision.result.actionId || !sameJson(payload.selectedOptionIds, selectedOptionIds)
+    || context.wakeReason !== "operator_decision_resolved"
+    || !continuation || continuation.state !== "leased" || continuation.targetAgentId !== input.agentId
+    || !continuation.issueId || continuation.issueId !== input.issueId || continuation.issueId !== text(payload.issueId)
+    || continuation.issueId !== text(context.issueId) || continuation.idempotencyKey !== expectedKey
+    || input.idempotencyKey !== expectedKey || input.source !== "automation"
+    || input.reason !== "operator_decision_resolved" || payload.kind !== "operator_decision_resolution"
+    || input.requestedByActorType !== "user" || input.requestedByActorId !== decision.resolvedByUserId) {
+    throw conflict("operator_decision_delivery_identity_mismatch");
+  }
+  return true;
 }
 
-/** All identity paths are OR-ed: an explicit hint never hides the issue's actual run.
- * Owner/oversight issue mission membership alone is deliberately NOT an execution link.
- * Caller owns a transaction; acquire mission → run before issue/wake/heartbeat locks.
- */
+/** OR all identity paths; owner issue membership alone is not execution linkage. Caller owns the transaction. */
 export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
   const context = record(input.contextSnapshot);
+  const deliveryMarker = readDeliveryMarker(input, context);
+  const ownerDelivery = deliveryMarker ? await assertOperatorDecisionDelivery(db, input, deliveryMarker) : false;
+  if (input.operatorDecisionOnly) return;
   const issueIds = [...new Set([input.issueId, text(context.issueId)].filter((id): id is string => !!id))];
   const stepIds = [...new Set([input.workflowStepRunId, text(context.workflowStepRunId)].filter((id): id is string => !!id))];
   const runIds = new Set([input.workflowRunId, text(context.workflowRunId)].filter((id): id is string => !!id));
@@ -52,7 +110,7 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
       eq(issues.companyId, input.companyId), inArray(issues.id, issueIds), eq(issues.originKind, "workflow_execution")));
     for (const origin of origins) if (origin.runId) runIds.add(origin.runId);
   }
-  if (!runIds.size && !input.missionId) return;
+  if (!runIds.size && !input.missionId && !ownerDelivery) return;
   const runs = await db.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, input.companyId), inArray(workflowRuns.id, [...runIds])));
   if (runs.length !== runIds.size) throw conflict("heartbeat_workflow_scope_missing");
   runs.sort((a, b) => (a.missionId ?? "").localeCompare(b.missionId ?? "") || a.id.localeCompare(b.id));

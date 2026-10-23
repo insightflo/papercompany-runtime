@@ -18,7 +18,18 @@ import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, 
 import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
 import { deliverPauseResume, selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
 import { recheckPauseQuiescence } from "./heartbeat-pause-quiescence.js";
+import { writeSkippedWakeupRequest } from "./quality/heartbeat-admission.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
+type SkippedInput = Parameters<typeof writeSkippedWakeupRequest>[1];
+/** Assemble the unchanged skipped-wake record outside heartbeat.ts. */
+export function createSkippedWakeWriter(db: Db, input: Omit<SkippedInput, "skipReason" | "requestKind"
+  | "missionId" | "workflowRunId" | "workflowStepRunId"> & { contextSnapshot: unknown }) {
+  const payload = parseObject(input.payload), context = parseObject(input.contextSnapshot);
+  return (skipReason: string) => writeSkippedWakeupRequest(db, { ...input, skipReason,
+    requestKind: readNonEmptyString(payload.kind) ?? readNonEmptyString(payload.mutation) ?? skipReason,
+    missionId: readNonEmptyString(context.missionId), workflowRunId: readNonEmptyString(context.workflowRunId),
+    workflowStepRunId: readNonEmptyString(context.workflowStepRunId) });
+}
 /** Only the identical unconditional rejection update; callers keep their own continue/return. */
 export async function failFollowupWake(tx: FollowupTx, id: string, error: string) {
   await tx.update(agentWakeupRequests).set({

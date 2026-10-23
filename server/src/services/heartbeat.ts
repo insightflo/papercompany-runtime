@@ -84,7 +84,6 @@ import {
   findExistingQualityWakeRow,
   mergeableWakeupKeyCondition,
   queuePausedAgentWakeupRequest,
-  writeSkippedWakeupRequest,
 } from "./quality/heartbeat-admission.js";
 import { isBoundedExecutionWakeKey } from "./quality/native-wake.js";
 import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
@@ -211,7 +210,7 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
-import { promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
+import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
@@ -9184,22 +9183,17 @@ export function heartbeatService(db: Db) {
       }
     }
 
-    // [T8 추출] skip 원문 기록은 heartbeat-admission 로 이동했다(같은 의미, 순수 이동).
-    const writeSkippedRequest = (skipReason: string) => writeSkippedWakeupRequest(db, {
+    const writeSkippedRequest = createSkippedWakeWriter(db, {
       companyId: agent.companyId,
       agentId,
       source,
       triggerDetail,
-      skipReason,
       payload,
       requestedByActorType: opts.requestedByActorType ?? null,
       requestedByActorId: opts.requestedByActorId ?? null,
       idempotencyKey: opts.idempotencyKey ?? null,
-      requestKind: readNonEmptyString((payload as Record<string, unknown> | null)?.kind as string) ?? readNonEmptyString((payload as Record<string, unknown> | null)?.mutation as string) ?? skipReason,
       issueId: issueId ?? null,
-      missionId: readNonEmptyString(enrichedContextSnapshot.missionId) ?? null,
-      workflowRunId: readNonEmptyString(enrichedContextSnapshot.workflowRunId) ?? null,
-      workflowStepRunId: readNonEmptyString(enrichedContextSnapshot.workflowStepRunId) ?? null,
+      contextSnapshot: enrichedContextSnapshot,
       recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
     });
 
@@ -9283,20 +9277,20 @@ export function heartbeatService(db: Db) {
       status: "queued", requestedByActorType: opts.requestedByActorType ?? null,
       requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null,
     };
-    const queuePausedAgentWakeup = () => queuePausedAgentWakeupRequest(db, {
-      companyId: agent.companyId,
-      agentId,
-      source,
-      triggerDetail,
-      reason,
-      payload,
-      typedQueueColumns,
-      requestedByActorType: opts.requestedByActorType ?? null,
-      requestedByActorId: opts.requestedByActorId ?? null,
-      idempotencyKey: opts.idempotencyKey ?? null,
-      missionIdForWake,
-      recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
-    });
+    const recoveryAdmission = { companyId: agent.companyId, agentId, ...typedQueueColumns,
+      contextSnapshot: enrichedContextSnapshot, idempotencyKey: opts.idempotencyKey ?? null,
+      source, reason, payload, requestedByActorType: opts.requestedByActorType ?? null,
+      requestedByActorId: opts.requestedByActorId ?? null, operatorDecisionInitialAdmission: true };
+    const queuePausedAgentWakeup = () => withTxTimeout(db, async tx => {
+      await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...recoveryAdmission, operatorDecisionOnly: true });
+      await queuePausedAgentWakeupRequest(tx as unknown as Db, {
+        companyId: agent.companyId, agentId, source, triggerDetail, reason, payload, typedQueueColumns,
+        requestedByActorType: opts.requestedByActorType ?? null,
+        requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null,
+        missionIdForWake,
+        recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
+      });
+    }, { label: "enqueueWakeup:paused-admission" });
     if (missionIdForWake) {
       try {
         await assertMissionRuntimeAcceptsWork(db, {
@@ -9398,7 +9392,7 @@ export function heartbeatService(db: Db) {
       });
 
       const outcome = await withTxTimeout(db, async (tx) => {
-        await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
+        await assertHeartbeatRecoveryAdmission(tx as unknown as Db, recoveryAdmission);
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );
@@ -9886,7 +9880,7 @@ export function heartbeatService(db: Db) {
       ? await withTxTimeout(
           db,
           async (tx) => {
-            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
+            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, recoveryAdmission);
             await tx.execute(
               sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
             );
@@ -9897,7 +9891,7 @@ export function heartbeatService(db: Db) {
       : await withTxTimeout(
           db,
           async (tx) => {
-            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { companyId: agent.companyId, agentId, ...typedQueueColumns, contextSnapshot: enrichedContextSnapshot });
+            await assertHeartbeatRecoveryAdmission(tx as unknown as Db, recoveryAdmission);
             return admitUnlockedRun(tx as unknown as Db);
           },
           { label: "enqueueWakeup:taskkey-admission" },
