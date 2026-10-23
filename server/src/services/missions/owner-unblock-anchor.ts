@@ -96,7 +96,9 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
           agentId: mission.ownerAgentId, heartbeatRunId: lifetime.heartbeatRunId,
           recoveryTarget: lifetime.submission.recoveryTarget });
         if (!current || current.lifetime.lifetimeId !== lifetime.lifetimeId) return fail();
-        if (open.length && open[0]!.id !== current.pointer.anchorIssueId) return fail();
+        if (open.length && open[0]!.id !== current.pointer.anchorIssueId
+          && (current.pointer.recoveryNeeded || source.status !== "blocked"
+            || !isTerminalIssueStatus(anchor.status))) return fail();
       } else {
         const [orphan] = await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
           eq(workflowTransitionEvents.companyId, mission.companyId), eq(workflowTransitionEvents.missionId, mission.id),
@@ -108,7 +110,7 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
         return { mission, source, issue: open[0]!, created: false };
       }
       const historical = current ? locked.get(current.pointer.anchorIssueId)! : visible[0];
-      if (isTerminalIssueStatus(source.status) || current && (!current.pointer.recoveryNeeded || source.status !== "blocked")) {
+      if (isTerminalIssueStatus(source.status) || current && source.status !== "blocked") {
         if (!historical) return fail();
         return { mission, source, issue: historical, created: false };
       }
@@ -150,7 +152,9 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
         parentId: source.parentId ? undefined : source.id, priority: "high", status: "todo",
         title: `[Unblock] ${source.identifier ?? source.id}: ${source.title}`,
       });
-      if (current) {
+      // A closed lifetime cannot be renewed. The owner submits fresh content/key on
+      // this anchor through the existing CAS writer; historical approval grants nothing.
+      if (current?.pointer.recoveryNeeded) {
         await renewOwnerHumanRequestWithCard(tx, { companyId: mission.companyId,
           previousLifetimeId: current.lifetime.lifetimeId, anchorIssueId: issue.id,
           requestKey: `owner-anchor-renewal:v1:${current.lifetime.lifetimeId}:${issue.id}` });

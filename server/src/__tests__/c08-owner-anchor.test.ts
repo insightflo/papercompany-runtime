@@ -188,18 +188,65 @@ describeDb("C08 source anchor producer", () => {
     expect((await cards(legacy)).find((row) => row.issueId === legacy.oldId)?.requestKey).toMatch(/^moi1:/);
   });
 
-  it("does not copy a closed recovery pointer when the source becomes blocked again", async () => {
-    const w = await world();
+  it("submits a fresh recurrence after official closure without inheriting past approval", async () => {
+    const w = await world(true, false, false, "todo"), old = await currentLifetime(w), [oldCard] = await cards(w);
+    await operatorDecisionWriteService(db).resolve(oldCard!.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
+    await issueService(db).update(w.oldId, { status: "done" });
     await issueService(db).update(w.sourceId, { status: "done" });
-    const lifetime = await currentLifetime(w);
     await db.transaction(async (tx) => {
       const auth = await lockOwnerHumanRequestAuthority(tx, { companyId: w.companyId, missionId: w.missionId,
         ownerActionIssueId: w.oldId, agentId: w.agentId, heartbeatRunId: w.heartbeatId, purpose: "settle" });
-      await closeOwnerHumanRequest(auth, lifetime.lifetimeId);
+      await closeOwnerHumanRequest(auth, old.lifetimeId);
     });
     await issueService(db).update(w.sourceId, { status: "blocked" });
-    const before = await snapshot(w);
-    expect((await produce(w)).id).toBe(w.oldId); expect(await snapshot(w)).toEqual(before);
+    const before = await snapshot(w), closed = await currentRow(w);
+    const [next, retry] = await Promise.all([produce(w), produce(w, other)]);
+    expect(next.id).not.toBe(w.oldId); expect(retry.id).toBe(next.id);
+    expect(await currentRow(w)).toEqual(closed); expect(await cards(w)).toEqual(before[1]);
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId,
+      issueId: next.id, status: "running" });
+    await issueService(db).checkout(next.id, w.agentId, ["todo"], runId);
+    const actor = { ...w.actor, runId }, get = () =>
+      readOwnerHumanRequest({ db, companyId: w.companyId, issueId: next.id, actor });
+    const initial = await get();
+    expect(initial).toMatchObject({ lifetimeId: old.lifetimeId, requestKey: null, anchorIssueId: next.id,
+      recoveryNeeded: false, closure: closed.payload!.closure, card: null, delivery: null, resubmit: null });
+    const data = { ...submission, reason: "새 재발 요청", humanRequest: { schemaVersion: 1 as const,
+      requestKey: randomUUID(), expectedCurrentLifetimeId: initial.lifetimeId } };
+    const send = (connection = db) => submitMissionOwnerDecision({ db: connection, issueId: next.id, actor, data });
+    const unchanged = await snapshot(w), transaction = db.transaction.bind(db);
+    const interrupted = vi.spyOn(db, "transaction").mockImplementationOnce((callback) => transaction(async (tx) => {
+      await callback(tx); throw new Error("recurrence transaction interrupted");
+    }));
+    try { await expect(send()).rejects.toThrow("recurrence transaction interrupted"); }
+    finally { interrupted.mockRestore(); }
+    expect(await snapshot(w)).toEqual(unchanged);
+    await expect(submitMissionOwnerDecision({ db, issueId: next.id, actor,
+      data: { ...data, humanRequest: { ...data.humanRequest, requestKey: old.requestKey } } })).rejects.toMatchObject({ status: 409 });
+    expect(await snapshot(w)).toEqual(unchanged);
+    const [fresh, replay] = await Promise.all([send(), send(other)]);
+    expect(replay).toEqual(fresh); expect(fresh.eventId).not.toBe(old.decisionEventId);
+    const now = await currentLifetime(w), projection = await get();
+    expect(now).toMatchObject({ anchorIssueId: next.id, heartbeatRunId: runId, authorAgentId: w.agentId,
+      requestKey: data.humanRequest.requestKey, submission: { ...submission, reason: data.reason } });
+    expect(now.lifetimeId).not.toBe(old.lifetimeId); expect(now.renewal).toBeUndefined();
+    expect((await currentRow(w)).payload).toMatchObject({ revision: 3, lifetimeId: now.lifetimeId, anchorIssueId: next.id });
+    expect(projection.card).toMatchObject({ id: fresh.operatorDecisionId, status: "pending",
+      result: null, resolvedAt: null, cancelledAt: null, requestKey: `moi2:${now.lifetimeId}` });
+    expect(projection.delivery).toBeNull(); expect(projection.recoveryNeeded).toBe(true);
+    expect(projection.closure).toBeNull();
+    expect(projection.resubmit).toEqual({ ...data, humanRequest: { ...data.humanRequest, expectedCurrentLifetimeId: now.lifetimeId } });
+    expect(await submitMissionOwnerDecision({ db, issueId: next.id, actor, data: projection.resubmit! })).toEqual(fresh);
+    const after = await snapshot(w);
+    for (const row of before[0].filter((row) => row.eventType !== "owner_human_current_v1")) {
+      expect(after[0].find((event) => event.id === row.id)).toEqual(row);
+    }
+    expect(after[1].find((row) => row.id === oldCard!.id)).toEqual(before[1][0]);
+    expect(after[4]).toEqual(before[4]); expect(await anchors(w)).toHaveLength(2); expect(await cards(w)).toHaveLength(2);
+    expect(after[2].find((row) => row.id === w.oldId)).toEqual(before[2].find((row) => row.id === w.oldId));
+    expect(after[3].find((row) => row.id === w.heartbeatId)).toEqual(before[3][0]);
   });
 
   it("preserves legacy open unassigned anchors for the existing supervision wake path", async () => {

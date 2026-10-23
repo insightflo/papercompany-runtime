@@ -109,6 +109,27 @@ export async function readOwnerHumanRequest(input: {
         scope: auth.scope, recoveryNeeded: false, closure: null, card: null, delivery: null, resubmit: null };
     }
     const lifetime = current.lifetime;
+    // A closed source lifetime remains the CAS predecessor until the owner submits
+    // a new request. Expose only its number on the one live recurrence anchor:
+    // no historical text, key, approval, delivery or replay body is inherited.
+    if (current.pointer.anchorIssueId !== auth.anchor.id && !current.pointer.recoveryNeeded) {
+      if (auth.scope.target.kind !== "source_issue" || !auth.source
+        || auth.source.status !== "blocked" || auth.source.hiddenAt
+        || ["completed", "cancelled"].includes(mission.status)) return fail();
+      const siblings = await tx.select().from(issues).where(and(
+        eq(issues.companyId, input.companyId), eq(issues.missionId, issue.missionId),
+        eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, auth.source.id)));
+      const previous = siblings.find((row) => row.id === current.pointer.anchorIssueId);
+      const open = siblings.filter((row) => !row.hiddenAt && !["done", "cancelled"].includes(row.status));
+      if (!previous || previous.hiddenAt || !["done", "cancelled"].includes(previous.status)
+        || open.length !== 1 || open[0]!.id !== auth.anchor.id
+        || current.lifetime.authorAgentId !== agentId
+        || current.lifetime.sourceIssueId !== auth.source.id
+        || current.lifetime.cardInput.workflowRunId !== (auth.run?.id ?? null)) return fail();
+      return { lifetimeId: current.lifetime.lifetimeId, requestKey: null, anchorIssueId: auth.anchor.id,
+        scope: auth.scope, recoveryNeeded: false, closure: current.pointer.closure,
+        card: null, delivery: null, resubmit: null };
+    }
     if (current.pointer.anchorIssueId !== auth.anchor.id || lifetime.authorAgentId !== agentId
       || lifetime.sourceIssueId !== (auth.source?.id ?? null)
       || lifetime.cardInput.workflowRunId !== (auth.run?.id ?? null)) return fail();
