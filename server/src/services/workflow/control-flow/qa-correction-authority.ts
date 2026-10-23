@@ -36,13 +36,26 @@ export function requireQaCorrection(value: unknown, reason: QaCorrectionFailureR
   if (!value) throw new QaCorrectionReadError(reason);
 }
 
-/** SELECT-only. Historical reads compare immutable logical identity, not today's attempt counters. */
-export async function readQaCorrectionAttempt(db: QaCorrectionDb, p: QaCorrectionPreparation,
-  attempt: QaCorrectionAttempt, current: boolean) {
+export type QaCorrectionAttemptCache = WeakMap<QaCorrectionDb, Map<string, ReturnType<typeof readAttemptRows>>>;
+async function readAttemptRows(db: QaCorrectionDb, p: QaCorrectionPreparation, attempt: QaCorrectionAttempt) {
   const [step] = await db.select().from(workflowStepRuns).where(and(
     eq(workflowStepRuns.id, attempt.stepRunId), eq(workflowStepRuns.workflowRunId, p.workflowRunId)));
   const [issue] = await db.select().from(issues).where(and(
     eq(issues.id, attempt.issueId), eq(issues.companyId, p.companyId)));
+  return { step, issue };
+}
+/** Observation-local raw rows only; historical checks still run for every supplied identity. */
+export async function readQaCorrectionAttempt(db: QaCorrectionDb, p: QaCorrectionPreparation,
+  attempt: QaCorrectionAttempt, current: boolean, cache?: QaCorrectionAttemptCache) {
+  let rows: ReturnType<typeof readAttemptRows>;
+  if (!current && cache) {
+    let entries = cache.get(db);
+    if (!entries) { entries = new Map(); cache.set(db, entries); }
+    const key = JSON.stringify([attempt.stepRunId, attempt.issueId, p.workflowRunId, p.companyId]);
+    rows = entries.get(key) ?? readAttemptRows(db, p, attempt);
+    entries.set(key, rows);
+  } else rows = readAttemptRows(db, p, attempt);
+  const { step, issue } = await rows;
   requireQaCorrection(step && issue && step.stepId === attempt.stepId && step.issueId === issue.id
     && issue.missionId === p.missionId, "scope");
   if (current) {
@@ -53,13 +66,14 @@ export async function readQaCorrectionAttempt(db: QaCorrectionDb, p: QaCorrectio
   return step;
 }
 
-export async function readQaCorrectionScope(db: QaCorrectionDb, p: QaCorrectionPreparation, current: boolean) {
+export async function readQaCorrectionScope(db: QaCorrectionDb, p: QaCorrectionPreparation,
+  current: boolean, cache?: QaCorrectionAttemptCache) {
   const [run] = await db.select().from(workflowRuns).where(and(
     eq(workflowRuns.id, p.workflowRunId), eq(workflowRuns.companyId, p.companyId)));
   const [mission] = await db.select().from(missions).where(and(
     eq(missions.id, p.missionId), eq(missions.companyId, p.companyId)));
   requireQaCorrection(run && mission && run.missionId === mission.id, "scope");
-  const producer = await readQaCorrectionAttempt(db, p, p.producer, current);
+  const producer = await readQaCorrectionAttempt(db, p, p.producer, current, cache);
   if (current) {
     requireQaCorrection(run.dispatchAuthorityVersion === p.dispatchAuthorityVersion, "attempt");
     requireQaCorrection(run.status !== "cancelled" && mission.status !== "cancelled", "scope");
@@ -70,8 +84,8 @@ export async function readQaCorrectionScope(db: QaCorrectionDb, p: QaCorrectionP
 
 /** An official event plus its real original wake is required, including for legacy NULL identities. */
 export async function readQaCorrectionVerdict(db: QaCorrectionDb, p: QaCorrectionPreparation,
-  v: QaCorrectionVerdictAuthority, current: boolean) {
-  const qa = await readQaCorrectionAttempt(db, p, v.qa, current);
+  v: QaCorrectionVerdictAuthority, current: boolean, cache?: QaCorrectionAttemptCache) {
+  const qa = await readQaCorrectionAttempt(db, p, v.qa, current, cache);
   requireQaCorrection(qa.id !== p.producer.stepRunId, "verdict");
   const [event] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, v.eventId));
   requireQaCorrection(event && event.companyId === p.companyId && event.missionId === p.missionId

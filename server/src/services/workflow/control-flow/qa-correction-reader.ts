@@ -18,7 +18,7 @@ import {
 } from "./qa-correction-contract.js";
 import {
   QaCorrectionReadError, readQaCorrectionAttempt, readQaCorrectionQuality, readQaCorrectionScope,
-  readQaCorrectionVerdict, requireQaCorrection, type QaCorrectionDb,
+  readQaCorrectionVerdict, requireQaCorrection, type QaCorrectionDb, type QaCorrectionAttemptCache,
 } from "./qa-correction-authority.js";
 
 // Product metadata is a lookup hint only; every use below reads the actual issuance chain.
@@ -42,8 +42,9 @@ export interface IssuedQaCorrection {
 }
 type Scope = { companyId: string; workflowRunId: string; appliedEventId: string };
 type Event = typeof workflowTransitionEvents.$inferSelect;
-type IssuedCache = Map<string, { issued: IssuedQaCorrection; ancestors: Set<string>; bindingCheck?: Promise<void> }>;
-
+type IssuedCache = Map<string, { issued: IssuedQaCorrection; ancestors: Set<string>; bindingCheck?: Promise<void> }>
+  & { attempts: QaCorrectionAttemptCache };
+const observationCache = (): IssuedCache => Object.assign(new Map(), { attempts: new WeakMap() });
 function productFile(product: typeof issueWorkProducts.$inferSelect, registeredLegacy = false): string {
   const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
     .map(key => product.metadata?.[key]).find((value): value is string => typeof value === "string" && value.trim().length > 0);
@@ -66,7 +67,7 @@ function inside(file: string, directory: string) {
 /** Shared by new-issuance validation and history. No branch confers ordinary selector authority. */
 export async function readQaCorrectionSources(db: QaCorrectionDb, p: QaCorrectionPreparation,
   current: boolean, ancestors = new Set<string>(), sourceMeasured?: QaCorrectionSourceMeasured): Promise<QaCorrectionSourceRead[]> {
-  return readSources(db, p, current, ancestors, sourceMeasured, new Map());
+  return readSources(db, p, current, ancestors, sourceMeasured, observationCache());
 }
 async function readSources(db: QaCorrectionDb, p: QaCorrectionPreparation, current: boolean,
   ancestors: Set<string>, sourceMeasured: QaCorrectionSourceMeasured | undefined, cache: IssuedCache): Promise<QaCorrectionSourceRead[]> {
@@ -119,7 +120,7 @@ async function readSources(db: QaCorrectionDb, p: QaCorrectionPreparation, curre
         const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, producer.heartbeatRunId));
         requireQaCorrection(heartbeat && heartbeat.companyId === p.companyId && heartbeat.issueId === attempt.issueId
           && heartbeat.workflowStepRunId === attempt.stepRunId && heartbeat.workflowExecutionGeneration === attempt.executionGeneration, "source");
-        const step = await readQaCorrectionAttempt(db, p, attempt, current);
+        const step = await readQaCorrectionAttempt(db, p, attempt, current, cache.attempts);
         try { await producerAttempt(db, heartbeat, { ...step, ...attempt, id: step.id }); }
         catch (error) { if (!(error instanceof HttpError)) throw error; throw new QaCorrectionReadError("source"); }
         origin = "workflow_producer";
@@ -132,7 +133,7 @@ async function readSources(db: QaCorrectionDb, p: QaCorrectionPreparation, curre
     requireQaCorrection(row && row.companyId === p.companyId && row.workflowRunId === p.workflowRunId
       && row.consumerStepRunId === binding.consumer.stepRunId && row.referencedStepId === binding.referencedStepId
       && binding.referencedStepId === p.producer.stepId, "binding");
-    await readQaCorrectionAttempt(db, p, binding.consumer, current);
+    await readQaCorrectionAttempt(db, p, binding.consumer, current, cache.attempts);
     if (current) requireQaCorrection(row.workProductId === binding.expectedProductId
       && (row.sourceExecutionGeneration === null || row.sourceExecutionGeneration === p.producer.executionGeneration), "binding");
   }
@@ -224,16 +225,16 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, activePath: Set<stri
     const followup = parseQaCorrectionEventPayload("qa_correction_followup_requested", row.payload);
     eventScope(row, p, followup.target, qaCorrectionFollowupKey(p.correctionId, followup.target));
     requireQaCorrection(row.createdAt >= appliedRow.createdAt, "record");
-    await readQaCorrectionAttempt(db, p, followup.target, false);
+    await readQaCorrectionAttempt(db, p, followup.target, false, cache.attempts);
     followupRows.push(row); followups.push(followup);
   }
   assertQaCorrectionEventLinks({ preparation: preparedRow.payload,
     sourceMeasured: { eventId: measuredRow.id, payload: measuredRow.payload },
     applied: { eventId: appliedRow.id, payload: appliedRow.payload },
     followups: followupRows.map(row => ({ eventId: row.id, payload: row.payload })) });
-  await readQaCorrectionScope(db, p, false);
+  await readQaCorrectionScope(db, p, false, cache.attempts);
   for (const verdict of p.authority.verdicts) {
-    const fact = await readQaCorrectionVerdict(db, p, verdict, false);
+    const fact = await readQaCorrectionVerdict(db, p, verdict, false, cache.attempts);
     requireQaCorrection(fact.event.createdAt <= preparedRow.createdAt, "verdict");
   }
   await readQaCorrectionQuality(db, p, false, new Date(a.appliedAt));
@@ -263,7 +264,7 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, activePath: Set<stri
 
 /** One observation: reuse completed proofs; every root's source ancestry is fixed before checking successors. */
 export async function readQaCorrectionSourcesWithHistory(db: QaCorrectionDb, p: QaCorrectionPreparation) {
-  const cache: IssuedCache = new Map();
+  const cache = observationCache();
   const sources = await readSources(db, p, true, new Set(), undefined, cache);
   const roots = new Set(p.sources.flatMap(s => s.provenance.kind === "prior_correction" ? [s.provenance.appliedEventId] : []));
   const histories = new Map<string, Awaited<ReturnType<typeof readHistory>>>();
@@ -271,7 +272,7 @@ export async function readQaCorrectionSourcesWithHistory(db: QaCorrectionDb, p: 
     await readHistory(db, { companyId: p.companyId, workflowRunId: p.workflowRunId, appliedEventId }, cache));
   return { sources, histories };
 }
-async function readHistory(db: QaCorrectionDb, scope: Scope, cache: IssuedCache = new Map()) {
+async function readHistory(db: QaCorrectionDb, scope: Scope, cache: IssuedCache = observationCache()) {
   const issued = await readIssued(db, scope, new Set(), cache), root = cache.get(scope.appliedEventId)!;
   await (root.bindingCheck ??= verifyBindingSuccessors(db, scope, issued, cache));
   return { issued, readAncestor: async (appliedEventId: string): Promise<IssuedQaCorrection> => {
@@ -284,16 +285,14 @@ async function readHistory(db: QaCorrectionDb, scope: Scope, cache: IssuedCache 
 export async function readIssuedQaCorrectionHistory(db: QaCorrectionDb, scope: Scope) {
   return readHistory(db, scope);
 }
-
 /** C03/C12 historical issuance only. New QA/PASS and B→C must not require the source verdict to stay latest. */
 export async function readIssuedQaCorrection(db: QaCorrectionDb, scope: Scope): Promise<IssuedQaCorrection> {
   return (await readIssuedQaCorrectionHistory(db, scope)).issued;
 }
-
 /** Original attempt history only: reuse issuance proofs per call, excluding current binding successors. */
 export async function readIssuedQaCorrectionFollowupForAttempt(db: Pick<Db, "select">, ref: QaCorrectionFollowupRef) {
   const { readIssuedQaCorrectionFollowup } = await import("./qa-correction-followup.js");
-  const cache: IssuedCache = new Map(); // SELECT-only type bridge grants no transaction or lock authority.
+  const cache = observationCache(); // SELECT-only type bridge grants no transaction or lock authority.
   return readIssuedQaCorrectionFollowup(db as QaCorrectionDb, ref,
     (connection, scope) => readIssued(connection, scope, new Set(), cache));
 }
