@@ -16,7 +16,6 @@ import { activatePlanningMissionForWorkflowRun } from "../services/missions/miss
 import { seedReplacement } from "./helpers/replacement-scenario.js";
 import { createCommitSourceHarness, issueC02, issueNextC02, deliveryInput, deliveryState,
   correctionRows, waitForDeliveryLocks } from "./helpers/c02-delivery-fixture.js";
-
 // C02/C12 expectations: one issued request, one persisted link/receipt, no replay execution.
 // Only the external adapter is replaced. Issuance, proof, transactions, claims and drains are real.
 const adapter = vi.hoisted(() => vi.fn());
@@ -69,11 +68,11 @@ async function world(quality = true) {
 }
 type World = Awaited<ReturnType<typeof world>>;
 const wake = (w: World, db = owned.db, opts = w.opts) => heartbeatService(track(db)).wakeup(w.i.agentId, opts);
-function gate() {
+function gate(onEnter?: () => Promise<void>) {
   let enter!: (runId: string) => void, release!: () => void;
   const entered = new Promise<string>(resolve => { enter = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  adapter.mockImplementation(async ({ runId }) => { enter(runId); await held; return stopped; });
+  adapter.mockImplementation(async ({ runId }) => { await onEnter?.(); enter(runId); await held; return stopped; });
   return { release, entered: () => new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("adapter did not enter")), 5000);
     void entered.then(runId => { clearTimeout(timer); resolve(runId); });
@@ -109,9 +108,11 @@ async function one(w: World) {
   return rows;
 }
 it.each(["initial", "queued", "deferred"] as const)("%s public writer crosses the real root lock chain once", async mode => {
-  const w = await world(), g = gate(), peer = track(owned.connect()), holder = track(owned.connect());
-  let busy: Awaited<ReturnType<typeof owner>> | undefined, invalidIds: string[] = [], ordinaryId: string | undefined;
-  if (mode === "queued") await pending(w);
+  const w = await world(), peer = track(owned.connect()), holder = track(owned.connect());
+  let busy: Awaited<ReturnType<typeof owner>> | undefined, invalidIds: string[] = [], ordinaryId: string | undefined, wakeId: string | undefined;
+  const g = gate(async () => { if (busy) expect(await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, busy.id)))
+    .toEqual([expect.objectContaining({ status: "cancelled" })]); });
+  if (mode === "queued") wakeId = (await pending(w)).id;
   if (mode === "deferred") {
     busy = await owner(w);
     const [invalid] = await owned.db.insert(agents).values({ companyId: w.i.companyId, name: "Not invokable", status: "paused" }).returning();
@@ -120,7 +121,7 @@ it.each(["initial", "queued", "deferred"] as const)("%s public writer crosses th
       payload: { issueId: w.i.issueId }, requestedAt: new Date(Date.now() - 10000 + n),
     }))).returning({ id: agentWakeupRequests.id });
     invalidIds = bad.map(row => row.id);
-    await pending(w, true);
+    wakeId = (await pending(w, true)).id;
     const [ordinary] = await owned.db.insert(agentWakeupRequests).values({ companyId: w.i.companyId, agentId: w.i.agentId,
       source: "automation", status: "deferred_issue_execution", requestedAt: new Date(Date.now() + 10000),
       payload: { issueId: w.i.issueId, _paperclipWakeContext: { issueId: w.i.issueId } } }).returning();
@@ -143,7 +144,8 @@ it.each(["initial", "queued", "deferred"] as const)("%s public writer crosses th
     await replay;
     await g.entered();
     const rows = await one(w), count = adapter.mock.calls.length;
-    expect(count).toBe(1);
+    expect(count).toBe(1); if (wakeId) expect(rows.wakes[0]!.id).toBe(wakeId);
+    if (busy) await heartbeatService(owned.db).cancelRun(busy.id);
     expect((await wake(w, peer))!.id).toBe(rows.heartbeats[0]!.id);
     expect(adapter).toHaveBeenCalledTimes(count);
     expect(rootCalls.mock.calls.filter(([, i]) => i.mode === mode).length).toBeGreaterThan(0);
@@ -251,11 +253,18 @@ it.each(["active", "mention"] as const)("%s merge keeps both directions isolated
 }, 60000);
 it.each(["queued", "deferred"] as const)("%s nested public pending validates DB only, rolls back failures and drains the exact wake after the outer commit", async mode => {
   const w = await world(), busy = mode === "deferred" ? await owner(w) : null;
-  const row = await pending(w, !!busy), s = await seedReplacement(owned.db);
-  extraRoots.push(s.tempRoot);
+  const s = await seedReplacement(owned.db); extraRoots.push(s.tempRoot);
   const target = (await admitReplacement(owned.db, s.input, s.actor)).run;
   expect(await claimPlainWorkflowStart(owned.db, target.id, { activateMission: activatePlanningMissionForWorkflowRun } as never)).toBe("started");
-  const before = await state(w);
+  if (busy) {
+    const untouched = await state(w), io = observations.mock.calls.length;
+    await expect(withReplacementFirstDelivery(owned.db, target.id, tx => heartbeatService(track(tx)).cancelRun(busy.id)))
+      .rejects.toThrow("heartbeat_cancellation_root_required"); expect(await state(w)).toEqual(untouched);
+    expect(await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, busy.id))).toEqual([busy]);
+    expect(adapter).not.toHaveBeenCalled(); expect(observations).toHaveBeenCalledTimes(io);
+    await heartbeatService(owned.db).cancelRun(busy.id);
+  }
+  const row = await pending(w, !!busy), before = await state(w);
   await expect(owned.db.transaction(tx => wake(w, track(tx as unknown as Db)))).rejects.toBeInstanceOf(QaCorrectionRootOwnerRequired);
   if (!busy) await expect(owned.db.transaction(tx => heartbeatService(track(tx as unknown as Db)).resumeQueuedRuns(w.i.agentId)))
     .rejects.toBeInstanceOf(QaCorrectionRootOwnerRequired);
@@ -267,34 +276,25 @@ it.each(["queued", "deferred"] as const)("%s nested public pending validates DB 
     const io = observations.mock.calls.length, calls = adapter.mock.calls.length;
     await expect(withReplacementFirstDelivery(owned.db, target.id, async tx => {
       const changed = structuredClone(w.opts), payload = { ...row.payload };
-      if (fault === "ref") changed.payload = { ...changed.payload, qaCorrectionFollowup: {} };
-      if (fault === "key") changed.idempotencyKey = "qa-correction-wake:wrong";
-      if (fault === "source") changed.source = "on_demand";
-      if (fault === "actor") changed.requestedByActorId = "other";
+      if (fault === "ref") changed.payload = { ...changed.payload, qaCorrectionFollowup: {} }; if (fault === "key") changed.idempotencyKey = "qa-correction-wake:wrong";
+      if (fault === "source") changed.source = "on_demand"; if (fault === "actor") changed.requestedByActorId = "other";
       if (fault === "payload") changed.payload = { ...changed.payload, extra: true };
-      if (fault === "proof") payload.__paperclipWorkflowProducerAttempt = {};
-      if (fault === "context") payload._paperclipWakeContext = {};
+      if (fault === "proof") payload.__paperclipWorkflowProducerAttempt = {}; if (fault === "context") payload._paperclipWakeContext = {};
       if (fault === "proof" || fault === "context") await tx.update(agentWakeupRequests).set({ payload }).where(eq(agentWakeupRequests.id, row.id));
-      if (busy && fault === "rollback") await heartbeatService(track(tx)).cancelRun(busy.id);
       expect(await wake(w, track(tx), changed)).toBeNull();
       throw new Error(fault === "rollback" ? "rollback sentinel" : "unexpected nested acceptance");
     })).rejects.toThrow(fault === "rollback" ? "rollback sentinel" : /qa_correction_delivery|workproduct_producer_attempt_unproven/);
     expect(await state(w)).toEqual(before);
-    expect(observations).toHaveBeenCalledTimes(io);
-    expect(adapter).toHaveBeenCalledTimes(calls);
+    expect(observations).toHaveBeenCalledTimes(io); expect(adapter).toHaveBeenCalledTimes(calls);
   }
   const g = gate(), io = observations.mock.calls.length;
   try {
     await withReplacementFirstDelivery(owned.db, target.id, async tx => {
-      if (busy) await heartbeatService(track(tx)).cancelRun(busy.id);
       expect(await wake(w, track(tx))).toBeNull();
       expect(await heartbeatService(track(tx)).resumeQueuedRuns(w.i.agentId)).toBeUndefined();
       expect(await state(w)).toEqual(before);
-      expect(adapter).not.toHaveBeenCalled();
-      expect(observations).toHaveBeenCalledTimes(io);
+      expect(adapter).not.toHaveBeenCalled(); expect(observations).toHaveBeenCalledTimes(io);
     });
-    await g.entered();
-    expect((await one(w)).wakes[0]!.id).toBe(row.id);
-    expect(adapter).toHaveBeenCalledTimes(1);
+    await g.entered(); expect((await one(w)).wakes[0]!.id).toBe(row.id); expect(adapter).toHaveBeenCalledTimes(1);
   } finally { g.release(); await drain(); }
 }, 60000);

@@ -32,12 +32,13 @@ it.each([
   const heartbeat = heartbeatService(db);
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
+  let busyRunId: string | null = null;
   adapter.mockReset().mockImplementation(async () => {
+    if (busyRunId) expect(await f.readRun(busyRunId)).toMatchObject({ status: "cancelled" });
     await held;
     return stopped;
   });
   try {
-    let busyRunId: string | null = null;
     if (path === "queued") {
       await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
     } else {
@@ -95,6 +96,9 @@ it.each([
       await heartbeat.cancelRun(busyRunId!);
     }
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+    if (busyRunId) await heartbeat.cancelRun(busyRunId);
+    await heartbeat.resumeQueuedRuns(f.agentId);
+    expect(adapter).toHaveBeenCalledTimes(1);
 
     // helper 반환 대신 adapter가 대기하는 동안 DB의 실행과 원래 요청을 관측한다.
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId));

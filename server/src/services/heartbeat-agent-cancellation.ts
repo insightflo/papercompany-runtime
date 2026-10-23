@@ -130,7 +130,7 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
       if (!bulk) await appendRunEvent(cancelled, 1, {
         eventType: "lifecycle", stream: "system", level: "warn", message: "run cancelled",
       });
-      await releaseIssueExecutionAndPromote(bulk ? original : cancelled, { resumeQueue: bulk });
+      await releaseIssueExecutionAndPromote(bulk ? original : cancelled);
     }
     if (!bulk) {
       for (const agentId of new Set(committed.changed.map(({ original }) => original.agentId))) {
