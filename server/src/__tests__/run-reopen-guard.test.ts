@@ -121,14 +121,14 @@ describeEP("run-reopen-guard v1", () => {
       expect(await db.select().from(issues).where(eq(issues.originRunId, world.runId))).toHaveLength(0);
     });
 
-    it("flag OFF (legacy regression): the same recompute revives the run to running", async () => {
+    it("flag OFF: recompute preserves the failed terminal state", async () => {
       await setRunReopenGuardFlag(db, false);
       const world = await seedFailedRunWithLiveStep("failed");
 
       const result = await syncWorkflowRunState(db, world.runId);
 
-      expect(result.status).toBe("running");
-      expect((await runOf(db, world.runId))?.status).toBe("running");
+      expect(result.status).toBe("failed");
+      expect((await runOf(db, world.runId))?.status).toBe("failed");
       expect(await refusalsOf(db, world.runId)).toHaveLength(0);
     });
   });
