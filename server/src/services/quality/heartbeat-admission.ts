@@ -122,6 +122,8 @@ export async function queuePausedAgentWakeupRequest(
     requestedByActorId: string | null;
     idempotencyKey: string | null;
     missionIdForWake: string | null;
+    contextSnapshot?: Record<string, unknown>;
+    contextSnapshotKey?: string;
     recordEvent: HeartbeatQueueEventRecorder;
   },
 ): Promise<void> {
@@ -129,6 +131,8 @@ export async function queuePausedAgentWakeupRequest(
   if (isQaCorrectionWakeKey(input.idempotencyKey) || Object.hasOwn(input.payload ?? {}, "qaCorrectionFollowup")) {
     throw conflict("qa_correction_root_admission_required");
   }
+  const storedPayload = input.contextSnapshot && input.contextSnapshotKey
+    ? { ...(input.payload ?? {}), [input.contextSnapshotKey]: input.contextSnapshot } : input.payload;
   let wakeupRequestId: string | null = null;
   let recordWaiting = true;
   if (isBoundedExecutionWakeKey(input.idempotencyKey)) {
@@ -157,7 +161,7 @@ export async function queuePausedAgentWakeupRequest(
       await db
         .update(agentWakeupRequests)
         .set({
-          payload: preserveWorkflowAttemptProof(existingQueuedWake.payload, input.payload),
+          payload: preserveWorkflowAttemptProof(existingQueuedWake.payload, storedPayload),
           coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
           updatedAt: new Date(),
         })
@@ -173,7 +177,7 @@ export async function queuePausedAgentWakeupRequest(
         source: input.source,
         triggerDetail: input.triggerDetail,
         reason: input.reason,
-        payload: input.payload,
+        payload: storedPayload,
         ...input.typedQueueColumns,
         status: "queued",
         requestedByActorType: input.requestedByActorType,

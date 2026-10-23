@@ -161,6 +161,35 @@ describeDb("C08 owner response initial heartbeat admission", () => {
       .toEqual([expect.objectContaining({ status: "queued", issueId: w.anchorId })]);
   });
 
+  it("keeps paused bounded delivery separate, exact, and promotable", async () => {
+    const first = await world(), firstDelivery = await resolvedDelivery(first);
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, first.agentId));
+    const generic = { reason: "manual", payload: { issueId: first.anchorId },
+      contextSnapshot: { issueId: first.anchorId, missionId: first.missionId } };
+    await heartbeatService(db).wakeup(first.agentId, generic);
+    await heartbeatService(db).wakeup(first.agentId, firstDelivery.options);
+    expect(await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, first.companyId))).toHaveLength(2);
+
+    const w = await world(), delivery = await resolvedDelivery(w);
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, w.agentId));
+    await heartbeatService(db).wakeup(w.agentId, delivery.options);
+    const [firstBounded] = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, w.companyId));
+    await heartbeatService(db).wakeup(w.agentId, delivery.options);
+    await heartbeatService(db).wakeup(w.agentId, { reason: "manual", payload: { issueId: w.anchorId },
+      contextSnapshot: { issueId: w.anchorId, missionId: w.missionId } });
+    const rows = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, w.companyId));
+    expect(rows).toHaveLength(2);
+    const bounded = rows.find(row => row.idempotencyKey === delivery.options.idempotencyKey)!;
+    const storedContext = { ...delivery.options.contextSnapshot, taskId: w.anchorId, taskKey: w.anchorId,
+      wakeSource: "automation", wakeTriggerDetail: "system" };
+    expect(bounded).toMatchObject({ id: firstBounded!.id, agentId: w.agentId, issueId: w.anchorId,
+      status: "queued", coalescedCount: 0 });
+    expect(bounded.payload).toEqual({ ...delivery.options.payload, _paperclipWakeContext: storedContext });
+  });
+
   it("rechecks the stored wake identity before queued promotion", async () => {
     const currentWorld = await world(), current = await resolvedDelivery(currentWorld);
     const currentBlocker = await blockMissionQueue(currentWorld);

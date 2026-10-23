@@ -572,7 +572,7 @@ export async function recordHeartbeatQueueTransitionEvent(db: Db, input: {
       reasonCode: input.reasonCode ?? null,
       idempotencyKey: input.idempotencyKey,
       payload: input.payload ?? {},
-    });
+    }).onConflictDoNothing();
   } catch {
     // unique index on (company_id, idempotency_key) WHERE not null - duplicate, ignore
   }
@@ -9285,9 +9285,9 @@ export function heartbeatService(db: Db) {
       await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...recoveryAdmission, operatorDecisionOnly: true });
       await queuePausedAgentWakeupRequest(tx as unknown as Db, {
         companyId: agent.companyId, agentId, source, triggerDetail, reason, payload, typedQueueColumns,
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null,
-        missionIdForWake,
+        requestedByActorType: opts.requestedByActorType ?? null, requestedByActorId: opts.requestedByActorId ?? null,
+        idempotencyKey: opts.idempotencyKey ?? null, missionIdForWake, contextSnapshot: enrichedContextSnapshot,
+        contextSnapshotKey: DEFERRED_WAKE_CONTEXT_KEY,
         recordEvent: (recordDb, event) => recordHeartbeatQueueTransitionEvent(recordDb, event),
       });
     }, { label: "enqueueWakeup:paused-admission" });
