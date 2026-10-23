@@ -1,11 +1,11 @@
-import { companies, activityLog, issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { companies, activityLog, issueComments, issues, missions, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { conflict } from "../../errors.js";
 import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
 import { ownerHumanCurrentKey, ownerHumanCurrentSchema, ownerHumanLifetimeSchema,
   ownerHumanScopeSchema, sameOwnerHumanValue, type OwnerHumanTx } from "./owner-human-request-contract.js";
-import { closeOwnerHumanRequest } from "./owner-human-request-state.js";
+import { closeOwnerHumanRequest, readOwnerHumanCurrent } from "./owner-human-request-state.js";
 
 const SETTLEABLE_OWNER_ACTION_STATUSES = ["backlog", "todo", "blocked"];
 
@@ -25,7 +25,6 @@ async function lockCurrentSettlement(tx: OwnerHumanTx, pointerRow: typeof workfl
     || pointerRow.missionId !== pointer.data.scope.missionId
     || pointerRow.eventType !== pointer.data.kind
     || pointerRow.idempotencyKey !== ownerHumanCurrentKey(pointer.data.scope)) return settlementConflict();
-  if (!pointer.data.recoveryNeeded) return null;
   const [lifetimeRow] = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, pointer.data.scope.companyId),
     eq(workflowTransitionEvents.id, pointer.data.lifetimeId)));
@@ -37,23 +36,31 @@ async function lockCurrentSettlement(tx: OwnerHumanTx, pointerRow: typeof workfl
   const lifetime = parsed.data;
   let auth: OwnerHumanAuthority;
   if (lifetime.renewal) {
-    const [previousRow] = await tx.select().from(workflowTransitionEvents).where(and(
-      eq(workflowTransitionEvents.companyId, lifetime.scope.companyId),
-      eq(workflowTransitionEvents.id, lifetime.renewal.previousLifetimeId)));
-    const previous = ownerHumanLifetimeSchema.safeParse(previousRow?.payload);
-    if (!previous.success || previous.data.lifetimeId !== lifetime.renewal.previousLifetimeId
-      || previous.data.authorAgentId !== lifetime.authorAgentId
-      || previous.data.heartbeatRunId !== lifetime.heartbeatRunId
-      || !sameOwnerHumanValue(previous.data.scope, lifetime.scope)
-      || !sameOwnerHumanValue(previous.data.submission, lifetime.submission)) return settlementConflict();
-    const renewal = await lockOwnerHumanRequestAuthority(tx, {
+    let origin = lifetime;
+    const seen = new Set([lifetime.lifetimeId]);
+    while (origin.renewal) {
+      const previousLifetimeId = origin.renewal.previousLifetimeId;
+      if (seen.has(previousLifetimeId)) return settlementConflict();
+      seen.add(previousLifetimeId);
+      const [previousRow] = await tx.select().from(workflowTransitionEvents).where(and(
+        eq(workflowTransitionEvents.companyId, lifetime.scope.companyId),
+        eq(workflowTransitionEvents.id, previousLifetimeId)));
+      const previous = ownerHumanLifetimeSchema.safeParse(previousRow?.payload);
+      if (!previous.success || previous.data.lifetimeId !== previousLifetimeId
+        || previous.data.authorAgentId !== lifetime.authorAgentId
+        || previous.data.heartbeatRunId !== lifetime.heartbeatRunId
+        || previous.data.decisionEventId !== lifetime.decisionEventId
+        || !sameOwnerHumanValue(previous.data.scope, lifetime.scope)
+        || !sameOwnerHumanValue(previous.data.submission, lifetime.submission)) return settlementConflict();
+      origin = previous.data;
+    }
+    auth = await lockOwnerHumanRequestAuthority(tx, {
       companyId: lifetime.scope.companyId, missionId: lifetime.scope.missionId,
-      ownerActionIssueId: previous.data.anchorIssueId, agentId: lifetime.authorAgentId,
+      ownerActionIssueId: origin.anchorIssueId, agentId: lifetime.authorAgentId,
       heartbeatRunId: lifetime.heartbeatRunId, recoveryTarget: lifetime.submission.recoveryTarget,
-      purpose: "renew", renewal: { previousLifetimeId: previous.data.lifetimeId,
+      purpose: "settle", renewal: { previousLifetimeId: origin.lifetimeId,
         anchorIssueId: lifetime.anchorIssueId },
     });
-    auth = { ...renewal, purpose: "settle", renewal: undefined, renewalAnchor: undefined };
   } else {
     auth = await lockOwnerHumanRequestAuthority(tx, {
       companyId: lifetime.scope.companyId, missionId: lifetime.scope.missionId,
@@ -62,12 +69,19 @@ async function lockCurrentSettlement(tx: OwnerHumanTx, pointerRow: typeof workfl
       purpose: "settle",
     });
   }
+  const current = await readOwnerHumanCurrent(auth);
+  if (!current || current.pointerEventId !== pointerRow.id
+    || current.lifetime.lifetimeId !== lifetime.lifetimeId) return settlementConflict();
+  if (!current.pointer.recoveryNeeded) return null;
   return { auth, lifetimeId: lifetime.lifetimeId } satisfies LockedSettlement;
 }
 
 export async function lockSourceOwnerHumanSettlement(tx: OwnerHumanTx, input: {
   companyId: string; missionId: string; sourceIssueId: string;
 }): Promise<LockedSettlement | null> {
+  const [mission] = await tx.select({ id: missions.id }).from(missions).where(and(
+    eq(missions.companyId, input.companyId), eq(missions.id, input.missionId))).for("update");
+  if (!mission) return settlementConflict();
   const scope = ownerHumanScopeSchema.parse({ companyId: input.companyId, missionId: input.missionId,
     target: { kind: "source_issue", issueId: input.sourceIssueId } });
   const [pointer] = await tx.select().from(workflowTransitionEvents).where(and(
@@ -77,6 +91,9 @@ export async function lockSourceOwnerHumanSettlement(tx: OwnerHumanTx, input: {
 }
 
 export async function lockMissionOwnerHumanSettlements(tx: OwnerHumanTx, companyId: string, missionId: string) {
+  const [mission] = await tx.select({ id: missions.id }).from(missions).where(and(
+    eq(missions.companyId, companyId), eq(missions.id, missionId))).for("update");
+  if (!mission) return settlementConflict();
   const pointers = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.missionId, missionId),
     or(eq(workflowTransitionEvents.eventType, "owner_human_current_v1"),

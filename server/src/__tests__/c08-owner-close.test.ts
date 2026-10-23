@@ -9,7 +9,7 @@ import { runMissionTerminalCleanup } from "../services/missions/terminal-cleanup
 import { lockOwnerHumanRequestAuthority } from "../services/missions/owner-human-request-authority.js";
 import { ownerHumanCurrentKey, ownerHumanCurrentSchema,
   type OwnerHumanSubmission } from "../services/missions/owner-human-request-contract.js";
-import { saveOwnerHumanRequest } from "../services/missions/owner-human-request-state.js";
+import { renewOwnerHumanRequest, saveOwnerHumanRequest } from "../services/missions/owner-human-request-state.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import { getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -25,11 +25,14 @@ type World = { companyId: string; missionId: string; agentId: string; sourceId: 
 describeDb("C08 owner request native closeout", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: Db;
+  let other: Db;
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("c08-owner-close-");
     db = createDb(database.connectionString);
+    other = createDb(database.connectionString);
   }, 60_000);
   afterAll(async () => {
+    await other?.$client.end({ timeout: 5 });
     await db?.$client.end({ timeout: 5 });
     await database?.cleanup();
   });
@@ -95,6 +98,61 @@ describeDb("C08 owner request native closeout", () => {
     expect((await db.select().from(issues).where(eq(issues.id, w.sourceId)))[0]!.status).toBe("blocked");
   });
 
+  it("serializes first request creation before source settlement", async () => {
+    const w = await world();
+    await db.delete(workflowTransitionEvents).where(eq(workflowTransitionEvents.companyId, w.companyId));
+    let release!: () => void;
+    let locked!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const authorityLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const submit = db.transaction(async (tx) => {
+      const auth = await lockOwnerHumanRequestAuthority(tx, { companyId: w.companyId,
+        missionId: w.missionId, ownerActionIssueId: w.anchorId, agentId: w.agentId,
+        heartbeatRunId: w.heartbeatRunId });
+      locked();
+      await gate;
+      const decision = await recordMissionOwnerDecision({ db: tx,
+        issue: { id: w.anchorId, companyId: w.companyId, missionId: w.missionId },
+        submission, sourceIssueId: w.sourceId, heartbeatRunId: w.heartbeatRunId });
+      return saveOwnerHumanRequest(auth, { schemaVersion: 1, requestKey: "concurrent",
+        expectedCurrentLifetimeId: null, identityMode: "keyed",
+        decisionEventId: decision.eventId, submission });
+    });
+    await authorityLocked;
+    const settle = issueService(other).update(w.sourceId, { status: "done" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    release();
+    const [created] = await Promise.all([submit, settle]);
+    expect(await current({ ...w, lifetimeId: created.lifetime.lifetimeId })).toMatchObject({
+      lifetimeId: created.lifetime.lifetimeId, recoveryNeeded: false,
+      closure: { reason: "source_settled" },
+    });
+  });
+
+  it("closes a repeatedly renewed lifetime after its source settles", async () => {
+    const w = await world();
+    const renew = async (anchorId: string, lifetimeId: string, requestKey: string) => {
+      const nextAnchorId = randomUUID();
+      await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, anchorId));
+      await db.insert(issues).values({ id: nextAnchorId, companyId: w.companyId,
+        missionId: w.missionId, title: "Renewed owner action", status: "todo",
+        assigneeAgentId: w.agentId, originKind: "mission_main_executor_unblock", originId: w.sourceId });
+      const saved = await db.transaction(async (tx) => renewOwnerHumanRequest(
+        await lockOwnerHumanRequestAuthority(tx, { companyId: w.companyId, missionId: w.missionId,
+          ownerActionIssueId: anchorId, agentId: w.agentId, heartbeatRunId: w.heartbeatRunId,
+          purpose: "renew", renewal: { previousLifetimeId: lifetimeId, anchorIssueId: nextAnchorId } }),
+        { requestKey, expectedCurrentLifetimeId: lifetimeId }));
+      return { anchorId: nextAnchorId, lifetimeId: saved.lifetime.lifetimeId };
+    };
+    const first = await renew(w.anchorId, w.lifetimeId, "renewed-1");
+    const second = await renew(first.anchorId, first.lifetimeId, "renewed-2");
+    await issueService(db).update(w.sourceId, { status: "done" });
+    expect(await current({ ...w, anchorId: second.anchorId, lifetimeId: second.lifetimeId })).toMatchObject({
+      lifetimeId: second.lifetimeId, recoveryNeeded: false,
+      closure: { reason: "source_settled" },
+    });
+  });
+
   it("settles a stale anchor and its current lifetime atomically from a terminal source", async () => {
     const w = await world();
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, w.anchorId));
@@ -124,5 +182,20 @@ describeDb("C08 owner request native closeout", () => {
       closure: { reason } });
     expect((await db.select().from(missions).where(eq(missions.id, w.missionId)))[0]!.status)
       .toBe(status);
+  });
+
+  it("rejects terminal cleanup when an existing closure record is corrupt", async () => {
+    const w = await world();
+    await issueService(db).update(w.sourceId, { status: "done" });
+    const pointer = await current(w);
+    await db.update(workflowTransitionEvents).set({ payload: { schemaVersion: 2 } })
+      .where(eq(workflowTransitionEvents.id, pointer.closure!.eventId));
+    const [snapshot] = await db.select().from(missions).where(eq(missions.id, w.missionId));
+    await expect(runMissionTerminalCleanup(db, { companyId: w.companyId,
+      missionId: w.missionId, status: "cancelled", now: new Date(), completedAt: null,
+      missionSnapshot: snapshot!, pendingMissionUpdates: { updatedAt: new Date() } }))
+      .rejects.toMatchObject({ status: 409 });
+    expect((await db.select().from(missions).where(eq(missions.id, w.missionId)))[0]!.status)
+      .toBe("active");
   });
 });

@@ -74,7 +74,7 @@ export type OwnerHumanAuthorityInput = {
 // Discovery reads are not authority: all mutable identity facts are checked again under these locks.
 export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: OwnerHumanAuthorityInput) {
   const purpose = input.purpose ?? "submit";
-  if ((purpose === "renew") !== Boolean(input.renewal)) return reject();
+  if ((purpose === "renew" && !input.renewal) || (purpose === "submit" && input.renewal)) return reject();
   const [mission] = await tx.select().from(missions).where(and(
     eq(missions.id, input.missionId), eq(missions.companyId, input.companyId))).for("update");
   if (!mission || mission.ownerAgentId !== input.agentId) return reject();
@@ -147,16 +147,17 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
     const previous = await readOwnerHumanOrigin(tx, input.companyId, input.renewal.previousLifetimeId);
     await assertOwnerHumanOriginalDecision(tx, previous);
     if (oversight || !source || !renewalAnchor || renewalAnchor.id === anchor.id
-      || !["done", "cancelled"].includes(anchor.status) || renewalAnchor.hiddenAt
-      || ["done", "cancelled"].includes(renewalAnchor.status)
+      || renewalAnchor.hiddenAt
       || renewalAnchor.originKind !== "mission_main_executor_unblock"
       || renewalAnchor.originId !== source.id || renewalAnchor.assigneeAgentId !== input.agentId
       || previous.anchorIssueId !== anchor.id || previous.authorAgentId !== input.agentId
       || previous.heartbeatRunId !== heartbeat.id || !sameOwnerHumanValue(previous.scope, scope)
       || !sameOwnerHumanValue(previous.submission.recoveryTarget, input.recoveryTarget)
       || previous.cardInput.workflowRunId !== (run?.id ?? null)
-      || (!tool && source.status !== "blocked")
       || (tool && (!target || target.kind !== "tool_step"))) return reject();
+    if (purpose === "renew" && (!["done", "cancelled"].includes(anchor.status)
+      || ["done", "cancelled"].includes(renewalAnchor.status)
+      || (!tool && source.status !== "blocked"))) return reject();
   }
   return { tx, scope, anchor, source, run, step, purpose, renewal: input.renewal, renewalAnchor,
     agentId: input.agentId, heartbeatRunId: input.heartbeatRunId, recoveryTarget: input.recoveryTarget };
