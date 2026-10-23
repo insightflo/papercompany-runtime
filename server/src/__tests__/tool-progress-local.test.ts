@@ -230,7 +230,7 @@ describe("C07 accepted advance attribution through core, local and real FD3", ()
       const before = await invoke(w, {});
       const after = await invoke(w);
       expect(after).toEqual(before);
-      expect(after.status).toBe(mode === "cancelled" ? 500 : mode === "foreign-company" ? 404 : 403);
+      expect(after.status).toBe(mode === "cancelled" ? 500 : 403);
       if (mode === "cancelled") expect(after.body.error).toBe("tool_progress_scope_replaced");
       const rows = await fixture.reader.select().from(schema.toolExecutionHeartbeats)
         .where(eq(schema.toolExecutionHeartbeats.toolId, w.scope.toolId));
