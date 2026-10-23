@@ -4,7 +4,6 @@ import {
   activityLog,
   agents,
   assets,
-  agentWakeupRequests,
   companyMemberships,
   documents,
   goals,
@@ -22,42 +21,37 @@ import {
   missions,
   projectWorkspaces,
   projects,
-  workflowRuns,
-  workflowStepRuns,
 } from "@paperclipai/db";
 import { extractAgentMentionIds, extractProjectMentionIds } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { classifyIssueGroupPhase, createIssueRecord as createIssueRecordRow, getProjectDefaultGoalId, isMissionLevelGroupedIssue, syncIssueLabels, type IssueWriteDb } from "./issue-create-records.js";
+import { classifyIssueGroupPhase, createIssueRecord as createIssueRecordRow, isMissionLevelGroupedIssue, type IssueWriteDb } from "./issue-create-records.js";
 
 export { classifyIssueGroupPhase } from "./issue-create-records.js";
 export type { IssueGroupPhase, IssueWriteDb } from "./issue-create-records.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
-import { resolveNextIssueGoalId } from "./issue-goal-fallback.js";
-import { getDefaultCompanyGoal } from "./goals.js";
 import { type PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { logger } from "../middleware/logger.js";
-import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import {
   NOT_WAITING_ON_OPERATOR_APPROVAL,
   operatorApprovalWaitService,
   type OperatorApprovalWaitMarker,
 } from "./operator-approval-wait.js";
-import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { recordHumanOperatorRequestEvent } from "./missions/human-operator-alert-events.js";
-import { resyncIssueExecutionCardAfterIssueUpdate } from "./issue-execution-cards/resync.js";
-import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.js";
-import { unblockIssueHasValidatedHandbackReport } from "./missions/owner-action-unblock-handback.js";
-import {
-  assertWorkflowIssueWorkProductReadyForDone,
-  completeWorkflowIssueStepRunsAfterDone,
-} from "./workflow/work-product-completion-gate.js";
+import { assertWorkflowIssueWorkProductReadyForDone } from "./workflow/work-product-completion-gate.js";
 import type { WorkflowSyncSource } from "./workflow/workflow-sync-source.js";
 import { isHeartbeatFinalizationV1Enabled } from "./heartbeat-finalization/flag.js";
+import { commitIssueUpdate } from "./issue-update-commit.js";
+import {
+  TERMINAL_MISSION_STATUSES,
+  assertCanCompleteMissionOversightIssue,
+  assertCanCompleteMissionPlanQaIssue,
+  assertCanCompleteWorkflowValidationIssue,
+  assertCanCompleteOwnerActionWithHandback,
+} from "./issue-update-completion-guards.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
-const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
@@ -82,158 +76,6 @@ function applyStatusSideEffects(
     patch.cancelledAt = new Date();
   }
   return patch;
-}
-
-async function assertCanCompleteMissionOversightIssue(db: Db, issue: typeof issues.$inferSelect) {
-  if (issue.originKind !== "mission_main_executor_oversight" || !issue.missionId) return;
-
-  const [mission] = await db
-    .select({ id: missions.id, status: missions.status })
-    .from(missions)
-    .where(and(eq(missions.id, issue.missionId), eq(missions.companyId, issue.companyId)))
-    .limit(1);
-  if (!mission) return;
-  if (!TERMINAL_MISSION_STATUSES.has(mission.status)) {
-    throw unprocessable(
-      `Cannot complete mission oversight while mission ${mission.id} is ${mission.status}.`,
-    );
-  }
-
-  const openWork = await db
-    .select({
-      id: issues.id,
-      identifier: issues.identifier,
-      title: issues.title,
-      status: issues.status,
-    })
-    .from(issues)
-    .where(and(
-      eq(issues.companyId, issue.companyId),
-      eq(issues.missionId, issue.missionId),
-      isNull(issues.hiddenAt),
-      ne(issues.id, issue.id),
-      sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
-      sql`${issues.status} not in ('done', 'cancelled')`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (openWork) {
-    throw unprocessable(
-      `Cannot complete mission oversight while mission work remains open (${openWork.identifier ?? openWork.id}: ${openWork.status}).`,
-    );
-  }
-
-  const activeWorkflowRun = await db
-    .select({
-      id: workflowRuns.id,
-      status: workflowRuns.status,
-    })
-    .from(workflowRuns)
-    .where(and(
-      eq(workflowRuns.companyId, issue.companyId),
-      eq(workflowRuns.missionId, issue.missionId),
-      sql`${workflowRuns.status} not in ('completed', 'succeeded', 'done', 'failed', 'error', 'cancelled', 'canceled', 'aborted')`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (activeWorkflowRun) {
-    throw unprocessable(
-      `Cannot complete mission oversight while workflow run ${activeWorkflowRun.id} is ${activeWorkflowRun.status}.`,
-    );
-  }
-
-  const activeWorkflowStep = await db
-    .select({
-      runId: workflowRuns.id,
-      stepId: workflowStepRuns.stepId,
-      status: workflowStepRuns.status,
-    })
-    .from(workflowStepRuns)
-    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .where(and(
-      eq(workflowRuns.companyId, issue.companyId),
-      eq(workflowRuns.missionId, issue.missionId),
-      sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`,
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (activeWorkflowStep) {
-    throw unprocessable(
-      `Cannot complete mission oversight while workflow step ${activeWorkflowStep.stepId} is ${activeWorkflowStep.status}.`,
-    );
-  }
-}
-
-async function assertCanCompleteMissionPlanQaIssue(db: Db, issue: typeof issues.$inferSelect) {
-  if (issue.originKind !== "mission_plan_qa") return;
-  const ledger = await hasMissionPlanQaCompletionLedger({
-    db,
-    companyId: issue.companyId,
-    missionId: issue.missionId,
-    planQaIssueId: issue.id,
-  });
-  if (ledger.satisfied) return;
-  throw unprocessable(
-    `Cannot complete mission_plan_qa issue without an official mission_plan_qa_verdicts row for ${ledger.decisionHash ? "the active plan decision hash" : "that plan QA issue"}.`,
-  );
-}
-
-async function assertCanCompleteWorkflowValidationIssue(db: Db, issue: typeof issues.$inferSelect) {
-  if (issue.originKind !== "workflow_execution") return;
-  const ledger = await hasWorkflowValidationCompletionLedger({ db, issue });
-  if (!ledger.isCandidate || ledger.satisfied) return;
-  throw unprocessable(
-    "Cannot complete workflow validation issue without an official workflow_validation_verdict ledger event for that workflow QA issue.",
-  );
-}
-
-// [owner-action next-execution contract] mission_main_executor_unblock이 done으로 닫히려면
-//   source(originId)로 handback 증거가 있어야 — GAZ-315 silent success(자기 unblock issue에 workflow API
-//   실패 후 일반 done, source 향 wakeup 없음) 방지. evidence는 DB state 우선(source 회복/wakeup dispatch).
-async function assertCanCompleteOwnerActionWithHandback(db: Db, issue: typeof issues.$inferSelect) {
-  if (issue.originKind !== "mission_main_executor_unblock") return;
-  const sourceIssueId = issue.originId;
-  if (!sourceIssueId) return; // source 미지정 → 강제 불가
-
-  const [source] = await db
-    .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
-    .from(issues)
-    .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, issue.companyId)))
-    .limit(1);
-  if (!source) return; // source 회수/삭제 또는 다른 회사 → 강제 불가
-  // evidence 1: source가 blocked에서 벗어남(재오픈/회복 = supervision retry 적용 효과).
-  if (source.status !== "blocked") return;
-  if (await unblockIssueHasValidatedHandbackReport(db, {
-    companyId: issue.companyId,
-    unblockIssueId: issue.id,
-    expectedSourceIssueId: sourceIssueId,
-  })) {
-    return;
-  }
-  // evidence 2: source 담당자(assignee) 향 wakeup이 allowed status로 dispatch됨.
-  //   assignee 없는 source는 wakeup 대상이 없으므로 evidence 불가 → conflict.
-  if (!source.assigneeAgentId) {
-    throw conflict(
-      "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is blocked and has no assignee agent to wake for handback.",
-    );
-  }
-  const [wake] = await db
-    .select({ id: agentWakeupRequests.id })
-    .from(agentWakeupRequests)
-    .where(and(
-      eq(agentWakeupRequests.issueId, sourceIssueId),
-      eq(agentWakeupRequests.companyId, issue.companyId),
-      eq(agentWakeupRequests.agentId, source.assigneeAgentId),
-      // "claimed" 포함: queue admission 이 claim 한 wakeup 도 live evidence 이다(Phase D
-      //   stopped 판정과 동일 live 집합).
-      inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]),
-  ))
-    .limit(1);
-  if (wake) return;
-
-  throw conflict(
-    "Cannot complete this owner-action (mission_main_executor_unblock): the source issue is still blocked, no live wakeup has been dispatched to it, and no structured Oversight handback report is present. Post a Mission owner decision on the source issue, or complete it via the owner-action handback route so a structured report/native workflow_resume is recorded; do not use the Workflow API on this unblock issue.",
-  );
 }
 
 export interface IssueFilters {
@@ -1512,109 +1354,16 @@ export function issueService(db: Db) {
         patch.executionLockedAt = null;
       }
 
-      const updatedIssue = await db.transaction(async (tx) => {
-        const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
-        const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
-          getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
-          getProjectDefaultGoalId(
-            tx,
-            existing.companyId,
-            issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
-          ),
-        ]);
-        const resolvedNextGoalId =
-          issueData.goalId !== undefined
-            ? issueData.goalId
-            : (nextProjectGoalId ?? currentProjectGoalId ?? existing.goalId);
-        patch.goalId = resolveNextIssueGoalId({
-          currentProjectId: existing.projectId,
-          currentGoalId: existing.goalId,
-          projectId: issueData.projectId,
-          goalId: resolvedNextGoalId,
-          defaultGoalId: defaultCompanyGoal?.id ?? null,
-        });
-        const updated = await tx
-          .update(issues)
-          .set(patch)
-          .where(eq(issues.id, id))
-          .returning()
-          .then((rows) => rows[0] ?? null);
-        if (!updated) return null;
-        if (issueData.status === "done" && existing.status !== "done") {
-          await completeWorkflowIssueStepRunsAfterDone({
-            db: tx,
-            issue: updated,
-            completedAt: updated.completedAt ?? new Date(),
-            source: workflowSyncSource,
-          });
-        }
-        if (nextLabelIds !== undefined) {
-          await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
-        }
-        const [enriched] = await withIssueLabels(tx, [updated]);
-        return enriched;
+      return await commitIssueUpdate({
+        db,
+        id,
+        existing,
+        issueData,
+        patch,
+        nextLabelIds,
+        workflowSyncSource,
+        withIssueLabels,
       });
-
-      const executionCardInputChanged = (
-        (issueData.title !== undefined && issueData.title !== existing.title) ||
-        (issueData.description !== undefined && issueData.description !== existing.description) ||
-        (issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== existing.assigneeAgentId) ||
-        (issueData.projectId !== undefined && issueData.projectId !== existing.projectId) ||
-        (issueData.missionId !== undefined && issueData.missionId !== existing.missionId)
-      );
-      if (updatedIssue && executionCardInputChanged) {
-        try {
-          await resyncIssueExecutionCardAfterIssueUpdate({ db, issue: updatedIssue });
-        } catch (err) {
-          logger.warn({ err, issueId: updatedIssue.id }, "failed to resync issue execution card after issue update");
-        }
-      }
-
-      if (
-        updatedIssue &&
-        issueData.status &&
-        issueData.status !== existing.status &&
-        (issueData.status === "done" || issueData.status === "blocked" || issueData.status === "cancelled")
-      ) {
-        try {
-          await persistTerminalIssueHandoff({
-            db,
-            issue: updatedIssue,
-            previousIssue: existing,
-          });
-        } catch (err) {
-          logger.warn(
-            { err, issueId: updatedIssue.id, status: issueData.status },
-            "failed to persist terminal issue handoff",
-          );
-        }
-        try {
-          const { finalizeDelegatedWorkflowTargetIssue } = await import("./workflow-delegations.js");
-          await finalizeDelegatedWorkflowTargetIssue(db, {
-            targetIssueId: updatedIssue.id,
-            targetStatus: issueData.status,
-          });
-        } catch (err) {
-          logger.warn(
-            { err, issueId: updatedIssue.id, status: issueData.status },
-            "failed to finalize delegated workflow target issue",
-          );
-        }
-      }
-
-      if (updatedIssue && issueData.status && issueData.status !== existing.status) {
-        try {
-          const { workflowService } = await import("./workflow/engine.js");
-          await workflowService.syncRunStatusForIssue(db, updatedIssue.id, workflowSyncSource);
-        } catch (err) {
-          logger.warn(
-            { err, issueId: updatedIssue.id, status: issueData.status },
-            "failed to sync workflow state after issue status update",
-          );
-        }
-      }
-
-      return updatedIssue;
     },
 
     remove: (id: string) =>
