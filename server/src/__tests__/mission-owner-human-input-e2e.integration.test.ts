@@ -101,10 +101,21 @@ describeDb("mission owner human-input decision card contract E2E", () => {
   afterEach(async () => {
     // resolve 즉시 웨이크의 비동기 실행 체인(번들 스킬 upsert·run 생성)이 다음 테이블 정리와
     // 경합하지 않도록 깨움이 종료 상태가 될 때까지 기다린다(operator-decision-routes 와 동일 원인).
+    // [2026-10-23 경합 수리] 깨움 종료 이후에도 런타임 확보가 agent_runtime_state 를 늦게 삽입해
+    //   agents 삭제 FK 위반(라이브 CI 반복 관측) — 행 수가 연속 2회 안정된 뒤 정리하고,
+    //   그래도 남은 극단 경합은 agents 삭제 재시도로 흡수한다.
+    const runtimeStateSettled = async () => {
+      const before = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const after = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
+      return before.length === after.length
+        && before.every((row) => after.some((other) => other.agentId === row.agentId));
+    };
     const deadline = Date.now() + 10_000;
     for (;;) {
       const rows = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests);
-      if (!rows.some((row) => ["queued", "claimed", "deferred_issue_execution"].includes(row.status))) break;
+      if (!rows.some((row) => ["queued", "claimed", "deferred_issue_execution"].includes(row.status))
+        && await runtimeStateSettled()) break;
       if (Date.now() > deadline) throw new Error(`wakeup chains did not settle within 10s: ${JSON.stringify(rows)}`);
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -124,7 +135,17 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     await db.delete(workflowDefinitions);
     await db.delete(issues);
     await db.delete(missions);
-    await db.delete(agents);
+    // [경합 수리] 안정 대기 후에도 극단적으로 늦은 삽입이 남면 agents 삭제가 FK 위반 — 최대 3회 재정리한다.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await db.delete(agents);
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await db.delete(agentRuntimeState);
+      }
+    }
     await db.delete(companies);
   }, 15_000);
 

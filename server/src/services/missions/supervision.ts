@@ -1407,21 +1407,30 @@ export function createSupervision({ db, deps, ownerActions }: {
           if (toolRecovery.outcome.kind === "no_op" && toolRecovery.outcome.reason === "target_missing") {
             const toolLoopKey = "tool_recovery_target_missing";
             const toolDeadTargetId = issue.originId ?? "none";
-            const priorToolNoOp = await countOwnerDecisionNotApplied(db, {
+            // [2단계 — 실행 불가 회복 카드 즉시 승격 2026-10-23] 결정이 이미 기록됐는데 도구 단계 대상이
+            //   없으면(죽은 결정) 회복 카드의 전제가 소멸했다 — 오너가 다음 틱에 대상을 보완할 가능성만
+            //   기다리며 no_op 를 재기록·재노출하는 것은 무한 대기 루프다(라이브 관측: RES-8604 17h+,
+            //   2026-10-23 RES-9071 3회 반복). 즉시 1회 사람 에스컬레이션으로 전환한다. 결정 자체가 없는
+            //   대기는 오너 응답 대기이므로 기존 3회 브레이컈를 그대로 쓴다.
+            const hasRecordedDecision = toolRecovery.outcome.decisionEventId != null;
+            const priorToolNoOp = hasRecordedDecision ? DEAD_TARGET_RETRY_BREAKER_THRESHOLD : await countOwnerDecisionNotApplied(db, {
               companyId: mission.companyId, ownerActionIssueId: issue.id,
               decision: toolLoopKey, sourceIssueId: toolDeadTargetId,
               decisionEventId: toolRecovery.outcome.decisionEventId ?? "auto",
             });
             if (priorToolNoOp >= DEAD_TARGET_RETRY_BREAKER_THRESHOLD) {
+              const immediateDeadDecision = hasRecordedDecision;
               const escalation = await ensureDeadTargetHumanEscalation(db, {
                 companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
                 loopKey: toolLoopKey,
                 anchors: [issue, oversightIssue],
                 ownerActionIssueId: issue.id, sourceIssueId: issue.originId,
-                reason: `Tool recovery owner action ${label} has repeated no_op(target_missing) ${priorToolNoOp} times: the recovery card requires an explicit tool-step recovery target but the recorded decision has none. Re-exposing the same no_op every supervision tick is an infinite decision-wait loop.`,
-                evidence: `owner-action=${label} reason=target_missing repeats=${priorToolNoOp} supervisionTick=${now.toISOString()}`,
+                reason: immediateDeadDecision
+                  ? `Tool recovery owner action ${label} has a recorded decision without an explicit tool-step recovery target (dead target) — waiting for the owner to patch it re-exposes the same no_op every supervision tick, an infinite decision-wait loop. Escalating immediately; choose replan, an explicit recovery target, or cancel this recovery.`
+                  : `Tool recovery owner action ${label} has repeated no_op(target_missing) ${priorToolNoOp} times: the recovery card requires an explicit tool-step recovery target but the owner decision has not arrived. Re-exposing the same no_op every supervision tick is an infinite decision-wait loop.`,
+                evidence: `owner-action=${label} reason=target_missing ${immediateDeadDecision ? "dead-recorded-decision" : `repeats=${priorToolNoOp}`} supervisionTick=${now.toISOString()}`,
               });
-              findings.push(`owner_tool_recovery_dead_target_breaker: ${label} tool recovery no_op(target_missing) repeated ${priorToolNoOp}x — further no-op re-exposure suppressed; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: record a decision with an explicit tool-step recovery target, replan, or cancel this recovery`);
+              findings.push(`owner_tool_recovery_dead_target_breaker: ${label} tool recovery no_op(target_missing) ${immediateDeadDecision ? "dead recorded decision — escalated immediately" : `repeated ${priorToolNoOp}x`} — further no-op re-exposure suppressed; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: record a decision with an explicit tool-step recovery target, replan, or cancel this recovery`);
               addRecommendation({
                 type: "escalate_blocked",
                 missionId: mission.id,
@@ -1431,13 +1440,16 @@ export function createSupervision({ db, deps, ownerActions }: {
               });
               continue;
             }
-            await recordOwnerDecisionNotApplied(db, {
-              companyId: mission.companyId, missionId: mission.id, ownerActionIssueId: issue.id,
-              decision: toolLoopKey, sourceIssueId: toolDeadTargetId,
-              decisionEventId: toolRecovery.outcome.decisionEventId ?? "auto",
-              reason: "tool recovery card present but decision has no tool-step recovery target",
-              reasonCode: "tool_target_missing", occurredAt: now,
-            });
+            if (!hasRecordedDecision) {
+              // 결정 자체가 없는 대기만 no_op 로 기록한다(기존 3회 브레이컈 대상).
+              await recordOwnerDecisionNotApplied(db, {
+                companyId: mission.companyId, missionId: mission.id, ownerActionIssueId: issue.id,
+                decision: toolLoopKey, sourceIssueId: toolDeadTargetId,
+                decisionEventId: toolRecovery.outcome.decisionEventId ?? "auto",
+                reason: "tool recovery card present but decision has no tool-step recovery target",
+                reasonCode: "tool_target_missing", occurredAt: now,
+              });
+            }
           }
           findings.push(`tool_step_recovery_${toolRecovery.outcome.kind}: ${label} reason=${toolRecovery.outcome.reason}`);
           // Missing/stale/consumed tool targets never fall through to generic issue retry.
