@@ -7,7 +7,8 @@ import { isPgUniqueViolation } from "../pg-error.js";
 import { assertIssueResumeScopeIdentity } from "../workflow/resume-scope-fence.js";
 import { registeredProducer } from "./producer-provenance.js";
 import { matchWorkProductContractPromotion, recordContractPromotionAudit, type ContractPromotionMatch } from "./contract-promotion.js";
-import { metadataPath, sealedProducerMetadata } from "./producer-seal.js";
+import { metadataPath, sealProducerWrite } from "./producer-seal.js";
+import { recordWorkProductProgress } from "./progress-evidence.js";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
 
@@ -38,8 +39,9 @@ export function workProductProducerWrite(db: Db) {
       }
       const row = await db.transaction(async (tx) => {
         const producer = await registeredProducer(tx, companyId, issueId, data.createdByRunId, delegation);
+        const sealed = await sealProducerWrite(data, producer);
         data = { ...data, sourceExecutionGeneration: producer?.executionGeneration ?? null,
-          metadata: await sealedProducerMetadata(data, producer) };
+          metadata: sealed.metadata };
         let isPrimary: boolean | undefined = data.isPrimary;
         let contractMatch: ContractPromotionMatch | null = null;
         if (isPrimary === undefined) {
@@ -133,6 +135,7 @@ export function workProductProducerWrite(db: Db) {
             companyId, workProductId: inserted.id, match: contractMatch,
           });
         }
+        if (inserted) await recordWorkProductProgress(tx, inserted, producer, sealed.seal);
         return inserted;
       });
       return row;
@@ -152,10 +155,13 @@ export function workProductProducerWrite(db: Db) {
         const producer = await registeredProducer(tx, current.companyId, current.issueId, runId, delegation);
         const [existing] = await tx.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, id)).for("update");
         if (!existing || existing.issueId !== current.issueId || existing.companyId !== current.companyId) return null;
-        return await tx.update(issueWorkProducts).set({ createdByRunId: runId,
+        const sealed = await sealProducerWrite({ ...existing, metadata: { ...(existing.metadata ?? {}), ...stamp } }, producer);
+        const updated = await tx.update(issueWorkProducts).set({ createdByRunId: runId,
           sourceExecutionGeneration: producer?.executionGeneration ?? null,
-          metadata: await sealedProducerMetadata({ ...existing, metadata: { ...(existing.metadata ?? {}), ...stamp } }, producer), updatedAt: new Date() })
+          metadata: sealed.metadata, updatedAt: new Date() })
           .where(eq(issueWorkProducts.id, id)).returning().then((rows) => rows[0] ?? null);
+        if (updated) await recordWorkProductProgress(tx, updated, producer, sealed.seal, existing);
+        return updated;
       });
       return row;
     },
