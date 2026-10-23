@@ -238,6 +238,10 @@ describeDb("C08 current lifetime card creation", () => {
     await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
       .rejects.toMatchObject({ status: 409 });
     expect((await cards(w)).find((card) => card.id === old.decision.id)!.status).toBe("pending");
+    await db.update(operatorDecisions).set({ requestKey: `moi1:${a.lifetime.decisionEventId}` })
+      .where(eq(operatorDecisions.id, old.decision.id));
+    await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
+      .rejects.toMatchObject({ status: 409, details: { code: "owner_human_decision_stale" } });
     const current = await create(b);
     const resolved = await operatorDecisionWriteService(db).resolve(current.decision.id, result, "board");
     expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
@@ -255,6 +259,9 @@ describeDb("C08 current lifetime card creation", () => {
     expect(first.decision.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
     expect(first.decision.definition.comment.mode).toBe("required");
     expect((await createMissionOwnerHumanInputDecisionCard(db, legacy)).replayed).toBe(true);
+    expect(await operatorDecisionWriteService(db).resolve(first.decision.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "legacy" }, "board"))
+      .toMatchObject({ applied: true, decision: { status: "resolved" } });
     const structured = { ...legacy, decisionEventId: randomUUID(), structuredOptions: [{ id: "check", label: "확인" }] };
     expect((await createMissionOwnerHumanInputDecisionCard(db, structured)).decision.definition.options[0]!.id).toBe("check");
     const generic = { ...buildMissionOwnerHumanInputDecisionCard(legacy),

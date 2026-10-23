@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues, operatorDecisions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { issues, operatorDecisions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import type { OperatorDecisionTargetSnapshot } from "@paperclipai/shared/types/operator-decision";
 import { conflict } from "../errors.js";
 import { lockOwnerHumanRequestCard } from "./missions/owner-human-request-card.js";
@@ -28,12 +28,20 @@ function createInputFromDecision(row: DecisionRow) {
 // rebuilt byte-for-byte and checked through the same binding authority as creation.
 export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: DecisionRow): Promise<void> {
   if (row.sourceType !== MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE) return;
-  if (!row.requestedByAgentId) throw conflict("Owner human decision is not current", {
+  const input = createInputFromDecision(row);
+  const [binding] = await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, row.companyId),
+    sql`${workflowTransitionEvents.payload}->>'operatorDecisionId' = ${row.id}`)).limit(1);
+  const lifetimeCard = input.requestKey.startsWith("moi2:");
+  if (!lifetimeCard && !binding) return;
+  if (!lifetimeCard || !row.requestedByAgentId) throw conflict("Owner human decision is not current", {
     operatorDecisionId: row.id, code: "owner_human_decision_stale",
   });
-  const guard = await lockOwnerHumanRequestCard(tx, row.companyId, createInputFromDecision(row),
+  const guard = await lockOwnerHumanRequestCard(tx, row.companyId, input,
     { type: "agent", id: row.requestedByAgentId });
-  if (!guard) return;
+  if (!guard) throw conflict("Owner human decision is not current", {
+    operatorDecisionId: row.id, code: "owner_human_decision_stale",
+  });
   if (!guard.card || guard.card.id !== row.id) throw conflict("Owner human decision is not current", {
     operatorDecisionId: row.id, code: "owner_human_decision_stale",
   });
