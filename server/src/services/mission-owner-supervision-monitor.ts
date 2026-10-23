@@ -4,7 +4,6 @@ import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwne
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
 import { sweepApprovedRevisionStarts } from "./workflow/approved-revision-start.js";
-import { promoteStrandedDeferredWakes } from "./deferred-wake-promotion.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
 import { createMissionOversightLivenessLane, type MissionOversightLivenessGhostWakeRequestedHandler } from "./mission-oversight-liveness-lane.js";
 
@@ -106,13 +105,6 @@ export function createMissionOwnerSupervisionMonitor(
       await sweepApprovedRevisionStarts(db);
     } catch (err) {
       logger.warn({ err }, "approved revision start sweep failed");
-    }
-    // [성긴 deferred 깨움 승격 2026-10-23] 이슈를 아무도 붙잡지 않는 오래된 deferred 깨움을 queued 로
-    //   돌려보낸다 — 해제-승격 경로가 작동하지 않아 사람 결정 전달이 성그는 것을 막는다.
-    try {
-      await promoteStrandedDeferredWakes(db);
-    } catch (err) {
-      logger.warn({ err }, "stranded deferred wake promotion sweep failed");
     }
   }
 
