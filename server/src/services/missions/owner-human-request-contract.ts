@@ -53,6 +53,8 @@ export const ownerHumanLifetimeSchema = z.object({
   authorAgentId: uuid, heartbeatRunId: uuid,
   submission: ownerHumanSubmissionSchema,
   cardInput: cardInputSchema,
+  // Server renewal retains the original author/decision; it is not another agent submission.
+  renewal: z.object({ schemaVersion: z.literal(1), previousLifetimeId: uuid }).strict().optional(),
 }).strict();
 export type OwnerHumanLifetime = z.infer<typeof ownerHumanLifetimeSchema>;
 

@@ -170,6 +170,54 @@ export async function saveOwnerHumanRequest(auth: OwnerHumanAuthority, input: {
   }, lifetime);
 }
 
+// Stage 13A primitive only: the caller owns creation in this transaction and acquired the
+// complete authority prefix (including both anchors) before reading the current pointer.
+// Notifications/cards and producer integration stay with the following original stages.
+export async function renewOwnerHumanRequest(auth: OwnerHumanAuthority, input: {
+  requestKey: string; expectedCurrentLifetimeId: string;
+}): Promise<OwnerHumanCurrentRecord> {
+  const next = auth.renewalAnchor;
+  if (auth.purpose !== "renew" || !auth.renewal || !next
+    || input.expectedCurrentLifetimeId !== auth.renewal.previousLifetimeId) {
+    return fail("owner_human_request_invalid");
+  }
+  const previous = await readOwnerHumanCurrent(auth);
+  if (!previous?.pointer.recoveryNeeded || previous.lifetime.authorAgentId !== auth.agentId) {
+    return fail("owner_human_request_recovery_still_needed");
+  }
+  const old = previous.lifetime;
+  // Response loss/restart reuses the committed successor, never another key or lifetime.
+  if (old.renewal?.previousLifetimeId === input.expectedCurrentLifetimeId
+    && old.anchorIssueId === next.id && old.requestKey === input.requestKey) return previous;
+  if (old.lifetimeId !== input.expectedCurrentLifetimeId || old.anchorIssueId !== auth.anchor.id) {
+    return fail("owner_human_request_current_changed");
+  }
+  if (await byKey(auth.tx, auth.scope.companyId, ownerHumanLifetimeKey(input.requestKey))) {
+    return fail("owner_human_request_key_conflict");
+  }
+  const lifetime = decode(ownerHumanLifetimeSchema, {
+    ...old, lifetimeId: randomUUID(), requestKey: input.requestKey, identityMode: "keyed",
+    anchorIssueId: next.id,
+    renewal: { schemaVersion: 1, previousLifetimeId: old.lifetimeId },
+    cardInput: { ...old.cardInput, ownerActionIssueId: next.id, ownerActionIssueStatus: next.status,
+      issueTitle: next.title, issueIdentifier: next.identifier },
+  });
+  const rows = await auth.tx.insert(workflowTransitionEvents).values({
+    id: lifetime.lifetimeId, companyId: auth.scope.companyId, missionId: auth.scope.missionId,
+    issueId: lifetime.anchorIssueId, heartbeatRunId: lifetime.heartbeatRunId,
+    eventType: lifetime.kind, layer: OWNER_HUMAN_LAYER, reason: OWNER_HUMAN_SOURCE,
+    reasonCode: OWNER_HUMAN_SOURCE, idempotencyKey: ownerHumanLifetimeKey(lifetime.requestKey), payload: lifetime,
+  }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
+  if (rows.length !== 1) return fail("owner_human_request_key_conflict");
+  await appendEnd(auth, old, "replaced", lifetime.lifetimeId);
+  await assertOwnerHumanOriginalDecision(auth.tx, lifetime);
+  return writePointer(auth, previous, {
+    schemaVersion: 1, kind: "owner_human_current_v1", scope: auth.scope,
+    lifetimeId: lifetime.lifetimeId, requestKey: lifetime.requestKey, anchorIssueId: lifetime.anchorIssueId,
+    revision: previous.pointer.revision + 1, recoveryNeeded: true, closure: null,
+  }, lifetime);
+}
+
 // Human-card `resolved` is deliberately not an ending fact. Native source/mission settlement owns
 // this operation. Re-read already locked rows so a native update earlier in the same transaction counts.
 export async function closeOwnerHumanRequest(auth: OwnerHumanAuthority, expectedCurrentLifetimeId: string) {

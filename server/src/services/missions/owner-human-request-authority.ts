@@ -7,7 +7,8 @@ import type { OwnerRecoveryTarget } from "./mission-owner-recovery-events.js";
 import { MISSION_OWNER_DECISION_EVENT_TYPE, MISSION_OWNER_DECISION_SOURCE } from "./mission-owner-decision-contract.js";
 import { ownerRecoveryRunMatches, ownerRecoveryStepMatches } from "./owner-recovery-submission-guards.js";
 import {
-  OWNER_HUMAN_LAYER, ownerHumanScopeSchema, ownerHumanSubmissionSchema, sameOwnerHumanValue,
+  OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, ownerHumanScopeSchema, ownerHumanSubmissionSchema, sameOwnerHumanValue,
+  ownerHumanLifetimeSchema, ownerHumanLifetimeKey, ownerHumanEndKey, ownerHumanEndSchema,
   type OwnerHumanLifetime, type OwnerHumanTx,
 } from "./owner-human-request-contract.js";
 
@@ -38,7 +39,8 @@ async function toolIdentity(tx: OwnerHumanTx, companyId: string, missionId: stri
 export type OwnerHumanAuthorityInput = {
   companyId: string; missionId: string; ownerActionIssueId: string;
   agentId: string; heartbeatRunId: string; recoveryTarget?: OwnerRecoveryTarget;
-  purpose?: "submit" | "settle";
+  purpose?: "submit" | "settle" | "renew";
+  renewal?: { previousLifetimeId: string; anchorIssueId: string };
 };
 
 // Caller holds the existing quality prefix, if applicable. The only locking order here is:
@@ -46,10 +48,11 @@ export type OwnerHumanAuthorityInput = {
 // Discovery reads are not authority: all mutable identity facts are checked again under these locks.
 export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: OwnerHumanAuthorityInput) {
   const purpose = input.purpose ?? "submit";
+  if ((purpose === "renew") !== Boolean(input.renewal)) return reject();
   const [mission] = await tx.select().from(missions).where(and(
     eq(missions.id, input.missionId), eq(missions.companyId, input.companyId))).for("update");
   if (!mission || mission.ownerAgentId !== input.agentId) return reject();
-  if (purpose === "submit" && ["completed", "cancelled"].includes(mission.status)) return reject();
+  if (purpose !== "settle" && ["completed", "cancelled"].includes(mission.status)) return reject();
   const [observed] = await tx.select().from(issues).where(and(
     eq(issues.id, input.ownerActionIssueId), eq(issues.companyId, input.companyId),
     eq(issues.missionId, input.missionId)));
@@ -75,7 +78,8 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
   }
   const [heartbeat] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.heartbeatRunId)).for("share");
   const locked = new Map<string, typeof issues.$inferSelect>();
-  for (const id of [...new Set([observed.id, ...(source ? [source.id] : [])])].sort()) {
+  for (const id of [...new Set([observed.id, ...(source ? [source.id] : []),
+    ...(input.renewal ? [input.renewal.anchorIssueId] : [])])].sort()) {
     const [row] = await tx.select().from(issues).where(eq(issues.id, id)).for("update");
     if (!row || row.companyId !== input.companyId || row.missionId !== input.missionId) return reject();
     locked.set(id, row);
@@ -83,7 +87,8 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
   const anchor = locked.get(observed.id)!;
   if (anchor.originKind !== observed.originKind || anchor.originId !== observed.originId
     || anchor.assigneeAgentId !== input.agentId || !heartbeat || heartbeat.companyId !== input.companyId
-    || heartbeat.agentId !== input.agentId || heartbeat.issueId !== anchor.id) return reject();
+    || heartbeat.agentId !== input.agentId
+    || (purpose !== "renew" && heartbeat.issueId !== anchor.id)) return reject();
   if (purpose === "submit" && (["done", "cancelled"].includes(anchor.status)
     || (oversight && heartbeat.status !== "running"))) return reject();
   if (source) {
@@ -99,20 +104,88 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
   const target = input.recoveryTarget;
   if (target?.kind === "tool_step") {
     if (!tool || target.workflowRunId !== tool.workflowRunId || target.stepRunId !== tool.stepRunId) return reject();
-    if (purpose === "submit" && (!ownerRecoveryRunMatches(run, target) || !ownerRecoveryStepMatches(step, target))) return reject();
+    if (purpose !== "settle" && (!ownerRecoveryRunMatches(run, target) || !ownerRecoveryStepMatches(step, target))) return reject();
   } else if (target && (tool || target.issueId !== source?.id)) return reject();
   const scope = ownerHumanScopeSchema.parse({ companyId: input.companyId, missionId: input.missionId,
     target: oversight ? { kind: "oversight" } : tool
       ? { kind: "tool_step", workflowRunId: tool.workflowRunId, stepRunId: tool.stepRunId }
       : { kind: "source_issue", issueId: source!.id } });
-  return { tx, scope, anchor, source, run, step, purpose,
+  const renewalAnchor = input.renewal ? locked.get(input.renewal.anchorIssueId) : undefined;
+  if (input.renewal) {
+    const previous = await readOwnerHumanOrigin(tx, input.companyId, input.renewal.previousLifetimeId);
+    await assertOwnerHumanOriginalDecision(tx, previous);
+    if (oversight || !source || !renewalAnchor || renewalAnchor.id === anchor.id
+      || !["done", "cancelled"].includes(anchor.status) || renewalAnchor.hiddenAt
+      || ["done", "cancelled"].includes(renewalAnchor.status)
+      || renewalAnchor.originKind !== "mission_main_executor_unblock"
+      || renewalAnchor.originId !== source.id || renewalAnchor.assigneeAgentId !== input.agentId
+      || previous.anchorIssueId !== anchor.id || previous.authorAgentId !== input.agentId
+      || previous.heartbeatRunId !== heartbeat.id || !sameOwnerHumanValue(previous.scope, scope)
+      || !sameOwnerHumanValue(previous.submission.recoveryTarget, input.recoveryTarget)
+      || previous.cardInput.workflowRunId !== (run?.id ?? null)
+      || (!tool && source.status !== "blocked")
+      || (tool && (!target || target.kind !== "tool_step"))) return reject();
+  }
+  return { tx, scope, anchor, source, run, step, purpose, renewal: input.renewal, renewalAnchor,
     agentId: input.agentId, heartbeatRunId: input.heartbeatRunId, recoveryTarget: input.recoveryTarget };
 }
 export type OwnerHumanAuthority = Awaited<ReturnType<typeof lockOwnerHumanRequestAuthority>>;
 
+// An ancestry reference alone is insufficient: every predecessor has its exact stored header,
+// and its immutable replaced ending must name this successor. No historical link is moved.
+async function readOwnerHumanOrigin(tx: OwnerHumanTx, companyId: string, id: string) {
+  const [row] = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.id, id)));
+  const parsed = ownerHumanLifetimeSchema.safeParse(row?.payload);
+  if (!row || !parsed.success) return reject();
+  const saved = parsed.data;
+  if (saved.lifetimeId !== id || saved.scope.companyId !== companyId || row.missionId !== saved.scope.missionId
+    || row.eventType !== saved.kind || row.layer !== OWNER_HUMAN_LAYER
+    || row.reason !== OWNER_HUMAN_SOURCE || row.reasonCode !== OWNER_HUMAN_SOURCE
+    || row.issueId !== saved.anchorIssueId || row.heartbeatRunId !== saved.heartbeatRunId
+    || row.idempotencyKey !== ownerHumanLifetimeKey(saved.requestKey)) return reject();
+  return saved;
+}
+
+export async function assertOwnerHumanOriginalDecision(tx: OwnerHumanTx, lifetime: OwnerHumanLifetime) {
+  const seen = new Set<string>();
+  let child = lifetime;
+  while (child.renewal) {
+    if (seen.has(child.lifetimeId)) return reject();
+    seen.add(child.lifetimeId);
+    const parent = await readOwnerHumanOrigin(tx, child.scope.companyId, child.renewal.previousLifetimeId);
+    if (child.identityMode !== "keyed" || child.requestKey === parent.requestKey
+      || child.anchorIssueId === parent.anchorIssueId || child.scope.target.kind === "oversight"
+      || child.decisionEventId !== parent.decisionEventId || child.authorAgentId !== parent.authorAgentId
+      || child.heartbeatRunId !== parent.heartbeatRunId || child.sourceIssueId !== parent.sourceIssueId
+      || !sameOwnerHumanValue(child.scope, parent.scope)
+      || !sameOwnerHumanValue(child.submission, parent.submission)
+      || !sameOwnerHumanValue(child.cardInput, { ...parent.cardInput, ownerActionIssueId: child.anchorIssueId,
+        ownerActionIssueStatus: child.cardInput.ownerActionIssueStatus,
+        issueTitle: child.cardInput.issueTitle, issueIdentifier: child.cardInput.issueIdentifier })) return reject();
+    const [ending] = await tx.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, child.scope.companyId),
+      eq(workflowTransitionEvents.idempotencyKey, ownerHumanEndKey(parent.lifetimeId))));
+    const end = ownerHumanEndSchema.safeParse(ending?.payload);
+    if (!ending || !end.success || ending.missionId !== parent.scope.missionId
+      || ending.issueId !== parent.anchorIssueId || ending.heartbeatRunId !== parent.heartbeatRunId
+      || ending.eventType !== end.data.kind || ending.layer !== OWNER_HUMAN_LAYER
+      || ending.reason !== OWNER_HUMAN_SOURCE || ending.reasonCode !== OWNER_HUMAN_SOURCE
+      || end.data.lifetimeId !== parent.lifetimeId || end.data.reason !== "replaced"
+      || end.data.nextLifetimeId !== child.lifetimeId || !sameOwnerHumanValue(end.data.scope, parent.scope)) return reject();
+    const [anchor] = await tx.select().from(issues).where(and(
+      eq(issues.id, child.anchorIssueId), eq(issues.companyId, child.scope.companyId)));
+    if (!anchor || anchor.missionId !== child.scope.missionId
+      || anchor.originKind !== "mission_main_executor_unblock" || anchor.originId !== child.sourceIssueId) return reject();
+    child = parent;
+  }
+  if (seen.has(child.lifetimeId)) return reject();
+  return assertSubmittedOwnerHumanOriginalDecision(tx, child);
+}
+
 // Exact immutable-origin validation, also used when reading current state after a restart.
 // These plain historical reads do not acquire an earlier lock after the pointer lock.
-export async function assertOwnerHumanOriginalDecision(tx: OwnerHumanTx, lifetime: OwnerHumanLifetime) {
+async function assertSubmittedOwnerHumanOriginalDecision(tx: OwnerHumanTx, lifetime: OwnerHumanLifetime) {
   const [event] = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.id, lifetime.decisionEventId),
     eq(workflowTransitionEvents.companyId, lifetime.scope.companyId)));
