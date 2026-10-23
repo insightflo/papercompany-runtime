@@ -20,6 +20,7 @@ import {
   loadApplyTransitionEvents,
   noneActor,
   resetReviewedPolicies,
+  TEST_REVIEWED_POLICIES,
   resumeApplyBody,
   seedResumeApplyScenario,
   startExecutionDefinitionFixture,
@@ -28,7 +29,8 @@ import {
   type ResumeApplyScenario,
 } from "./helpers/workflow-resume-apply-fixture.js";
 import { hashStructuredValue } from "../services/issue-execution-cards/hash.js";
-import { applyResume } from "../services/workflow/resume/apply.js";
+import { applyResume, applyResumeForOperatorDecision } from "../services/workflow/resume/apply.js";
+import { deriveResumeStartStep } from "../services/missions/terminal-resume-from-decision.js";
 import { previewResume } from "../services/workflow/resume/preview.js";
 import { hashSnapshotState } from "../services/workflow/resume/snapshot.js";
 
@@ -294,5 +296,44 @@ describeEmbeddedPostgres("workflow resume apply", () => {
     expect(error).toMatchObject({ status: 409, message: "resume_authority_exhausted" });
     expect(await loadApplyRequestRows(sql, scenario.runId)).toHaveLength(0);
     expect(await loadApplyActivityRows(sql, scenario.runId)).toHaveLength(0);
+  });
+
+  // [승인=재개 2026-10-23] 운영자 결정 승인이 권한 원본인 재개 적용 — 시스템 감사·결정 묶음 멱등·fail-closed.
+  it("applies via operator decision authorization with system audit and decision-bound idempotency", async () => {
+    const scenario = await seedResumeApplyScenario(db, sql, "opdec-ok-");
+    const decisionId = randomUUID();
+    const input = {
+      companyId: scenario.companyId, missionId: scenario.missionId, workflowRunId: scenario.runId,
+      startStepId: "gate", reason: "operator decision resume", idempotencyKey: decisionId,
+      authorization: { kind: "operator_decision" as const, operatorDecisionId: decisionId, resolvedByUserId: "local-board" },
+    };
+    const first = await applyResumeForOperatorDecision(db, input, applySigner(NOW));
+    expect(first.idempotencyKey).toBe(decisionId);
+    // 같은 결정 id 재발사(시간 경과 포함)는 replay — 요청 1건만 존재한다.
+    const second = await applyResumeForOperatorDecision(db, input, applySigner(new Date("2026-09-08T01:06:00.000Z")));
+    expect(second.id).toBe(first.id);
+    expect(await loadApplyRequestRows(sql, scenario.runId)).toHaveLength(1);
+    const resumeAudit = (await loadApplyActivityRows(sql, scenario.runId))
+      .filter((row) => row.action === "workflow.resume_requested");
+    expect(resumeAudit).toHaveLength(1);
+    expect(resumeAudit[0]).toMatchObject({ actor_type: "system", actor_id: "system:operator-decision-resume" });
+    expect(JSON.stringify(resumeAudit[0]!.details)).toContain(decisionId);
+  });
+
+  it("fails closed with structured blockers when the reviewed policy is missing", async () => {
+    const scenario = await seedResumeApplyScenario(db, sql, "opdec-blocked-");
+    TEST_REVIEWED_POLICIES.length = 0;
+    const error = await captureHttpError(applyResumeForOperatorDecision(db, {
+      companyId: scenario.companyId, missionId: scenario.missionId, workflowRunId: scenario.runId,
+      startStepId: "gate", reason: "blocked", idempotencyKey: randomUUID(),
+      authorization: { kind: "operator_decision", operatorDecisionId: randomUUID(), resolvedByUserId: "local-board" },
+    }, applySigner(NOW)));
+    expect(error).toMatchObject({ message: "resume_blocked" });
+    expect(await loadApplyRequestRows(sql, scenario.runId)).toHaveLength(0);
+  });
+
+  it("derives the first non-completed frozen step as the resume start", async () => {
+    const scenario = await seedResumeApplyScenario(db, sql, "opdec-start-");
+    expect(await deriveResumeStartStep(db, scenario.runId)).toBe("gate");
   });
 });

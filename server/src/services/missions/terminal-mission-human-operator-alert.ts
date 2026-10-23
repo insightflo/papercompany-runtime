@@ -32,6 +32,8 @@ import {
 } from "./terminal-mission-workflow-continuation.js";
 import { bindingResolves } from "../workflow/resume/preview-policy.js";
 import { REVIEWED_RESUME_POLICIES, type ReviewedResumePolicy } from "../workflow/resume/reviewed-policy.js";
+import { deriveRecoveryPathOptionsFromNextAction } from "./mission-owner-human-input-card.js";
+import { TERMINAL_RESUME_OPTION_DESCRIPTION, TERMINAL_RESUME_OPTION_ID, TERMINAL_RESUME_OPTION_LABEL } from "./terminal-resume-from-decision.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
@@ -53,8 +55,8 @@ const TERMINAL_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계�
 // [재개 경로 안내 2026-10-23] 실패 실행의 frozen 정의가 검토된 재개 정책으로 완전히 resolve 되면
 //   next-action 에 실제 클릭 경로(보드 '이 실행 이어서 진행')를 덧붙인다. 정책 부재·binding 불일치면
 //   안내하지 않는다(preview 가 fail-closed 로 거절할 것이므로 거짓 안내가 되지 않게).
-const TERMINAL_RESUME_GUIDANCE_KO = "이 미션의 실패 실행은 검토된 재개 경로가 있습니다: 미션 상세 화면의 '이 실행 이어서 진행'(재개) 버튼으로 실패한 단계부터 이어서 실행할 수 있습니다.";
-const TERMINAL_RESUME_GUIDANCE_EN = "A reviewed resume path is available for this mission's failed run: use the '이 실행 이어서 진행' (resume) action on the mission detail page to continue from the failed step.";
+const TERMINAL_RESUME_GUIDANCE_KO = "이 미션의 실패 실행은 검토된 재개 경로가 있습니다: 이 카드의 '이 실행 이어서 진행(재개)' 선택 또는 미션 상세 화면의 재개 버튼으로 실패한 단계부터 이어서 실행할 수 있습니다.";
+const TERMINAL_RESUME_GUIDANCE_EN = "A reviewed resume path is available for this mission's failed run: choose the '이 실행 이어서 진행' (resume) option on this card (or the resume action on the mission detail page) to continue from the failed step.";
 
 export function terminalResumeGuidanceText(available: boolean, language: "ko" | "en" | SystemLanguage): string | null {
   if (!available) return null;
@@ -265,7 +267,24 @@ type TerminalHumanInputCardContext = {
   nextAction: string;
   evidence: string;
   workflowRunId: string | null;
+  /** [승인=재개 2026-10-23] 재개 정책이 온전히 resolve 되는 실패 실행이 있으면 재개 옵션을 카드에 추가한다. */
+  resumeAvailable: boolean;
 };
+
+/** [승인=재개] 재개 가능시 카드 선택지 구성 — 재개 옵션 첫 번째+추천, 나머지는 nextAction 파생. */
+export function terminalCardStructuredOptions(resumeAvailable: boolean,
+  nextAction: string): { structuredOptions: { id: string; label: string; description?: string }[];
+  recommendedOptionId: string; recommendationReason: string } | null {
+  if (!resumeAvailable) return null;
+  return {
+    structuredOptions: [
+      { id: TERMINAL_RESUME_OPTION_ID, label: TERMINAL_RESUME_OPTION_LABEL, description: TERMINAL_RESUME_OPTION_DESCRIPTION },
+      ...(deriveRecoveryPathOptionsFromNextAction(nextAction) ?? []),
+    ],
+    recommendedOptionId: TERMINAL_RESUME_OPTION_ID,
+    recommendationReason: "실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다.",
+  };
+}
 
 // [fail-loud] 시스템 경로는 제출 응답이 없으므로 카드 매핑/생성 실패를 activity+로그 로 남긴다.
 async function recordTerminalHumanInputCardFailure(
@@ -334,6 +353,8 @@ export async function ensureTerminalHumanInputDecisionCard(
       sourceIssueId: context.issue.originId,
       workflowRunId: context.workflowRunId,
       actorType: "system",
+      // [승인=재개 2026-10-23] 재개가 실제로 작동할 때만 “이 실행 이어서 진행(재개)” 선택지를 추가한다.
+      ...(terminalCardStructuredOptions(context.resumeAvailable, context.nextAction) ?? {}),
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {
@@ -443,6 +464,7 @@ export async function emitTerminalMissionHumanOperatorReport(
       nextAction: nextActionText,
       evidence: evidenceText,
       workflowRunId: verifiedRunId,
+      resumeAvailable: resumePathAvailable,
     };
 
     // atomic claim: 동시/재시도 중 정확히 한 번만 통과(design section 9 unique-index 패턴).
