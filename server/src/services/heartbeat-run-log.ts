@@ -1,15 +1,14 @@
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
-import { runningProcesses } from "../adapters/index.js";
 import { appendWithCap, MAX_EXCERPT_BYTES, parseObject } from "../adapters/utils.js";
 import { parseHermesProgressText } from "../adapters/hermes-local-execute.js";
 import { redactCurrentUserText, type CurrentUserRedactionOptions } from "../log-redaction.js";
 import { logger } from "../middleware/logger.js";
 import { hermesChatService } from "./hermes-chat.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
-import { resolveRunawayAdvisorySoftBytes, resolveRunawayLogLimitBytes } from "./heartbeat-stability.js";
+import { resolveRunawayLogLimitBytes } from "./heartbeat-stability.js";
 import { publishLiveEvent } from "./live-events.js";
-import type { RunLogHandle, RunLogStore } from "./run-log-store.js";
+import { serializeRunLogEvent, type RunLogEvent, type RunLogHandle, type RunLogStore } from "./run-log-store.js";
 import { evaluateRuntimeBroadScanHook } from "./runtime-broad-scan-hook.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -26,7 +25,7 @@ interface HeartbeatRunLogOptions {
   appendEvent: (event: {
     eventType: string;
     stream: "system";
-    level: "warn" | "error";
+    level: "info" | "warn" | "error";
     message: string;
     payload: Record<string, unknown>;
   }) => Promise<void>;
@@ -52,12 +51,29 @@ export function createHeartbeatRunLog(options: HeartbeatRunLogOptions) {
   let currentUserRedactionOptions: CurrentUserRedactionOptions | undefined;
   let hermesChatAssistantMessageId: string | null = null;
   let hermesChat: ReturnType<typeof hermesChatService> | null = null;
-  // Preserve the existing advisory/kill policy until the C07 storage-limit step.
-  const runawayLogLimitBytes = resolveRunawayLogLimitBytes(options.config);
-  const runawayAdvisorySoftBytes = resolveRunawayAdvisorySoftBytes(runawayLogLimitBytes);
-  let runawayLogBytes = 0;
-  let runawayTriggered = false;
-  let runawayAdvisoryEmitted = false;
+  const storageLimitBytes = resolveRunawayLogLimitBytes(options.config);
+  let storageCapped = false;
+  let summaryEmitted = false;
+  const storage = { storedRecords: 0, storedBytes: 0, omittedRecords: 0, omittedBytes: 0, writeErrors: 0 };
+
+  async function appendStoredEvent(event: RunLogEvent) {
+    if (!handle) return;
+    const bytes = Buffer.byteLength(serializeRunLogEvent(event), "utf8");
+    if (storageCapped || (storageLimitBytes > 0 && storage.storedBytes + bytes > storageLimitBytes)) {
+      storageCapped = true;
+      storage.omittedRecords += 1;
+      storage.omittedBytes += bytes;
+      return;
+    }
+    try {
+      await runLogStore.append(handle, event);
+      storage.storedRecords += 1;
+      storage.storedBytes += bytes;
+    } catch (err) {
+      storage.writeErrors += 1;
+      throw err;
+    }
+  }
 
   const evaluateRuntimeGuardLines = (stream: "stdout" | "stderr", text: string, flush = false) => {
     const currentBuffer = stream === "stdout" ? stdoutGuardBuffer : stderrGuardBuffer;
@@ -146,64 +162,7 @@ export function createHeartbeatRunLog(options: HeartbeatRunLogOptions) {
     if (stream === "stderr") stderrExcerpt = appendWithCap(stderrExcerpt, sanitizedChunk, MAX_EXCERPT_BYTES);
     if (stream === "stdout") await maybeUpdateHermesChatProgress(now);
 
-    if (handle) {
-      await runLogStore.append(handle, {
-        stream,
-        chunk: sanitizedChunk,
-        ts,
-      });
-    }
-    if (!runawayTriggered && runawayLogLimitBytes > 0) {
-      runawayLogBytes += Buffer.byteLength(sanitizedChunk, "utf8");
-      // [runaway advisory] 소프트 경고 — kill 전에 한 번, 감사 이벤트로 기록한다.
-      //   (commandcode는 stdin이 ignore로 스폰되어 실행 중 주입은 불가; 대신 다음 실행
-      //   웨이크의 paperclipRunawayRecoveryBrief가 회복 지시를 보장한다.)
-      if (
-        !runawayAdvisoryEmitted &&
-        runawayAdvisorySoftBytes > 0 &&
-        runawayLogBytes >= runawayAdvisorySoftBytes
-      ) {
-        runawayAdvisoryEmitted = true;
-        await options.appendEvent({
-          eventType: "lifecycle",
-          stream: "system",
-          level: "warn",
-          message: `Runaway advisory: run log reached ${runawayLogBytes} bytes (soft threshold ${runawayAdvisorySoftBytes}, hard limit ${runawayLogLimitBytes}); the run will be terminated if output growth continues`,
-          payload: {
-            runawayLogBytes,
-            runawayAdvisorySoftBytes,
-            runawayLogLimitBytes,
-          },
-        }).catch(() => undefined);
-      }
-    }
-    if (
-      !runawayTriggered &&
-      runawayLogLimitBytes > 0 &&
-      runawayLogBytes > runawayLogLimitBytes
-    ) {
-      runawayTriggered = true;
-      const tracked = runningProcesses.get(getRun().id);
-      if (tracked) {
-        tracked.child.kill("SIGTERM");
-        setTimeout(() => {
-          if (!tracked.child.killed) {
-            tracked.child.kill("SIGKILL");
-          }
-        }, Math.max(1, tracked.graceSec) * 1000);
-        runningProcesses.delete(getRun().id);
-      }
-      await options.appendEvent({
-        eventType: "lifecycle",
-        stream: "system",
-        level: "error",
-        message: `Runaway log guard: run log exceeded ${runawayLogLimitBytes} bytes (wrote ${runawayLogBytes}); terminating adapter child`,
-        payload: {
-          runawayLogBytes,
-          runawayLogLimitBytes,
-        },
-      }).catch(() => undefined);
-    }
+    await appendStoredEvent({ stream, chunk: sanitizedChunk, ts });
     if (now.getTime() - lastActivityTouchMs >= RUN_ACTIVITY_TOUCH_INTERVAL_MS) {
       lastActivityTouchMs = now.getTime();
       await db
@@ -251,7 +210,7 @@ export function createHeartbeatRunLog(options: HeartbeatRunLogOptions) {
         // runtime-broad-scan-hook.ts header for the audit-not-block trade-off.
         if (handle) {
           try {
-            await runLogStore.append(handle, { stream: "stdout", chunk: hook.syntheticOutput ?? "", ts: new Date().toISOString() });
+            await appendStoredEvent({ stream: "stdout", chunk: hook.syntheticOutput ?? "", ts: new Date().toISOString() });
           } catch {
             // non-fatal — the audit event below still records the interception
           }
@@ -269,7 +228,19 @@ export function createHeartbeatRunLog(options: HeartbeatRunLogOptions) {
   }
 
   async function finalize() {
-    return handle ? runLogStore.finalize(handle) : null;
+    if (!handle) return null;
+    const summary = await runLogStore.finalize(handle);
+    if (!summaryEmitted) {
+      await options.appendEvent({
+        eventType: "log_storage_summary",
+        stream: "system",
+        level: storage.omittedRecords || storage.writeErrors ? "warn" : "info",
+        message: "Run log storage summary",
+        payload: { version: 1, storageLimitBytes, ...storage, actualBytes: summary.bytes, sha256: summary.sha256 ?? null },
+      });
+      summaryEmitted = true;
+    }
+    return summary;
   }
 
   async function finalizeAfterError() {
@@ -289,7 +260,8 @@ export function createHeartbeatRunLog(options: HeartbeatRunLogOptions) {
     finalizeAfterError,
     get stdoutExcerpt() { return stdoutExcerpt; },
     get stderrExcerpt() { return stderrExcerpt; },
-    get runawayTriggered() { return runawayTriggered; },
+    // Compatibility for the caller; log volume no longer terminates execution.
+    get runawayTriggered() { return false; },
     get redactionOptions() { return currentUserRedactionOptions; },
   };
 }

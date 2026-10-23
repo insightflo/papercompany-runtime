@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import { getRunLogStore } from "../services/run-log-store.js";
 import {
 	createDb, agents, companies, issues, heartbeatRunEvents, issueComments, activityLog,
 } from "@paperclipai/db";
@@ -47,16 +48,11 @@ async function waitForIssueRow(
 	return row;
 }
 
-async function emitRunawayOutput(input: Pick<AdapterInput, "onLog">, chunks: number) {
+async function emitLargeOutput(input: Pick<AdapterInput, "onLog">, chunks: number) {
 	for (let i = 0; i < chunks; i += 1) {
 		await input.onLog?.("stdout", "x".repeat(20_000) + "\n");
 	}
-	return {
-		...successfulAdapterResult(),
-		exitCode: 1,
-		errorMessage: "child terminated after runaway output",
-		errorCode: null,
-	};
+	return successfulAdapterResult();
 }
 
 describeEmbeddedPostgres("heartbeat C07 log and no-progress preservation", () => {
@@ -123,43 +119,54 @@ describeEmbeddedPostgres("heartbeat C07 log and no-progress preservation", () =>
 		};
 	}
 
-	it("fails a run with runaway_context when the log stream exceeds the configured limit", async () => {
+	it("finishes large output while storing only complete records within the cap", async () => {
 		const { invoke } = await seedC07Fixture({ runawayLogLimitBytes: 60_000 });
-		executeSpy.mockImplementation((input: AdapterInput) => emitRunawayOutput(input, 5));
-		const { final } = await invoke();
-		expect(final.status).toBe("failed");
-		expect(final.errorCode).toBe("runaway_context");
-	});
-
-	it("emits a soft-threshold advisory event before the runaway kill", async () => {
-		const { invoke } = await seedC07Fixture({ runawayLogLimitBytes: 100_000 });
-		executeSpy.mockImplementation((input: AdapterInput) => emitRunawayOutput(input, 6));
+		executeSpy.mockImplementation((input: AdapterInput) => emitLargeOutput(input, 5));
 		const { run, final } = await invoke();
-		expect(final.status).toBe("failed");
-		expect(final.errorCode).toBe("runaway_context");
+		expect(final.status).toBe("succeeded");
+		expect(final.errorCode).toBeNull();
 		const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
-		const advisory = events.find((event) => (event.message ?? "").includes("Runaway advisory"));
-		expect(advisory).toBeTruthy();
-		expect(advisory?.level).toBe("warn");
+		const summaries = events.filter(event => event.eventType === "log_storage_summary");
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0].payload).toMatchObject({ version: 1, storageLimitBytes: 60_000, storedRecords: 3, omittedRecords: 3, writeErrors: 0 });
+		expect(final.logStore).toBe("local_file");
+		expect(final.logRef).toBeTruthy();
+		const stored = await getRunLogStore().read({ store: "local_file", logRef: final.logRef! });
+		const records = stored.content.trimEnd().split("\n").map(line => JSON.parse(line));
+		expect(records[0].chunk).toContain("[paperclip] No project or prior session workspace was available.");
+		expect(records.slice(1).map(record => record.chunk)).toEqual(Array(2).fill("x".repeat(20_000) + "\n"));
+		expect(final.logBytes).toBe(Buffer.byteLength(stored.content));
+		expect(final.logBytes).toBeLessThanOrEqual(60_000);
+		expect(final.logSha256).toBe(createHash("sha256").update(stored.content).digest("hex"));
+		expect(summaries[0].payload).toMatchObject({ storedBytes: final.logBytes, actualBytes: final.logBytes, sha256: final.logSha256 });
 	});
 
-	it("injects a runaway recovery brief into the next run for the same issue", async () => {
-		const { invoke } = await seedC07Fixture({ runawayLogLimitBytes: 60_000 });
+	it("does not emit log-volume advisory or termination events", async () => {
+		const { invoke } = await seedC07Fixture({ runawayLogLimitBytes: 100_000 });
+		executeSpy.mockImplementation((input: AdapterInput) => emitLargeOutput(input, 6));
+		const { run, final } = await invoke();
+		expect(final.status).toBe("succeeded");
+		expect(final.errorCode).toBeNull();
+		const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
+		expect(events.some(event => (event.message ?? "").includes("Runaway advisory") || (event.message ?? "").includes("Runaway log guard"))).toBe(false);
+	});
+
+	it("does not inject a runaway recovery brief after a storage-capped successful run", async () => {
+		const { invoke, reopenIssue } = await seedC07Fixture({ runawayLogLimitBytes: 60_000 });
 		const contexts: Array<Record<string, unknown>> = [];
 		executeSpy.mockImplementation(async (input: AdapterInput) => {
 			contexts.push(input.context);
-			if (contexts.length === 1) return emitRunawayOutput(input, 5);
-			return { ...successfulAdapterResult() };
+			if (contexts.length === 1) return emitLargeOutput(input, 5);
+			return successfulAdapterResult();
 		});
 		const first = await invoke(true);
-		expect(first.final.errorCode).toBe("runaway_context");
+		expect(first.final.status).toBe("succeeded");
+		expect(first.final.errorCode).toBeNull();
+		await reopenIssue();
 		const second = await invoke(true);
 		expect(second.final.status).toBe("succeeded");
 		expect(contexts).toHaveLength(2);
-		expect(contexts[1]?.paperclipRunawayRecoveryBrief).toMatchObject({
-			kind: "runaway_recovery", previousRunId: first.run.id,
-		});
-		expect(contexts[0]?.paperclipRunawayRecoveryBrief).toBeUndefined();
+		expect(contexts.every(context => context.paperclipRunawayRecoveryBrief === undefined)).toBe(true);
 	});
 
 	it("no-progress ladder: advisory at N, recovery brief on next wake, honest auto-block at K", async () => {

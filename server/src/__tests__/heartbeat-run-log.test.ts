@@ -5,7 +5,7 @@ import { MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { logger } from "../middleware/logger.js";
 import { createHeartbeatRunLog } from "../services/heartbeat-run-log.js";
 import { publishLiveEvent } from "../services/live-events.js";
-import type { RunLogStore } from "../services/run-log-store.js";
+import { serializeRunLogEvent, type RunLogStore } from "../services/run-log-store.js";
 import { evaluateRuntimeBroadScanHook } from "../services/runtime-broad-scan-hook.js";
 
 const { progress } = vi.hoisted(() => ({ progress: vi.fn() }));
@@ -131,61 +131,70 @@ describe("C07 run-log extraction preserves the existing output contract", () => 
     }));
   });
 
-  it("preserves UTF-8 threshold equality, shared event order and one hard kill with escalation", async () => {
-    const h = fixture({ config: { runawayLogLimitBytes: 4 } });
+  it.each([1, 2])("caps whole UTF-8 records at equality, retains only the prefix and never kills the child", async capacity => {
+    const chunk = "é\n\"\\";
+    const record = "{\"ts\":\"1970-01-01T00:00:20.000Z\",\"stream\":\"stdout\",\"chunk\":\"é\\n\\\"\\\\\"}\n";
+    const bytes = Buffer.byteLength(record);
+    const rejected = "x".repeat(bytes * 2);
+    const omitted = "{\"ts\":\"1970-01-01T00:00:20.000Z\",\"stream\":\"stderr\",\"chunk\":\"" + rejected + "\"}\n{\"ts\":\"1970-01-01T00:00:20.000Z\",\"stream\":\"stdout\",\"chunk\":\"\"}\n";
+    expect(serializeRunLogEvent({ ts: new Date().toISOString(), stream: "stdout", chunk })).toBe(record);
+    const h = fixture({ config: { runawayLogLimitBytes: bytes * capacity } });
     await h.log.begin();
     const child = { kill: vi.fn(() => true), killed: false };
     type Tracked = NonNullable<ReturnType<typeof runningProcesses.get>>;
     runningProcesses.set("run", { child, graceSec: 0 } as unknown as Tracked);
-    await h.log.onLog("stdout", "éé"); // Four bytes: advisory, but no hard kill at equality.
+    await h.log.onLog("stdout", chunk);
+    await h.log.onLog("stderr", rejected);
+    await h.log.onLog("stdout", ""); // Even a shorter record after overflow is omitted.
+    expect(h.store.append).toHaveBeenCalledTimes(1);
     expect(h.log.runawayTriggered).toBe(false);
+    expect(runningProcesses.has("run")).toBe(true);
     expect(child.kill).not.toHaveBeenCalled();
-    await h.log.onLog("stderr", "!");
-    await h.log.onLog("stdout", "ignored by the already-triggered byte counter");
-    expect(h.events).toEqual([
-      { seq: 2, value: expect.objectContaining({ level: "warn", payload: {
-        runawayLogBytes: 4, runawayAdvisorySoftBytes: 4, runawayLogLimitBytes: 4,
-      } }) },
-      { seq: 3, value: expect.objectContaining({ level: "error", payload: {
-        runawayLogBytes: 5, runawayLogLimitBytes: 4,
-      } }) },
-    ]);
-    expect(h.log.runawayTriggered).toBe(true);
-    expect(runningProcesses.has("run")).toBe(false);
-    expect(child.kill.mock.calls).toEqual([["SIGTERM"]]);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(child.kill.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(publishLiveEvent).toHaveBeenCalledTimes(3);
+    expect(h.log.stderrExcerpt).toBe(rejected);
+    await h.log.finalize();
+    expect(h.appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "log_storage_summary", payload: expect.objectContaining({
+        version: 1, storageLimitBytes: bytes * capacity, storedRecords: 1, storedBytes: bytes,
+        omittedRecords: 2, omittedBytes: Buffer.byteLength(omitted), writeErrors: 0,
+        actualBytes: 123, sha256: "actual-file-hash",
+      }),
+    }));
   });
 
-  it("shares the caller sequence across a hook audit, advisory and hard guard", async () => {
-    const h = fixture({ config: { runawayLogLimitBytes: 4 } });
+  it("shares audit sequencing and caps the trailing synthetic flush through the same boundary", async () => {
+    const h = fixture({ config: { runawayLogLimitBytes: 80 } });
     await h.log.begin();
-    vi.mocked(evaluateRuntimeBroadScanHook).mockResolvedValueOnce({
-      intercepted: true, syntheticOutput: "1234",
-    });
-    await h.log.onLog("stdout", "blocked\n");
-    await h.log.onLog("stderr", "!");
-    expect(h.events.map(event => event.seq)).toEqual([2, 3, 4]);
+    await h.log.onLog("stdout", "blocked");
+    vi.mocked(evaluateRuntimeBroadScanHook).mockResolvedValueOnce({ intercepted: true, syntheticOutput: "audit".repeat(20) });
+    await h.log.flushRuntimeGuardLines();
+    await h.log.finalizeAfterError();
+    await h.log.finalize();
+    expect(h.store.append).toHaveBeenCalledTimes(1);
+    expect(h.events.map(event => event.seq)).toEqual([2, 3]);
     expect(h.appendBroadScanEvent).toHaveBeenCalledTimes(1);
-    expect(h.appendEvent.mock.calls.map(call => call[0].level)).toEqual(["warn", "error"]);
+    expect(h.appendEvent).toHaveBeenCalledTimes(1);
+    expect(h.appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ storedRecords: 1, omittedRecords: 1, writeErrors: 0 }),
+    }));
   });
 
-  it("keeps a zero limit disabled and advisory write failures nonfatal", async () => {
-    const disabled = fixture();
-    await disabled.log.begin();
-    await disabled.log.onLog("stdout", "x".repeat(50_000));
-    expect(disabled.log.runawayTriggered).toBe(false);
-    expect(disabled.appendEvent).not.toHaveBeenCalled();
-    const guarded = fixture({ config: { runawayLogLimitBytes: 1 } });
-    guarded.appendEvent.mockRejectedValue(new Error("event unavailable"));
-    await guarded.log.begin();
-    await expect(guarded.log.onLog("stdout", "xx")).resolves.toBeUndefined();
-    expect(guarded.log.runawayTriggered).toBe(true);
-    expect(guarded.appendEvent.mock.calls.map(call => call[0].level)).toEqual(["warn", "error"]);
+  it.each([0, 80])("separates failed writes from omissions without consuming budget (limit=%s)", async limit => {
+    const h = fixture({ config: { runawayLogLimitBytes: limit } });
+    await h.log.begin();
+    vi.mocked(h.store.append).mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(h.log.onLog("stdout", "failed")).rejects.toThrow("storage unavailable");
+    await h.log.onLog("stdout", "stored");
+    expect(await h.log.finalizeAfterError()).toBe(h.summary);
+    expect(h.appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ storageLimitBytes: limit, storedRecords: 1, omittedRecords: 0, omittedBytes: 0, writeErrors: 1 }),
+    }));
+    expect(h.log.runawayTriggered).toBe(false);
   });
 
   it.each(["stdout", "stderr"] as const)("flushes a trailing %s audit without replaying onLog", async stream => {
-    const h = fixture({ config: { runawayLogLimitBytes: 20 } });
+    const h = fixture();
     await h.log.begin();
     await h.log.onLog(stream, "blocked");
     const writes = h.writes.length;
@@ -225,7 +234,7 @@ describe("C07 run-log extraction preserves the existing output contract", () => 
   });
 
   it("retains excerpts but propagates an ordinary append failure before guard/touch/live effects", async () => {
-    const h = fixture({ config: { runawayLogLimitBytes: 1 } });
+    const h = fixture();
     await h.log.begin();
     const error = new Error("ordinary append unavailable");
     vi.mocked(h.store.append).mockRejectedValueOnce(error);
