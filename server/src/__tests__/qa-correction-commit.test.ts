@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, is, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
-import { assets, heartbeatRuns, issueAttachments, issueWorkProducts, qualityActions,
-  workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { assets, issueAttachments, issueWorkProducts, qualityActions,
+  workflowStepOutputBindings, type Db } from "@paperclipai/db";
 import { getStorageService } from "../storage/index.js";
 import * as reader from "../services/workflow/control-flow/qa-correction-reader.js";
 import * as validation from "../services/workflow/control-flow/qa-correction-commit-validation.js";
@@ -17,7 +17,7 @@ import { measureQaCorrectionSources } from "../services/workflow/control-flow/qa
 import { storeQaCorrection, type StoredCorrection } from "../services/workflow/control-flow/qa-correction-storage.js";
 import { appendQaVerdict } from "./helpers/qa-correction-fixture.js";
 import { commitBuffers, commitDbState, commitFacts, commitFileState, createCommitSourceHarness,
-  makeCommitSource, type CommitSourceCase, type CommitSourceMode } from "./qa-correction-commit-fixture.js";
+  makeCommitSource, prepareFreshQaOverRevision, type CommitSourceCase, type CommitSourceMode } from "./qa-correction-commit-fixture.js";
 
 // C03 adopted plan §§5,6,8 supplies the oracle: fixture bytes, actual constraints and DB readback.
 // QA requests/verdicts are controlled fixtures; every correction issuance below uses the real writer.
@@ -56,31 +56,12 @@ describe("C03 atomic correction issuance", () => {
       attachments: await s.db.select().from(issueAttachments).where(eq(issueAttachments.companyId, id)).orderBy(issueAttachments.id),
       actions: await s.db.select().from(qualityActions).where(eq(qualityActions.companyId, id)).orderBy(qualityActions.id) };
   }
-  async function nextCorrection(s: CommitSourceCase, issued: reader.IssuedQaCorrection) {
-    const r = issued.applied.revisions[0]!, output = path.join(r.root, r.mainRelativePath);
-    const expected = commitBuffers(s.mode, "new"), request = structuredClone(s.request);
-    request.input.workProductId = r.workProductId; request.input.path = output;
-    request.input.sha256 = commitFacts(expected).find(f => f.role === "main")!.sha256;
-    request.input.byteSize = expected.get("report.html")!.length;
-    if (request.input.mode === "html") request.input.htmlManifest = { path: path.join(r.root, "bundle-index.json"),
-      sha256: commitFacts(expected).find(f => f.relativePath === "bundle-index.json")!.sha256,
-      byteSize: expected.get("bundle-index.json")!.length };
-    else request.input.assetsRoot = r.assetsRelativeRoot === null ? "" : path.join(r.root, r.assetsRelativeRoot!);
-    await s.db.update(workflowStepRuns).set({ metadata: { artifactExecution: request.artifactExecution,
-      toolArtifactRequest: request } }).where(eq(workflowStepRuns.id, s.f.qa.id));
-    const remediations = { items: [{ op: "string_replace" as const, file: output, find: "new", replace: "final" }] };
-    const verdict = await appendQaVerdict(s.db, s.f, "request_changes", remediations), now = new Date();
-    await s.db.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, verdict.heartbeatRunId));
-    await s.db.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, verdict.eventId));
-    const p = structuredClone(s.p); p.correctionId = randomUUID(); p.preparedAt = now.toISOString();
-    p.authority.verdicts = [verdict];
-    p.sources = [{ productId: r.workProductId, provenance: { kind: "prior_correction", appliedEventId: request.input.workProductId === r.workProductId
-      ? (await s.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, r.workProductId)))[0]!.metadata!.qaCorrection as never : "" } }];
-    p.sources[0] = { productId: r.workProductId, provenance: { kind: "prior_correction",
-      appliedEventId: (issued.sources.length && (await s.db.select().from(workflowTransitionEvents)
-        .where(eq(workflowTransitionEvents.idempotencyKey, "qa-correction-applied:" + issued.preparation.correctionId)))[0]!.id) as string } };
-    p.bindings.forEach(b => { b.expectedProductId = r.workProductId; });
-    const prepared = await beginQaCorrection(s.db, p);
+  async function nextCorrection(s: CommitSourceCase, issued: reader.IssuedQaCorrection, appliedEventId: string) {
+    const next = await prepareFreshQaOverRevision(s, s.db, issued, appliedEventId);
+    expect(next.f.qa.id).not.toBe(s.f.qa.id);
+    expect(next.f.qa.issueId).not.toBe(s.f.qa.issueId);
+    expect(next.request.input.workProductId).toBe(issued.applied.revisions[0]!.workProductId);
+    const prepared = await beginQaCorrection(s.db, next.p);
     if (prepared.status !== "prepared") throw Error("next actual preparation required");
     const measured = await measureQaCorrectionSources(s.db, { preparationEventId: prepared.preparationEventId, preparationHash: prepared.preparationHash });
     return storeQaCorrection(s.db, measured);
@@ -126,7 +107,7 @@ describe("C03 atomic correction issuance", () => {
     const bState = await state(s);
     expect(await commitQaCorrection(owned.connect(), stored)).toEqual({ ...first, status: "existing", authority: "history_only" });
     expect(await state(s)).toEqual(bState);
-    const next = await nextCorrection(s, first.proof), second = await commitQaCorrection(owned.connect(), next);
+    const next = await nextCorrection(s, first.proof, first.appliedEventId), second = await commitQaCorrection(owned.connect(), next);
     if (second.status !== "committed") throw Error("actual C required");
     expect(await files.readFile(next.outputs[0]!.mainPath)).toEqual(commitBuffers("html", "final").get("report.html"));
     expect(second.proof.sourceMeasured.sources[0]!.files).toEqual(commitFacts(commitBuffers("html", "new")));

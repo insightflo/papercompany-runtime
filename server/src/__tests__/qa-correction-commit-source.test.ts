@@ -58,7 +58,11 @@ describe("C03 accepted plan sections 2/8: common prior observation and fixed mea
   }, 20000);
   it.each(["html", "content", "empty", "content-only"] as const)(
     "reaches actual begin/observe/bytes/measure for issued %s without losing any tuple", async mode => {
-      const s = await makeCommitPrior(await original(mode)), files = await commitFileState(s);
+      const source = await original(mode), s = await makeCommitPrior(source), files = await commitFileState(s);
+      expect(s.f.qa.id).not.toBe(source.f.qa.id);
+      expect(s.f.qa.issueId).not.toBe(source.f.qa.issueId);
+      expect(s.request.stepRunId).toBe(s.f.qa.id);
+      expect(s.request.input.workProductId).toBe(s.history!.workProductId);
       const issued = await readIssuedQaCorrection(owned.db, s.history!.scope), m = await measured(s);
       const revision = issued.applied.revisions[0]!;
       expect(m.ref.sourceMeasured.sources[0]!.files).toEqual(revision.files.map(({ beforeSha256: _, ...f }) => f));
