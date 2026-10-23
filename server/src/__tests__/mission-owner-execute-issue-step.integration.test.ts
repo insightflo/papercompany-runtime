@@ -222,6 +222,7 @@ describe("mission owner execute issue step (real DB + native source-issue resume
     executeSpy.mockClear(); // Seed dispatch has already drained; measure only the recovery worker.
     const drain = vi.spyOn(delivery, "drainReplacementRootNotifications")
       .mockRejectedValueOnce(new Error("committed source delivery lost"));
+    let failed = false;
     try {
       const body = ownerBody(s);
       const first = await callExecute(s, body);
@@ -244,8 +245,11 @@ describe("mission owner execute issue step (real DB + native source-issue resume
       const linked = heartbeats.filter(row => row.wakeupRequestId === wake.id);
       expect(linked).toHaveLength(1);
       const [heartbeat] = linked;
-      expect(heartbeat).toMatchObject({ status: "queued", agentId: s.agentId, issueId: s.issueId,
-        workflowStepRunId: s.stepRunId, workflowExecutionGeneration: 1 });
+      expect(heartbeat).toMatchObject({ status: "queued", companyId: s.companyId, agentId: s.agentId,
+        issueId: s.issueId, wakeupRequestId: wake.id });
+      expect(wake.runId).toBe(heartbeat.id);
+      expect(heartbeat.contextSnapshot).toMatchObject({ issueId: s.issueId, missionId: s.missionId,
+        workflowRunId: s.workflowRunId, workflowStepRunId: s.stepRunId });
       expect(drain).toHaveBeenCalledTimes(1);
       expect(executeSpy).not.toHaveBeenCalled();
       const committed = await snapshot(s);
@@ -261,7 +265,8 @@ describe("mission owner execute issue step (real DB + native source-issue resume
       expect(executeSpy).toHaveBeenCalledTimes(1);
       expect(executeSpy.mock.calls[0]?.[0]).toMatchObject({ runId: heartbeat.id });
       expect((await workerHeartbeats(s)).filter(row => row.wakeupRequestId === wake.id))
-        .toMatchObject([{ id: heartbeat.id, wakeupRequestId: wake.id, status: "succeeded" }]);
+        .toMatchObject([{ id: heartbeat.id, wakeupRequestId: wake.id, status: "succeeded",
+          workflowStepRunId: s.stepRunId, workflowExecutionGeneration: 1 }]);
       expect((await getResult(s, action.actionId)).state).toBe("resolved");
       expect((await resumeWakes(s)).map(row => row.id)).toEqual([wake.id]);
       expect(await authorities(s)).toHaveLength(1);
@@ -271,7 +276,14 @@ describe("mission owner execute issue step (real DB + native source-issue resume
       const stale = await callExecute(s, ownerBody(s));
       expect((stale.body.data as { state: string }).state).toBe("blocked");
       expect(await authorities(s)).toHaveLength(1);
-    } finally { drain.mockRestore(); }
+    } catch (error) { failed = true; throw error; }
+    finally {
+      drain.mockRestore();
+      try {
+        await heartbeatService(db).resumeQueuedRuns(s.agentId);
+        await drainHeartbeatRuns(db);
+      } catch (error) { if (!failed) throw error; console.error("Recovery cleanup failed after test failure", error); }
+    }
   });
 
   it("never reaches the privileged cap-override branch for automatic retries", async () => {
