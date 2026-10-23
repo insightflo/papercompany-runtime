@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
-import { agentWakeupRequests, companies, heartbeatRuns, issueWorkProducts, qualityActionGroups,
+import { agentWakeupRequests, companies, issueWorkProducts, qualityActionGroups,
   qualityEvidenceRefs, qualityPolicyUsage, workflowDefinitions, workflowRuns, workflowStepOutputBindings,
   workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { beginQaCorrection } from "../services/workflow/control-flow/qa-correction-prepare.js";
@@ -18,7 +18,9 @@ import { captureArtifactRoot, digest } from "../services/workflow/artifact-files
 import * as artifactFiles from "../services/workflow/artifact-files.js";
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { prepareQaArtifactRequest } from "../services/workflow/qa-artifact-request.js";
-import { appendQaVerdict, createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection,
+import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
+import { hideCommitDeclaration, prepareFreshQaOverRevision } from "./qa-correction-commit-fixture.js";
+import { createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection,
   type CorrectionFixture } from "./helpers/qa-correction-fixture.js";
 
 describe("C03/C12 whole immutable correction storage", () => {
@@ -130,7 +132,7 @@ describe("C03/C12 whole immutable correction storage", () => {
         : { content: file, ...(kind === "only" ? {} : { assets: path.join(dir, "assets") }) } });
     expect(request).not.toBeNull();
     await owned.db.update(workflowStepRuns).set({ status: "failed" }).where(eq(workflowStepRuns.id, f.qa.id));
-    return { ...s, bytes, names, html, manifest, definition, steps };
+    return { ...s, bytes, names, html, manifest, request: request!.snapshot };
   }
   it.each(["registered_legacy", "identity", "sealed"] as const)("stores %s without changing A or DB; absent mission directory", async mode => {
     const { f, dir } = await seed(mode, false, true), m = await measure(f);
@@ -228,18 +230,13 @@ describe("C03/C12 whole immutable correction storage", () => {
     await owned.db.update(workflowTransitionEvents).set({ payload: issued.applied }).where(eq(workflowTransitionEvents.id, issued.appliedId));
     const [product] = await owned.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, issued.workProductId));
     await owned.db.update(issueWorkProducts).set({ metadata: { ...product!.metadata, path: path.join(b.path, "report.html") } }).where(eq(issueWorkProducts.id, issued.workProductId));
-    await owned.db.update(workflowDefinitions).set({ stepsJson: s.steps.map(step => {
-      const copy: Record<string, unknown> = { ...step }; delete copy.toolArtifactContract; return copy;
-    }) }).where(eq(workflowDefinitions.id, s.definition!.id));
-    await owned.db.update(workflowStepRuns).set({ metadata: {} }).where(eq(workflowStepRuns.id, f.qa.id));
+    const prior = await readIssuedQaCorrection(owned.db, issued.scope);
+    const next = await prepareFreshQaOverRevision({ f, root, request: s.request }, owned.db, prior, issued.appliedId, "new", {
+      files: new Map(files.map(x => [x.relativePath, x.bytes])),
+      bundleManifestRelativePath: s.html ? s.manifest : null, assetsRelativeRoot: kind === "only" ? null : "assets" });
+    await hideCommitDeclaration({ ...next, db: owned.db });
     await owned.db.update(companies).set({ workProductRoot: null }).where(eq(companies.id, p.companyId));
-    f.remediations.items = [{ op: "string_replace", file: path.join(b.path, "report.html"), find: "new", replace: "final" }];
-    const v = await appendQaVerdict(owned.db, f, "request_changes"), now = new Date();
-    await owned.db.update(heartbeatRuns).set({ createdAt: now }).where(eq(heartbeatRuns.id, v.heartbeatRunId));
-    await owned.db.update(workflowTransitionEvents).set({ createdAt: now }).where(eq(workflowTransitionEvents.id, v.eventId));
-    p.correctionId = randomUUID(); p.authority.verdicts = [v]; p.sources = [{ productId: issued.workProductId,
-      provenance: { kind: "prior_correction", appliedEventId: issued.appliedId } }]; p.bindings[0]!.expectedProductId = issued.workProductId;
-    return { ...s, issued, revision: r, files, prefix, measured: await measure(f) };
+    return { ...s, f: next.f, issued, revision: r, files, prefix, measured: await measure(next.f) };
   }
   it.each((["content", "empty", "only", "html", "html-empty"] as const).flatMap(kind =>
     (["mission", "local"] as const).map(layout => ({ kind, layout }))))("uses historical format and original $layout base for $kind B→C", async ({ kind, layout }) => {

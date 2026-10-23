@@ -147,7 +147,6 @@ export async function makeCommitSource(db: Db, root: string, mode: CommitSourceM
     text: "old", productId: f.productId, directory, file, files, history: null, bundles: [{ directory, files }] };
   return { ...s, request: await declare(s) };
 }
-
 export async function makeCommitPrior(s: CommitSourceCase): Promise<CommitSourceCase> {
   const { db } = s, oldFiles = s.files, text = s.text === "old" ? "new" : "final";
   // Reuse the existing historical reader fixture, then bind it to independently known real bytes.
@@ -171,13 +170,14 @@ export async function makeCommitPrior(s: CommitSourceCase): Promise<CommitSource
   const next = await prepareFreshQaOverRevision(s, db, prior, issued.appliedId, text);
   return { ...next, history: issued, bundles: [...s.bundles, { directory, files }] };
 }
-
 /** Independent current QA over issued bytes, never an ordinary verdict on the correction target. */
-export async function prepareFreshQaOverRevision(s: CommitSourceCase, peer: Db, prior: IssuedQaCorrection,
-  appliedEventId: string, text = "new"): Promise<CommitSourceCase> {
+export async function prepareFreshQaOverRevision<T extends { f: CorrectionFixture; root: string; request: Request; mode?: CommitSourceMode }>(
+  s: T, peer: Db, prior: IssuedQaCorrection, appliedEventId: string, text = "new",
+  bundle?: { files: Map<string, Buffer>; bundleManifestRelativePath: string | null; assetsRelativeRoot: string | null }) {
   if (prior.preparation.authority.kind !== "workflow_qa") throw Error("workflow QA preparation required");
-  const revision = prior.applied.revisions[0]!, files = commitBuffers(s.mode, text), facts = commitFacts(files);
-  if (facts.length !== revision.files.length || facts.some(file => !revision.files.some(stored =>
+  const revision = prior.applied.revisions[0]!, files = bundle?.files ?? commitBuffers(s.mode ?? "empty", text), facts = commitFacts(files);
+  if ((bundle && (bundle.bundleManifestRelativePath !== revision.bundleManifestRelativePath || bundle.assetsRelativeRoot !== revision.assetsRelativeRoot))
+    || facts.length !== revision.files.length || facts.some(file => !revision.files.some(stored =>
     stored.relativePath === file.relativePath && stored.role === file.role
       && stored.sha256 === file.sha256 && stored.byteSize === file.byteSize)))
     throw Error("registered B bytes must match the next correction input");
@@ -221,7 +221,7 @@ export async function prepareFreshQaOverRevision(s: CommitSourceCase, peer: Db, 
   request.input.assetManifest = facts.filter(fact => fact.role === "asset").map(fact => ({
     fileName: path.posix.relative("assets", fact.relativePath), sha256: fact.sha256, byteSize: fact.byteSize }));
   if (request.input.mode === "html") {
-    const manifest = facts.find(fact => fact.relativePath === "bundle-index.json")!, notes = facts.find(fact => fact.relativePath === "source-notes.txt")!;
+    const manifest = facts.find(fact => fact.relativePath === revision.bundleManifestRelativePath)!, notes = facts.find(fact => fact.relativePath === "source-notes.txt")!;
     request.input.htmlManifest = { path: path.join(revision.root, manifest.relativePath), sha256: manifest.sha256, byteSize: manifest.byteSize };
     request.input.ancillaryManifest = [{ fileName: "research", sha256: notes.sha256, byteSize: notes.byteSize }];
   }
@@ -283,7 +283,7 @@ export async function changeCommitSelector(s: CommitSourceCase, selector: { type
     ? step : { ...step, workProductSelectors: { produce: selector } }) }).where(eq(workflowDefinitions.id, run!.workflowId));
 }
 
-export async function hideCommitDeclaration(s: CommitSourceCase) {
+export async function hideCommitDeclaration(s: Pick<CommitSourceCase, "db" | "p" | "f">) {
   const [run] = await s.db.select().from(workflowRuns).where(eq(workflowRuns.id, s.p.workflowRunId));
   const [definition] = await s.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
   const [qa] = await s.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.f.qa.id));

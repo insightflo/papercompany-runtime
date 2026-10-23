@@ -15,8 +15,9 @@ import * as sourceBytes from "../services/workflow/control-flow/qa-correction-so
 import * as files from "../services/workflow/artifact-files.js";
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
 import { prepareQaArtifactRequest } from "../services/workflow/qa-artifact-request.js";
-import { appendQaVerdict, createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection, type CorrectionFixture } from "./helpers/qa-correction-fixture.js";
-
+import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
+import { hideCommitDeclaration, prepareFreshQaOverRevision } from "./qa-correction-commit-fixture.js";
+import { createQaCorrectionTestDb, issueQaCorrectionFixture, seedQaCorrection, type CorrectionFixture } from "./helpers/qa-correction-fixture.js";
 describe("C03/C12 first complete source measurement", () => {
   let owned: Awaited<ReturnType<typeof createQaCorrectionTestDb>>, root: string;
   beforeAll(async () => { owned = await createQaCorrectionTestDb(); root = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-measure-"))); }, 120000);
@@ -52,12 +53,12 @@ describe("C03/C12 first complete source measurement", () => {
   }
   async function prepare(f: CorrectionFixture) { const r = await beginQaCorrection(owned.db, f.preparation);
     if (r.status !== "prepared") throw Error("actual first begin required: " + r.status); return r; }
-  async function declared(html = false, noAssets?: "content-only" | "invalid-json") {
+  async function declared(html = false, noAssets?: "content-only" | "invalid-json", historical = false) {
     const s = await seed("identity", noAssets !== undefined), { f, file, dir } = s, p = f.preparation, assetsRoot = path.join(dir, "assets");
     await owned.db.update(issueWorkProducts).set({ type: "artifact" }).where(eq(issueWorkProducts.id, f.productId));
-    await mkdir(assetsRoot); const names = noAssets ? [] : Array.from({ length: html ? 1 : 9 }, (_, i) => `img-${i}.png`);
-    for (const name of names) await writeFile(path.join(assetsRoot, name), name);
-    const bytes = noAssets ? Buffer.from(noAssets === "content-only" ? '{"title":"old"}' : '{"title":"old"')
+    await mkdir(assetsRoot); const names = historical ? ["x.bin"] : noAssets ? [] : Array.from({ length: html ? 1 : 9 }, (_, i) => `img-${i}.png`);
+    for (const name of names) await writeFile(path.join(assetsRoot, name), historical ? "asset" : name);
+    const bytes = historical ? Buffer.from("old") : noAssets ? Buffer.from(noAssets === "content-only" ? '{"title":"old"}' : '{"title":"old"')
       : html ? Buffer.from("<p>old</p>") : Buffer.from(JSON.stringify({ schemaVersion: "ContentV1", title: "old", summary: "Draft", tags: ["fixture"],
         blocks: names.map(assetFile => ({ type: "image", assetFile })) }));
     await writeFile(file, bytes);
@@ -72,7 +73,7 @@ describe("C03/C12 first complete source measurement", () => {
         : noAssets === "content-only" ? { content: "content" } : { content: "content", assetsDir: "assets", out: "out" },
       deploymentFiles: ["qa.mjs"], inputEnvelopeVersion: "workflow.artifact-input.v1",
       ...(html ? { bundleManifest: { fileName: "manifest.json", schemaVersion: "bundle.v1", ancillaryRoles: ["research"] } }
-        : { assetDiscovery: noAssets ? [] : ["/blocks/*/assetFile"] }) };
+        : { assetDiscovery: noAssets || historical ? [] : ["/blocks/*/assetFile"] }) };
     const [run] = await owned.db.select().from(workflowRuns).where(eq(workflowRuns.id, p.workflowRunId));
     const [definition] = await owned.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
     const steps = (definition!.stepsJson as { id: string; [key: string]: unknown }[]).map(step => step.id !== f.qa.stepId ? step : { ...step,
@@ -160,26 +161,25 @@ describe("C03/C12 first complete source measurement", () => {
     expect(await state(f)).toEqual(before);
   });
   async function priorSource() {
-    const { f } = await seed(), p = f.preparation;
+    const s = await declared(false, undefined, true), { f } = s;
     // Historical reader input only. New measurement below must use the actual begin writer.
     const issued = await issueQaCorrectionFixture(owned.db, f), revision = issued.applied.revisions[0]!;
     const dir = path.join(root, "prior", revision.revisionId); await mkdir(path.join(dir, "assets"), { recursive: true });
     await writeFile(path.join(dir, "report.html"), "new"); await writeFile(path.join(dir, "assets", "x.bin"), "asset");
     issued.measured.sources[0]!.files.push({ role: "asset", relativePath: "assets/x.bin", sha256: files.digest("asset"), byteSize: 5 });
-    revision.root = dir; revision.files.push({ role: "asset", relativePath: "assets/x.bin", sha256: files.digest("asset"), byteSize: 5, beforeSha256: files.digest("asset") });
+    Object.assign(revision, { root: dir, bundleManifestRelativePath: null, assetsRelativeRoot: "assets" });
+    revision.files.push({ role: "asset", relativePath: "assets/x.bin", sha256: files.digest("asset"), byteSize: 5, beforeSha256: files.digest("asset") });
     issued.applied.sourceMeasuredHash = hashQaCorrectionPayload(issued.measured);
     await owned.db.update(workflowTransitionEvents).set({ payload: issued.measured }).where(eq(workflowTransitionEvents.id, issued.measuredId));
     await owned.db.update(workflowTransitionEvents).set({ payload: issued.applied }).where(eq(workflowTransitionEvents.id, issued.appliedId));
     const [product] = await owned.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, issued.workProductId));
     await owned.db.update(issueWorkProducts).set({ metadata: { ...product!.metadata, path: path.join(dir, "report.html") } }).where(eq(issueWorkProducts.id, issued.workProductId));
-    f.remediations.items[0]!.file = path.join(dir, "report.html"); f.remediations.items[0]!.find = "new";
-    const v = await appendQaVerdict(owned.db, f, "request_changes"), at = new Date();
-    await owned.db.update(heartbeatRuns).set({ createdAt: at }).where(eq(heartbeatRuns.id, v.heartbeatRunId));
-    await owned.db.update(workflowTransitionEvents).set({ createdAt: at }).where(eq(workflowTransitionEvents.id, v.eventId));
-    p.correctionId = randomUUID(); p.authority.verdicts = [v];
-    p.sources = [{ productId: issued.workProductId, provenance: { kind: "prior_correction", appliedEventId: issued.appliedId } }];
-    p.bindings[0]!.expectedProductId = issued.workProductId;
-    return { f, dir, issued, r: await prepare(f) };
+    const prior = await readIssuedQaCorrection(owned.db, issued.scope);
+    const next = await prepareFreshQaOverRevision({ f, root, request: s.request }, owned.db, prior, issued.appliedId, "new", {
+      files: new Map([["report.html", await readFile(path.join(dir, "report.html"))], ["assets/x.bin", await readFile(path.join(dir, "assets/x.bin"))]]),
+      bundleManifestRelativePath: null, assetsRelativeRoot: "assets" });
+    await hideCommitDeclaration({ ...next, db: owned.db });
+    return { f: next.f, dir, issued, r: await prepare(next.f) };
   }
   it.each(["valid", "main", "asset", "missing", "role", "path", "size", "count"] as const)("checks prior revision full tuple: %s", async kind => {
     const { f, dir, issued, r } = await priorSource();
