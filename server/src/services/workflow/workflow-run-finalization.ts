@@ -7,6 +7,7 @@ import { workflowRuns, type Db, type workflowStepRuns } from "@paperclipai/db";
 import type { WorkflowExecutionContext } from "./dag-engine.js";
 import { isDynamicOwnerPlanWorkflowDefinition, type WorkflowDefinitionExecutionShape } from "./execution-steps.js";
 import { executeTerminalEffectIntents, finalizeRunTerminal, isTerminalRunStatus } from "./run-terminal-boundary.js";
+import { hasLiveValidationRecheck } from "./workflow-validation-recheck-liveness.js";
 import { readQaCorrectionLiveness } from "./control-flow/qa-correction-liveness.js";
 import {
   logWorkflowRunFinalizationRefused,
@@ -51,7 +52,7 @@ export async function finalizeWorkflowRunState(
   const allStepsTerminal = dynamicLaunchStepIds
     ? executableStepRuns.length === dynamicLaunchStepIds.size && !executableHasActiveStep
     : stepRuns.length === context.steps.length && !hasActiveStep;
-  const nextStatus =
+  const candidateStatus =
     context.run.status === "cancelled"
       ? "cancelled"
       : hasFailedStep && allStepsTerminal
@@ -59,6 +60,11 @@ export async function finalizeWorkflowRunState(
         : !hasFailedStep && allStepsTerminal
           ? "completed"
           : "running";
+  const deferConvergence =
+    !isTerminalRunStatus(context.run.status)
+    && (candidateStatus === "failed" || candidateStatus === "completed")
+    && await hasLiveValidationRecheck(db, context.run);
+  const nextStatus = deferConvergence ? "running" : candidateStatus;
   const patch: Partial<typeof workflowRuns.$inferInsert> = {
     status: nextStatus,
     startedAt: context.run.startedAt ?? new Date(),
