@@ -204,7 +204,8 @@ it("C05: payload-only forgery, mismatched provenance and foreign original identi
   expect(() => readPauseControl(fake)).toThrow();
   const saved = await pause(db, input(w));
   expect(saved.head.id).not.toBe(fakeId);
-  const receipt = saved.receipts[0], row = (await controls(db, w.agentId)).find(p => p.id === receipt.id)!;
+  const receipt = saved.receipts.find(p => p.identity.heartbeatRunId === w.attempts[0].heartbeatId)!;
+  const row = (await controls(db, w.agentId)).find(p => p.id === receipt.id)!;
   for (const patch of [{ source: "automation" }, { requestedByActorType: "board" }, { requestedByActorId: "operator" },
     { requestKind: "on_demand" }, { status: "queued" }]) {
     expect(() => readPauseControl({ ...row, ...patch })).toThrow();
