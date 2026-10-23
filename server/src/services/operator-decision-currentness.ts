@@ -27,11 +27,16 @@ function createInputFromDecision(row: DecisionRow) {
 // C08 resolve gate: lock mission/current lifetime before the pending card CAS. The stored card is
 // rebuilt byte-for-byte and checked through the same binding authority as creation.
 export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: DecisionRow): Promise<void> {
-  if (row.sourceType !== MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE) return;
-  const input = createInputFromDecision(row);
   const [binding] = await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, row.companyId),
     sql`${workflowTransitionEvents.payload}->>'operatorDecisionId' = ${row.id}`)).limit(1);
+  if (row.sourceType !== MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE) {
+    if (!binding) return;
+    throw conflict("Owner human decision is not current", {
+      operatorDecisionId: row.id, code: "owner_human_decision_stale",
+    });
+  }
+  const input = createInputFromDecision(row);
   const lifetimeCard = input.requestKey.startsWith("moi2:");
   if (!lifetimeCard && !binding) return;
   if (!lifetimeCard || !row.requestedByAgentId) throw conflict("Owner human decision is not current", {

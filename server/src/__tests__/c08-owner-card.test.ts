@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, companies, createDb, heartbeatRuns, issues, missions,
-  operatorDecisions, workflowTransitionEvents, type Db } from "@paperclipai/db";
+  operatorDecisionContinuations, operatorDecisions, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { lockOwnerHumanRequestAuthority } from "../services/missions/owner-human-request-authority.js";
 import { closeOwnerHumanRequest, saveOwnerHumanRequest, type OwnerHumanCurrentRecord } from "../services/missions/owner-human-request-state.js";
@@ -238,6 +238,14 @@ describeDb("C08 current lifetime card creation", () => {
     await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
       .rejects.toMatchObject({ status: 409 });
     expect((await cards(w)).find((card) => card.id === old.decision.id)!.status).toBe("pending");
+    await db.update(operatorDecisions).set({ sourceType: "ordinary" })
+      .where(eq(operatorDecisions.id, old.decision.id));
+    await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
+      .rejects.toMatchObject({ status: 409, details: { code: "owner_human_decision_stale" } });
+    expect(await db.select().from(operatorDecisionContinuations)
+      .where(eq(operatorDecisionContinuations.operatorDecisionId, old.decision.id))).toHaveLength(0);
+    await db.update(operatorDecisions).set({ sourceType: old.decision.sourceType })
+      .where(eq(operatorDecisions.id, old.decision.id));
     await db.update(operatorDecisions).set({ requestKey: `moi1:${a.lifetime.decisionEventId}` })
       .where(eq(operatorDecisions.id, old.decision.id));
     await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
