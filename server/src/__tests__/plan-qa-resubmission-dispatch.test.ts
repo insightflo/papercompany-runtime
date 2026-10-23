@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { and, desc, eq } from "drizzle-orm";
 import request from "supertest";
-import { agentWakeupRequests, agents, heartbeatRuns, instanceSettings, issues } from "@paperclipai/db";
+import { agentWakeupRequests, agents, heartbeatRuns, instanceSettings, issues, missionPlanQaVerdicts } from "@paperclipai/db";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import type { ArtifactRef, QualityAgentActor } from "@paperclipai/shared";
@@ -28,25 +28,21 @@ vi.mock("../adapters/index.js", () => ({
   getServerAdapter: vi.fn(() => ({ supportsLocalAgentJwt: false, execute: executeSpy })),
   runningProcesses: new Map(),
 }));
-
 function successfulAdapterResult() {
   return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
 }
-
 function dispatchInput(w: GateWorld, enqueue: unknown) {
   return {
     companyId: w.companyId, planQaIssueId: w.planQaIssueId, decisionHash: GATE_DECISION_HASH,
     missionId: w.missionId, enqueue,
   } as Parameters<typeof dispatchPendingPlanQaResubmission>[1];
 }
-
 function resubmitKey(w: GateWorld, attempt: number) {
   return planQaResubmissionWakeKey({ issueId: w.planQaIssueId, decisionHash: GATE_DECISION_HASH, generation: 1, attempt });
 }
-
 /** fixture 의 합성 시도를 종료해 실제 heartbeat 실행을 받을 준비를 한다. */
 async function endFixtureAttempt(db: Db, w: GateWorld) {
-  await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, w.runId));
+  await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, w.runId));
   await db.update(issues).set({ status: "todo", checkoutRunId: null, executionRunId: null }).where(eq(issues.id, w.planQaIssueId));
   await db.update(agents).set({ runtimeConfig: { heartbeat: { wakeOnDemand: true } } }).where(eq(agents.id, w.reviewerAgentId));
   executeSpy.mockImplementation(async () => successfulAdapterResult());
@@ -159,6 +155,10 @@ describeQualityDb("PLAN-QA resubmission dispatch through real heartbeat", () => 
     expect(epoch2).toBeGreaterThan(epoch1);
     const wakeRow = await wakeRowByIntentKey(owned.db, w.companyId, resubmitKey(w, 1));
     expect(wakeRow?.qualityAcceptance).toMatchObject({ heartbeatRunId: run2Id, attempt: 1 });
+    const [verdict] = await owned.db.select().from(missionPlanQaVerdicts).where(and(
+      eq(missionPlanQaVerdicts.companyId, w.companyId), eq(missionPlanQaVerdicts.planQaIssueId, w.planQaIssueId),
+    ));
+    expect(verdict).toMatchObject({ verdict: "pass", qualityContract: { verdict: { status: "pass", scope: { heartbeatRunId: run2Id, executionEpoch: epoch2 } } } });
     const [issue] = await owned.db.select().from(issues).where(eq(issues.id, w.planQaIssueId));
     expect(issue?.status).toBe("done");
     const marker = issue!.qualityPlanQaBinding as { manifestRef: ArtifactRef };
