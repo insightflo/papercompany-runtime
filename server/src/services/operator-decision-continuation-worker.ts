@@ -44,6 +44,7 @@ interface WakeupOptions {
   };
   contextSnapshot: {
     issueId: string;
+    missionId?: string;
     wakeReason: "operator_decision_resolved";
     operatorDecisionId: string;
     paperclipOperatorDecisionResolution: OperatorDecisionResolutionSummary;
@@ -84,6 +85,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       companyId: issues.companyId,
       status: issues.status,
       assigneeAgentId: issues.assigneeAgentId,
+      missionId: issues.missionId,
     }).from(issues).where(and(
       eq(issues.id, continuation.issueId),
       eq(issues.companyId, continuation.companyId),
@@ -145,6 +147,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       },
       contextSnapshot: {
         issueId: targeted.issueId,
+        ...(issue.missionId ? { missionId: issue.missionId } : {}),
         wakeReason: "operator_decision_resolved",
         operatorDecisionId: decision.id,
         paperclipOperatorDecisionResolution: resolutionSummary,
