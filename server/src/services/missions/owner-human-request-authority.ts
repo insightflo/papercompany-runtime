@@ -1,5 +1,5 @@
 // C08 identity/authority reads. No checkout adoption, card writes or execution admission occurs here.
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { z } from "zod";
 import { conflict } from "../../errors.js";
@@ -12,8 +12,11 @@ import {
   type OwnerHumanLifetime, type OwnerHumanTx,
 } from "./owner-human-request-contract.js";
 
-const toolLinkSchema = z.object({ schemaVersion: z.literal(1), kind: z.literal("tool_step"),
+const toolLinkV1 = z.object({ schemaVersion: z.literal(1), kind: z.literal("tool_step"),
   workflowRunId: z.string().uuid(), stepRunId: z.string().uuid() }).strict();
+const toolLinkSchema = z.union([toolLinkV1, toolLinkV1.extend({ schemaVersion: z.literal(2),
+  companyId: z.string().uuid(), missionId: z.string().uuid(), anchorIssueId: z.string().uuid(),
+  sourceIssueId: z.string().uuid() }).strict()]);
 const originalPayloadSchema = ownerHumanSubmissionSchema.extend({
   kind: z.literal(MISSION_OWNER_DECISION_EVENT_TYPE), source: z.literal(MISSION_OWNER_DECISION_SOURCE),
   ownerActionIssueId: z.string().uuid(), sourceIssueId: z.string().uuid().nullable(), commentId: z.string().uuid().nullable(),
@@ -22,18 +25,41 @@ const reject = (): never => { throw conflict("Owner human request authority mism
   reason: "owner_human_request_authority_mismatch",
 }); };
 
-async function toolIdentity(tx: OwnerHumanTx, companyId: string, missionId: string, anchorId: string) {
+export function validateOwnerToolIdentity(row: typeof workflowTransitionEvents.$inferSelect,
+  anchor: typeof issues.$inferSelect, companyId: string, missionId: string) {
+  const parsed = toolLinkSchema.safeParse(row.payload);
+  if (!parsed.success) return reject();
+  const value = parsed.data;
+  if (row.companyId !== companyId || row.missionId !== missionId || row.issueId !== anchor.id
+    || row.eventType !== "owner_tool_recovery_target_v1" || row.layer !== OWNER_HUMAN_LAYER
+    || row.workflowRunId !== value.workflowRunId || row.workflowStepRunId !== value.stepRunId
+    || anchor.companyId !== companyId || anchor.missionId !== missionId
+    || anchor.originKind !== "mission_main_executor_unblock" || !anchor.originId
+    || row.idempotencyKey !== (value.schemaVersion === 1 ? `owner-tool-card:${value.stepRunId}`
+      : `owner-tool-card:v2:${value.stepRunId}:${anchor.id}`)) return reject();
+  if (value.schemaVersion === 2 && (value.companyId !== companyId || value.missionId !== missionId
+    || value.anchorIssueId !== anchor.id || value.sourceIssueId !== anchor.originId)) return reject();
+  return { ...value, companyId, missionId, anchorIssueId: anchor.id, sourceIssueId: anchor.originId };
+}
+
+export async function readOwnerToolIdentity(tx: OwnerHumanTx, companyId: string, missionId: string, anchorId: string) {
+  // Include malformed headers/keys rather than silently treating a damaged card as legacy.
   const rows = await tx.select().from(workflowTransitionEvents).where(and(
-    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.missionId, missionId),
-    eq(workflowTransitionEvents.issueId, anchorId), eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1")));
+    or(eq(workflowTransitionEvents.issueId, anchorId),
+      sql`${workflowTransitionEvents.payload}->>'anchorIssueId' = ${anchorId}`),
+    or(eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1"),
+      sql`${workflowTransitionEvents.payload}->>'kind' = 'tool_step'`,
+      sql`${workflowTransitionEvents.idempotencyKey} like 'owner-tool-card:%'`)));
   if (rows.length > 1) return reject();
   const row = rows[0];
   if (!row) return null;
-  const parsed = toolLinkSchema.safeParse(row.payload);
-  if (!parsed.success || row.layer !== OWNER_HUMAN_LAYER
-    || row.workflowRunId !== parsed.data.workflowRunId || row.workflowStepRunId !== parsed.data.stepRunId
-    || row.idempotencyKey !== `owner-tool-card:${parsed.data.stepRunId}`) return reject();
-  return parsed.data;
+  const [anchor] = await tx.select().from(issues).where(eq(issues.id, anchorId));
+  if (!anchor) return reject();
+  const identity = validateOwnerToolIdentity(row, anchor, companyId, missionId);
+  const [source] = await tx.select({ id: issues.id }).from(issues).where(and(
+    eq(issues.id, identity.sourceIssueId), eq(issues.companyId, companyId), eq(issues.missionId, missionId)));
+  if (!source) return reject();
+  return identity;
 }
 
 export type OwnerHumanAuthorityInput = {
@@ -67,7 +93,7 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
       eq(issues.companyId, input.companyId), eq(issues.missionId, input.missionId)));
     if (!source) return reject();
   }
-  const tool = await toolIdentity(tx, input.companyId, input.missionId, observed.id);
+  const tool = await readOwnerToolIdentity(tx, input.companyId, input.missionId, observed.id);
   if (oversight && tool) return reject();
   const runId = tool?.workflowRunId ?? source?.originRunId ?? null;
   let run: typeof workflowRuns.$inferSelect | undefined;
@@ -85,7 +111,7 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
     locked.set(id, row);
   }
   const anchor = locked.get(observed.id)!;
-  if (anchor.originKind !== observed.originKind || anchor.originId !== observed.originId
+  if ((tool && anchor.hiddenAt) || anchor.originKind !== observed.originKind || anchor.originId !== observed.originId
     || anchor.assigneeAgentId !== input.agentId || !heartbeat || heartbeat.companyId !== input.companyId
     || heartbeat.agentId !== input.agentId
     || (purpose !== "renew" && heartbeat.issueId !== anchor.id)) return reject();
@@ -112,6 +138,12 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
       : { kind: "source_issue", issueId: source!.id } });
   const renewalAnchor = input.renewal ? locked.get(input.renewal.anchorIssueId) : undefined;
   if (input.renewal) {
+    const next = renewalAnchor && await readOwnerToolIdentity(tx, input.companyId, input.missionId, renewalAnchor.id);
+    if (tool) {
+      if (!next || next.schemaVersion !== 2 || next.companyId !== tool.companyId
+        || next.missionId !== tool.missionId || next.sourceIssueId !== tool.sourceIssueId
+        || next.workflowRunId !== tool.workflowRunId || next.stepRunId !== tool.stepRunId) return reject();
+    } else if (next) return reject();
     const previous = await readOwnerHumanOrigin(tx, input.companyId, input.renewal.previousLifetimeId);
     await assertOwnerHumanOriginalDecision(tx, previous);
     if (oversight || !source || !renewalAnchor || renewalAnchor.id === anchor.id
@@ -214,7 +246,7 @@ async function assertSubmittedOwnerHumanOriginalDecision(tx: OwnerHumanTx, lifet
     if (!source) return reject();
     if (target.kind === "source_issue" && target.issueId !== source.id) return reject();
     if (target.kind === "tool_step") {
-      const tool = await toolIdentity(tx, lifetime.scope.companyId, lifetime.scope.missionId, lifetime.anchorIssueId);
+      const tool = await readOwnerToolIdentity(tx, lifetime.scope.companyId, lifetime.scope.missionId, lifetime.anchorIssueId);
       if (!tool || tool.workflowRunId !== target.workflowRunId || tool.stepRunId !== target.stepRunId) return reject();
     }
   }
