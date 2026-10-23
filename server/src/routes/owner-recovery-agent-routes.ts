@@ -12,6 +12,7 @@ import type { assertCompanyAccess, getActorInfo } from "./authz.js";
 import type { logActivity } from "../services/activity-log.js";
 import type { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
 import type { ownerSelfReplacement } from "../services/workflow/owner-self-replacement.js";
+import { readOwnerHumanRequest } from "../services/missions/owner-human-request-read.js";
 import type { ownerExecuteDecisionWindow } from "../services/missions/owner-execute-decision-window.js";
 
 type OwnerRecoveryAgentRouteDependencies = {
@@ -38,6 +39,14 @@ export function registerOwnerRecoveryAgentRoutes(router: Router, deps: OwnerReco
     ownerSelfReplacementSchema, ownerSelfReplacement, ownerExecuteApiSchema, ownerExecuteDecisionWindow,
   } = deps;
 
+  router.get("/issues/:id/owner-recovery/decision/current", async (req, res) => {
+    const issue = await loadIssue(db, routeParam(req.params.id, "id"));
+    assertCompanyAccess(req, issue.companyId);
+    const current = await readOwnerHumanRequest({ db, issueId: issue.id,
+      companyId: issue.companyId, actor: getActorInfo(req) });
+    res.json(current);
+  });
+
   router.post("/issues/:id/owner-recovery/decision", hermesOpsMutationGuard("owner_recovery.decision.submit"), validate(missionOwnerDecisionSubmitSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     assertCompanyAccess(req, issue.companyId);
@@ -59,7 +68,10 @@ export function registerOwnerRecoveryAgentRoutes(router: Router, deps: OwnerReco
         decisionEventId: recorded.eventId,
       },
     });
-    res.status(201).json({ eventId: recorded.eventId, createdAt: recorded.createdAt, decision: recorded.submission.decision });
+    res.status(201).json({ eventId: recorded.eventId, createdAt: recorded.createdAt, decision: recorded.submission.decision,
+      ...(recorded.lifetimeId ? { lifetimeId: recorded.lifetimeId,
+        humanRequest: recorded.humanRequest, operatorDecisionId: recorded.operatorDecisionId } : {}),
+    });
   });
 
   // 오너 에이전트 자기 미션 실패 런의 교정 메타데이터 replacement — 제안+승인을 한 번에 기록한다.
