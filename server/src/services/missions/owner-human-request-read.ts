@@ -7,7 +7,7 @@ import { issues, missions, operatorDecisions, operatorDecisionContinuations,
 import { z } from "zod";
 import { conflict, forbidden, unauthorized } from "../../errors.js";
 import type { OwnerRecoveryApiActor } from "./mission-owner-recovery-agent-api.js";
-import { lockOwnerHumanRequestAuthority } from "./owner-human-request-authority.js";
+import { lockOwnerHumanRequestAuthority, readOwnerToolIdentity } from "./owner-human-request-authority.js";
 import { readOwnerHumanCurrent, type OwnerHumanCurrentRecord } from "./owner-human-request-state.js";
 import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, sameOwnerHumanValue,
   type OwnerHumanTx } from "./owner-human-request-contract.js";
@@ -113,12 +113,24 @@ export async function readOwnerHumanRequest(input: {
     // a new request. Expose only its number on the one live recurrence anchor:
     // no historical text, key, approval, delivery or replay body is inherited.
     if (current.pointer.anchorIssueId !== auth.anchor.id && !current.pointer.recoveryNeeded) {
-      if (auth.scope.target.kind !== "source_issue" || !auth.source
-        || auth.source.status !== "blocked" || auth.source.hiddenAt
-        || ["completed", "cancelled"].includes(mission.status)) return fail();
-      const siblings = await tx.select().from(issues).where(and(
+      if (!auth.source || auth.source.hiddenAt || ["completed", "cancelled"].includes(mission.status)) return fail();
+      const related = await tx.select().from(issues).where(and(
         eq(issues.companyId, input.companyId), eq(issues.missionId, issue.missionId),
         eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, auth.source.id)));
+      let siblings = related;
+      if (auth.scope.target.kind === "source_issue") {
+        if (auth.source.status !== "blocked") return fail();
+      } else if (auth.scope.target.kind === "tool_step") {
+        siblings = [];
+        for (const row of related) {
+          const identity = await readOwnerToolIdentity(tx, input.companyId, issue.missionId, row.id);
+          if (identity?.workflowRunId === auth.scope.target.workflowRunId
+            && identity.stepRunId === auth.scope.target.stepRunId) siblings.push(row);
+        }
+        if (!auth.run || auth.run.id !== auth.scope.target.workflowRunId
+          || !auth.step || auth.step.id !== auth.scope.target.stepRunId
+          || auth.step.status !== "failed") return fail();
+      } else return fail();
       const previous = siblings.find((row) => row.id === current.pointer.anchorIssueId);
       const open = siblings.filter((row) => !row.hiddenAt && !["done", "cancelled"].includes(row.status));
       if (!previous || previous.hiddenAt || !["done", "cancelled"].includes(previous.status)
