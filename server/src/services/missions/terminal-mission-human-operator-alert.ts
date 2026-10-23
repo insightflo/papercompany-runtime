@@ -10,10 +10,10 @@
 //   - sanitize: human comment + workflowTransitionEvents payload 모두 한 줄 bounded. control char/JSON-fragment/raw stderr·error body 제거.
 //   - terminal failure status: approved failed/timed_out 만(cancelled 제외).
 import { createHash } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { type SystemLanguage } from "./system-language.js";
-import { activityLog, issueComments, issues, missions, operatorDecisions, toolDefinitions, workflowRunDefinitions, workflowRuns, workflowTransitionEvents, companies } from "@paperclipai/db";
+import { activityLog, issueComments, issues, missions, operatorDecisions, workflowRuns, workflowTransitionEvents, companies } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import {
   materializeHumanOperatorRequestPayload,
@@ -30,8 +30,8 @@ import {
   type ValidationVerdictObservation,
   type WorkflowContinuationStepRow,
 } from "./terminal-mission-workflow-continuation.js";
-import { bindingResolves } from "../workflow/resume/preview-policy.js";
-import { REVIEWED_RESUME_POLICIES, type ReviewedResumePolicy } from "../workflow/resume/reviewed-policy.js";
+import { resumableRunSignalForRun, resumePreviewEligibleForRun } from "./resume-signals.js";
+export { reviewedResumePolicyFullyResolves } from "./resume-signals.js";
 import { deriveRecoveryPathOptionsFromNextAction } from "./mission-owner-human-input-card.js";
 import { TERMINAL_RESUME_OPTION_DESCRIPTION, TERMINAL_RESUME_OPTION_ID, TERMINAL_RESUME_OPTION_LABEL } from "./terminal-resume-from-decision.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
@@ -63,29 +63,18 @@ export function terminalResumeGuidanceText(available: boolean, language: "ko" | 
   return language === "ko" ? TERMINAL_RESUME_GUIDANCE_KO : TERMINAL_RESUME_GUIDANCE_EN;
 }
 
-/** 정책의 모든 tool binding 이 현재 registry 행과 정확히 resolve 되는가(하나라도 어긋나면 false). */
-export function reviewedResumePolicyFullyResolves(
-  policy: ReviewedResumePolicy,
-  registryRows: (typeof toolDefinitions.$inferSelect)[],
-): boolean {
-  return Object.values(policy.steps).every((step) =>
-    (step.toolBindings ?? []).every((binding) => bindingResolves(binding, registryRows)));
-}
-
-/** 실패 실행들의 frozen 정의 중 검토된 재개 정책이 온전히 resolve 되는 것이 있는가(보드 재개 버튼이 실제로 작동함). */
-async function terminalResumePathAvailable(db: Db, companyId: string, failedRunIds: readonly string[]): Promise<boolean> {
-  if (failedRunIds.length === 0) return false;
-  const rows = await db.select({ definitionHash: workflowRunDefinitions.definitionHash })
-    .from(workflowRunDefinitions)
-    .where(inArray(workflowRunDefinitions.workflowRunId, [...failedRunIds]));
-  const hashes = [...new Set(rows.map((row) => row.definitionHash).filter((hash): hash is string => typeof hash === "string"))];
-  if (hashes.length === 0) return false;
-  const registryRows = await db.select().from(toolDefinitions).where(eq(toolDefinitions.companyId, companyId));
-  return hashes.some((hash) => {
-    const matched = REVIEWED_RESUME_POLICIES.filter((policy) =>
-      policy.schemaVersion === 1 && policy.companyId === companyId && policy.definitionHash === hash);
-    return matched.length === 1 && reviewedResumePolicyFullyResolves(matched[0]!, registryRows);
-  });
+/** 실패 실행 중 하나라도 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 재개 옵션이 실제로 작동함).
+ *  [재개 약속 정직화 2026-10-23] 정책 등록만으로 재개를 약속하면 프리뷰가 거절하는 경로를 카드가
+ *  약속하게 된다(dsh-purge 사례) — 정책 resolve 사전필터 후 실제 프리뷰로 확정한다. */
+async function terminalResumePathAvailable(db: Db, companyId: string, missionId: string,
+  failedRunIds: readonly string[]): Promise<boolean> {
+  for (const runId of failedRunIds) {
+    const signal = await resumableRunSignalForRun(db, companyId, runId);
+    if (signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId })) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export type TerminalMissionOwnerActionIssue = {
@@ -390,7 +379,7 @@ export async function emitTerminalMissionHumanOperatorReport(
     failedRuns: terminalFailedRuns,
   });
   const resumePathAvailable = await terminalResumePathAvailable(db, input.expectedCompanyId,
-    terminalFailedRuns.map((run) => run.id));
+    input.expectedMissionId, terminalFailedRuns.map((run) => run.id));
   const body = buildTerminalMissionHumanOperatorComment({
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,

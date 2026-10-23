@@ -26,10 +26,16 @@ export function buildGraphNodes(frozenSteps: WorkflowStep[]) {
   return nodes;
 }
 
-/** step.type 부재는 agent. if/complete=제어(reevaluate), agent/tool=실행(execute). */
+/** step.type 부재는 agent. if/complete=제어(reevaluate), agent/tool=실행(execute).
+ *  [PAQO 유형 2026-10-23] 수정 미션의 PAQO 실행 정의는 materialization 규칙상 스텝 type 으로
+ *  "action"/"qa" 를 쓰한다(revision-step-config). 도구를 지정(action toolNames)했으면 tool 실행,
+ *  아니면 agent 실행 — 엔진 입장과 동일하게 판별한다. */
 export function kindOf(step: WorkflowStep): "agent" | "tool" | "control" | null {
   if (step.type === undefined || step.type === "agent") return "agent";
   if (step.type === "tool") return "tool";
   if (step.type === "if" || step.type === "complete") return "control";
+  if (step.type === "action" || step.type === "qa") {
+    return step.toolName !== undefined || (step.toolNames !== undefined && step.toolNames.length > 0) ? "tool" : "agent";
+  }
   return null;
 }

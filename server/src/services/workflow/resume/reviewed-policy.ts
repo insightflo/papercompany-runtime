@@ -151,7 +151,11 @@ export const REVIEWED_RESUME_POLICIES: readonly ReviewedResumePolicy[] = [
    *     내부 산출물/증거 등록만 수행, 외부 쓰기 없음 → none.
    *   - qa-2-cd874c856d (agent QA, F1 해소 검증·회귀 재검토): 등록 산출물 대조 검증 → none.
    *   - qa-3-bb9e492d5f (builtin manual-onboarding-qa): 등록 본문 기계 검사, 결과 JSON 을
-   *     워크스페이스에 기록. 외부 쓰기 없음 → none. 발행 직전 기계 게이트 → requiredGateStepIds.
+   *     워크스페이스에 기록. 외부 쓰기 없음 → none. [2026-10-23 정정] requiredGateStepIds 에서
+   *     제외한다 — 이 정의는 선형 사슬이라 게이트 이전(action-1/qa-2)에서 시작하는 재개는 항상
+   *     qa-3 를 포함하고, 게이트 이후(publish/verify)만 재개하는 경우는 이미 qa-3 를 통과한
+   *     동일 본문을 보존하는 경로뿐이다(게이트 우회 경로가 존재하지 않는다). 등록 시 게이트가
+   *     보존 집합에 들어가 verify 단독 재개가 required_gate_bypass 로 전부 차단되는 오류를 바로잡는다.
    *   - action-4-64dcc548f7 (builtin manual-onboarding-publish): CMS manuals 섹션 외부 발행 →
    *     external + publicationStepIds.
    *   - qa-5-a57c357b38 (builtin manual-onboarding-verify): 공개 상태 readback 확인 읽기 → read_only.
@@ -195,7 +199,7 @@ export const REVIEWED_RESUME_POLICIES: readonly ReviewedResumePolicy[] = [
       },
       "qa-e4612efd83": { effect: "none", toolBindings: [] },
     },
-    requiredGateStepIds: ["qa-3-bb9e492d5f"],
+    requiredGateStepIds: [],
     publicationStepIds: ["action-4-64dcc548f7"],
     generationStepIds: ["action-1-4ae1f74ba7"],
   },
