@@ -9,14 +9,15 @@ import { claimHeartbeatWithRecoveryGuard } from "../services/heartbeat-recovery-
 import { insertWorkflowWakeRequest } from "../services/heartbeat-workflow-wake.js";
 import { WORKFLOW_ATTEMPT_PROOF_KEY, readWorkflowAttemptProof } from "../services/heartbeat-finalization/workflow-attempt-proof.js";
 import * as historyReader from "../services/workflow/control-flow/qa-correction-reader.js";
-import { readIssuedQaCorrectionFollowup } from "../services/workflow/control-flow/qa-correction-followup.js";
+import { readIssuedQaCorrectionFollowup, readQaCorrectionFollowupConsumption } from "../services/workflow/control-flow/qa-correction-followup.js";
+import { createQaCorrectionHistorySession } from "../services/workflow/control-flow/qa-correction-history-session.js";
 import { QaCorrectionReadError, type QaCorrectionDb } from "../services/workflow/control-flow/qa-correction-authority.js";
 import { beginQaCorrection } from "../services/workflow/control-flow/qa-correction-prepare.js";
 import { measureQaCorrectionSources } from "../services/workflow/control-flow/qa-correction-measure.js";
 import { storeQaCorrection } from "../services/workflow/control-flow/qa-correction-storage.js";
 import { commitQaCorrection } from "../services/workflow/control-flow/qa-correction-commit.js";
 import { hashQaCorrectionPayload } from "../services/workflow/control-flow/qa-correction-contract.js";
-import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
+import { submitWorkflowVerdict } from "../services/workflow/agent-api.js";
 import { commitDbState, commitBuffers, commitFacts } from "./qa-correction-commit-fixture.js";
 import { createCommitSourceHarness, issueC02, correctionRows } from "./helpers/c02-delivery-fixture.js";
 import { createClaimFixture } from "./helpers/c02-claim-race-fixture.js";
@@ -64,20 +65,32 @@ async function issueC(w: World, heartbeat: Heartbeat) {
     artifactExecution: request.artifactExecution, toolArtifactRequest: request,
   } }).where(eq(workflowStepRuns.id, c.followup.target.stepRunId));
   const remediations = { items: [{ op: "string_replace" as const, file: request.input.path, find: "new", replace: "final" }] };
+  // The fixture's producer is already done; preserve its actual completion across public API sync.
+  const producer = await readStep(c.s.p.producer.stepRunId);
+  expect(producer).toMatchObject({ status: "completed", completedAt: expect.any(Date) });
+  await c.peer.update(issues).set({ completedAt: producer.completedAt }).where(eq(issues.id, producer.issueId!));
   const [issue] = await c.peer.select().from(issues).where(eq(issues.id, c.followup.target.issueId));
-  expect((await recordWorkflowValidationVerdict({ db: c.peer, issue: issue!, source: "workflow_api",
-    verdict: "request_changes", heartbeatRunId: heartbeat.id, remediations })).satisfied).toBe(true);
-  const [event] = await c.peer.select().from(workflowTransitionEvents).where(and(
-    eq(workflowTransitionEvents.heartbeatRunId, heartbeat.id),
-    eq(workflowTransitionEvents.eventType, "workflow_validation_verdict")));
-  if (!event) throw Error("same-H official rejection required");
+  expect((await submitWorkflowVerdict({ db: c.peer, issue: issue!,
+    actor: { actorType: "agent", actorId: heartbeat.agentId, agentId: heartbeat.agentId, runId: heartbeat.id },
+    data: { verdict: "request_changes", remediations } })).satisfied).toBe(true);
+  const relation = await readQaCorrectionFollowupConsumption(c.peer, c.ref, createQaCorrectionHistorySession(c.peer, c.ref));
+  if (!relation || relation.consumed.evidence.kind !== "workflow_verdict") throw Error("official B consumption required");
+  const target = relation.consumed.followup.target, current = await readStep(target.stepRunId);
+  expect(frozen(current)).toEqual({ id: target.stepRunId, workflowRunId: c.ref.workflowRunId,
+    stepId: target.stepId, issueId: target.issueId, executionGeneration: target.executionGeneration,
+    retryCount: target.retryCount, iterationIndex: target.iterationIndex });
+  const [event] = await c.peer.select().from(workflowTransitionEvents)
+    .where(eq(workflowTransitionEvents.id, relation.consumed.evidence.eventId));
+  expect(event).toMatchObject({ heartbeatRunId: heartbeat.id, wakeupRequestId: heartbeat.wakeupRequestId,
+    workflowStepRunId: target.stepRunId, executionGeneration: target.executionGeneration, verdict: "request_changes" });
+  if (!event?.heartbeatRunId) throw Error("same-H official rejection required");
   const p = structuredClone(c.s.p);
   p.correctionId = randomUUID();
   p.preparedAt = new Date().toISOString();
-  p.authority.verdicts = [{ eventId: event.id, heartbeatRunId: heartbeat.id,
-    qa: c.followup.target, remediationsHash: hashQaCorrectionPayload(remediations.items) }];
+  p.authority.verdicts = [{ eventId: event.id, heartbeatRunId: event.heartbeatRunId,
+    qa: target, remediationsHash: hashQaCorrectionPayload(remediations.items) }];
   p.sources = [{ productId: r.workProductId, provenance: { kind: "prior_correction", appliedEventId: c.ref.appliedEventId } }];
-  p.bindings.forEach(binding => { binding.expectedProductId = r.workProductId; });
+  p.bindings.forEach(binding => { binding.consumer = target; binding.expectedProductId = r.workProductId; });
   const prepared = await beginQaCorrection(c.peer, p);
   if (prepared.status !== "prepared") throw Error("real C preparation required: " + prepared.status);
   const measured = await measureQaCorrectionSources(c.peer, {
