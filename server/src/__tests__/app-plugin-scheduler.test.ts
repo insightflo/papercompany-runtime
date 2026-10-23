@@ -100,6 +100,7 @@ vi.mock("../services/plugin-event-bus.js", () => ({
 
 vi.mock("../services/activity-log.js", () => ({
   setPluginEventBus: vi.fn(),
+  logActivity: vi.fn(),
 }));
 
 vi.mock("../services/workflow/tool-result-events.js", () => ({
