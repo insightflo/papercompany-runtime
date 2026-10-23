@@ -133,7 +133,7 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
   it("reports a terminal failed workflow even when no owner-action run failed", async () => {
     const seed = await seedTerminalFixture(db);
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, seed.failedRunId));
-    await db.delete(issues).where(eq(issues.id, seed.ownerActionIssueId));
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, seed.ownerActionIssueId));
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, seed.sourceIssueId));
 
     const definitionId = randomUUID();
@@ -185,18 +185,14 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
       expect.stringContaining("terminal_mission_human_operator_request_emitted"),
     ]));
     expect(onOwnerActionCreated).not.toHaveBeenCalled();
-    const ownerActions = await db
-      .select()
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, seed.companyId),
-        eq(issues.missionId, seed.missionId),
-        eq(issues.originKind, "mission_main_executor_unblock"),
-        eq(issues.originId, seed.sourceIssueId),
-      ));
+    const ownerActions = await db.select().from(issues).where(and(
+      eq(issues.companyId, seed.companyId), eq(issues.missionId, seed.missionId),
+      eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, seed.sourceIssueId),
+    ));
     expect(ownerActions).toHaveLength(1);
     const [ownerAction] = ownerActions;
-    expect(ownerAction).toBeDefined();
+    expect(ownerAction).toMatchObject({ id: seed.ownerActionIssueId, status: "done" });
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.missionId, seed.missionId))).toHaveLength(0);
     const artifacts = await countReportArtifacts(db, ownerAction!.id);
     expect(artifacts.events).toBe(1);
     expect(artifacts.comments).toBe(1);
@@ -385,6 +381,10 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
   it("prefers a QA-cap owner action even when it was inserted later", async () => {
     const seed = await seedTerminalFixture(db);
     const qaCapIssueId = randomUUID();
+    const qaCapSource = await issueService(db).create(seed.companyId, {
+      missionId: seed.missionId, assigneeAgentId: seed.workerAgentId,
+      originKind: "workflow_execution", status: "blocked", title: "QA-cap source",
+    });
     await db.insert(issues).values({
       id: qaCapIssueId,
       companyId: seed.companyId,
@@ -395,7 +395,7 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
       status: "blocked",
       assigneeAgentId: seed.ownerAgentId,
       originKind: "mission_main_executor_unblock",
-      originId: seed.sourceIssueId,
+      originId: qaCapSource.id,
     });
 
     await missionService(db).runMainExecutorSupervision({

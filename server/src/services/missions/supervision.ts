@@ -2221,7 +2221,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
       }
       if (
-        issue.status === "blocked" && !issue.hiddenAt &&
+        issue.status === "blocked" && !issue.hiddenAt && !isTerminalMissionStatus(mission.status) &&
         issue.originKind !== "mission_main_executor_unblock" &&
         !isRejectedPlanningIssue &&
         !qaCapSourceIssueIds.has(issue.id)
