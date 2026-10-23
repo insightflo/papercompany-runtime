@@ -185,15 +185,18 @@ export async function queuePausedAgentWakeupRequest(
 }
 
 /**
- * 병합 조회용 quality-safe 조건: 저장 행의 키가 bounded 실행 키(quality 조치 wake·PLAN-QA 재제출
- * wake)가 아니거나, 들어오는 키와 정확히 같을 때만 병합 대상이 된다. generic 요청(키 없음)은
- * bounded 행과 절대 병합되지 않고, bounded 요청도 다른 시도 행과 병합되지 않는다.
+ * 병합 조회용 bounded-execution 조건: 저장 행의 키가 유한 시도 키가 아니거나, 들어오는 키와
+ * 정확히 같을 때만 병합 대상이 된다. generic 요청(키 없음)은 bounded 행과 절대 병합되지 않고,
+ * bounded 요청도 다른 결정·세대·시도 행과 병합되지 않는다. isBoundedExecutionWakeKey의 네 접두사와
+ * 반드시 같이 유지한다.
  */
 export function mergeableWakeupKeyCondition(incomingKey: string | null | undefined) {
   const exact = typeof incomingKey === "string" && incomingKey.length > 0 ? incomingKey : "";
   return sql`(${agentWakeupRequests.idempotencyKey} is null
     or (${agentWakeupRequests.idempotencyKey} not like 'quality-action-wake:%'
-      and ${agentWakeupRequests.idempotencyKey} not like 'plan-qa-resubmit:%')
+      and ${agentWakeupRequests.idempotencyKey} not like 'plan-qa-resubmit:%'
+      and ${agentWakeupRequests.idempotencyKey} not like 'operator-decision-wake:%'
+      and ${agentWakeupRequests.idempotencyKey} not like 'qa-remediation-refire:%')
     or ${agentWakeupRequests.idempotencyKey} = ${exact})`;
 }
 
