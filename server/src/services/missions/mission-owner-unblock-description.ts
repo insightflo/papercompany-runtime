@@ -110,7 +110,22 @@ export function buildMissionOwnerUnblockDescription(
     "",
     "Decision authority (REQUIRED control path): submit your decision through the structured API, not a comment:",
     `POST /api/issues/{this owner-action issue id}/owner-recovery/decision`,
-    "Body schema: { decision: <one of the allowed options>, sourceIssueRef?, reworkTargetRef?, targetAgentId?, reason?, nextAction?, evidence? }",
+    "Body schema: { decision: <one of the allowed options>, sourceIssueRef?, reworkTargetRef?, targetAgentId?, reason?, nextAction?, evidence?, humanRequest? }",
+    language === "ko"
+      ? "request_input/escalate에만 humanRequest를 사용하세요. 먼저 현재 실행 인증으로 GET /api/issues/{this owner-action issue id}/owner-recovery/decision/current 를 조회해 lifetimeId, requestKey, recoveryNeeded, resubmit을 확인하세요. 카드 resolved만으로 복구 완료를 판단하지 마세요."
+      : "Use humanRequest only with request_input/escalate. First GET /api/issues/{this owner-action issue id}/owner-recovery/decision/current with current run credentials; inspect lifetimeId, requestKey, recoveryNeeded and resubmit. A resolved card alone does not mean recovery is complete.",
+    language === "ko"
+      ? "같은 현재 요청의 복구가 여전히 필요하면 반환된 resubmit 전체를 requestKey와 humanRequest까지 그대로 POST하세요. 본문·hash·heartbeat로 동일성을 추정하지 마세요. 같은 요청에 resubmit이 없으면 실패를 보고하세요."
+      : "For the same current request still needing recovery, POST the exact returned resubmit unchanged, including requestKey and humanRequest. Do not infer identity from body text, hash or heartbeat. If the same request has no resubmit, report the failure.",
+    language === "ko"
+      ? "최초 요청 또는 의도한 교체·재발에는 새 안정 requestKey를 제출 전에 한 번 선택해 보존하고 humanRequest: {schemaVersion: 1, requestKey, expectedCurrentLifetimeId: <GET의 lifetimeId>}를 포함하세요. GET의 lifetimeId:null일 때만 null을 사용하며 재시도에도 선택한 키와 본문을 유지하세요."
+      : "For a first request or intentional replacement/recurrence, choose and retain a new stable requestKey once before sending and include humanRequest: {schemaVersion: 1, requestKey, expectedCurrentLifetimeId: <the GET lifetimeId>}. Use null only for GET lifetimeId:null; retain the chosen key and body across retries.",
+    language === "ko"
+      ? "위 POST에서 HTTP 201, eventId, lifetimeId, humanRequest.requestKey를 확인하세요. 반환 humanRequest.expectedCurrentLifetimeId는 lifetimeId와 같아야 하고, 재전달 수명은 조회값과 같으며 새 요청 수명은 달라야 합니다. 응답 유실만으로 새 키를 자동 발급하지 마세요. 선택한 키·본문을 보존하고 다시 GET한 뒤 같은 현재 요청일 때만 정확한 resubmit을 재제출하세요. 409 또는 현재 요청 변경 시 다시 조회·판단하며 예상 수명만 맹목적으로 바꾸거나 과거 키를 재사용하지 마세요."
+      : "Confirm HTTP 201, eventId, lifetimeId and humanRequest.requestKey from the POST above. Returned humanRequest.expectedCurrentLifetimeId must equal lifetimeId; replay must return the queried lifetime and a new request a different lifetime. Never automatically issue a new key after response loss. Keep the chosen key/body, GET again and replay exact resubmit only for the same current request. On 409 or a different current request, re-read and explicitly reconsider; never blindly rebase the expected lifetime or reuse a past key.",
+    language === "ko"
+      ? "기존 안전 복구 한도를 지키고 취소된 미션을 재개·수정하지 마세요. 인증 정보는 댓글·근거에 넣지 마세요. 이 안내는 표시용이며 실행 권한이나 자연어 제어 계약이 아닙니다. 비human 결정의 기존 제출 형식과 재배정의 targetAgentId 요건은 유지됩니다."
+      : "Keep existing safe recovery limits; do not resume or modify a cancelled mission or put credentials in comments/evidence. This guidance is display only, not execution authority or a natural-language control contract. Nonhuman submissions and the reassignment targetAgentId requirement remain unchanged.",
     "Allowed decision options:",
     ...MISSION_OWNER_DECISION_OPTIONS.map((decision) => `- ${decision}`),
     "When decision is reassign_source_issue, targetAgentId is REQUIRED (UUID of a same-company agent). Free-text nextAction/reason/evidence never assigns the source.",

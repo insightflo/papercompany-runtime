@@ -17,6 +17,12 @@ import { submitMissionOwnerDecision } from "../services/missions/mission-owner-r
 import { readOwnerHumanRequest } from "../services/missions/owner-human-request-read.js";
 import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 import { publishLiveEvent } from "../services/live-events.js";
+import { appendOrRefreshMissionOwnerHumanInputInstructions, buildMainExecutorOversightDescription,
+  HUMAN_INPUT_INSTRUCTIONS_START_MARKER as START, HUMAN_INPUT_INSTRUCTIONS_END_MARKER as END,
+  MISSION_OWNER_HUMAN_INPUT_INSTRUCTIONS } from "../services/missions/oversight-human-input-instructions.js";
+import { buildMissionOwnerUnblockDescription } from "../services/missions/mission-owner-unblock-description.js";
+import { buildToolStepRecoveryDescription } from "../services/missions/tool-step-recovery-description.js";
+import { loadToolRecoveryBriefFacts } from "../services/missions/tool-recovery-brief-facts.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 const support = await getEmbeddedPostgresTestSupport();
@@ -27,6 +33,15 @@ const keyed = (requestKey = "A", expectedCurrentLifetimeId: string | null = null
   reason = "原文 A"): MissionOwnerDecisionSubmit => ({ decision: "request_input", reason,
   nextAction: "사람 확인", evidence: "원천 근거",
   humanRequest: { schemaVersion: 1, requestKey, expectedCurrentLifetimeId } });
+
+it("C08 refreshes complete instruction markers and preserves incomplete descriptions", () => {
+  const fresh = appendOrRefreshMissionOwnerHumanInputInstructions(`prefix\n${START}\nold\n${END}\nsuffix`);
+  expect(fresh).toBe(`prefix\n${START}\n${MISSION_OWNER_HUMAN_INPUT_INSTRUCTIONS}\n${END}\nsuffix`);
+  expect(appendOrRefreshMissionOwnerHumanInputInstructions(fresh)).toBe(fresh);
+  expect(appendOrRefreshMissionOwnerHumanInputInstructions("")).toContain(MISSION_OWNER_HUMAN_INPUT_INSTRUCTIONS);
+  for (const broken of [`prefix${START}old`, `old${END}suffix`])
+    expect(appendOrRefreshMissionOwnerHumanInputInstructions(broken)).toBe(broken);
+});
 
 describeDb("C08 actual current-request HTTP routes", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: Db;
@@ -88,6 +103,35 @@ describeDb("C08 actual current-request HTTP routes", () => {
     expect(vi.mocked(publishLiveEvent).mock.calls).toHaveLength(emitted);
     return response.body;
   }
+
+  // Plan:38–76,218: prose guides a caller; only the structured HTTP submission has authority.
+  it.each([["oversight", "en"], ["unblock", "en"], ["unblock", "ko"]] as const)(
+    "C08 %s/%s output guides first submission, lost-response replay and explicit replacement", async (kind, language) => {
+      const w = await world(kind === "oversight");
+      const description = kind === "oversight"
+        ? buildMainExecutorOversightDescription({ missionTitle: "C08", workflowName: "test" })
+        : buildMissionOwnerUnblockDescription({ id: w.missionId, title: "C08" }, { id: w.sourceId,
+          identifier: null, title: "Source", status: "blocked", assigneeAgentId: w.agentId }, { language });
+      for (const field of ["resubmit", "requestKey", "schemaVersion: 1", "expectedCurrentLifetimeId", "HTTP 201", "hash", "heartbeat"])
+        expect(description).toContain(field);
+      expect(description).toContain(language === "ko" ? "응답 유실만으로 새 키를 자동 발급하지 마세요" : "Never automatically issue a new key after response loss");
+      if (kind === "oversight") expect(description).toContain("Never include recoveryTarget on oversight submissions");
+      const documented = description.match(/GET (\/api\/issues\/\{[^}]+\}\/owner-recovery\/decision\/current)/);
+      expect(documented).not.toBeNull();
+      const current = await request(app(w)).get(documented![1]!.replace(/\{[^}]+\}/, w.issueId));
+      expect(current.status).toBe(200); expect(current.body.lifetimeId).toBeNull();
+      const first = await post(w, keyed("caller-A", current.body.lifetimeId)); expect(first.status).toBe(201);
+      expect(first.body.humanRequest).toEqual({ schemaVersion: 1, requestKey: "caller-A",
+        expectedCurrentLifetimeId: first.body.lifetimeId });
+      const recovered = await get(w); // Ignore the first response as a caller would after response loss.
+      expect(recovered.requestKey).toBe("caller-A");
+      expect((await post(w, recovered.resubmit)).body).toEqual(first.body);
+      const changed = await post(w, keyed("caller-B", recovered.lifetimeId));
+      expect(changed.status).toBe(201); expect(changed.body.lifetimeId).not.toBe(first.body.lifetimeId);
+      expect(changed.body.humanRequest.expectedCurrentLifetimeId).toBe(changed.body.lifetimeId);
+      expect((await post(w, recovered.resubmit)).status).toBe(409);
+      expect((await get(w)).requestKey).toBe("caller-B");
+    });
 
   it("returns no current request without adopting stale checkout or writing anything", async () => {
     const w = await world();
@@ -185,6 +229,30 @@ describeDb("C08 actual current-request HTTP routes", () => {
       payload: { schemaVersion: 1, kind: "tool_step", workflowRunId, stepRunId } });
     expect((await post(w)).status).toBe(201);
     expect((await get(w)).scope.target).toEqual({ kind: "tool_step", workflowRunId, stepRunId });
+    const [[mission], [source], [run], [stepRun]] = await Promise.all([
+      db.select().from(missions).where(eq(missions.id, w.missionId)),
+      db.select().from(issues).where(eq(issues.id, w.sourceId)),
+      db.select().from(workflowRuns).where(eq(workflowRuns.id, workflowRunId)),
+      db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)),
+    ]);
+    const facts = await loadToolRecoveryBriefFacts(db, { mission: mission!, oversightIssue: source!,
+      run: run!, stepRun: stepRun!, step: null, workflowName: "tool" });
+    for (const language of ["en", "ko"] as const) {
+      const text = buildToolStepRecoveryDescription({ marker: "C08", missionTitle: "C08", workflowName: "tool",
+        workflowRunId, stepId: "tool", displayStepName: "tool", toolNames: [], facts: { ...facts, language },
+        classification: { className: "auth_missing", retryPolicy: "do_not_retry_until_auth_configured",
+          rationale: "missing", requiredAction: "human", evidence: ['token="C08_SECRET"'] } });
+      expect(text).toContain("GET /api/issues/{this owner-action issue id}/owner-recovery/decision/current");
+      expect(text).toContain(JSON.stringify(facts.recoveryTarget, null, 2)); expect(text).not.toContain("C08_SECRET");
+      for (const field of ["resubmit", "requestKey", "schemaVersion: 1", "expectedCurrentLifetimeId", "HTTP 201"])
+        expect(text).toContain(field);
+      expect(text).toContain(language === "ko" ? "응답 유실만으로 새 키를 자동 발급하지 마세요" : "Never automatically issue a new key after response loss");
+    }
+    const current = await get(w), submitted = await post(w, { ...keyed("tool-key", current.lifetimeId),
+      recoveryTarget: facts.recoveryTarget });
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(201);
+    const replay = await get(w); expect(replay.resubmit.recoveryTarget).toEqual(facts.recoveryTarget);
+    expect((await post(w, replay.resubmit)).body).toEqual(submitted.body);
     await db.delete(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId));
     await get(w, 409);
   });
