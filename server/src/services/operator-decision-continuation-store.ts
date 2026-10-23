@@ -16,6 +16,7 @@ const BATCH_SIZE = 20;
 export const OPERATOR_DECISION_WAKE_PREFIX = "operator-decision-wake:";
 
 type Continuation = typeof operatorDecisionContinuations.$inferSelect;
+type DispatchIdentity = Pick<Continuation, "generation" | "attemptCount" | "idempotencyKey" | "issueId">;
 
 export function operatorDecisionContinuationStore(db: Db) {
   async function claimPending(row: Continuation, workerId: string, now: Date) {
@@ -81,11 +82,20 @@ export function operatorDecisionContinuationStore(db: Db) {
     return decision ? { continuation, decision } : null;
   }
 
-  async function setTarget(continuationId: string, workerId: string, targetAgentId: string) {
+  async function setTarget(
+    continuationId: string,
+    workerId: string,
+    targetAgentId: string,
+    observed: DispatchIdentity & { idempotencyKey: string; issueId: string },
+  ) {
     return db.update(operatorDecisionContinuations).set({ targetAgentId, updatedAt: new Date() }).where(and(
       eq(operatorDecisionContinuations.id, continuationId),
       eq(operatorDecisionContinuations.state, "leased"),
       eq(operatorDecisionContinuations.leaseOwner, workerId),
+      eq(operatorDecisionContinuations.generation, observed.generation),
+      eq(operatorDecisionContinuations.attemptCount, observed.attemptCount),
+      eq(operatorDecisionContinuations.idempotencyKey, observed.idempotencyKey),
+      eq(operatorDecisionContinuations.issueId, observed.issueId),
     )).returning().then((rows) => rows[0] ?? null);
   }
 
@@ -130,16 +140,14 @@ export function operatorDecisionContinuationStore(db: Db) {
   }
 
   async function accept(
-    continuationId: string,
+    targeted: Continuation & { targetAgentId: string; idempotencyKey: string; issueId: string },
     workerId: string,
-    targetAgentId: string,
     wakeupRequestId: string,
     now = new Date(),
   ) {
     return db.transaction(async (tx) => {
       const row = await tx.update(operatorDecisionContinuations).set({
         state: "accepted",
-        targetAgentId,
         wakeupRequestId,
         acceptedAt: now,
         leaseOwner: null,
@@ -148,9 +156,14 @@ export function operatorDecisionContinuationStore(db: Db) {
         errorSummary: null,
         updatedAt: now,
       }).where(and(
-        eq(operatorDecisionContinuations.id, continuationId),
+        eq(operatorDecisionContinuations.id, targeted.id),
         eq(operatorDecisionContinuations.state, "leased"),
         eq(operatorDecisionContinuations.leaseOwner, workerId),
+        eq(operatorDecisionContinuations.generation, targeted.generation),
+        eq(operatorDecisionContinuations.attemptCount, targeted.attemptCount),
+        eq(operatorDecisionContinuations.idempotencyKey, targeted.idempotencyKey),
+        eq(operatorDecisionContinuations.issueId, targeted.issueId),
+        eq(operatorDecisionContinuations.targetAgentId, targeted.targetAgentId),
       )).returning().then((rows) => rows[0] ?? null);
       if (row) await writeTerminalActivity(tx, row, "operator_decision.continuation_accepted", "queued", null);
       return row;
