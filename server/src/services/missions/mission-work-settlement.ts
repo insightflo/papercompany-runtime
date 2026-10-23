@@ -1,6 +1,11 @@
-import { companies, activityLog, issueComments, issues } from "@paperclipai/db";
+import { companies, activityLog, issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { conflict } from "../../errors.js";
+import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
+import { ownerHumanCurrentKey, ownerHumanCurrentSchema, ownerHumanLifetimeSchema,
+  ownerHumanScopeSchema, sameOwnerHumanValue, type OwnerHumanTx } from "./owner-human-request-contract.js";
+import { closeOwnerHumanRequest } from "./owner-human-request-state.js";
 
 const SETTLEABLE_OWNER_ACTION_STATUSES = ["backlog", "todo", "blocked"];
 
@@ -8,6 +13,89 @@ type OpenMissionWork = {
   readonly id: string;
   readonly status: string;
 };
+
+type LockedSettlement = { auth: OwnerHumanAuthority; lifetimeId: string };
+const settlementConflict = (): never => { throw conflict("Owner human settlement conflict", {
+  reason: "owner_human_request_settlement_mismatch",
+}); };
+
+async function lockCurrentSettlement(tx: OwnerHumanTx, pointerRow: typeof workflowTransitionEvents.$inferSelect) {
+  const pointer = ownerHumanCurrentSchema.safeParse(pointerRow.payload);
+  if (!pointer.success || pointerRow.companyId !== pointer.data.scope.companyId
+    || pointerRow.missionId !== pointer.data.scope.missionId
+    || pointerRow.eventType !== pointer.data.kind
+    || pointerRow.idempotencyKey !== ownerHumanCurrentKey(pointer.data.scope)) return settlementConflict();
+  if (!pointer.data.recoveryNeeded) return null;
+  const [lifetimeRow] = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, pointer.data.scope.companyId),
+    eq(workflowTransitionEvents.id, pointer.data.lifetimeId)));
+  const parsed = ownerHumanLifetimeSchema.safeParse(lifetimeRow?.payload);
+  if (!parsed.success || parsed.data.lifetimeId !== pointer.data.lifetimeId
+    || parsed.data.anchorIssueId !== pointer.data.anchorIssueId
+    || parsed.data.requestKey !== pointer.data.requestKey
+    || !sameOwnerHumanValue(parsed.data.scope, pointer.data.scope)) return settlementConflict();
+  const lifetime = parsed.data;
+  let auth: OwnerHumanAuthority;
+  if (lifetime.renewal) {
+    const [previousRow] = await tx.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, lifetime.scope.companyId),
+      eq(workflowTransitionEvents.id, lifetime.renewal.previousLifetimeId)));
+    const previous = ownerHumanLifetimeSchema.safeParse(previousRow?.payload);
+    if (!previous.success || previous.data.lifetimeId !== lifetime.renewal.previousLifetimeId
+      || previous.data.authorAgentId !== lifetime.authorAgentId
+      || previous.data.heartbeatRunId !== lifetime.heartbeatRunId
+      || !sameOwnerHumanValue(previous.data.scope, lifetime.scope)
+      || !sameOwnerHumanValue(previous.data.submission, lifetime.submission)) return settlementConflict();
+    const renewal = await lockOwnerHumanRequestAuthority(tx, {
+      companyId: lifetime.scope.companyId, missionId: lifetime.scope.missionId,
+      ownerActionIssueId: previous.data.anchorIssueId, agentId: lifetime.authorAgentId,
+      heartbeatRunId: lifetime.heartbeatRunId, recoveryTarget: lifetime.submission.recoveryTarget,
+      purpose: "renew", renewal: { previousLifetimeId: previous.data.lifetimeId,
+        anchorIssueId: lifetime.anchorIssueId },
+    });
+    auth = { ...renewal, purpose: "settle", renewal: undefined, renewalAnchor: undefined };
+  } else {
+    auth = await lockOwnerHumanRequestAuthority(tx, {
+      companyId: lifetime.scope.companyId, missionId: lifetime.scope.missionId,
+      ownerActionIssueId: lifetime.anchorIssueId, agentId: lifetime.authorAgentId,
+      heartbeatRunId: lifetime.heartbeatRunId, recoveryTarget: lifetime.submission.recoveryTarget,
+      purpose: "settle",
+    });
+  }
+  return { auth, lifetimeId: lifetime.lifetimeId } satisfies LockedSettlement;
+}
+
+export async function lockSourceOwnerHumanSettlement(tx: OwnerHumanTx, input: {
+  companyId: string; missionId: string; sourceIssueId: string;
+}): Promise<LockedSettlement | null> {
+  const scope = ownerHumanScopeSchema.parse({ companyId: input.companyId, missionId: input.missionId,
+    target: { kind: "source_issue", issueId: input.sourceIssueId } });
+  const [pointer] = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, input.companyId),
+    eq(workflowTransitionEvents.idempotencyKey, ownerHumanCurrentKey(scope))));
+  return pointer ? lockCurrentSettlement(tx, pointer) : null;
+}
+
+export async function lockMissionOwnerHumanSettlements(tx: OwnerHumanTx, companyId: string, missionId: string) {
+  const pointers = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.missionId, missionId),
+    or(eq(workflowTransitionEvents.eventType, "owner_human_current_v1"),
+      sql`${workflowTransitionEvents.idempotencyKey} like 'owner-human-current:v1:%'`,
+      sql`${workflowTransitionEvents.payload}->>'kind' = 'owner_human_current_v1'`)))
+    .orderBy(workflowTransitionEvents.idempotencyKey);
+  const locked: LockedSettlement[] = [];
+  for (const pointer of pointers) {
+    const settlement = await lockCurrentSettlement(tx, pointer);
+    if (settlement) locked.push(settlement);
+  }
+  return locked;
+}
+
+export async function closeLockedOwnerHumanSettlements(locked: LockedSettlement[]) {
+  for (const settlement of locked) {
+    await closeOwnerHumanRequest(settlement.auth, settlement.lifetimeId);
+  }
+}
 
 export function createMissionWorkSettlement(db: Db) {
   return async function settleResolvedOwnerActionsAndFindOpenWork(
@@ -33,6 +121,7 @@ export function createMissionWorkSettlement(db: Db) {
       const sourceIssueId = action.originId;
       if (!sourceIssueId) continue;
       await db.transaction(async (tx) => {
+        const ownerHuman = await lockSourceOwnerHumanSettlement(tx, { companyId, missionId, sourceIssueId });
         const [source] = await tx
           .select({
             id: issues.id, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})`,
@@ -50,6 +139,8 @@ export function createMissionWorkSettlement(db: Db) {
           ))
           .for("update");
         if (!source) return;
+
+        await closeLockedOwnerHumanSettlements(ownerHuman ? [ownerHuman] : []);
 
         const now = new Date();
         const nextStatus = source.status === "done" ? "done" : "cancelled";

@@ -10,6 +10,7 @@ import {
 } from "./terminal-cleanup-authority.js";
 import { resetSafeTerminalAgents, settleMissionTerminalResources } from "./terminal-cleanup-resources.js";
 import { stopMissionTerminalProcesses } from "./terminal-cleanup-processes.js";
+import { closeLockedOwnerHumanSettlements, lockMissionOwnerHumanSettlements } from "./mission-work-settlement.js";
 
 /** Terminal status and DB cleanup share one epoch-checked transaction, including no-run missions.
  * Producer-owned child handles are captured under locks and signalled only after commit.
@@ -154,10 +155,12 @@ export async function runMissionTerminalCleanup(
     if (!matches || (!input.pendingMissionUpdates && captured.missionStatus !== input.status)) {
       return { aborted: true, reason: "resume_reactivated" as const, stoppedRuntimeIds: [], processStops: [] };
     }
+    const ownerHuman = await lockMissionOwnerHumanSettlements(tx, input.companyId, input.missionId);
     if (input.pendingMissionUpdates) {
       await tx.update(missions).set({ ...input.pendingMissionUpdates, status: input.status })
         .where(and(eq(missions.companyId, input.companyId), eq(missions.id, input.missionId)));
     }
+    await closeLockedOwnerHumanSettlements(ownerHuman);
     const resources = await executeMissionTerminalCleanup(tx, input);
     return { aborted: false, reason: null, ...resources };
   });

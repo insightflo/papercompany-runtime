@@ -7,6 +7,7 @@ import { getDefaultCompanyGoal } from "./goals.js";
 import { logger } from "../middleware/logger.js";
 import { resyncIssueExecutionCardAfterIssueUpdate } from "./issue-execution-cards/resync.js";
 import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.js";
+import { closeLockedOwnerHumanSettlements, lockSourceOwnerHumanSettlement } from "./missions/mission-work-settlement.js";
 import { completeWorkflowIssueStepRunsAfterDone } from "./workflow/work-product-completion-gate.js";
 import type { WorkflowSyncSource } from "./workflow/workflow-sync-source.js";
 
@@ -53,6 +54,10 @@ export async function commitIssueUpdate<T extends IssueRow>({
       goalId: resolvedNextGoalId,
       defaultGoalId: defaultCompanyGoal?.id ?? null,
     });
+    const ownerHuman = existing.missionId && issueData.status !== existing.status
+      && (issueData.status === "done" || issueData.status === "cancelled")
+      ? await lockSourceOwnerHumanSettlement(tx, { companyId: existing.companyId,
+        missionId: existing.missionId, sourceIssueId: existing.id }) : null;
     const updated = await tx
       .update(issues)
       .set(patch)
@@ -60,6 +65,7 @@ export async function commitIssueUpdate<T extends IssueRow>({
       .returning()
       .then((rows) => rows[0] ?? null);
     if (!updated) return null;
+    await closeLockedOwnerHumanSettlements(ownerHuman ? [ownerHuman] : []);
     if (issueData.status === "done" && existing.status !== "done") {
       await completeWorkflowIssueStepRunsAfterDone({
         db: tx,
