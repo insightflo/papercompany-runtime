@@ -211,6 +211,7 @@ import {
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
 import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
+import { isStoredOperatorDecisionWake, promoteStoredDeferredWakes } from "./heartbeat-stored-recovery-admission.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
@@ -5854,6 +5855,7 @@ export function heartbeatService(db: Db) {
     isWorkflowStepResumeWake,
     getInvocationBlock: budgets.getInvocationBlock,
     promote: (tx, input) => promoteQueuedWakeupRequest(followupPromotionDeps, tx, input),
+    promoteDeferredOwner: (agent, limit) => promoteStoredDeferredWakes(db, followupPromotionDeps, agent, limit, isWorkflowStepResumeWake),
     deliverCorrection: connectCorrectionDelivery,
   };
 
@@ -8896,12 +8898,7 @@ export function heartbeatService(db: Db) {
         })
         .where(eq(issues.id, issue.id));
 
-      // [recovery liveness hardening] deferred 승격 루프에 bounded budget. 새 deferred 가
-      // 재삽입되며 무한 루프가 되면 recovery lane 이 영원히 막힌다. max iterations + wall-clock
-      // 예산 초과 시 루프를 중단한다. 남은 deferred 는 deferred 상태 그대로 유지되므로 (a) 같은
-      // issue 가 다음에 release 될 때(정상 종료 경로 포함) 다시 승격되고, (b) mission-dedup
-      // enqueue 시 coalesce/재시도된다. 즉 영구 유실이 아니라 지연이다 — 무한 루프에 대한
-      // fail-safe 이다.
+      // Bounded iterations and wall-clock keep a reinserting deferred wake from blocking recovery.
       const deferredPromotionBudget = {
         maxIterations: 50,
         startedAtMs: Date.now(),
@@ -8927,6 +8924,8 @@ export function heartbeatService(db: Db) {
         const candidate = await selectDeferredWakeupRequest(tx, issue);
         if (!candidate) return null;
         const { request: deferred, agent: deferredAgent } = candidate;
+        if (isStoredOperatorDecisionWake(deferred, DEFERRED_WAKE_CONTEXT_KEY))
+          return { promotedRun: null, operatorDeferredAgentId: deferred.agentId };
         if (readQaCorrectionWakeRef(deferred)) {
           return { promotedRun: null, correctionCandidate: { wakeupRequestId: deferred.id } };
         }
@@ -9137,8 +9136,9 @@ export function heartbeatService(db: Db) {
         options.resumeQueue !== false,
       );
     }
+    if (transactionObject && "operatorDeferredAgentId" in transactionObject) {
+      if (options.resumeQueue !== false) await startNextQueuedRunForAgent(String(transactionRecord!.operatorDeferredAgentId)); return; }
     if (!promotedRun) return;
-
     publishQueuedRun(promotedRun);
 
     if (options.resumeQueue !== false) await startNextQueuedRunForAgent(promotedRun.agentId);

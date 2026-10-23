@@ -102,6 +102,18 @@ describeDb("C08 owner response initial heartbeat admission", () => {
     return blocker!;
   }
 
+  async function deferredDelivery(w: World) {
+    const delivery = await resolvedDelivery(w);
+    await db.update(issues).set({ executionRunId: w.heartbeatRunId,
+      checkoutRunId: w.heartbeatRunId, executionAgentNameKey: "owner",
+    }).where(eq(issues.id, w.anchorId));
+    await heartbeatService(db).wakeup(w.agentId, delivery.options);
+    const [wake] = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, w.companyId));
+    expect(wake).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    return { delivery, wake: wake! };
+  }
+
   it("rejects a forged issued key before inserting a wake request", async () => {
     const w = await world(), delivery = await resolvedDelivery(w);
     await expect(heartbeatService(db).wakeup(w.agentId, {
@@ -229,6 +241,44 @@ describeDb("C08 owner response initial heartbeat admission", () => {
       .toMatchObject({ status: "failed", runId: null });
   });
 
+  it("releases issues before deferred validation and retries pending acceptance", async () => {
+    const pendingWorld = await world(), pending = await deferredDelivery(pendingWorld);
+    const pendingService = heartbeatService(db);
+    await pendingService.cancelRun(pendingWorld.heartbeatRunId);
+    await pendingService.resumeQueuedRuns(pendingWorld.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.wake.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, pendingWorld.anchorId)))[0])
+      .toMatchObject({ executionRunId: null, checkoutRunId: null });
+    await operatorDecisionContinuationStore(db).accept(pending.delivery.targeted as typeof pending.delivery.targeted & {
+      targetAgentId: string; idempotencyKey: string; issueId: string;
+    }, "admission-worker", pending.wake.id);
+    await pendingService.resumeQueuedRuns(pendingWorld.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.wake.id)))[0]?.runId)
+      .toEqual(expect.any(String));
+
+    const staleWorld = await world(), stale = await deferredDelivery(staleWorld);
+    await operatorDecisionContinuationStore(db).accept(stale.delivery.targeted as typeof stale.delivery.targeted & {
+      targetAgentId: string; idempotencyKey: string; issueId: string;
+    }, "admission-worker", stale.wake.id);
+    await request(staleWorld, "request:B", stale.delivery.saved.lifetime.lifetimeId);
+    const [ordinary] = await db.insert(agentWakeupRequests).values({ companyId: staleWorld.companyId,
+      agentId: staleWorld.agentId, issueId: staleWorld.anchorId, source: "automation",
+      reason: "issue_execution_deferred", status: "deferred_issue_execution", requestedAt: new Date(Date.now() + 1_000),
+      payload: { issueId: staleWorld.anchorId, _paperclipWakeContext: {
+        issueId: staleWorld.anchorId, missionId: staleWorld.missionId } },
+    }).returning();
+    const staleService = heartbeatService(db);
+    await staleService.cancelRun(staleWorld.heartbeatRunId);
+    await staleService.resumeQueuedRuns(staleWorld.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, stale.wake.id)))[0])
+      .toMatchObject({ status: "failed", runId: null });
+    const promotedOrdinary = (await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, ordinary!.id)))[0]!;
+    expect(promotedOrdinary.runId).toEqual(expect.any(String));
+    expect((await db.select().from(issues).where(eq(issues.id, staleWorld.anchorId)))[0]?.executionRunId)
+      .toBe(promotedOrdinary.runId);
+  });
   it("accepts the exact returned delivery but rejects it after current lifetime replacement", async () => {
     const exactWorld = await world(), exact = await resolvedDelivery(exactWorld);
     await heartbeatService(db).wakeup(exactWorld.agentId, exact.options);

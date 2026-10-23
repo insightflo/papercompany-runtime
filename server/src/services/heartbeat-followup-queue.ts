@@ -43,8 +43,10 @@ export async function selectQueuedAgentIds(db: Db) {
     .where(eq(heartbeatRuns.status, "queued"));
   const queuedWakeups = await db.select({ agentId: agentWakeupRequests.agentId }).from(agentWakeupRequests)
     .where(and(eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
+  const deferredOwnerWakeups = await db.select({ agentId: agentWakeupRequests.agentId }).from(agentWakeupRequests)
+    .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), sql`${agentWakeupRequests.runId} is null`));
   const pauseReceipts = await selectPauseResumeCandidates(db);
-  return [...new Set([...queuedRuns, ...queuedWakeups, ...pauseReceipts].map(r => r.agentId))];
+  return [...new Set([...queuedRuns, ...queuedWakeups, ...deferredOwnerWakeups, ...pauseReceipts].map(r => r.agentId))];
 }
 type AgentRow = typeof agents.$inferSelect;
 type RunRow = typeof heartbeatRuns.$inferSelect;
@@ -58,6 +60,7 @@ export type HeartbeatFollowupQueueDeps = {
   promote: (tx: FollowupTx, input: QueuedWakeupPromotionInput) => Promise<RunRow>;
   deliverCorrection?: (candidate: { wakeupRequestId: string }, profile: "public_callback") =>
     Promise<{ kind: CorrectionDeliveryResult["kind"] | "nested_pending"; run: RunRow | null }>;
+  promoteDeferredOwner?: (agent: AgentRow, limit: number) => Promise<RunRow[]>;
 };
 export async function promoteQueuedWakeupRequestsForAgent(
   deps: HeartbeatFollowupQueueDeps,
@@ -87,6 +90,9 @@ export async function promoteQueuedWakeupRequestsForAgent(
         logger.warn({ err, agentId: agent.id, pauseReceiptId: candidate.id }, "pause resume delivery deferred");
       }
     }
+  }
+  if (!is(db, PgTransaction) && promotedRuns.length < limit && deps.promoteDeferredOwner) {
+    promotedRuns.push(...await deps.promoteDeferredOwner(agent, limit - promotedRuns.length));
   }
   return promotedRuns;
 }
