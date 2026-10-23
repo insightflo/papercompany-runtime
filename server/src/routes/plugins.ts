@@ -19,7 +19,6 @@ import { assertPluginWorkflowActionAccess, nativeWorkflowActionKeys, normalizedW
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
  */
 
-import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { and, desc, eq } from "drizzle-orm";
@@ -69,7 +68,8 @@ import {
   completeWorkflowToolStepFromResult,
   type WorkflowExecutionMode,
 } from "../services/workflow/dag-engine.js";
-import { executeCoreWorkflowTool, resolveRunStepEnv } from "../services/workflow/core-tool-executor.js";
+import { resolveRunStepEnv } from "../services/workflow/core-tool-executor.js";
+import { executePluginCoreToolCall } from "../services/workflow/plugin-core-tool-call.js";
 import { listWorkflowToolCatalog } from "../services/workflow/tool-catalog.js";
 import { authorizeRunToolExecution } from "../services/workflow/plugin-tool-authorization.js";
 
@@ -1161,17 +1161,13 @@ export function pluginRoutes(
 
     try {
       const stepEnv = await resolveRunStepEnv(db, String(runContext.runId));
-      const coreResult = await executeCoreWorkflowTool({
+      const coreResult = await executePluginCoreToolCall({
         db,
-        companyId: runContext.companyId,
-        agentId: runContext.agentId,
-        issueId: workflowRunIssueId,
-        heartbeatRunId: req.actor.type === 'agent' ? String(runContext.runId) : undefined,
-        toolName: tool,
-        parameters: parameters ?? {},
-        requestId: randomUUID(),
-        workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
-        stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
+        actor: req.actor,
+        runContext,
+        workflowRunIssueId,
+        tool,
+        parameters,
         stepEnv,
       });
       // 409 artifact_tool_step_call_in_progress: nothing executed (another call holds the step).

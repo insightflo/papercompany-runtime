@@ -57,6 +57,11 @@ export async function executeCoreWorkflowTool(input: {
   stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
   /** Authenticated server route only; never taken from tool parameters. */
   heartbeatRunId?: string;
+  /** Attribution context only; never an additional execution authorization gate. */
+  progressEvidenceContext?: {
+    actor: Pick<Express.Request["actor"], "type" | "source" | "companyId" | "agentId" | "runId">;
+    targetRunId: string;
+  };
   artifactDispatch?: Awaited<ReturnType<typeof captureQaDispatch>>;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db.select({ id: toolDefinitions.id, name: toolDefinitions.name,
