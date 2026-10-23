@@ -22,6 +22,7 @@ import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
 import { normalizeCommandParts, parametersToCliArgs, readObject } from "./core-tool-context.js";
 import { readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { executeLocalToolWithProgress } from "./local-tool-progress-executor.js";
+import type { ProgressEvidenceContext } from "../tools/progress-store.js";
 import { executeAgentJudgmentTool } from "../judgment/agent-judgment-tool-executor.js";
 import { executeMissionOwnerAction, OwnerActionRefusalError, withCurrentOwnerToolAttempt } from "../missions/mission-owner-execute.js";
 import { missionOwnerExecuteSchema } from "@paperclipai/shared/validators/mission-owner-authority";
@@ -58,10 +59,7 @@ export async function executeCoreWorkflowTool(input: {
   /** Authenticated server route only; never taken from tool parameters. */
   heartbeatRunId?: string;
   /** Attribution context only; never an additional execution authorization gate. */
-  progressEvidenceContext?: {
-    actor: Pick<Express.Request["actor"], "type" | "source" | "companyId" | "agentId" | "runId">;
-    targetRunId: string;
-  };
+  progressEvidenceContext?: ProgressEvidenceContext;
   artifactDispatch?: Awaited<ReturnType<typeof captureQaDispatch>>;
 }): Promise<CoreWorkflowToolExecutionResult> {
   const [tool] = await input.db.select({ id: toolDefinitions.id, name: toolDefinitions.name,
@@ -236,6 +234,7 @@ export async function executeCoreWorkflowTool(input: {
       () => policy
       ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
+        progressEvidenceContext: input.progressEvidenceContext, agentId, stepRunId: input.stepRunId,
         policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1 })
       : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1, timeoutMs })
       : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }));

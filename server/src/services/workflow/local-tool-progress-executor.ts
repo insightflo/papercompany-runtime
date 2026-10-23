@@ -5,7 +5,7 @@ import type { Readable } from "node:stream";
 import { toolProgressEventSchema, type ToolProgressPolicy } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import { ToolProgressError } from "../tools/progress-policy.js";
-import { createToolProgressStore } from "../tools/progress-store.js";
+import { createToolProgressStore, type ProgressEvidenceContext } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
 import type { ProgressScope } from "../tools/progress-scope.js";
 
@@ -36,6 +36,7 @@ async function readProgress(stream: Readable, accept: (raw: unknown) => Promise<
 }
 export async function executeLocalToolWithProgress(input: {
   db: Db; scope: ProgressScope; policy: ToolProgressPolicy;
+  progressEvidenceContext?: ProgressEvidenceContext; agentId?: string | null; stepRunId?: string | null;
   executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
   launch?: <T>(start: () => T) => Promise<{ result: T }>;
   inputBytes?: Buffer; qaResult?: boolean; acceptQaExit1?: boolean;
@@ -113,7 +114,9 @@ export async function executeLocalToolWithProgress(input: {
       const intake = readProgress(channel, async (raw) => {
         const parsed = toolProgressEventSchema.safeParse(raw);
         if (!parsed.success) throw protocolError();
-        await store.acceptLocal(input.scope.companyId, heartbeat.id, parsed.data);
+        await store.acceptLocal(input.scope.companyId, heartbeat.id, parsed.data, input.progressEvidenceContext && {
+          ...input.progressEvidenceContext, scope: input.scope, agentId: input.agentId, stepRunId: input.stepRunId,
+        });
       }, signal).catch((error: unknown) => fail(error instanceof ToolProgressError ? error : protocolError()));
       cleanup = async () => { await close; await intake; await guard?.drained; guard?.dispose(); };
       const code = await close;
