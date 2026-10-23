@@ -51,11 +51,79 @@ export async function applyResume(
   const body: ResumeRequestBody = resumeRequestSchema.parse(rawBody);
   assertBoardAuthorization(actor, body.companyId);
   const requestHash = hashStructuredValue(body);
+  return applyVerifiedResumeBody(db, body,
+    { actorType: "user", actorId: actor.userId ?? "board" }, signer);
+}
+
+/** [승인=재개 2026-10-23] 감사 주체 — 보드 요청은 실제 인증 actor에서, 운영자 결정 승인은
+ *   system 주체 + 결정/사용자 근거로 기록된다(보드 actor 위장 경로는 존재하지 않는다). */
+export type ResumeAuditActor = {
+  actorType: "user" | "system";
+  actorId: string;
+  details?: Record<string, unknown>;
+};
+
+/** 검증된 본문으로 재개를 원자 적용한다 — 권한 검증은 각 진입점(보드/운영자 결정)이 이미 완료했다. */
+async function applyVerifiedResumeBody(
+  db: Db,
+  body: ResumeRequestBody,
+  audit: ResumeAuditActor,
+  signer: ResumeApplySigner,
+): Promise<ResumeRequestView> {
+  const requestHash = hashStructuredValue(body);
   return withResumeSerialization(
     db,
     { companyId: body.companyId, missionId: body.missionId, runId: body.workflowRunId },
-    (context) => applyInsideLock(context, body, requestHash, actor, signer),
+    (context) => applyInsideLock(context, body, requestHash, audit, signer),
   );
+}
+
+export type OperatorDecisionResumeAuthorization = {
+  kind: "operator_decision";
+  operatorDecisionId: string;
+  resolvedByUserId: string;
+};
+
+/**
+ * [승인=재개 2026-10-23] 사람이 종말 카드에서 “이 실행 이어서 진행(재개)”를 선택한 resolve 가
+ *   재개 요청의 권한 원본이 된다. 보드 actor 를 만들지 않고 명시적 권한 종류로 적용 코어를 호출한다:
+ *   서버가 미리보기(서명·자격·게이트 검증)를 조립해 스냅샷 토큰을 얻고, 같은 원자 경로로 적용한다.
+ *   미리보기가 막히면 conflict 로 fail-closed — 자격 없는 재개는 결정 승인으로도 불가능하다.
+ *   idempotencyKey 는 결정 id 로 고정해 이중 발사를 replay 처리한다.
+ */
+export async function applyResumeForOperatorDecision(
+  db: Db,
+  input: { companyId: string; missionId: string; workflowRunId: string; startStepId: string; reason: string;
+    idempotencyKey: string; authorization: OperatorDecisionResumeAuthorization },
+  signer: ResumeApplySigner,
+): Promise<ResumeRequestView> {
+  // replay 우선: 이미 적용된 요청이면 조립 없이 그대로 돌려준다(토큰은 호출마다 달라지므로 선검사).
+  const existing = await db.select({ id: workflowResumeRequests.id }).from(workflowResumeRequests)
+    .where(and(eq(workflowResumeRequests.companyId, input.companyId),
+      eq(workflowResumeRequests.workflowRunId, input.workflowRunId),
+      eq(workflowResumeRequests.idempotencyKey, input.idempotencyKey)))
+    .limit(1);
+  if (existing.length > 0) {
+    return readResumeRequest(db, { companyId: input.companyId, missionId: input.missionId, requestId: existing[0]!.id });
+  }
+  const fresh = await assembleResumePreview(db, {
+    companyId: input.companyId, missionId: input.missionId,
+    workflowRunId: input.workflowRunId, startStepId: input.startStepId,
+  }, signer);
+  if (!fresh.preview.eligible || fresh.state === null || fresh.preview.token === null) {
+    throw conflict("resume_blocked", { blockers: fresh.preview.blockers });
+  }
+  const body: ResumeRequestBody = {
+    schemaVersion: 1, mode: "resume_from_step",
+    companyId: input.companyId, missionId: input.missionId, workflowRunId: input.workflowRunId,
+    startStepId: input.startStepId, snapshotToken: fresh.preview.token,
+    idempotencyKey: input.idempotencyKey, reason: input.reason,
+  };
+  return applyVerifiedResumeBody(db, body, {
+    actorType: "system", actorId: "system:operator-decision-resume",
+    details: { operatorDecisionId: input.authorization.operatorDecisionId,
+      resolvedByUserId: input.authorization.resolvedByUserId },
+  }, signer);
 }
 
 /** routes/authz.ts 의 assertBoard + assertCompanyAccess board 경과 동일한 조건(사전 검증, DB 접근 없음). */
@@ -98,7 +166,7 @@ async function applyInsideLock(
   context: Awaited<Parameters<Parameters<typeof withResumeSerialization>[2]>[0]>,
   body: ResumeRequestBody,
   requestHash: string,
-  actor: Express.Request["actor"],
+  audit: ResumeAuditActor,
   signer: ResumeApplySigner,
 ): Promise<ResumeRequestView> {
   const { tx, mission, run, steps } = context;
@@ -162,7 +230,7 @@ async function applyInsideLock(
   await reactivateMissionIfCompleted(tx, { mission, companyId: body.companyId, now });
   await insertResumeAuditRow(tx, {
     companyId: body.companyId,
-    actor,
+    audit,
     runId: run.id,
     requestId,
     startStepId: body.startStepId,
@@ -226,7 +294,7 @@ async function insertResumeAuditRow(
   tx: ResumeMutationTransaction,
   input: {
     companyId: string;
-    actor: Express.Request["actor"];
+    audit: ResumeAuditActor;
     runId: string;
     requestId: string;
     startStepId: string;
@@ -236,8 +304,8 @@ async function insertResumeAuditRow(
 ): Promise<void> {
   await tx.insert(activityLog).values({
     companyId: input.companyId,
-    actorType: "user",
-    actorId: input.actor.userId ?? "board",
+    actorType: input.audit.actorType,
+    actorId: input.audit.actorId,
     action: "workflow.resume_requested",
     entityType: "workflow_run",
     entityId: input.runId,
@@ -246,6 +314,7 @@ async function insertResumeAuditRow(
       startStepId: input.startStepId,
       affectedStepIds: input.affectedStepIds,
       reasonHash: hashStructuredValue(input.reason),
+      ...(input.audit.details ?? {}),
     },
   });
 }

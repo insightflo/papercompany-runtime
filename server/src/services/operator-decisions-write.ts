@@ -26,6 +26,7 @@ import {
 import { operatorDecisionContinuationRetryService } from "./operator-decision-continuation-retry.js";
 import { operatorDecisionReadService } from "./operator-decisions-read.js";
 import { startApprovedRevisionRun } from "./workflow/approved-revision-start.js";
+import { resumeRunFromOperatorDecision, TERMINAL_RESUME_OPTION_ID } from "./missions/terminal-resume-from-decision.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
@@ -413,6 +414,18 @@ export function operatorDecisionWriteService(db: Db) {
       void startApprovedRevisionRun(db, { companyId: decision.companyId, missionId })
         .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId },
           "approved revision start after decision resolve failed"));
+    }
+    // [승인=재개 2026-10-23] 종말 카드의 “이 실행 이어서 진행(재개)” 선택도 같은 패턴이다 — 사람의
+    //   선택이 재개 요청의 권한 원본이 되고, 적용은 비동기로 실행된다(실패는 로그 기록, 선택 자체는 유효).
+    if (applied && result.outcome === "submit" && Array.isArray(result.selectedOptionIds)
+      && result.selectedOptionIds.includes(TERMINAL_RESUME_OPTION_ID)
+      && decision.sourceContext.missionId && decision.sourceContext.workflowRunId) {
+      const missionId = decision.sourceContext.missionId;
+      const workflowRunId = decision.sourceContext.workflowRunId;
+      void resumeRunFromOperatorDecision(db, { operatorDecisionId: id, resolvedByUserId,
+        companyId: decision.companyId, missionId, workflowRunId })
+        .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId, workflowRunId },
+          "operator-decision resume after decision resolve failed"));
     }
     return { decision, applied, continuation: decision.continuation };
   }

@@ -9,6 +9,7 @@ import {
   emitTerminalMissionHumanOperatorReport,
   reviewedResumePolicyFullyResolves,
   terminalResumeGuidanceText,
+  terminalCardStructuredOptions,
 } from "../services/missions/terminal-mission-human-operator-alert.js";
 import { missionWorkflowContinuationRemains, type WorkflowContinuationStepRow } from "../services/missions/terminal-mission-workflow-continuation.js";
 
@@ -228,5 +229,21 @@ describe("terminal resume guidance (reviewed resume policy surfacing)", () => {
     expect(buildTerminalMissionHumanOperatorComment(base)).not.toContain("Resume path:");
     expect(buildTerminalMissionHumanOperatorComment({ ...base, resumeGuidance: terminalResumeGuidanceText(true, "ko") }))
       .toContain("Resume path: 이 미션의 실패 실행은 검토된 재개 경로가 있습니다");
+  });
+});
+
+// [승인=재개 2026-10-23] 재개 옵션 구성 — 재개 가능할 때만 첫 옵션+추천으로 추가.
+describe("terminalCardStructuredOptions (resume option on the terminal card)", () => {
+  const nextAction = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
+  it("returns null when resume is not available", () => {
+    expect(terminalCardStructuredOptions(false, nextAction)).toBeNull();
+  });
+  it("prepends the resume option with recommendation and keeps derived recovery paths", () => {
+    const options = terminalCardStructuredOptions(true, nextAction)!;
+    expect(options.structuredOptions[0]).toMatchObject({ id: "resume-this-run" });
+    expect(options.structuredOptions[0]!.label).toContain("이 실행 이어서 진행");
+    expect(options.structuredOptions.length).toBeGreaterThan(1);
+    expect(options.recommendedOptionId).toBe("resume-this-run");
+    expect(options.structuredOptions.slice(1).map((o) => o.id)).toContain("replan");
   });
 });

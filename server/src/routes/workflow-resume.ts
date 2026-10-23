@@ -9,6 +9,7 @@ import { previewResume, type ResumeSnapshotSigner } from "../services/workflow/r
 import { readResumeRequest } from "../services/workflow/resume/request-store.js";
 import { projectResumeRequest } from "../services/workflow/resume/public-views.js";
 import { snapshotUuidSchema } from "../services/workflow/resume/snapshot-state.js";
+import { loadResumeSignerFromEnv } from "../services/workflow/resume/signer.js";
 import { workflowResumeCuRoutes } from "./workflow-resume-cu.js";
 
 /**
@@ -51,14 +52,8 @@ function uuidParam(req: Request, name: string): string {
   return value;
 }
 
-/** 서명 키는 매 요청 env 에서 읽는다. 누락/오작형은 고정 503 — fallback/난수 키 없음. */
-function loadResumeSigner(): ResumeSnapshotSigner {
-  const raw = process.env[SIGNING_KEY_ENV];
-  if (typeof raw !== "string" || !SIGNING_KEY_PATTERN.test(raw)) {
-    throw new HttpError(503, "resume_unavailable");
-  }
-  return { key: Buffer.from(raw, "hex"), now: () => new Date() };
-}
+/** 서명 키는 공용 로더(signer.ts)에서 읽는다 — 운영자 결정 재개 경로와 같은 원본. */
+const loadResumeSigner = loadResumeSignerFromEnv;
 
 async function handler(db: Db, run: (req: Request, res: Response) => Promise<void>, req: Request, res: Response, next: NextFunction) {
   try {
