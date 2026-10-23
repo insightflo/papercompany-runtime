@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
-  agentWakeupRequests, heartbeatRuns, issueWorkProducts, qualityActions, qualityEvidenceRefs,
-  qualityPolicyVersions, workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents,
+  agentWakeupRequests, heartbeatRuns, issues, issueWorkProducts, qualityActions, qualityEvidenceRefs,
+  qualityPolicyVersions, workflowDefinitions, workflowRuns, workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents,
 } from "@paperclipai/db";
 import { validateQaCorrectionAuthority } from "../services/workflow/control-flow/qa-correction-authority.js";
+import { isLatestQaExecution } from "../services/workflow/control-flow/qa-cap-acceptance.js";
+import { loadLatestQaRemediations } from "../services/workflow/validation-verdict-ledger.js";
 import { readIssuedQaCorrection } from "../services/workflow/control-flow/qa-correction-reader.js";
 import { assertQaCorrectionEventLinks, hashQaCorrectionPayload, type QaCorrectionPreparation } from "../services/workflow/control-flow/qa-correction-contract.js";
 import { freezeArtifactAttempt } from "../services/workflow/artifact-contract-runtime.js";
@@ -118,8 +120,26 @@ describe("QA correction SELECT authority and historical issuance", () => {
 
   it("preserves B history after B→C moves the same binding", async () => {
     const f = await seedQaCorrection(owned.db), b = await issueQaCorrectionFixture(owned.db, f);
-    const remediation = { items: [{ op: "string_replace" as const, file: `${b.applied.revisions[0]!.root}/report.html`, find: "old", replace: "new" }] };
-    const verdict = await appendQaVerdict(owned.db, f, "request_changes", remediation);
+    const remediation = { items: [{ op: "string_replace" as const, file: `${b.applied.revisions[0]!.root}/report.html`, find: "new", replace: "next" }] };
+    const unconsumed = await appendQaVerdict(owned.db, f, "request_changes", remediation);
+    expect(await isLatestQaExecution(owned.db, f.qa.issueId!, f.qa.id, unconsumed.heartbeatRunId)).toBe(true);
+    expect(await loadLatestQaRemediations({ db: owned.db, companyId: f.preparation.companyId, issueId: f.qa.issueId! })).toBeNull();
+    const stale = structuredClone(f.preparation); stale.authority.verdicts = [unconsumed];
+    await expect(validateQaCorrectionAuthority(owned.db, stale)).rejects.toMatchObject({ reason: "stale" });
+    // A separate official QA can assess B without pretending it consumed B's pending recheck.
+    // Keep the original binding: C must move that same pin from B while preserving B's history.
+    const [run] = await owned.db.select().from(workflowRuns).where(eq(workflowRuns.id, f.preparation.workflowRunId));
+    const [definition] = await owned.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
+    const stepId = `qa-next-${randomUUID()}`;
+    const sourceQa = definition!.stepsJson.find(step => (step as { id: string }).id === f.qa.stepId) as Record<string, unknown>;
+    await owned.db.update(workflowDefinitions).set({ stepsJson: [...definition!.stepsJson,
+      { ...sourceQa, id: stepId, name: "QA of B" }] }).where(eq(workflowDefinitions.id, definition!.id));
+    const [issue] = await owned.db.insert(issues).values({ companyId: f.preparation.companyId,
+      missionId: f.preparation.missionId, title: "[QA] B", status: "todo", originKind: "workflow_execution" }).returning();
+    const [qa] = await owned.db.insert(workflowStepRuns).values({ workflowRunId: f.preparation.workflowRunId,
+      stepId, issueId: issue!.id, status: "failed" }).returning();
+    const verdict = await appendQaVerdict(owned.db, { ...f, qa: qa! }, "request_changes", remediation);
+    const bHistory = await readIssuedQaCorrection(owned.db, b.scope);
     const next = structuredClone(f.preparation);
     next.correctionId = randomUUID(); next.preparedAt = new Date(Date.now() + 2000).toISOString();
     next.authority.verdicts = [verdict];
@@ -128,13 +148,15 @@ describe("QA correction SELECT authority and historical issuance", () => {
     // C03 inter-correction integrity: C measures B's output ("new"), not the original A ("old").
     await expect(validateQaCorrectionAuthority(owned.db, next)).resolves.toMatchObject({ status: "authority_validated" });
     const c = await issueQaCorrectionFixture(owned.db, f, next);
+    const [binding] = await owned.db.select().from(workflowStepOutputBindings).where(eq(workflowStepOutputBindings.id, f.bindingId));
+    expect(binding!.workProductId).toBe(c.workProductId);
     expect(b.applied.revisions[0]!.files[0]!.sha256).toBe(afterSha256);
     expect(c.measured.sources[0]!.files).toEqual([
       { role: "main", relativePath: "report.html", sha256: afterSha256, byteSize: 3 },
     ]);
     expect(c.measured.sources[0]!.files[0]!.sha256).not.toBe(beforeSha256);
     expect(c.applied.revisions[0]!.files[0]!.beforeSha256).toBe(b.applied.revisions[0]!.files[0]!.sha256);
-    expect((await readIssuedQaCorrection(owned.db, b.scope)).applied.revisions[0]!.workProductId).toBe(b.workProductId);
+    expect(await readIssuedQaCorrection(owned.db, b.scope)).toEqual(bHistory);
     expect((await readIssuedQaCorrection(owned.db, c.scope)).sources[0]!.origin).toBe("registered_legacy");
   });
 
