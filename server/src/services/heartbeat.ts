@@ -3105,7 +3105,7 @@ function buildNoProgressAutoBlockedComment(input: {
     `- 연속 무진행 성공 run: ${assessment.count}회 (차단 기준 ${autoBlockThreshold}회, 경고 기준 ${advisoryThreshold}회)`,
     `- 판정 창: ${assessment.windowStart.toISOString()} 이후 (구조화 DB 증거로 재계산)`,
     `- 마지막 무진행 run: \`${assessment.lastRunId ?? "-"}\``,
-    `- 확인 증거: 산출물 등록 ${assessment.evidenceSummary.workProductRuns}건 / 워크플로 전이 ${assessment.evidenceSummary.transitionRuns}건 / 에이전트 코멘트 ${assessment.evidenceSummary.agentCommentsInWindow}건 — 연쇄 구간 run들(${assessment.evidenceSummary.runs}개 스캔)에서 모두 없음`,
+    `- 확인 증거: 실제 산출물 생성·변경 ${assessment.evidenceSummary.workProductRuns}개 실행 / 공식 도구 증가 ${assessment.evidenceSummary.toolProgressRuns}개 실행 (최근 ${assessment.evidenceSummary.runs}개 실행 조회)`,
     "- 정책: 성공했지만 아무 변화 없는 실행이 반복되어 자동 디스패치를 멈춤. blocked는 owner-action/native-resume으로만 재개됩니다.",
     "- 재개 전 확인: 이슈 범위 재조정, 산출물 계약 재명시, 또는 담당 재할당. 같은 상태로 재개하면 같은 연쇄가 이어집니다.",
   ].join("\n");
@@ -3123,7 +3123,7 @@ function buildMissionWorkerNoProgressOversightComment(input: {
     `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
     `- latest succeeded runId: \`${input.run.id}\``,
     `- consecutive no-progress runs: ${input.assessment.count} (auto-block threshold ${input.autoBlockThreshold})`,
-    `- evidence checked: work products ${input.assessment.evidenceSummary.workProductRuns}, workflow transitions ${input.assessment.evidenceSummary.transitionRuns}, agent comments ${input.assessment.evidenceSummary.agentCommentsInWindow} (window from ${input.assessment.windowStart.toISOString()})`,
+    `- evidence checked: measured work-product creation/change in ${input.assessment.evidenceSummary.workProductRuns} runs, accepted tool advances in ${input.assessment.evidenceSummary.toolProgressRuns} runs (window from ${input.assessment.windowStart.toISOString()})`,
     "- policy: the worker issue was auto-blocked after repeated successful runs with no structured change; owner action is required to resume (re-scope, restate the deliverable contract, or reassign).",
   ].join("\n");
 }
@@ -6609,7 +6609,7 @@ export function heartbeatService(db: Db) {
     } else {
       delete context.paperclipRunawayRecoveryBrief;
     }
-    // [no-progress ladder 2단계] 이 이슈의 직전 성공 run들이 모두 무진행(산출물/코멘트/전이 없음)이면
+    // [no-progress ladder 2단계] 직전 성공 run들에 공식 도구 증가·실측 산출물 생성/변경이 없으면
     //   이번 실행 선두에 회복 지시를 붙인다(런타임 브리프가 렌더). 판정은 DB 증거 쿼리로
     //   매번 stateless 재계산 — 어드바이저(N회) 다음 단계, K회 도달 시 release 게이트에서 auto-block.
     if (issueId) {
@@ -8283,7 +8283,7 @@ export function heartbeatService(db: Db) {
           canApplyMissingWorkProductRegistrationGate(issue, stepRunRequiresWorkProduct)
         );
       const noProgressAssessment = noProgressLadderScope
-        ? await computeConsecutiveNoProgress(db, {
+        ? await computeConsecutiveNoProgress(tx, {
             companyId: issue.companyId,
             issueId: issue.id,
             agentId: issue.assigneeAgentId!,
@@ -8299,7 +8299,7 @@ export function heartbeatService(db: Db) {
           eventType: "lifecycle",
           stream: "system",
           level: "warn",
-          message: `No-progress advisory: last ${noProgressAssessment.count} succeeded runs on this issue produced no work product, comment, or workflow transition (advisory threshold ${noProgressAdvisoryThreshold}, auto-block threshold ${noProgressAutoBlockThreshold})`,
+          message: `No-progress advisory: last ${noProgressAssessment.count} succeeded runs on this issue produced no accepted tool advance or measured work-product creation/change (advisory threshold ${noProgressAdvisoryThreshold}, auto-block threshold ${noProgressAutoBlockThreshold})`,
           payload: {
             consecutiveNoProgress: noProgressAssessment.count,
             advisoryThreshold: noProgressAdvisoryThreshold,
