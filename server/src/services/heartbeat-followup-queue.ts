@@ -9,7 +9,7 @@ import type { CorrectionDeliveryResult } from "./workflow/control-flow/qa-correc
 import { logger } from "../middleware/logger.js";
 import type { budgetService } from "./budgets.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
-import { assertHeartbeatRecoveryAdmission } from "./heartbeat-recovery-guard.js";
+import { lockStoredRecoveryAdmission } from "./heartbeat-stored-recovery-admission.js";
 import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
@@ -110,29 +110,19 @@ async function promoteQueuedWakeupRequest(
     return result.kind === "new_delivery" ? result.run : null;
   }
   return withTxTimeout(db, async (tx) => {
-    const [observed] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
+    const [observed] = await tx.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
     if (!observed) return null;
+    let request: typeof observed | null;
     try {
-      await assertHeartbeatRecoveryAdmission(tx as unknown as Db, { ...observed, contextSnapshot: parseObject(observed.payload)[DEFERRED_WAKE_CONTEXT_KEY] });
+      request = await lockStoredRecoveryAdmission(tx, observed, DEFERRED_WAKE_CONTEXT_KEY);
     } catch (err) {
       if (isQaCorrectionRootOwnerRequired(err)) throw err;
       await tx.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date(), error: err instanceof Error ? err.message : "Recovery admission refused", updatedAt: new Date() })
         .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
       return null;
     }
-    await tx.execute(sql`select id from agent_wakeup_requests where id = ${wakeupRequestId} for update`);
-    const request = await tx
-      .select()
-      .from(agentWakeupRequests)
-      .where(and(
-        eq(agentWakeupRequests.id, wakeupRequestId),
-        eq(agentWakeupRequests.companyId, agent.companyId),
-        eq(agentWakeupRequests.agentId, agent.id),
-        eq(agentWakeupRequests.status, "queued"),
-        sql`${agentWakeupRequests.runId} is null`,
-      ))
-      .then((rows) => rows[0] ?? null);
-    if (!request) return null;
+    if (!request || request.agentId !== agent.id || request.status !== "queued" || request.runId !== null) return null;
     // [거절] agent 가 실행 불가 상태면 run 도 만들지 않고 request 를 terminal-fail.
     if (agent.status === "terminated" || agent.status === "paused" || agent.status === "pending_approval") {
       return failFollowupWake(tx, request.id, `Queued wakeup rejected: agent not runnable (status=${agent.status})`);

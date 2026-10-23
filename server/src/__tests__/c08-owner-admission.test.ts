@@ -92,6 +92,16 @@ describeDb("C08 owner response initial heartbeat admission", () => {
     } };
   }
 
+  async function blockMissionQueue(w: World) {
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, w.heartbeatRunId));
+    const [blocker] = await db.insert(heartbeatRuns).values({ companyId: w.companyId,
+      agentId: w.agentId, issueId: w.sourceId, status: "running",
+      contextSnapshot: { issueId: w.sourceId, missionId: w.missionId },
+    }).returning();
+    return blocker!;
+  }
+
   it("rejects a forged issued key before inserting a wake request", async () => {
     const w = await world(), delivery = await resolvedDelivery(w);
     await expect(heartbeatService(db).wakeup(w.agentId, {
@@ -149,6 +159,45 @@ describeDb("C08 owner response initial heartbeat admission", () => {
     })).resolves.toBeNull();
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, w.companyId)))
       .toEqual([expect.objectContaining({ status: "queued", issueId: w.anchorId })]);
+  });
+
+  it("rechecks the stored wake identity before queued promotion", async () => {
+    const currentWorld = await world(), current = await resolvedDelivery(currentWorld);
+    const currentBlocker = await blockMissionQueue(currentWorld);
+    await heartbeatService(db).wakeup(currentWorld.agentId, current.options);
+    const [currentWake] = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, currentWorld.companyId));
+    expect(currentWake).toMatchObject({ status: "queued", runId: null,
+      payload: expect.objectContaining({ _paperclipWakeContext: expect.objectContaining({
+        missionId: currentWorld.missionId,
+      }) }),
+    });
+    await heartbeatService(db).resumeQueuedRuns(currentWorld.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, currentWake!.id)))[0])
+      .toMatchObject({ status: "queued", runId: null });
+    await operatorDecisionContinuationStore(db).accept(current.targeted as typeof current.targeted & {
+      targetAgentId: string; idempotencyKey: string; issueId: string;
+    }, "admission-worker", currentWake!.id);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, currentBlocker.id));
+    await heartbeatService(db).resumeQueuedRuns(currentWorld.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, currentWake!.id)))[0]?.runId)
+      .toEqual(expect.any(String));
+
+    const w = await world(), delivery = await resolvedDelivery(w);
+    const blocker = await blockMissionQueue(w);
+    await heartbeatService(db).wakeup(w.agentId, delivery.options);
+    const [wake] = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, w.companyId));
+    await operatorDecisionContinuationStore(db).accept(delivery.targeted as typeof delivery.targeted & {
+      targetAgentId: string; idempotencyKey: string; issueId: string;
+    }, "admission-worker", wake!.id);
+    await request(w, "request:B", delivery.saved.lifetime.lifetimeId);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, blocker.id));
+    await heartbeatService(db).resumeQueuedRuns(w.agentId);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id)))[0])
+      .toMatchObject({ status: "failed", runId: null });
   });
 
   it("accepts the exact returned delivery but rejects it after current lifetime replacement", async () => {

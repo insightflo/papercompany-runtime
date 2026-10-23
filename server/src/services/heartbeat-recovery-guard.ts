@@ -22,10 +22,9 @@ type Scope = {
   contextSnapshot?: unknown; wakeupRequestId?: string | null; idempotencyKey?: string | null;
   source?: string | null; reason?: string | null; payload?: unknown;
   requestedByActorType?: string | null; requestedByActorId?: string | null;
-  operatorDecisionInitialAdmission?: boolean; operatorDecisionOnly?: boolean;
+  operatorDecisionInitialAdmission?: boolean; operatorDecisionStoredAdmission?: boolean; operatorDecisionOnly?: boolean;
 };
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function text(value: unknown): string | null { return typeof value === "string" && value.trim() ? value : null; }
 
 const resolutionRef = z.object({ operatorDecisionId: z.string().uuid(), options: z.array(z.object({
@@ -33,7 +32,7 @@ const resolutionRef = z.object({ operatorDecisionId: z.string().uuid(), options:
 }).strict()) }).strict();
 function sameJson(left: unknown, right: unknown) { return JSON.stringify(left) === JSON.stringify(right); }
 function readDeliveryMarker(input: Scope, context: Record<string, unknown>) {
-  if (!input.operatorDecisionInitialAdmission) return null;
+  if (!input.operatorDecisionInitialAdmission && !input.operatorDecisionStoredAdmission) return null;
   const payload = record(input.payload), rawPayload = payload.paperclipOperatorDecisionResolution,
     rawContext = context.paperclipOperatorDecisionResolution;
   const marked = input.idempotencyKey?.startsWith(OPERATOR_DECISION_WAKE_PREFIX) || input.reason === "operator_decision_resolved"
@@ -68,21 +67,23 @@ async function assertOperatorDecisionDelivery(db: Db, input: Scope, marker: Retu
   const expectedResolution = { operatorDecisionId: decision.id, options: selectedOptionIds.map(id => {
     const option = byId.get(id); return option ? { id: option.id, label: option.label, description: option.description }
       : { id, label: id, description: null }; }) };
-  const expectedKey = continuation
-    ? `${OPERATOR_DECISION_WAKE_PREFIX}${decisionId}:g${continuation.generation}:a${continuation.attemptCount}` : null;
+  const expectedKey = continuation ? `${OPERATOR_DECISION_WAKE_PREFIX}${decisionId}:g${continuation.generation}:a${continuation.attemptCount}` : null;
+  const storedPending = input.operatorDecisionStoredAdmission && continuation?.state === "leased" && continuation.wakeupRequestId === null;
   if (decision.status !== "resolved" || !decision.result || !sameJson(resolution, expectedResolution)
     || payload.operatorDecisionId !== decisionId || context.operatorDecisionId !== decisionId
     || input.missionId !== decision.sourceContext.missionId || context.missionId !== decision.sourceContext.missionId
     || payload.actionId !== decision.result.actionId || !sameJson(payload.selectedOptionIds, selectedOptionIds)
-    || context.wakeReason !== "operator_decision_resolved"
-    || !continuation || continuation.state !== "leased" || continuation.targetAgentId !== input.agentId
+    || context.wakeReason !== "operator_decision_resolved" || !continuation
+    || (input.operatorDecisionStoredAdmission ? !storedPending && (continuation.state !== "accepted" || continuation.wakeupRequestId !== input.wakeupRequestId)
+      : continuation.state !== "leased") || continuation.targetAgentId !== input.agentId
     || !continuation.issueId || continuation.issueId !== input.issueId || continuation.issueId !== text(payload.issueId)
     || continuation.issueId !== text(context.issueId) || continuation.idempotencyKey !== expectedKey
     || input.idempotencyKey !== expectedKey || input.source !== "automation"
-    || input.reason !== "operator_decision_resolved" || payload.kind !== "operator_decision_resolution"
+    || (input.operatorDecisionStoredAdmission ? !["operator_decision_resolved", "issue_execution_deferred"].includes(input.reason ?? "") : input.reason !== "operator_decision_resolved") || payload.kind !== "operator_decision_resolution"
     || input.requestedByActorType !== "user" || input.requestedByActorId !== decision.resolvedByUserId) {
     throw conflict("operator_decision_delivery_identity_mismatch");
   }
+  if (storedPending) throw conflict("operator_decision_delivery_pending_acceptance");
   return true;
 }
 
