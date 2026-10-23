@@ -107,6 +107,7 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
         if (orphan) return fail();
       }
       if (open.length) {
+        if (open[0]!.assigneeAgentId && open[0]!.assigneeAgentId !== mission.ownerAgentId) return fail();
         return { mission, source, issue: open[0]!, created: false };
       }
       const historical = current ? locked.get(current.pointer.anchorIssueId)! : visible[0];

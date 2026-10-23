@@ -190,13 +190,11 @@ describeDb("C08 source anchor producer", () => {
 
   it("submits a fresh recurrence after official closure without inheriting past approval", async () => {
     const w = await world(true, false, false, "todo"), old = await currentLifetime(w), [oldCard] = await cards(w);
-    await operatorDecisionWriteService(db).resolve(oldCard!.id,
-      { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
+    await operatorDecisionWriteService(db).resolve(oldCard!.id, { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
     await issueService(db).update(w.oldId, { status: "done" });
     await issueService(db).update(w.sourceId, { status: "done" });
     await db.transaction(async (tx) => {
-      const auth = await lockOwnerHumanRequestAuthority(tx, { companyId: w.companyId, missionId: w.missionId,
-        ownerActionIssueId: w.oldId, agentId: w.agentId, heartbeatRunId: w.heartbeatId, purpose: "settle" });
+      const auth = await lockOwnerHumanRequestAuthority(tx, { companyId: w.companyId, missionId: w.missionId, ownerActionIssueId: w.oldId, agentId: w.agentId, heartbeatRunId: w.heartbeatId, purpose: "settle" });
       await closeOwnerHumanRequest(auth, old.lifetimeId);
     });
     await issueService(db).update(w.sourceId, { status: "blocked" });
@@ -204,17 +202,20 @@ describeDb("C08 source anchor producer", () => {
     const [next, retry] = await Promise.all([produce(w), produce(w, other)]);
     expect(next.id).not.toBe(w.oldId); expect(retry.id).toBe(next.id);
     expect(await currentRow(w)).toEqual(closed); expect(await cards(w)).toEqual(before[1]);
+    const replacement = randomUUID();
+    await db.insert(agents).values({ id: replacement, companyId: w.companyId, name: "Replacement", status: "active" });
+    await db.update(issues).set({ assigneeAgentId: replacement }).where(eq(issues.id, next.id));
+    const reassigned = await snapshot(w); await expect(produce(w)).rejects.toMatchObject({ status: 409 });
+    expect(await snapshot(w)).toEqual(reassigned);
+    await db.update(issues).set({ assigneeAgentId: w.agentId }).where(eq(issues.id, next.id));
     const runId = randomUUID();
-    await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId,
-      issueId: next.id, status: "running" });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId, issueId: next.id, status: "running" });
     await issueService(db).checkout(next.id, w.agentId, ["todo"], runId);
     const actor = { ...w.actor, runId }, get = () =>
       readOwnerHumanRequest({ db, companyId: w.companyId, issueId: next.id, actor });
     const initial = await get();
-    expect(initial).toMatchObject({ lifetimeId: old.lifetimeId, requestKey: null, anchorIssueId: next.id,
-      recoveryNeeded: false, closure: closed.payload!.closure, card: null, delivery: null, resubmit: null });
-    const data = { ...submission, reason: "새 재발 요청", humanRequest: { schemaVersion: 1 as const,
-      requestKey: randomUUID(), expectedCurrentLifetimeId: initial.lifetimeId } };
+    expect(initial).toMatchObject({ lifetimeId: old.lifetimeId, requestKey: null, anchorIssueId: next.id, recoveryNeeded: false, closure: closed.payload!.closure, card: null, delivery: null, resubmit: null });
+    const data = { ...submission, reason: "새 재발 요청", humanRequest: { schemaVersion: 1 as const, requestKey: randomUUID(), expectedCurrentLifetimeId: initial.lifetimeId } };
     const send = (connection = db) => submitMissionOwnerDecision({ db: connection, issueId: next.id, actor, data });
     const unchanged = await snapshot(w), transaction = db.transaction.bind(db);
     const interrupted = vi.spyOn(db, "transaction").mockImplementationOnce((callback) => transaction(async (tx) => {
@@ -223,8 +224,7 @@ describeDb("C08 source anchor producer", () => {
     try { await expect(send()).rejects.toThrow("recurrence transaction interrupted"); }
     finally { interrupted.mockRestore(); }
     expect(await snapshot(w)).toEqual(unchanged);
-    await expect(submitMissionOwnerDecision({ db, issueId: next.id, actor,
-      data: { ...data, humanRequest: { ...data.humanRequest, requestKey: old.requestKey } } })).rejects.toMatchObject({ status: 409 });
+    await expect(submitMissionOwnerDecision({ db, issueId: next.id, actor, data: { ...data, humanRequest: { ...data.humanRequest, requestKey: old.requestKey } } })).rejects.toMatchObject({ status: 409 });
     expect(await snapshot(w)).toEqual(unchanged);
     const [fresh, replay] = await Promise.all([send(), send(other)]);
     expect(replay).toEqual(fresh); expect(fresh.eventId).not.toBe(old.decisionEventId);
