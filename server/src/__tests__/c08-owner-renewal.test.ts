@@ -162,8 +162,10 @@ describeDb("C08 explicit anchor renewal state", () => {
     const cancelled = await world();
     await db.update(missions).set({ status: "cancelled" }).where(eq(missions.id, cancelled.missionId));
     await unchanged(cancelled, () => renew(cancelled, randomUUID()));
-    const lost = await world();
-    await db.update(missions).set({ ownerAgentId: null }).where(eq(missions.id, lost.missionId));
+    const lost = await world(), replacementAgentId = randomUUID();
+    await db.insert(agents).values({ id: replacementAgentId, companyId: lost.companyId,
+      name: "Replacement owner", status: "active" });
+    await db.update(missions).set({ ownerAgentId: replacementAgentId }).where(eq(missions.id, lost.missionId));
     await unchanged(lost, () => renew(lost, randomUUID()));
   });
 
