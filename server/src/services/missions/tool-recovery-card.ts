@@ -112,9 +112,12 @@ export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, i
       if (current?.pointer.recoveryNeeded && current.pointer.anchorIssueId !== open[0]!.id) return fail();
       return { issue: open[0]!, created: false, classification, toolNames };
     }
-    if (!current && anchors.length) {
+    if (anchors.length) {
       const decided: Array<{ issue: IssueRow; human: boolean }> = [];
-      for (const anchor of anchors) {
+      const relevant = current
+        ? anchors.filter((anchor) => anchor.id === current!.pointer.anchorIssueId)
+        : anchors;
+      for (const anchor of relevant) {
         const decision = await loadLatestMissionOwnerDecision({ db: tx, companyId: mission.companyId,
           ownerActionIssueId: anchor.id });
         if (!decision) continue;
@@ -122,8 +125,9 @@ export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, i
           || decision.sourceIssueId !== source.id) return fail();
         decided.push({ issue: anchor, human: ownerDecisionRequestsHuman(decision.decision.decision) });
       }
-      if (decided.some((entry) => entry.human) || decided.length > 1) return fail();
-      if (decided.length === 1) return { issue: decided[0]!.issue, created: false, classification, toolNames };
+      const nonhuman = decided.filter((entry) => !entry.human);
+      if (nonhuman.length > 1 || (!current && decided.some((entry) => entry.human))) return fail();
+      if (nonhuman.length === 1) return { issue: nonhuman[0]!.issue, created: false, classification, toolNames };
     }
     const recurring = anchors.length > 0;
     if (recurring && (run.status !== "failed" || run.dispatchAuthorityVersion !== input.run.dispatchAuthorityVersion

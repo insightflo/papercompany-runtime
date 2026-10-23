@@ -205,10 +205,10 @@ describe("tool recovery brief creation (real transaction)", () => {
     expect(after[0].filter(row => row.eventType === "mission_owner_decision")).toHaveLength(1);
     expect(after[0].filter(row => row.eventType === "owner_human_lifetime_v1")).toHaveLength(2);
     await create(input, other); expect(await snapshot(input)).toEqual(after);
-    await issueService(db).update(next.issue.id, { status: "cancelled" });
-    const third = await create(input);
-    expect(third.issue.id).not.toBe(next.issue.id);
-    expect((await events(input)).filter(row => row.eventType === "owner_human_lifetime_v1")).toHaveLength(3);
+    const runId = randomUUID(); await db.insert(heartbeatRuns).values({ id: runId, companyId: input.mission.companyId, agentId: input.mission.ownerAgentId!, issueId: next.issue.id, status: "running" });
+    await issueService(db).checkout(next.issue.id, input.mission.ownerAgentId!, ["todo"], runId); await submitMissionOwnerDecision({ db, issueId: next.issue.id, actor: { actorType: "agent", actorId: input.mission.ownerAgentId!, agentId: input.mission.ownerAgentId!, runId }, data: { decision: "retry_source_issue", recoveryTarget: target(input) } });
+    await issueService(db).update(next.issue.id, { status: "cancelled" }); const kept = await create(input);
+    expect(kept).toMatchObject({ created: false, issue: { id: next.issue.id } }); expect((await events(input)).filter(row => row.eventType === "owner_human_lifetime_v1")).toHaveLength(2);
   });
 
   it("rolls back anchor/link/lifetime/current/card/audit on mandatory card failure", async () => {
