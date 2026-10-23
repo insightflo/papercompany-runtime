@@ -90,6 +90,27 @@ export function isBoundedExecutionWakeKey(key: string | null | undefined): boole
     || (typeof key === "string" && key.startsWith(QA_REMEDIATION_REFIRE_WAKE_PREFIX));
 }
 
+/** Generic merge candidates must exclude every bounded execution family in the stored direction. */
+export function unboundedExecutionWakeKeyCondition() {
+  return sql`(${agentWakeupRequests.idempotencyKey} is null or (
+    ${agentWakeupRequests.idempotencyKey} not like ${QUALITY_WAKE_PREFIX + "%"}
+    and ${agentWakeupRequests.idempotencyKey} not like ${PLAN_QA_RESUBMIT_WAKE_PREFIX + "%"}
+    and ${agentWakeupRequests.idempotencyKey} not like ${OPERATOR_DECISION_WAKE_PREFIX + "%"}
+    and ${agentWakeupRequests.idempotencyKey} not like ${QA_REMEDIATION_REFIRE_WAKE_PREFIX + "%"}
+    and ${agentWakeupRequests.idempotencyKey} not like ${QA_CORRECTION_WAKE_PREFIX.slice(0, -1) + "%"}))`;
+}
+
+export async function findBoundedWakeRowByExactKey(db: Db, input: {
+  companyId: string; agentId: string; issueId: string | null; idempotencyKey: string | null;
+}) {
+  if (!isBoundedExecutionWakeKey(input.idempotencyKey)) return null;
+  const [row] = await db.select({ id: agentWakeupRequests.id, agentId: agentWakeupRequests.agentId,
+    issueId: agentWakeupRequests.issueId, idempotencyKey: agentWakeupRequests.idempotencyKey,
+  }).from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, input.companyId),
+    eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey!))).limit(1);
+  return row ?? null;
+}
+
 export type QualityAttemptRow = {
   id: string;
   idempotencyKey: string | null;

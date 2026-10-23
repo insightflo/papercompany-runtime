@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
@@ -196,8 +197,8 @@ describe("C02 stage11 correction merge isolation", () => {
     expect(await candidates(QA_CORRECTION_WAKE_PREFIX)).toEqual([]);
     expect(await candidates(null)).toEqual([generic.id]);
     expect(await candidates("stage11:generic")).toEqual([generic.id]);
-    expect(await candidates(qKey)).toEqual([generic.id, q.id].sort());
-    expect(await candidates(pKey)).toEqual([generic.id, p.id].sort());
+    expect(await candidates(qKey)).toEqual([]);
+    expect(await candidates(pKey)).toEqual([]);
     for (const key of [bKey, cKey, QA_CORRECTION_WAKE_PREFIX]) {
       expect(isBoundedExecutionWakeKey(key)).toBe(true);
       expect(isQualityWakeKey(key)).toBe(false);
@@ -252,5 +253,27 @@ describe("C02 stage11 correction merge isolation", () => {
     } finally {
       select.mockRestore();
     }
+  }, 60000);
+
+  it("reuses one exact bounded helper row without merging its payload", async () => {
+    const c = await issueC02(owned, { mode: "content-only" }), t = c.followup.target;
+    const [origin] = await c.s.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, c.s.f.verdictHeartbeatId));
+    const key = OPERATOR_DECISION_WAKE_PREFIX + "00000000-0000-4000-8000-000000000001:g1:a1";
+    const recordEvent = vi.fn(async () => {});
+    const input = { companyId: c.ref.companyId, agentId: origin!.agentId, source: "automation",
+      triggerDetail: "system", reason: "operator_decision_resolved", payload: { first: true },
+      typedQueueColumns: { requestKind: null, issueId: t.issueId, missionId: c.s.p.missionId,
+        workflowRunId: c.ref.workflowRunId, workflowStepRunId: t.stepRunId },
+      requestedByActorType: "user" as const, requestedByActorId: "c02-bounded",
+      idempotencyKey: key, missionIdForWake: c.s.p.missionId, recordEvent };
+    await queuePausedAgentWakeupRequest(c.s.db, input);
+    await queuePausedAgentWakeupRequest(c.s.db, { ...input, payload: { second: true } });
+    const rows = await c.peer.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, c.ref.companyId), eq(agentWakeupRequests.idempotencyKey, key)));
+    expect(rows).toEqual([expect.objectContaining({ agentId: origin!.agentId, issueId: t.issueId,
+      payload: { first: true }, coalescedCount: 0 })]);
+    expect(recordEvent).toHaveBeenCalledTimes(1);
+    await expect(queuePausedAgentWakeupRequest(c.s.db, { ...input, agentId: randomUUID() }))
+      .rejects.toThrow("bounded_wakeup_identity_mismatch");
   }, 60000);
 });
