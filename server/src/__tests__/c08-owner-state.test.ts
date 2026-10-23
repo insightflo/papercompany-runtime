@@ -1,7 +1,7 @@
 // C08 stage 8 oracle: the accepted plan requires stable keyed replay, CAS replacement and retained
 // closure history. These tests execute the new writes against PostgreSQL; fixtures contain only
 // initial authority/target facts. API/card resolution/delivery/consumption remain later stages.
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issues, missions, workflowDefinitions,
@@ -11,6 +11,7 @@ import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthorityInput } from ".
 import { closeOwnerHumanRequest, readOwnerHumanCurrent, saveOwnerHumanRequest } from "../services/missions/owner-human-request-state.js";
 import { ownerHumanCurrentKey, ownerHumanLifetimeKey, type OwnerHumanSubmission } from "../services/missions/owner-human-request-contract.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
+import { ownerHumanRequestSchema } from "@paperclipai/shared/validators/owner-human-request";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -90,6 +91,32 @@ describeDb("C08 owner human request durable state", () => {
     expect((await events(w)).map((row) => row.eventType).sort()).toEqual([
       "mission_owner_decision", "owner_human_current_v1", "owner_human_lifetime_v1"].sort());
     expect(await current(w, A, other)).toEqual(first);
+  });
+
+  // Public nonblank keys have no length cap; adopted C08 plan:50–54 requires exact replay
+  // and same-key/different-body rejection. Random base64 exposes the old PostgreSQL index limit.
+  it("stores a public-valid 12000-byte key, preserves it and rejects a conflicting replay", async () => {
+    const w = await world();
+    const requestKey = randomBytes(9000).toString("base64");
+    expect(Buffer.byteLength(requestKey, "utf8")).toBe(12000);
+    expect(ownerHumanRequestSchema.safeParse({
+      schemaVersion: 1, requestKey, expectedCurrentLifetimeId: null,
+    }).success).toBe(true);
+    expect(await events(w)).toHaveLength(0);
+    const first = await write(w, requestKey);
+    expect(first.lifetime.requestKey).toBe(requestKey);
+    expect(first.pointer.requestKey).toBe(requestKey);
+    const stored = await events(w);
+    expect(stored).toHaveLength(3);
+    expect(stored.find((row) => row.id === first.lifetime.lifetimeId)!.payload.requestKey).toBe(requestKey);
+    expect(stored.find((row) => row.id === first.pointerEventId)!.payload.requestKey).toBe(requestKey);
+    expect(await write(w, requestKey)).toEqual(first);
+    expect(await current(w, A, other)).toEqual(first);
+    expect(await events(w)).toEqual(stored);
+    await expect(write(w, requestKey, first.lifetime.lifetimeId, B)).rejects.toMatchObject({
+      status: 409, details: { reason: "owner_human_request_key_conflict" } });
+    expect(await events(w)).toEqual(stored);
+    expect(await current(w)).toEqual(first);
   });
 
   it("keeps identity across a new heartbeat and anchor for the same actual source", async () => {

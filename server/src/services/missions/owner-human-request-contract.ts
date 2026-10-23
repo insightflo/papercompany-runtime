@@ -1,4 +1,5 @@
 // Versioned persistence contract for C08 lifetimes; existing transition-event storage is reused.
+import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { missionOwnerDecisionSubmitSchema } from "@paperclipai/shared";
 import { z } from "zod";
@@ -81,7 +82,10 @@ export function ownerHumanCurrentKey(scope: OwnerHumanScope): string {
     : target.kind === "tool_step" ? [target.kind, target.workflowRunId, target.stepRunId] : [target.kind];
   return `owner-human-current:v1:${JSON.stringify([scope.missionId, parts])}`;
 }
-export const ownerHumanLifetimeKey = (key: string) => `owner-human-lifetime:v1:${JSON.stringify(key)}`;
+// Fixed-size index locator only. Preserve and compare the original requestKey in the payload;
+// this digest proves neither request identity nor authority.
+export const ownerHumanLifetimeKey = (key: string) =>
+  `owner-human-lifetime:v1:${createHash("sha256").update(key, "utf8").digest("hex")}`;
 export const ownerHumanEndKey = (id: string) => `owner-human-end:v1:${id}`;
 
 // Object property order is irrelevant; values, including text and request-key bytes, are exact.

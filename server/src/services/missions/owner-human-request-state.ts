@@ -130,6 +130,7 @@ export async function saveOwnerHumanRequest(auth: OwnerHumanAuthority, input: {
   const existing = await byKey(auth.tx, auth.scope.companyId, ownerHumanLifetimeKey(input.requestKey));
   if (existing) {
     const saved = await lifetimeFromRow(auth.tx, existing);
+    if (saved.requestKey !== input.requestKey) fail("owner_human_request_key_conflict");
     if (!sameOwnerHumanValue(saved.scope, auth.scope)) fail("owner_human_request_scope_mismatch");
     if (!sameOwnerHumanValue(saved.submission, submission) || saved.identityMode !== input.identityMode) {
       fail("owner_human_request_key_conflict");
