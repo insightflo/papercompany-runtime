@@ -13,6 +13,7 @@ import { toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js
 import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryIdentityMatches, ownerRecoveryOversightDecisionFailure, ownerRecoveryOversightRunIsActive } from "./owner-recovery-submission-guards.js";
 import type { OwnerRecoveryApiActor } from "./mission-owner-recovery-agent-api.js";
 import type { MissionOwnerDecisionSubmission } from "./mission-owner-recovery-ledger.js";
+import { consumeOwnerHumanResponse } from "./owner-human-response.js";
 
 type OwnerRecoveryApiAuthDependencies = {
   readonly toSubmission: (data: MissionOwnerDecisionSubmit, oversight?: boolean) => MissionOwnerDecisionSubmission;
@@ -24,6 +25,13 @@ export async function authorizeOwnerRecoveryApi(db: Db, issueId: string, actor: 
   if (actorFailure === "agent_required") throw forbidden("Agent authentication required");
   if (actorFailure === "run_required" || !actor.runId) throw unauthorized("Agent run id required");
   if (!actor.agentId) throw forbidden("Agent authentication required");
+
+  // A response run owns the C08 authority prefix before this authorizer locks its issue.
+  // The public submitter wraps this function and its ledger write in one transaction, so a
+  // later authorization or decision-write failure rolls this consumption record back too.
+  const [responseRun] = await db.select().from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, actor.runId)).limit(1);
+  if (responseRun) await consumeOwnerHumanResponse(db, responseRun);
 
   const [issue] = await db.select({
     id: issues.id,
