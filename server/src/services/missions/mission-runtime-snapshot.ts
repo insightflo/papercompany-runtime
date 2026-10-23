@@ -5,6 +5,7 @@
 
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { operatorGuidanceSignals } from "./resume-signals.js";
 import {
   agentWakeupRequests,
   heartbeatRuns,
@@ -45,6 +46,11 @@ export interface MissionRuntimeSnapshot {
   comments: {
     recentComments: Array<Record<string, unknown>>;
     controlSource: "display_only";
+  };
+  /** [안내 상태 기반화 2026-10-23] 오너의 “운영자 할 일” 안내 근거 — 호출 시점 실제 상태. */
+  operatorGuidance: {
+    resumableRuns: Array<{ workflowRunId: string; definitionHash: string }>;
+    revisionBoardWaitReady: boolean;
   };
   legacyFallbackDiagnostics: Array<{
     parser: string;
@@ -207,6 +213,7 @@ export async function loadMissionRuntimeSnapshot(
       recentComments: commentRows as Array<Record<string, unknown>>,
       controlSource: "display_only",
     },
+    operatorGuidance: await operatorGuidanceSignals(db, companyId, missionId),
     legacyFallbackDiagnostics: [],
   };
 }
