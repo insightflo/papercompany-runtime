@@ -352,9 +352,9 @@ export function createOwnerActions({ db, deps }: { db: Db; deps: MissionServiceD
   const ensureMainExecutorUnblockIssue = createOwnerUnblockAnchor({
     db,
     deps,
-    createMissionOwnerActionIssue,
+    createMissionOwnerActionIssue: (tx, companyId, data) =>
+      createOwnerActions({ db: tx, deps: {} }).createMissionOwnerActionIssue(companyId, data),
   });
-
   async function ensureToolStepFailureRecoveryIssue(input: {
     mission: MissionRow;
     oversightIssue: IssueRow;
