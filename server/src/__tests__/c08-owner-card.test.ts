@@ -231,6 +231,21 @@ describeDb("C08 current lifetime card creation", () => {
     expect(await cards(w)).toHaveLength(0);
   });
 
+  it("resolves only the current lifetime card and keeps an exact resolved replay idempotent", async () => {
+    const w = await world(), a = await write(w), old = await create(a);
+    const b = await write(w, "B", a.lifetime.lifetimeId);
+    const result = { actionId: "approve", selectedOptionIds: ["approve"], comment: "approved" };
+    await expect(operatorDecisionWriteService(db).resolve(old.decision.id, result, "board"))
+      .rejects.toMatchObject({ status: 409 });
+    expect((await cards(w)).find((card) => card.id === old.decision.id)!.status).toBe("pending");
+    const current = await create(b);
+    const resolved = await operatorDecisionWriteService(db).resolve(current.decision.id, result, "board");
+    expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
+    await write(w, "C", b.lifetime.lifetimeId);
+    expect(await operatorDecisionWriteService(db).resolve(current.decision.id, result, "board"))
+      .toMatchObject({ applied: false, decision: { status: "resolved" } });
+  });
+
   it("preserves moi1, structured options, generic create/replay and their return/alert contracts", async () => {
     const w = await world(), saved = await write(w);
     const { lifetimeId: _lifetime, ...legacy } = spec(saved);

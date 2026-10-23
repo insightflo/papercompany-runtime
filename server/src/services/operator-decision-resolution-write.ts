@@ -8,6 +8,7 @@ import { normalizeSystemLanguage, type SystemLanguage } from "./missions/system-
 import { guardQualityWrite } from "./quality/write-guard.js";
 import { sameOperatorDecisionResult, validateOperatorDecisionResult } from "./operator-decision-result.js";
 import {
+  assertOwnerHumanDecisionCurrent,
   assertTargetSnapshotCurrent,
   MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
   readTargetSnapshot,
@@ -92,6 +93,7 @@ export function operatorDecisionResolutionWriteService(
 
     const applied = await db.transaction(async (tx) => {
       const now = new Date();
+      if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before);
       const updated = await tx.update(operatorDecisions).set({
         status: "resolved",
         result,
