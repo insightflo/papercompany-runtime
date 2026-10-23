@@ -13,6 +13,8 @@ import { submitMissionOwnerDecision } from "../services/missions/mission-owner-r
 import { operatorDecisionContinuationStore } from "../services/operator-decision-continuation-store.js";
 import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 import { publishLiveEvent } from "../services/live-events.js";
+import { saveOwnerExecutionIntent } from "../services/missions/mission-owner-execute-intent.js";
+import { ownerPlanExecutionIntentCurrent } from "../services/missions/mission-owner-execution-state.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 const support = await getEmbeddedPostgresTestSupport();
@@ -248,5 +250,33 @@ describeDb("C08 owner response consumption", () => {
     })).rejects.toMatchObject({ status: 409 });
     expect(await events(w, "owner_human_consumed_v1")).toHaveLength(0);
     expect(vi.mocked(publishLiveEvent)).toBeDefined();
+  });
+
+  it("binds a new execute intent to consumption while replay remains stable", async () => {
+    const w = await world(), response = await responseRun(w), actionRequestId = randomUUID();
+    const context = { db, companyId: w.companyId, agentId: w.agentId, heartbeatRunId: response.run.id };
+    const requestBody = { missionId: w.missionId, ownerActionIssueId: w.anchorId, actionRequestId,
+      expectedIntentEventId: null, action: { operation: "retry_step" } } as never;
+    const refuse = ((_status: number, reason: string) => { throw new Error(reason); }) as never;
+    const first = await saveOwnerExecutionIntent(context, requestBody, refuse);
+    const [intent] = await events(w, "owner_execute_intent_v1");
+    expect(intent?.payload).toMatchObject({ ownerHumanResponse: {
+      lifetimeId: response.saved.lifetime.lifetimeId, heartbeatRunId: response.run.id,
+      responseHeartbeatRunId: response.run.id } });
+    await request(w, "request:B", response.saved.lifetime.lifetimeId);
+    await expect(saveOwnerExecutionIntent(context, requestBody, refuse)).resolves.toEqual({
+      actionId: first.actionId, replay: true });
+    expect(await events(w, "owner_human_consumed_v1")).toHaveLength(1);
+    const payload = intent!.payload as Record<string, unknown>;
+    await db.update(workflowTransitionEvents).set({ payload: { ...payload, ownerHumanResponse: null } })
+      .where(eq(workflowTransitionEvents.id, intent!.id));
+    await expect(ownerPlanExecutionIntentCurrent(db, w.companyId,
+      { runMetadata: { ownerPlanExecution: { actionId: first.actionId } } })).resolves.toBe(false);
+    await db.update(workflowTransitionEvents).set({ payload })
+      .where(eq(workflowTransitionEvents.id, intent!.id));
+    const [consumed] = await events(w, "owner_human_consumed_v1");
+    await db.update(workflowTransitionEvents).set({ layer: "damaged" }).where(eq(workflowTransitionEvents.id, consumed!.id));
+    await expect(ownerPlanExecutionIntentCurrent(db, w.companyId,
+      { runMetadata: { ownerPlanExecution: { actionId: first.actionId } } })).resolves.toBe(false);
   });
 });
