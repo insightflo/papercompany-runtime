@@ -13,6 +13,7 @@ import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 import { createCommitSourceHarness, issueNextC02, deliveryInput, deliver,
   correctionRows, deliveryState, waitForDeliveryLocks } from "./helpers/c02-delivery-fixture.js";
 import { createClaimFixture, issueFollowingC02 } from "./helpers/c02-claim-race-fixture.js";
+import type { C02Case } from "./helpers/c02-fixture.js";
 
 // C02/C12: issuance, observation, original proof, PG, DAG and public claim remain real.
 // Same B queued -> real C issuance -> public resume distinguishes the old and new claim paths.
@@ -271,9 +272,21 @@ it("preserves an owner created after B observation while that new owner remains 
   expect(issue).toMatchObject({ executionRunId: owner.id, checkoutRunId: owner.id });
   expect(calls(owner.id)).toHaveLength(0);
 }, 60000);
-it("claims only the latest of 33 real corrections without applying the technical ancestor limit to history", async () => {
-  const first = await fixtures.world(false, false), history = [first.c];
-  for (let n = 1; n <= 32; n++) history.push(await issueFollowingC02(history[history.length - 1]!, n));
+const longHistory: C02Case[] = [];
+it.sequential("builds the first 17 real corrections for unbounded claim history", async () => {
+  const first = await fixtures.world(false, false);
+  longHistory.push(first.c);
+  for (let n = 1; n <= 16; n++) longHistory.push(await issueFollowingC02(longHistory[longHistory.length - 1]!, n));
+  expect(longHistory).toHaveLength(17);
+}, 120000);
+it.sequential("extends the real claim history to 33 corrections", async () => {
+  expect(longHistory).toHaveLength(17);
+  for (let n = 17; n <= 32; n++) longHistory.push(await issueFollowingC02(longHistory[longHistory.length - 1]!, n));
+  expect(longHistory).toHaveLength(33);
+}, 120000);
+it.sequential("claims only the latest of 33 real corrections without applying the technical ancestor limit to history", async () => {
+  const history = longHistory;
+  expect(history).toHaveLength(33);
   const c = history[history.length - 1]!, w = { c, i: await deliveryInput(c) }, g = gate(w);
   await deliver(c, w.i);
   const latest = await queued(w);
