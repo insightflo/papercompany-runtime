@@ -75,6 +75,12 @@ export type MissionOwnerSupervisionAppliedAction = {
   resultStatus: string;
   wakeupDispatchStatus?: MissionOwnerDecisionWakeupDispatchStatus;
   idempotencyKey?: string;
+} | {
+  type: "owner_decision_replan_mission";
+  missionId: string;
+  ownerActionIssueId: string;
+  planningIssueId: string;
+  resultStatus: string;
 } | (MissionPlanConsumerDiagnosticFields & {
   type: "materialize_plan_decision";
   missionId: string;

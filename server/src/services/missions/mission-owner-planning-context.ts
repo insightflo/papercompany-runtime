@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentKbGrants,
@@ -385,7 +385,11 @@ function buildPlanningDossier(input: {
   };
 }
 
-async function findPlanningIssue(db: Db, input: BuildMissionOwnerPlanningContextInput): Promise<PlanningIssueRow | null> {
+async function findPlanningIssue(
+  db: Db,
+  input: BuildMissionOwnerPlanningContextInput,
+  ownerAgentId: string,
+): Promise<PlanningIssueRow | null> {
   const [issue] = await db
     .select({ id: issues.id, title: issues.title, description: issues.description })
     .from(issues)
@@ -393,8 +397,11 @@ async function findPlanningIssue(db: Db, input: BuildMissionOwnerPlanningContext
       eq(issues.companyId, input.companyId),
       eq(issues.missionId, input.missionId),
       eq(issues.originKind, "mission_main_executor_plan"),
+      eq(issues.assigneeAgentId, ownerAgentId),
+      inArray(issues.status, ["backlog", "todo", "in_progress", "in_review"]),
+      isNull(issues.hiddenAt),
     ))
-    .orderBy(asc(issues.createdAt), asc(issues.id))
+    .orderBy(desc(issues.createdAt), desc(issues.id))
     .limit(1);
 
   return issue ?? null;
@@ -588,7 +595,7 @@ export async function buildMissionOwnerPlanningContext(
   input: BuildMissionOwnerPlanningContextInput,
 ): Promise<MissionOwnerPlanningContext> {
   const mission = await loadMission(db, input);
-  const planningIssue = await findPlanningIssue(db, input);
+  const planningIssue = await findPlanningIssue(db, input, mission.ownerAgentId);
   const activePlanRow = await missionPlanArtifactService(db).getActiveMissionPlan({
     companyId: input.companyId,
     missionId: input.missionId,
