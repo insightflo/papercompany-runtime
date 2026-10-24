@@ -166,13 +166,12 @@ describeEP("mission owner dead-target retry loop prevention", () => {
       originKind: "workflow_execution", status: "blocked", title: "Live blocked source",
     });
     await svc.runMainExecutorSupervision({ missionId: base.missionId, staleAfterMinutes: 1, now: new Date() });
-    const ownerAction = await issueService(db).create(base.companyId, {
-      assigneeAgentId: base.ownerAgentId, missionId: base.missionId,
-      originKind: "mission_main_executor_unblock", originId: source.id, status: "todo",
-      title: "Unblock for a live source",
-    });
+    const [ownerAction] = await db.select().from(issues).where(and(
+      eq(issues.companyId, base.companyId), eq(issues.missionId, base.missionId),
+      eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, source.id)));
+    expect(ownerAction).toBeTruthy();
     await db.update(issues).set({ createdAt: new Date(Date.now() - 40 * 60 * 1000) })
-      .where(eq(issues.id, ownerAction.id));
+      .where(eq(issues.id, ownerAction!.id));
 
     const result = await svc.runMainExecutorSupervision({
       missionId: base.missionId, staleAfterMinutes: 1, now: new Date(),
@@ -293,16 +292,15 @@ describeEP("mission owner dead-target retry loop prevention", () => {
       originKind: "workflow_execution", status: "blocked", title: "Tool recovery source",
     });
     await svc.runMainExecutorSupervision({ missionId: base.missionId, staleAfterMinutes: 1, now: new Date() });
-    const ownerAction = await issueService(db).create(base.companyId, {
-      assigneeAgentId: base.ownerAgentId, missionId: base.missionId,
-      originKind: "mission_main_executor_unblock", originId: source.id, status: "todo",
-      title: "Tool recovery card awaiting the owner decision",
-    });
+    const [ownerAction] = await db.select().from(issues).where(and(
+      eq(issues.companyId, base.companyId), eq(issues.missionId, base.missionId),
+      eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, source.id)));
+    expect(ownerAction).toBeTruthy();
     // 결정 기록 없음 + 도구 회복 카드만 존재 → 오너 응답 대기: 기존 3회 브레이컈 유지.
     await db.insert(workflowTransitionEvents).values({
-      companyId: base.companyId, missionId: base.missionId, issueId: ownerAction.id,
+      companyId: base.companyId, missionId: base.missionId, issueId: ownerAction!.id,
       eventType: "owner_tool_recovery_target_v1", layer: "mission_owner_recovery",
-      idempotencyKey: `test-tool-card:${ownerAction.id}`,
+      idempotencyKey: `test-tool-card:${ownerAction!.id}`,
       payload: { kind: "owner_tool_recovery_target_v1" },
     });
     const baseTime = Date.now();
