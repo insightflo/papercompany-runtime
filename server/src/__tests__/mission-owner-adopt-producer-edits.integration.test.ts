@@ -53,7 +53,7 @@ describeEP("mission owner adopt_producer_edits", () => {
     for (const root of roots) await rm(root, { recursive: true, force: true });
   });
 
-  async function seed() {
+  async function seed(options: { existingMarker?: boolean } = {}) {
     const companyId = randomUUID(), ownerAgentId = randomUUID(), missionId = randomUUID(), workflowId = randomUUID();
     const sourceIssueId = randomUUID(), ownerIssueId = randomUUID();
     const producerHeartbeatId = randomUUID(), heartbeatRunId = randomUUID();
@@ -96,9 +96,17 @@ describeEP("mission owner adopt_producer_edits", () => {
     const product = (await workProductService(db).createForIssue(sourceIssueId, companyId, {
       type: "document", title: "report.json", provider: "local_file", status: "active", metadata: { path: file },
       createdByRunId: producerHeartbeatId }))!;
-    // Owner fixes the producer artifact in place; recovery has since advanced generations.
-    await writeFile(file, FIXED);
+    // Recovery has advanced generations. Some older runs already carry a valid marker before
+    // the owner fixes the producer artifact in place.
     await db.update(workflowStepRuns).set({ executionGeneration: 3 }).where(eq(workflowStepRuns.id, producer.id));
+    if (options.existingMarker) {
+      await issueProducerRebind(db, { companyId, workflowRunId: run.id,
+        producerStepId: "report", productId: product.id,
+        actor: { actorType: "system", actorId: "workproduct-selector" } }, {
+        selector: { type: "document", title: "report.json" }, pinnedId: product.id,
+      });
+    }
+    await writeFile(file, FIXED);
     const [consumer] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: "inspect", status: "pending", executionGeneration: 3 }).returning();
     setWorkflowToolStepExecutor(async r => {
       const result = await executeCoreWorkflowTool({ db, companyId: r.companyId, agentId: r.agentId,
@@ -113,9 +121,13 @@ describeEP("mission owner adopt_producer_edits", () => {
     await syncWorkflowRunState(db, run.id);
     const failed = await stepRow(consumer.id);
     expect(failed.status).toBe("failed");
-    expect(failed.metadata.toolInvocation).toMatchObject({ dispatchError: "workproduct_selector_stale_producer" });
-    expect((failed.metadata.toolInvocation as { producerRebindDiagnostic?: { conflictReason?: string } }).producerRebindDiagnostic)
-      .toMatchObject({ conflictReason: "producer_rebind_bytes_changed" });
+    if (options.existingMarker) {
+      expect(failed.metadata.toolInvocation).toMatchObject({ dispatchError: "workproduct_selector_rebind_bytes_mismatch" });
+    } else {
+      expect(failed.metadata.toolInvocation).toMatchObject({ dispatchError: "workproduct_selector_stale_producer" });
+      expect((failed.metadata.toolInvocation as { producerRebindDiagnostic?: { conflictReason?: string } }).producerRebindDiagnostic)
+        .toMatchObject({ conflictReason: "producer_rebind_bytes_changed" });
+    }
     await db.update(workflowRuns).set({ status: "failed" }).where(eq(workflowRuns.id, run.id));
     const [failedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, run.id));
     const decisions = await db.select().from(workflowTerminalDecisions).where(eq(workflowTerminalDecisions.workflowRunId, run.id));
@@ -161,6 +173,23 @@ describeEP("mission owner adopt_producer_edits", () => {
       heartbeatRunId: s.heartbeatRunId }, { schemaVersion: 1, missionId: s.missionId, actionId: action.actionId })).state).toBe("resolved");
     expect((await s.call()).body.data).toMatchObject({ actionId: action.actionId, state: "resolved" });
     expect(await s.authorities()).toHaveLength(1);
+  });
+
+  it("replaces an older rebind marker with owner-attested bytes and recovers without marker cleanup", async () => {
+    const s = await seed({ existingMarker: true });
+    const failed = await stepRow(s.consumer.id);
+    expect(failed.metadata.toolInvocation).toMatchObject({
+      dispatchError: "workproduct_selector_rebind_bytes_mismatch",
+    });
+    const result = await s.call();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect((await s.readProduct()).metadata!.workflowProducerRebind).toMatchObject({
+      reason: "owner_attested_producer_rework",
+      sha256: sha256(FIXED),
+      byteSize: Buffer.byteLength(FIXED),
+    });
+    await processQueuedWorkflowToolStepRuns(db);
+    expect((await stepRow(s.consumer.id)).status).toBe("completed");
   });
 
   it.each(["attestation_mismatch", "wrong_product", "wrong_producer", "wrong_mission", "wrong_selector_product",

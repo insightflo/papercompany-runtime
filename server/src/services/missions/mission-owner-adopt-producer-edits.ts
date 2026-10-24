@@ -46,10 +46,12 @@ export async function executeOwnerAdoptProducerEdits(context: OwnerExecutionCont
     const invocation = consumer.metadata?.toolInvocation as {
       dispatchError?: unknown; producerRebindDiagnostic?: { conflictReason?: unknown } | undefined;
     } | undefined;
-    // Only the real changed-bytes fence qualifies; provenance-missing belongs to promote_unblock_product,
-    // and a plain generation drift is served by the automatic rebind at the retry boundary.
-    if (invocation?.dispatchError !== "workproduct_selector_stale_producer"
-      || invocation.producerRebindDiagnostic?.conflictReason !== "producer_rebind_bytes_changed") deny("adopt_edits_not_recovery");
+    // Accept both changed-byte shapes. Older valid rebind markers fail directly at consumption;
+    // generation-only recovery records the same condition through the issuance diagnostic.
+    const changedBytes = invocation?.dispatchError === "workproduct_selector_rebind_bytes_mismatch"
+      || (invocation?.dispatchError === "workproduct_selector_stale_producer"
+        && invocation.producerRebindDiagnostic?.conflictReason === "producer_rebind_bytes_changed");
+    if (!changedBytes) deny("adopt_edits_not_recovery");
     // Lock intent issue before its last currentness check, serializing a newer owner request with application.
     await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.id, request.ownerActionIssueId),
       eq(issues.companyId, context.companyId))).for("update");
