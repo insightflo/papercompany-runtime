@@ -1747,6 +1747,10 @@ function findRunnableSteps(
     if (step.triggerOn === "escalation") return false;
     const stepRun = stepRunMap.get(step.id);
     if (!stepRun || stepRun.status !== "pending") return false;
+    // A selector may point through a completed intermediary instead of a direct dependency.
+    // Keep the consumer pending while that exact producer is being reworked.
+    const selectorStepIds = Object.keys((step as PersistedWorkflowStep).workProductSelectors ?? {});
+    if (selectorStepIds.some((stepId) => stepRunMap.get(stepId)?.status !== "completed")) return false;
     if (stepRun.issueId == null && step.type === "if"
       && isControlNodeGraceWaitBlockingDispatch(stepRun.metadata, new Date())) return false;
     if (isRetryDelayBlockingDispatch(stepRun.metadata, new Date())) return false;
