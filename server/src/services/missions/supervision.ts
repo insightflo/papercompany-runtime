@@ -49,6 +49,7 @@ import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-re
 import { qualityService } from "../quality.js";
 import { formatMissionPlanDecisionSubmissionDiagnostics, isRejectedMissionPlanDecisionSubmissionStatus } from "./mission-plan-decision-ledger.js";
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
+import { applyOwnerReplanDecision } from "./owner-replan-application.js";
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { createMissionWorkSettlement } from "./mission-work-settlement.js";
@@ -132,6 +133,8 @@ function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): stri
       return `- ${action.type}: owner_action=${action.ownerActionIssueId} retry_target=${action.sourceIssueId} blocked=${action.blockedIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
     case "owner_decision_reassign_source_issue":
       return `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
+    case "owner_decision_replan_mission":
+      return `- ${action.type}: owner_action=${action.ownerActionIssueId} planning_issue=${action.planningIssueId} result=${action.resultStatus}`;
     case "native_tool_step_retry":
       return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`;
     case "native_tool_step_recovery_result":
@@ -2286,6 +2289,34 @@ export function createSupervision({ db, deps, ownerActions }: {
                 reason: `${baseReason}; mission plan revision is required before execution changes`,
                 safeToAutoApply: false,
               });
+              if (input.applyOwnerDecisionActions) {
+                const replan = await applyOwnerReplanDecision({
+                  db,
+                  mission,
+                  ownerActionIssueId: issue.id,
+                  expectedDecisionEventId: decisionRecord!.eventId,
+                });
+                if (!replan) break;
+                if (replan.planningIssue.assigneeAgentId && deps.onOwnerPlanningIssueCreated) {
+                  try {
+                    await deps.onOwnerPlanningIssueCreated({
+                      mission,
+                      issue: replan.planningIssue,
+                      targetAgentId: replan.planningIssue.assigneeAgentId,
+                      idempotencyKey: `mission-owner-replan-wakeup:${mission.id}:${replan.planningIssue.id}`,
+                    });
+                  } catch (err) {
+                    logger.warn({ err, missionId: mission.id, issueId: replan.planningIssue.id }, "failed to notify owner about mission replan issue");
+                  }
+                }
+                appliedActions.push({
+                  type: "owner_decision_replan_mission",
+                  missionId: mission.id,
+                  ownerActionIssueId: issue.id,
+                  planningIssueId: replan.planningIssue.id,
+                  resultStatus: replan.planningIssue.status,
+                });
+              }
               break;
             case "recover_artifact":
               addRecommendation({

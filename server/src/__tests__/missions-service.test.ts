@@ -3621,7 +3621,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await expect(db.select().from(issues).where(eq(issues.id, hiddenIssue.id)).then((rows) => rows[0])).resolves.toEqual(expect.objectContaining({ status: "blocked", assigneeAgentId: workerAgentId }));
   });
 
-  it("keeps non-retry owner decisions read-only even with explicit owner-decision apply and wakeup dispatch enabled", async () => {
+  it("keeps non-replan owner decisions read-only even with explicit owner-decision apply and wakeup dispatch enabled", async () => {
     const companyId = randomUUID();
     const ownerAgentId = randomUUID();
     const workerAgentId = randomUUID();
@@ -3632,8 +3632,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId, title: "Non retry mission", status: "active" });
     const svc = missionService(db, { onOwnerDecisionRetrySourceIssueApplied });
     const blockedIssue = await issueService(db).create(companyId, { assigneeAgentId: workerAgentId, missionId, originKind: "workflow_execution", status: "blocked", title: "Blocked source" });
-    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: blockedIssue.id, status: "done", title: "Replan owner action" });
-    await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: replan_mission", `Source issue: ${blockedIssue.identifier}`, "Reason: plan must change"].join("\n") });
+    const ownerAction = await issueService(db).create(companyId, { assigneeAgentId: ownerAgentId, missionId, originKind: "mission_main_executor_unblock", originId: blockedIssue.id, status: "done", title: "Input owner action" });
+    await db.insert(issueComments).values({ companyId, issueId: ownerAction.id, authorAgentId: ownerAgentId, body: ["### Mission owner decision", "Decision: request_input", `Source issue: ${blockedIssue.identifier}`, "Reason: operator input is required"].join("\n") });
     await recordOwnerDecision({
       companyId,
       missionId,
@@ -3641,9 +3641,9 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
       ownerAgentId,
       sourceIssueId: blockedIssue.id,
       submission: {
-        decision: "replan_mission",
+        decision: "request_input",
         sourceIssueRef: blockedIssue.identifier ?? blockedIssue.id,
-        reason: "plan must change",
+        reason: "operator input is required",
       },
     });
 
