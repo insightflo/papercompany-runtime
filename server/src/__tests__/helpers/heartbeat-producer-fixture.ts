@@ -11,6 +11,7 @@ import { heartbeatService } from "../../services/heartbeat.js";
 import { waitForHeartbeatExecutionsToDrain } from "../../services/heartbeat-execution-tracker.js";
 import { workProductService } from "../../services/work-products.js";
 import { selectOfficialWorkProduct } from "../../services/workflow/workproduct-selector.js";
+import { captureExecutionDefinition, EXECUTION_DEFINITION_CREATION_MARKER_VERSION } from "../../services/workflow/execution-definition.js";
 
 // The only execution double: never start a CLI/provider or make a network request.
 const adapter = vi.hoisted(() => vi.fn());
@@ -35,15 +36,22 @@ export const flag = (enabled: boolean) => db.update(instanceSettings).set({ expe
 export const drain = () => waitForHeartbeatExecutionsToDrain(db, 20000);
 export const stopped = { exitCode: 1, signal: null, timedOut: false, errorMessage: "isolated test stop",
   errorCode: "identity_test_stop", usage: null, provider: "test", model: "test", resultJson: null, runtimeServices: [] };
-export async function fixture() {
+export async function fixture(options: { stepsJson?: Record<string, unknown>[]; captureDefinition?: boolean } = {}) {
   const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), workflowId = randomUUID();
   const workflowRunId = randomUUID(), stepRunId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: "Identity", issuePrefix: `P${companyId.replaceAll("-", "")}` });
   const [agent] = await db.insert(agents).values({ id: agentId, companyId, name: "Writer", status: "active", adapterType: "codex_local",
     adapterConfig: { cwd: root, promptTemplate: "Isolated callback only" }, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).returning();
+  const stepsJson = options.stepsJson?.map(step => ({ ...step, agentId: step.agentId ?? agentId }));
   await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "Identity",
-    stepsJson: [{ id: "write", name: "Write", type: "agent", agentId, dependencies: [] }] });
-  await db.insert(workflowRuns).values({ id: workflowRunId, companyId, workflowId, status: "running", triggeredBy: "test" });
+    stepsJson: stepsJson ?? [{ id: "write", name: "Write", type: "agent", agentId, dependencies: [] }] });
+  await db.insert(workflowRuns).values({ id: workflowRunId, companyId, workflowId,
+    status: options.captureDefinition ? "pending" : "running", triggeredBy: "test",
+    metadata: options.captureDefinition ? { executionDefinitionVersion: EXECUTION_DEFINITION_CREATION_MARKER_VERSION } : {} });
+  if (options.captureDefinition) {
+    await db.transaction(tx => captureExecutionDefinition(tx, workflowRunId));
+    await db.update(workflowRuns).set({ status: "running", startedAt: new Date() }).where(eq(workflowRuns.id, workflowRunId));
+  }
   await db.insert(issues).values({ id: issueId, companyId, title: "Write", status: "todo", assigneeAgentId: agentId,
     originKind: "workflow_execution", originRunId: workflowRunId });
   await db.insert(workflowStepRuns).values({ id: stepRunId, workflowRunId, stepId: "write", issueId, status: "running",
