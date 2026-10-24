@@ -45,6 +45,7 @@ import {
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
 import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
 import { persistFailedToolDispatch } from "./tool-dispatch-failure.js";
+import { settleToolQueueMetadata } from "./tool-queue-settle.js";
 import {
   dispatchWorkflowChildStep,
   isWorkflowChildStep,
@@ -1978,7 +1979,7 @@ async function completeToolStepRunFromCache(input: {
 }): Promise<void> {
   const sourceMetadata = normalizeRecord(input.sourceStepRun.metadata);
   const sourceToolResult = normalizeRecord(sourceMetadata.toolResult);
-  const metadata: Record<string, unknown> = {
+  const metadata = settleToolQueueMetadata({
     ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
     toolInvocation: {
       toolName: input.toolName,
@@ -1991,7 +1992,7 @@ async function completeToolStepRunFromCache(input: {
       toolName: input.toolName,
       completedAt: input.now.toISOString(),
     },
-  };
+  }, input.now.toISOString());
   delete metadata.concurrencyBlocked;
 
   // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.

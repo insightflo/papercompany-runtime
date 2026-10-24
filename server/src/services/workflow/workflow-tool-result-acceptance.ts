@@ -19,6 +19,7 @@ import { readArtifactDigest } from "./artifact-files.js";
 import { stripRetryTrackingOnSuccess } from "./retry-launch-dispatch.js";
 import { lockFailureObservationScope } from "./tool-dispatch-failure.js";
 import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
+import { settleToolQueueMetadata } from "./tool-queue-settle.js";
 import { assertQaReceiptScope, compareQaCorrectionReceiptFiles, persistQaCorrectionToolConsumption } from "./qa-artifact-receipt.js";
 import { findWorkflowVerdictCorrection } from "./workflow-verdict-current.js";
 import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
@@ -156,6 +157,7 @@ export async function acceptWorkflowToolResult(
       retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
     }
     : { ...existingMetadata, toolResult, ...(toolArtifactReceipt ? { toolArtifactReceipt } : {}) };
+  resultMetadata = settleToolQueueMetadata(resultMetadata, now.toISOString());
   if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
   const completionPlan = planStructuralCompletion({
     step: stepForGuard, success: input.success, data: input.data,
