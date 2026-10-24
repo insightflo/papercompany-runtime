@@ -178,6 +178,28 @@ describeDb("mechanical QA rejection → rework loop (integration)", () => {
     ];
   }
 
+  /** Live service-onboarding shape: QA depends on a completed validator but selects the producer directly. */
+  function transitiveMechanicalSteps(agentId: string) {
+    return [
+      {
+        id: "produce", name: "Produce service report", type: "agent", agentId, dependencies: [],
+        graphWorkProductRequired: true,
+        conditionalDependencies: [
+          { stepId: "qa-mech", when: "qa_request_changes" as const, isBackEdge: true, maxIterations: 2 },
+        ],
+      },
+      {
+        id: "validate", name: "Validate service report", type: "agent", agentId,
+        dependencies: ["produce"], qaType: "digest-content",
+      },
+      {
+        id: "qa-mech", name: "Mechanical QA gate", type: "tool", qaType: "action", agentId: "",
+        toolNames: ["qa-content-gate"], dependencies: ["validate"],
+        workProductSelectors: { produce: { type: "file", title: "service-report-v1" } },
+      },
+    ];
+  }
+
   async function seedRun(options: {
     errorSummary: string;
     /** QA rejection observation time; null leaves both observation timestamps unknown. */
@@ -309,6 +331,37 @@ describeDb("mechanical QA rejection → rework loop (integration)", () => {
     expect(fbs.some((f) => f.feedback?.includes("Failing checks: https-links insecure links: http://example.com/insecure"))).toBe(true);
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, seed.producerIssueId));
     expect(comments.some((c) => c.body.includes("http://example.com/insecure"))).toBe(true);
+  });
+
+  it("keeps a requeued transitive QA pending until its selected producer recompletes", async () => {
+    heartbeatWakeup.mockResolvedValue({ id: "queued-mech-qa-transitive" });
+    const now = Date.now();
+    const seed = await seedRun({
+      errorSummary: "qa_artifact_verdict_failed",
+      qaCompletedAt: new Date(now - 5 * 60_000),
+      producerCompletedAt: new Date(now - 10 * 60_000),
+    });
+    const agentId = (await db.select({ id: agents.id }).from(agents).where(eq(agents.companyId, seed.companyId)))[0]!.id;
+    const steps = transitiveMechanicalSteps(agentId);
+    await db.update(workflowDefinitions).set({ stepsJson: steps }).where(eq(workflowDefinitions.companyId, seed.companyId));
+    await db.insert(workflowStepRuns).values({
+      workflowRunId: seed.runId,
+      companyId: seed.companyId,
+      stepId: "validate",
+      status: "completed",
+      completedAt: new Date(now - 6 * 60_000),
+    });
+
+    await syncWorkflowRunState(db, seed.runId);
+
+    const rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.runId));
+    const producer = rows.find((row) => row.stepId === "produce")!;
+    const qa = rows.find((row) => row.stepId === "qa-mech")!;
+    expect(producer.status).not.toBe("completed");
+    expect(producer.iterationIndex).toBe(1);
+    expect(qa.status).toBe("pending");
+    expect(qa.lastDispatchErrorSummary).toBeNull();
+    expect(qa.lastDispatchRequestId).toBeNull();
   });
 
   it("④ excludes a mechanical rejection observed before the producer's current completion (stale, no rework)", async () => {
