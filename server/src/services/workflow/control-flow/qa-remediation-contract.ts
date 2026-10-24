@@ -91,4 +91,3 @@ export async function remediationAlreadyApplied(
 export function remediationIdempotencyKey(companyId: string, qaStepRunId: string, sourceVerdictEventId: string): string {
   return `qa-remediation-applied:${companyId}:${qaStepRunId}:${sourceVerdictEventId}`;
 }
-

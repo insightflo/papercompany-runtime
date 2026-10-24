@@ -131,4 +131,3 @@ export async function assertTargetSnapshotCurrent(
     });
   }
 }
-
