@@ -6,6 +6,7 @@ import { resolveToolResultPaths } from "./artifact-step-result.js";
 import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, issueWorkProducts, workflowStepOutputBindings, workflowStepRuns } from "@paperclipai/db";
+import { artifactContractSchema } from "@paperclipai/shared";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { assertPinnedProductConsumable } from "./workproduct-pinned-path.js";
 import {
@@ -34,12 +35,29 @@ type WorkflowArgRun = {
   metadata?: Record<string, unknown> | null;
 };
 
+/** Receipt references resolve through verified machine results, never work-product copies. */
+function readVerifyReceiptReferences(step: WorkflowArgStep, consumerArtifactContract: unknown,
+  args: unknown, references: Set<string>): Set<string> {
+  const declared = step.toolArtifactContract;
+  if (declared === null || typeof declared !== "object"
+    || (declared as Record<string, unknown>).role !== "publication-verify") return new Set();
+  const parsed = artifactContractSchema.safeParse(consumerArtifactContract);
+  if (!parsed.success || parsed.data.role !== "publication-verify") return new Set();
+  const receiptParam = parsed.data.consumerParams?.receipt;
+  if (typeof receiptParam !== "string" || typeof args !== "object" || args === null) return new Set();
+  const receiptValue = (args as Record<string, unknown>)[receiptParam];
+  if (receiptValue === undefined) return new Set();
+  const receiptRefs = collectArtifactReferences(receiptValue);
+  return new Set(Array.from(references).filter(id => receiptRefs.has(id)));
+}
+
 export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (input: {
   db: Db;
   run: WorkflowArgRun;
   step: WorkflowArgStep;
   workflowSteps: WorkflowArgStep[];
   consumerStepRunId?: string | null;
+  consumerArtifactContract?: unknown;
 }): Promise<unknown> => {
   const args = input.step.toolArgs ?? {};
   const runMetadata = input.run.metadata ?? {};
@@ -58,6 +76,9 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   }
 
   const pathsByStepId = new Map<string, string>();
+  const verifyReceiptRefs = readVerifyReceiptReferences(input.step, input.consumerArtifactContract, args, references);
+  // Resolve canonical receipts first; an unresolved receipt must never fall back to a copy.
+  await resolveToolResultPaths(input, Array.from(verifyReceiptRefs), pathsByStepId);
   const pinByStepRun = input.consumerStepRunId
     ? Boolean(input.step.workProductSelectors) || await isWorkProductBindingEnabled(input.db)
     : false;
@@ -89,6 +110,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
         inArray(workflowStepOutputBindings.referencedStepId, Array.from(references)),
       ));
     for (const pinned of pinnedRows) {
+      if (verifyReceiptRefs.has(pinned.referencedStepId)) continue;
       pinIds.set(pinned.referencedStepId, pinned.workProductId);
       pinnedTargets.set(pinned.referencedStepId, { type: pinned.type, title: pinned.title });
       pathsByStepId.set(
@@ -106,7 +128,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
       if (pinIds.get(stepId) !== consumer.binding.row.workProductId) throw new Error("workproduct_selector_pin_conflict");
     }
     // Keep the existing binding and generation; render all sibling paths from the issued B main.
-    pathsByStepId.set(stepId, value.file);
+    if (!verifyReceiptRefs.has(stepId)) pathsByStepId.set(stepId, value.file);
   }
   // [소비 하드닍 4단계] selector 없는 참조 중 시드 없음(=레거시 폴백/핀 소비 대상)을 분류한다.
   // 분류는 resolveSelectedPaths 와 동일하게 findWorkflowSeed 를 재사용한다 — 시드가 존재하면
@@ -115,6 +137,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   const declaredSelectors = input.step.workProductSelectors as Record<string, unknown> | undefined;
   const selectorlessSeedless = new Set<string>();
   for (const stepId of references) {
+    if (verifyReceiptRefs.has(stepId)) continue;
     if (declaredSelectors?.[stepId] !== undefined) continue;
     if (await findWorkflowSeed(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId })) continue;
     selectorlessSeedless.add(stepId);
@@ -145,6 +168,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   // 후보) — 핀 생성 이전에 게이트가 “무엇이 폴백으로 소비되는가”를 판정하기 위한 미러다.
   const fallbackTarget = new Map<string, (typeof products)[number]>();
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (fallbackTarget.has(product.stepId) || pathsByStepId.has(product.stepId)) continue;
     if (product.provider !== "local" && product.provider !== "local_file") continue;
     if (!resolveWorkProductLocalFilePath(product)) continue;
@@ -167,6 +191,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   const pinCandidates: typeof products = [];
   const candidateStepIds = new Set<string>();
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (candidateStepIds.has(product.stepId)) continue;
     if (pathsByStepId.has(product.stepId)) continue; // 이미 핀된 참조는 재핀 대상 아니다
     if (product.provider !== "local" && product.provider !== "local_file") continue;
@@ -208,6 +233,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
     });
   }
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (pathsByStepId.has(product.stepId)) continue;
     if (product.provider !== "local" && product.provider !== "local_file") continue;
     const localPath = resolveWorkProductLocalFilePath(product);
@@ -255,7 +281,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
     );
   }
 
-  await resolveToolResultPaths(input, Array.from(references).filter(id => !pathsByStepId.has(id)), pathsByStepId);
+  await resolveToolResultPaths(input, Array.from(references).filter(id => !verifyReceiptRefs.has(id) && !pathsByStepId.has(id)), pathsByStepId);
   for (const stepId of references) {
     if (!pathsByStepId.has(stepId)) {
       throw new Error(`Workflow tool step "${input.step.id}" could not resolve an active local workProduct for ancestor step "${stepId}".`);

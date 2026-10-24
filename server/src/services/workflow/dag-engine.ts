@@ -2138,14 +2138,15 @@ async function startIssueLessToolStepRun(input: {
   };
   try {
     // Reuse request identity and contract, not prepared arguments: QA preparation needs original paths.
-    args = await resolveWorkflowToolStepArgs({
-      db, run, step: step as PersistedWorkflowStep, workflowSteps, consumerStepRunId: stepRun.id,
-    });
     artifactExecution = reuseRequest
       ? readFrozenArtifactAttempt(stepRun.metadata.artifactExecution,
         { executionGeneration: stepRun.executionGeneration, requestId })
       : await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
         executionGeneration: stepRun.executionGeneration, requestId });
+    args = await resolveWorkflowToolStepArgs({
+      db, run, step: step as PersistedWorkflowStep, workflowSteps, consumerStepRunId: stepRun.id,
+      consumerArtifactContract: artifactExecution?.contract,
+    });
     if (reuseRequest && !same(storedRequest.artifactExecution, artifactExecution)) {
       throw new Error("artifact_contract_snapshot_stale");
     }
@@ -2465,7 +2466,12 @@ export async function processQueuedWorkflowToolStepRuns(
     }
     // [arg hygiene] 저장된 인자 재사용 시에도 셸 이스케이프 잔여($/, $')를 정화한다 —
     // 렌더 직후 값과 동일한 위생 보장(2026-09-02 enqueue 오염 사고).
-    const args = Object.prototype.hasOwnProperty.call(invocation, "args")
+    const hasPersistedArgs = Object.prototype.hasOwnProperty.call(invocation, "args");
+    const queuedArtifactExecution = !hasPersistedArgs && requestId && row.stepRun.metadata.artifactExecution
+      ? readFrozenArtifactAttempt(row.stepRun.metadata.artifactExecution,
+        { executionGeneration: row.stepRun.executionGeneration, requestId })
+      : null;
+    const args = hasPersistedArgs
       ? stripShellEscapeResidue(invocation.args)
       : await resolveWorkflowToolStepArgs({
         db,
@@ -2473,6 +2479,7 @@ export async function processQueuedWorkflowToolStepRuns(
         step: step as PersistedWorkflowStep,
         workflowSteps: steps,
         consumerStepRunId: row.stepRun.id,
+        consumerArtifactContract: queuedArtifactExecution?.contract,
       });
     if (!requestId) {
       await failToolStepRunWithDispatchError({

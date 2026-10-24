@@ -1,13 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { expect, it } from 'vitest';
-import { toolDefinitions, workflowStepRuns } from '@paperclipai/db';
+import { expect, it, vi } from 'vitest';
+import { issues, toolDefinitions, workflowRuns, workflowStepOutputBindings, workflowStepRuns } from '@paperclipai/db';
 import type { ArtifactContract } from '@paperclipai/shared';
 import { fixture, database } from './helpers/qa-receipt-fixture.js';
 import { freezeArtifactAttempt } from '../services/workflow/artifact-contract-runtime.js';
 import { executeCoreWorkflowTool } from '../services/workflow/core-tool-executor.js';
+import { resolveWorkflowToolStepArgs } from '../services/workflow/tool-step-args.js';
+import { workProductService } from '../services/work-products.js';
+import * as selector from '../services/workflow/workproduct-selector.js';
 
 // Explicit machine producer doubles; these do not claim the unavailable external verifier's format.
 async function setup(receiptParam = 'publishResultPath', mutation = '') {
@@ -61,7 +64,7 @@ fs.writeFileSync(4,JSON.stringify(r));console.log(JSON.stringify({ok:true,artifa
   const invoke = (parameters: Record<string, unknown> = { [receiptParam]: published.artifactPath }) => executeCoreWorkflowTool({ db,
     companyId: f.companyId, workflowRunId: f.runId, stepRunId: verifyId, stepId: 'inspector', requestId: 'inspector',
     toolName: 'inspector', parameters });
-  return { ...f, published, publishId, verifyId, completedMetadata, invoke };
+  return { ...f, published, publishId, verifyId, completedMetadata, contract, verifyContract, invoke };
 }
 
 it.each(['publishResultPath', 'durableReceipt'])('consumes a durable publication via declared %s without requiring QA source params', async name => {
@@ -115,4 +118,71 @@ it('rejects another run/company publication path even when the file is valid', a
   expect(result.status).toBe(500);
   expect(result.body.error).toBe('qa_artifact_consumer_receipt_required');
   expect(result.body.invocationProvenance).toBeNull();
+}, 45000);
+
+// Selection is doubled only to exercise the corrected-QA map overwrite boundary; C02 tests
+// cover real issuance/currentness/consumer validation. The publication and DB pins here are real.
+it.each(['copy', 'new pin', 'existing pin', 'selected QA path'])(
+  'keeps the canonical receipt when competing with a %s', async mode => {
+  const f = await setup(), db = database();
+  const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
+  const copyPath = path.join(path.dirname(f.published.artifactPath!), '..', 'copy', 'published.json');
+  await mkdir(path.dirname(copyPath), { recursive: true });
+  await writeFile(copyPath, await readFile(f.published.artifactPath!, 'utf8'));
+  const [issue] = await db.insert(issues).values({ companyId: f.companyId, missionId: f.missionId,
+    title: 'Publish', status: 'done' }).returning();
+  await db.update(workflowStepRuns).set({ issueId: issue.id }).where(eq(workflowStepRuns.id, f.publishId));
+  const product = await workProductService(db).createForIssue(issue.id, f.companyId, {
+    provider: 'local_file', type: 'document', title: 'published.json', status: 'active', metadata: { path: copyPath } });
+  const pinned = mode === 'existing pin' ? (await db.insert(workflowStepOutputBindings).values({
+    companyId: f.companyId, workflowRunId: f.runId, consumerStepRunId: f.verifyId,
+    referencedStepId: 'publisher', workProductId: product.id }).returning()) : [];
+  const selection = mode === 'selected QA path' ? vi.spyOn(selector, 'resolveSelectedPaths')
+    .mockResolvedValue(new Map([['publisher', { file: copyPath, product, correction: {} } as never]])) : null;
+  const publisher = { id: 'publisher', toolArtifactContract: { schemaVersion: f.contract.resultSchemaVersion,
+    role: f.contract.role, inputStepId: 'source' } };
+  const verify = { id: 'inspector', dependsOn: ['publisher'], toolArtifactContract: {
+    schemaVersion: f.verifyContract.resultSchemaVersion, role: f.verifyContract.role, inputStepId: 'publisher' },
+    ...(mode.includes('pin') ? { workProductSelectors: {} } : {}),
+    toolArgs: { publishResultPath: '{$steps.publisher.workProductPath}' } };
+  try {
+    const parameters = await resolveWorkflowToolStepArgs({ db, run, step: verify,
+      workflowSteps: [publisher, verify], consumerArtifactContract: f.verifyContract,
+      ...(mode.includes('pin') ? { consumerStepRunId: f.verifyId } : {}) });
+    expect(parameters).toEqual({ publishResultPath: f.published.artifactPath });
+    const pins = await db.select().from(workflowStepOutputBindings)
+      .where(eq(workflowStepOutputBindings.consumerStepRunId, f.verifyId));
+    expect(pins).toEqual(pinned);
+    const result = await f.invoke(parameters as Record<string, unknown>);
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+  } finally { selection?.mockRestore(); }
+}, 45000);
+
+it.each(['missing', 'bytes', 'company', 'run'])(
+  'does not substitute a copy when canonical receipt authority is %s', async scenario => {
+  const f = await setup(), db = database();
+  const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, f.runId));
+  const [issue] = await db.insert(issues).values({ companyId: f.companyId, missionId: f.missionId,
+    title: 'Publish', status: 'done' }).returning();
+  await db.update(workflowStepRuns).set({ issueId: issue.id }).where(eq(workflowStepRuns.id, f.publishId));
+  await workProductService(db).createForIssue(issue.id, f.companyId, { provider: 'local_file',
+    type: 'document', title: 'published.json', status: 'active', metadata: { path: f.content } });
+  if (scenario === 'missing') await db.update(workflowStepRuns).set({ metadata: {} })
+    .where(eq(workflowStepRuns.id, f.publishId));
+  if (scenario === 'bytes') {
+    await chmod(f.published.artifactPath!, 0o600);
+    await writeFile(f.published.artifactPath!, '{}');
+  }
+  const publisher = { id: 'publisher', ...(scenario === 'missing' ? {} : { toolArtifactContract: {
+    schemaVersion: f.contract.resultSchemaVersion, role: f.contract.role, inputStepId: 'source' } }) };
+  const verify = { id: 'inspector', dependsOn: ['publisher'], toolArtifactContract: {
+    schemaVersion: f.verifyContract.resultSchemaVersion, role: f.verifyContract.role, inputStepId: 'publisher' },
+    toolArgs: { publishResultPath: '{$steps.publisher.workProductPath}' } };
+  await expect(resolveWorkflowToolStepArgs({ db,
+    run: { ...run, ...(scenario === 'company' ? { companyId: randomUUID() }
+      : scenario === 'run' ? { id: randomUUID() } : {}) },
+    step: verify, workflowSteps: [publisher, verify], consumerStepRunId: f.verifyId,
+    consumerArtifactContract: f.verifyContract,
+  })).rejects.toThrow(scenario === 'bytes' ? 'qa_publication_receipt_bytes_changed'
+    : 'could not resolve an active local workProduct');
 }, 45000);
