@@ -50,11 +50,19 @@ export async function issueProducerRebind(db: Db, input: ProducerRebindInput,
     if (!parsed.success) throw conflict("producer_rebind_provenance_missing");
     const p = parsed.data;
     const existingMarker = workProductProducerRebindMarkerSchema.safeParse(product.metadata?.workflowProducerRebind);
+    const ownerAttestedRework = !automatic
+      && input.actor.actorType === "mission_owner"
+      && input.reason === "owner_attested_producer_rework";
     if (existingMarker.success && existingMarker.data.fromGeneration === p.executionGeneration
       && existingMarker.data.fromHeartbeatRunId === p.heartbeatRunId) {
-      if (input.expected && (existingMarker.data.sha256 !== input.expected.sha256
-        || existingMarker.data.byteSize !== input.expected.byteSize)) throw conflict("producer_rebind_bytes_changed");
-      return { status: "already_rebound", productId: product.id, fromGeneration: p.executionGeneration };
+      const expectedMatchesMarker = !input.expected || (existingMarker.data.sha256 === input.expected.sha256
+        && existingMarker.data.byteSize === input.expected.byteSize);
+      if (expectedMatchesMarker) {
+        return { status: "already_rebound", productId: product.id, fromGeneration: p.executionGeneration };
+      }
+      // A mission owner may replace an older valid marker only through the attested rework path.
+      // The ordinary automatic/board paths keep treating changed bytes as a conflict.
+      if (!ownerAttestedRework) throw conflict("producer_rebind_bytes_changed");
     }
     const mismatches = workProductProducerMismatches(p, { companyId: input.companyId, workflowRunId: run.id, run, step, product });
     const generationOnly = mismatches.length > 0
@@ -84,7 +92,9 @@ export async function issueProducerRebind(db: Db, input: ProducerRebindInput,
       fromGeneration: p.executionGeneration, reboundAtGeneration: step.executionGeneration, fromHeartbeatRunId: p.heartbeatRunId,
       sha256, byteSize: bytes.byteLength, reboundAt: now.toISOString(), reboundBy: input.actor,
       reason: input.reason ?? (automatic ? "automatic_producer_provenance_rebind" : "board_producer_provenance_rebind"),
-      authorityIdempotencyKey: `producer-provenance-rebind:${product.id}:${p.executionGeneration}`,
+      authorityIdempotencyKey: ownerAttestedRework
+        ? `producer-provenance-adoption:${product.id}:${p.executionGeneration}:${sha256}`
+        : `producer-provenance-rebind:${product.id}:${p.executionGeneration}`,
     };
     await tx.update(issueWorkProducts).set({ metadata: { ...(product.metadata ?? {}), workflowProducerRebind: marker }, updatedAt: now })
       .where(and(eq(issueWorkProducts.id, product.id), eq(issueWorkProducts.companyId, input.companyId)));
