@@ -8,10 +8,7 @@
 // [시나리오] S1 풀 루프 / S2 중복 제출 멱등+알림 1회 / S3 카드 생성 실패 fail-closed(D4) /
 //   S4 열린 상태 churn 은 resolve 허용 + 종결 앵커 409 후 복원 재해결(D5 앵커 issueId+issueStatus, 종결 기준) / S5 escalate 동일 계약 /
 //   S6 C4 인박스↔카드 연결 키가 라우트 응답에서 유지됨.
-// [웨이크 모드] resolve 즉시 웨이크는 오너의 활성 checkout run 존재 여부에 따라 두 가지로 전달된다 —
-//   run 종료 후: reason=operator_decision_resolved_assignee_wakeup(신규 queued wake),
-//   run 실행 중: 기존 run 흡수(reason=issue_execution_same_name, status=coalesced) — 두 모두
-//   멱등 키 operator-decision-resolved:{cardId} 와 수신자(오너)를 유지하는 기존 admission 계약이다.
+// [웨이크 모드] durable worker가 발급 키·수신자를 확정한다. 종료 run 전달을 여기서, active bounded deferral은 C08 admission에서 검증한다.
 // [주의] 서버 로직 변경은 이 테스트가 실제 결함을 잡았을 때만 한다. 인접 계약(dedup·알림 1회·
 //   oversight 제한·agent_required·기존 카드 경로)은 수정하지 않는다.
 import { randomUUID } from "node:crypto";
@@ -23,9 +20,11 @@ import {
   activityLog,
   agentRuntimeState,
   agentTaskSessions,
+  agentWikiEntries,
   agentWakeupRequests,
   agents,
   companies,
+  companySecrets,
   companySkills,
   createDb,
   heartbeatRunEvents,
@@ -33,6 +32,7 @@ import {
   issueComments,
   issues,
   missions,
+  missionSessions,
   operatorDecisionContinuations,
   operatorDecisions,
   workflowDefinitions,
@@ -45,6 +45,9 @@ import { operatorDecisionRoutes } from "../routes/operator-decisions.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { publishLiveEvent } from "../services/live-events.js";
 import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import { operatorDecisionContinuationWorker } from "../services/operator-decision-continuation-worker.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import {
   buildMissionOwnerHumanInputDecisionCard,
   createMissionOwnerHumanInputDecisionCard,
@@ -99,53 +102,27 @@ describeDb("mission owner human-input decision card contract E2E", () => {
   });
 
   afterEach(async () => {
-    // resolve 즉시 웨이크의 비동기 실행 체인(번들 스킬 upsert·run 생성)이 다음 테이블 정리와
-    // 경합하지 않도록 깨움이 종료 상태가 될 때까지 기다린다(operator-decision-routes 와 동일 원인).
-    // [2026-10-23 경합 수리] 깨움 종료 이후에도 런타임 확보가 agent_runtime_state 를 늦게 삽입해
-    //   agents 삭제 FK 위반(라이브 CI 반복 관측) — 행 수가 연속 2회 안정된 뒤 정리하고,
-    //   그래도 남은 극단 경합은 agents 삭제 재시도로 흡수한다.
-    const runtimeStateSettled = async () => {
-      const before = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      const after = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
-      return before.length === after.length
-        && before.every((row) => after.some((other) => other.agentId === row.agentId));
-    };
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      const rows = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests);
-      if (!rows.some((row) => ["queued", "claimed", "deferred_issue_execution"].includes(row.status))
-        && await runtimeStateSettled()) break;
-      if (Date.now() > deadline) throw new Error(`wakeup chains did not settle within 10s: ${JSON.stringify(rows)}`);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    await waitForHeartbeatExecutionsToDrain(db);
     vi.clearAllMocks();
     await db.delete(workflowTransitionEvents);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(operatorDecisionContinuations);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(agentTaskSessions);
+    await db.delete(agentWikiEntries);
+    await db.delete(missionSessions);
+    await db.delete(companySecrets);
     await db.delete(companySkills);
     await db.delete(issueComments);
     await db.delete(activityLog);
-    await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(issues);
     await db.delete(missions);
-    // [경합 수리] 안정 대기 후에도 극단적으로 늦은 삽입이 남면 agents 삭제가 FK 위반 — 최대 3회 재정리한다.
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await db.delete(agents);
-        break;
-      } catch (error) {
-        if (attempt >= 2) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        await db.delete(agentRuntimeState);
-      }
-    }
+    await db.delete(agents);
     await db.delete(companies);
   }, 15_000);
 
@@ -201,13 +178,17 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     // 섹션 [B] mission-run dedup(queued 강제)을 피한다.
     await db.update(heartbeatRuns).set({ status: "completed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
   }
-  async function wakeRowsByIdempotencyKey(cardId: string) {
+  async function deliverContinuation(cardId: string) {
+    expect(await operatorDecisionContinuationWorker(db, { wakeup: heartbeatService(db).wakeup,
+      workerId: `human-input-e2e:${cardId}` }).pollOnce(new Date())).toBe(1);
+    const [continuation] = await db.select().from(operatorDecisionContinuations)
+      .where(eq(operatorDecisionContinuations.operatorDecisionId, cardId));
     return db.select({
       agentId: agentWakeupRequests.agentId,
       reason: agentWakeupRequests.reason,
       status: agentWakeupRequests.status,
     }).from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.idempotencyKey, `operator-decision-resolved:${cardId}`));
+      .where(eq(agentWakeupRequests.idempotencyKey, continuation!.idempotencyKey!));
   }
 
   it("S1: owner request_input submission creates the card, operator resolve wakes the mission owner", async () => {
@@ -243,9 +224,9 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     });
 
     // 4) C3 — requester(미션 오너)에게 멱등 웨이크 전달
-    const wakes = await wakeRowsByIdempotencyKey(card.id);
+    const wakes = await deliverContinuation(card.id);
     expect(wakes).toHaveLength(1);
-    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved_assignee_wakeup" });
+    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved" });
 
     // 5) delivery bridge — owner-action 이슈에 결정 코멘트
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
@@ -328,16 +309,14 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     expect((row!.sourceContext as { targetSnapshot: Record<string, unknown> }).targetSnapshot)
       .toEqual({ issueId, issueStatus: "in_progress" });
 
-    // [2026-10-17 사고 재발 방지] 사람 응답 대기 중 이슈 상태 churn(in_progress→blocked)은 정상 —
-    //   moi 카드의 currentness는 이슈 종결 여부 기준이라 열린 이슈에서 resolve 가 409 없이 통과한다.
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
     await completeOwnerRun();
     const resolved = await resolveCard(card.id);
     expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
     expect(resolved.body.data).toMatchObject({ applied: true, decision: { status: "resolved" } });
-    const wakes = await wakeRowsByIdempotencyKey(card.id);
+    const wakes = await deliverContinuation(card.id);
     expect(wakes).toHaveLength(1);
-    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved_assignee_wakeup" });
+    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved" });
 
     // 종결 앵커는 여전히 409 target_changed — 두 번째 결정 이벤트(실제 브리지 서비스로 직접 생성)로
     //   증명한다. 첫 resolve 의 웨이크 체인이 오너 run 을 새로 떠워려 checkout 이 이동했으므로 라우트
@@ -378,14 +357,14 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     const detail = await request(app("board")).get(`/api/operator-decisions/${card.id}`);
     expect(detail.body.data.definition.humanReview.decisionSubject).toContain("escalate");
 
-    // 오너 run 이 아직 실행 중인 resolve — 웨이크는 활성 run 에 흡수(coalesced)되어도
-    // 같은 멱등 키·같은 수신자(오너)로 전달되는 것이 기존 admission 계약이다.
+    // 이 E2E는 종료 run 표준 전달을 검증한다. active bounded deferral은 C08 admission이 소유한다.
+    await completeOwnerRun();
     const resolved = await resolveCard(card.id);
     expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
     expect(resolved.body.data).toMatchObject({ applied: true, decision: { status: "resolved" } });
-    const wakes = await wakeRowsByIdempotencyKey(card.id);
+    const wakes = await deliverContinuation(card.id);
     expect(wakes).toHaveLength(1);
-    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "issue_execution_same_name", status: "coalesced" });
+    expect(wakes[0]).toMatchObject({ agentId: ownerId, reason: "operator_decision_resolved" });
   }, 30_000);
 
   it("S6: the inbox row and the card keep the C4 join key (decisionEventId ↔ requestKey) on route responses", async () => {

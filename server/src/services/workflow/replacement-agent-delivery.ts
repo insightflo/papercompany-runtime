@@ -1,9 +1,11 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, is } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import { agents, agentWakeupRequests, issues, workflowStepRuns, type Db } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { budgetService } from "../budgets.js";
 import { applyIssueCreatedSideEffects } from "../issue-create-side-effects.js";
-import { DEFERRED_WAKE_CONTEXT_KEY } from "../heartbeat.js";
+import { DEFERRED_WAKE_CONTEXT_KEY, heartbeatService } from "../heartbeat.js";
+import { QaCorrectionRootOwnerRequired, type ReplacementRootNotifications } from "../issue-assignment-wakeup.js";
 import { asBoolean } from "../../adapters/utils.js";
 import { wakeIssueBackedRetryAndMarkDispatching } from "./retry-launch-dispatch.js";
 import { insertWorkflowWakeRequest } from "../heartbeat-workflow-wake.js";
@@ -94,4 +96,17 @@ export async function applyWorkflowIssueCreatedSideEffects(input: CreatedInput) 
       return request;
     } },
   });
+}
+
+// Registration deduplicates notifications, not execution; native queue claims remain authoritative.
+export async function drainReplacementRootNotifications(rootDb: Db, notifications: ReplacementRootNotifications): Promise<void> {
+  if (is(rootDb, PgTransaction)) throw new QaCorrectionRootOwnerRequired();
+  if (notifications.correctionWakeupRequestIds.size === 0 && notifications.agentIds.size === 0) return;
+  const heartbeat = heartbeatService(rootDb);
+  for (const wakeupRequestId of notifications.correctionWakeupRequestIds) {
+    await heartbeat.resumeQaCorrectionWake(wakeupRequestId);
+  }
+  for (const agentId of [...notifications.agentIds].sort()) {
+    await heartbeat.resumeQueuedRuns(agentId);
+  }
 }

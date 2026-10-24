@@ -10,7 +10,7 @@
 // [입장] 신규 런 생성·admission 은 기존 admitReplacement 경로만 사용한다. 이 서비스는
 //   approval( approved )과 targetRunId 를 반환하고 오너가 replacementIntent 로 런을 트리거한다.
 import { and, eq, sql } from "drizzle-orm";
-import { approvals, activityLog, type Db } from "@paperclipai/db";
+import { approvals, activityLog, heartbeatRuns, type Db } from "@paperclipai/db";
 import { replacementApprovalPayloadSchema, ownerSelfReplacementSchema, type OwnerSelfReplacement } from "@paperclipai/shared/validators/workflow-replacement";
 import { conflict, forbidden } from "../../errors.js";
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
@@ -19,6 +19,7 @@ import { replacementDefinitionHash } from "./replacement-definition.js";
 import { normalizeWorkflowRunInputs } from "./run-input-normalization.js";
 import type { OwnerRecoveryApiActor } from "../missions/mission-owner-recovery-agent-api.js";
 import { authorizeOwnerRecoveryWindow } from "../missions/owner-recovery-window-auth.js";
+import { consumeOwnerHumanResponse } from "../missions/owner-human-response.js";
 
 export type OwnerSelfReplacementResult = {
   readonly approval: typeof approvals.$inferSelect;
@@ -52,6 +53,9 @@ export async function ownerSelfReplacement(db: Db, input: {
       }
       throw conflict("replacement_idempotency_key_reuse");
     }
+    const [heartbeat] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.actor.runId!)).limit(1);
+    if (!heartbeat) throw conflict("owner_recovery_submission_identity_mismatch");
+    await consumeOwnerHumanResponse(t, heartbeat);
     // D3: 자기 미션 실패 런·terminal 결정·generation·예산·중복 실행·권한 소비 검증 전부 재사용.
     const scope = await lockReplacementScope(t, issue.companyId, body.sourceRunId, body.decisionEventId);
     if (scope.mission.id !== issue.missionId) throw conflict("owner_replacement_mission_mismatch");

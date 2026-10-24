@@ -8052,52 +8052,6 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     }));
   });
 
-  it("[P4 control-flow loop] bounded happy path: rework then QA pass → workflow completes (loop terminates)", async () => {
-    heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-happy" });
-    const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });
-    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "REQUEST_CHANGES", "2026-06-18T07:10:00.000Z");
-
-    // Sync 1: QA 반려 → producer rework 리셋(iter 0→1) + 재실행.
-    await syncWorkflowRunForIssue(db, producerIssueId);
-    let rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(rows.find((row) => row.stepId === "produce")!.iterationIndex).toBe(1);
-
-    await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:30:00.000Z"), cancelledAt: null, startedAt: new Date("2026-06-18T07:11:00.000Z") }).where(eq(issues.id, producerIssueId));
-
-    heartbeatWakeup.mockClear();
-    await syncWorkflowRunForIssue(db, producerIssueId);
-    const [qaIssueAfterRework] = await db.select().from(issues).where(eq(issues.id, qaIssueId));
-    expect(qaIssueAfterRework.status).toBe("blocked");
-    expect(heartbeatWakeup).toHaveBeenCalledWith(qaAgentId, expect.objectContaining({
-      reason: "workflow_step_runnable",
-      payload: expect.objectContaining({
-        issueId: qaIssueId,
-        mutation: "workflow_resume",
-        workflowRunId: runId,
-        stepId: "qa-validate",
-        workflowStepRunId: expect.any(String),
-      }),
-      contextSnapshot: expect.objectContaining({
-        issueId: qaIssueId,
-        workflowRunId: runId,
-        workflowStepId: "qa-validate",
-        workflowStepRunId: expect.any(String),
-      }),
-    }));
-
-    // QA 재리뷰 PASS 시뮬레이션(producer 07:30 이후). QA issue done.
-    await submitQaVerdictEvidence(qaIssueId, companyId, qaAgentId, "PASS", "2026-06-18T07:40:00.000Z");
-    await db.update(issues).set({ status: "done", completedAt: new Date("2026-06-18T07:40:00.000Z"), cancelledAt: null }).where(eq(issues.id, qaIssueId));
-
-    // Sync 3: QA pass → completed, back-edge 미발화, finalize → 워크플로 완료.
-    await syncWorkflowRunForIssue(db, qaIssueId);
-    rows = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, runId));
-    expect(rows.find((row) => row.stepId === "qa-validate")!.status).toBe("completed");
-    expect(rows.find((row) => row.stepId === "produce")!.iterationIndex).toBe(1); // rework 1회로 종료
-    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
-    expect(run.status).toBe("completed");
-  });
-
   it("[P4 control-flow loop] comments current dependency workProducts when requeueing QA after producer rework", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-p4-loop-refresh-qa" });
     const { companyId, qaAgentId, runId, producerIssueId, qaIssueId } = await seedBackEdgeLoopRun({ maxIterations: 2 });

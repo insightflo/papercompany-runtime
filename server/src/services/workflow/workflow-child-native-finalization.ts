@@ -15,6 +15,7 @@ import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns } from "@paperclipai/db";
 import { withLockedChildStartIdentity } from "./workflow-child-start-state.js";
+import { readQaCorrectionLiveness } from "./control-flow/qa-correction-liveness.js";
 import { isChildStartContention } from "./workflow-child-start-contention.js";
 import type { WorkflowChildIdentity } from "./workflow-child-start-predicates.js";
 
@@ -50,7 +51,8 @@ export async function reloadWorkflowRunForFinalization(
 /**
  * linked 자식 run 의 최종 상태 변이. 호출 조건: bound 는 linked gate 의 발견 신원(세대 1),
  * companyId 는 호출자가 기대하는 회사, boundWhere 는 보정된 bridge 가 만든 대상 재평가 술어다.
- * 트랜잭션 안에서 (1) 전체 신원 잠금 재검증 → 상실은 no-op, (2) 같은 핸들로 대상 UPDATE —
+ * 트랜잭션 안에서 (1) 전체 신원 잠금 재검증 → 상실은 no-op, (2) 성공/실패는 실제 대상의
+ * 상태/영수증/target을 재확인하고 미완료 교정을 보호, (3) 같은 핸들로 대상 UPDATE —
  * 최종 WHERE 가 잠금 대기 중 변경된 현재 상태/영수증/retained target 을 재평가한다.
  * 호출자가 외부 트랜잭션을 공급하면 그 핸들/세이브포인트를 쓴다(전역 연결 재취득 금지).
  */
@@ -77,6 +79,13 @@ export async function applyLinkedWorkflowRunFinalization(
       //   잠금 하 조기 no-op — 대체 링크를 따라가지 않는다(linked gate 전용).
       const ctx = await withLockedChildStartIdentity(txDb, input.bound);
       if (!ctx) return null;
+      if (input.nextStatus === "completed" || input.nextStatus === "failed") {
+        // boundWhere also owns current status, success receipt and the retained target.
+        const [target] = await txDb.select().from(workflowRuns).where(input.boundWhere).limit(1);
+        if (!target) return null;
+        const correction = await readQaCorrectionLiveness(tx, target);
+        if (correction.kind !== "clear") return null;
+      }
       const rows = await txDb
         .update(workflowRuns)
         .set({

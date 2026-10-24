@@ -1,64 +1,137 @@
-// server/src/services/quality/retry-budget.ts
-//
-// [purpose] T4 유한 재시도 예약. 기존 workflow step retry 트랜잭션 안에서 quality 조치의
-//   group+policy 사용량을 검사·증가한다(§3.3 잠금 순서: policy usage → group → action).
-//   새 기술 시도는 이 예약이 성공해야 새 generation/키로 확정된다.
-// [cost] 실행 시도 횟수(executionAttempts)만 예약한다. 시도당 금액 기본값을 만들지
-//   않는다(누락값에 숨은 기본값 금지). 금액은 기존 비용 기록에서 정산되며 이미 저장된
-//   예약·청구 금액은 새 시작 한도에서 제외하지 않는다.
-
-import { and, asc, eq } from "drizzle-orm";
+// Atomic quality retry admission. Locking does not spend or reject exhausted budgets;
+// only the event winner consumes. All failures must escape the owning transaction.
+// Order: usage(windowStart, id) -> group -> action -> policy -> caller's mission/run.
+// Company-period totals still span policy versions; cross-policy serialization is outside this boundary.
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import {
-  qualityActionGroups,
-  qualityActions,
-  qualityPolicyUsage,
-  qualityPolicyVersions,
-} from "@paperclipai/db";
+import { qualityActionGroups, qualityActions, qualityPolicyUsage, qualityPolicyVersions } from "@paperclipai/db";
 import { qualityPolicySchema, retryEnvelopeSchema } from "@paperclipai/shared";
 import { parseEvidence } from "./contract.js";
 import { readPolicyUsageTotals } from "./policy-usage.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+type BudgetInput = { companyId: string; actionId: string; now: Date };
+type GroupUsage = { executionAttempts?: number; reservedCostCents?: number; chargedCostCents?: number };
+declare const budgetLockBrand: unique symbol;
+export type QualityAttemptBudgetLock = { readonly [budgetLockBrand]: true };
+type LockedBudget = {
+  tx: Tx;
+  xid: string;
+  companyId: string;
+  action: typeof qualityActions.$inferSelect;
+  group: typeof qualityActionGroups.$inferSelect;
+  usage: typeof qualityPolicyUsage.$inferSelect;
+  policy: ReturnType<typeof qualityPolicySchema.parse>;
+  envelope: ReturnType<typeof retryEnvelopeSchema.parse>;
+  windowStart: Date;
+  windowEnd: Date;
+};
+// Opaque, single-use receipts bind both the tx object and its actual database transaction.
+const lockedBudgets = new WeakMap<QualityAttemptBudgetLock, LockedBudget>();
 
-/** step run metadata 에서 quality 소속 조치 ID 를 읽는다(없으면 null — generic step). */
+async function readBudgetTransactionId(tx: Tx): Promise<string> {
+  const [row] = await tx.execute(sql`SELECT txid_current()::text AS xid`);
+  const xid = row?.xid;
+  if (typeof xid !== "string" || !/^[1-9][0-9]*$/.test(xid)) {
+    throw new Error("quality_budget_lock_invalid");
+  }
+  return xid;
+}
+
 export function readQualityStepActionId(metadata: unknown): string | null {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
   const value = (metadata as Record<string, unknown>).qualityActionId;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-type GroupUsage = { executionAttempts?: number; reservedCostCents?: number; chargedCostCents?: number };
-
-/**
- * 재시도 1회 분의 실행 예약: 한도 검사 + group.usage/quality_policy_usage 증가.
- * 한도 초과/조치 없음은 예외를 던져 retry 트랜잭션 전체를 롤백한다(원본 불변).
- */
-export async function reserveQualityRetryUsage(tx: Tx, input: {
-  companyId: string; actionId: string; now: Date;
-}): Promise<void> {
-  // 잠금 순서(§3.3): policy usage 행 → group → action.
-  const [pre] = await tx.select({ groupId: qualityActions.groupId, policyVersionId: qualityActions.policyVersionId })
-    .from(qualityActions).where(and(eq(qualityActions.companyId, input.companyId), eq(qualityActions.id, input.actionId)));
+/** Acquire before mission/run locks; do not check quotas until the caller wins its event. */
+export async function lockQualityAttemptBudget(tx: Tx, input: BudgetInput): Promise<QualityAttemptBudgetLock> {
+  const [pre] = await tx.select().from(qualityActions)
+    .where(and(eq(qualityActions.companyId, input.companyId), eq(qualityActions.id, input.actionId)));
   if (!pre) throw new Error("quality_action_not_found");
-  await tx.select({ id: qualityPolicyUsage.id }).from(qualityPolicyUsage)
+  const [preGroup] = await tx.select().from(qualityActionGroups)
+    .where(and(eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, pre.groupId)));
+  if (!preGroup) throw new Error("quality_group_not_found");
+  const [prePolicy] = await tx.select().from(qualityPolicyVersions)
+    .where(and(eq(qualityPolicyVersions.companyId, input.companyId), eq(qualityPolicyVersions.id, pre.policyVersionId)));
+  if (!prePolicy) throw new Error("quality_policy_not_found");
+  const observedPolicy = parseEvidence(qualityPolicySchema, prePolicy.definition);
+  const windowStart = new Date(observedPolicy.periodStart);
+  const windowEnd = new Date(observedPolicy.periodEnd);
+
+  // A missing row cannot be locked. Materialize zero before locking either competing group.
+  // The unique key also serializes concurrent first reservations; no conflict-path increment.
+  await tx.insert(qualityPolicyUsage).values({
+    companyId: input.companyId, policyVersionId: pre.policyVersionId, windowStart, windowEnd,
+    executionAttempts: 0, reservedCostCents: 0, chargedCostCents: 0, revision: 1,
+  }).onConflictDoNothing();
+  const usageRows = await tx.select().from(qualityPolicyUsage)
     .where(and(eq(qualityPolicyUsage.companyId, input.companyId), eq(qualityPolicyUsage.policyVersionId, pre.policyVersionId)))
-    .orderBy(asc(qualityPolicyUsage.windowStart)).for("update");
-  await tx.select({ id: qualityActionGroups.id }).from(qualityActionGroups)
+    .orderBy(asc(qualityPolicyUsage.windowStart), asc(qualityPolicyUsage.id)).for("update");
+  const usage = usageRows.find(row => row.windowStart.getTime() === windowStart.getTime());
+  if (!usage) throw new Error("quality_usage_write_failed");
+  const [group] = await tx.select().from(qualityActionGroups)
     .where(and(eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, pre.groupId))).for("update");
+  if (!group) throw new Error("quality_group_not_found");
   const [action] = await tx.select().from(qualityActions)
     .where(and(eq(qualityActions.companyId, input.companyId), eq(qualityActions.id, input.actionId))).for("update");
   if (!action) throw new Error("quality_action_not_found");
-  const envelope = parseEvidence(retryEnvelopeSchema, action.retryEnvelope);
   const [policyRow] = await tx.select().from(qualityPolicyVersions)
-    .where(and(eq(qualityPolicyVersions.companyId, input.companyId), eq(qualityPolicyVersions.id, action.policyVersionId))).for("share");
+    .where(and(eq(qualityPolicyVersions.companyId, input.companyId), eq(qualityPolicyVersions.id, pre.policyVersionId))).for("share");
   if (!policyRow) throw new Error("quality_policy_not_found");
   const policy = parseEvidence(qualityPolicySchema, policyRow.definition);
-  const windowStart = new Date(policy.periodStart);
-  const windowEnd = new Date(policy.periodEnd);
+  const envelope = parseEvidence(retryEnvelopeSchema, action.retryEnvelope);
+  if (action.groupId !== pre.groupId || action.policyVersionId !== pre.policyVersionId
+    || action.revision !== pre.revision || group.policyVersionId !== preGroup.policyVersionId
+    || new Date(policy.periodStart).getTime() !== windowStart.getTime()
+    || new Date(policy.periodEnd).getTime() !== windowEnd.getTime()
+    || usage.windowEnd.getTime() !== windowEnd.getTime()) {
+    throw new Error("quality_budget_scope_changed");
+  }
+  if (envelope.groupId !== action.groupId || envelope.policyVersionId !== action.policyVersionId) {
+    throw new Error("quality_action_contract_mismatch");
+  }
+  const xid = await readBudgetTransactionId(tx);
+  const receipt = Object.freeze({}) as QualityAttemptBudgetLock;
+  lockedBudgets.set(receipt, { tx, xid, companyId: input.companyId, action, group, usage, policy, envelope, windowStart, windowEnd });
+  return receipt;
+}
 
-  // 회사 기간 총량(정책 버전 교체로 초기화되지 않는다) — 실행 시도 횟수와 저장 금액 모두 검사.
-  const totals = await readPolicyUsageTotals(tx as unknown as Db, {
+/** Backward-compatible reservation API; an optional authentic receipt avoids reversing lock order. */
+export async function reserveQualityRetryUsage(
+  tx: Tx, input: BudgetInput, receipt?: QualityAttemptBudgetLock,
+): Promise<void> {
+  const token = receipt === undefined ? await lockQualityAttemptBudget(tx, input) : receipt;
+  const locked = lockedBudgets.get(token);
+  if (!locked || locked.tx !== tx || locked.companyId !== input.companyId || locked.action.id !== input.actionId) {
+    throw new Error("quality_budget_lock_invalid");
+  }
+  // Consume before awaiting the identity check so concurrent consumers cannot reuse the receipt.
+  lockedBudgets.delete(token);
+  if (await readBudgetTransactionId(tx) !== locked.xid) {
+    throw new Error("quality_budget_lock_invalid");
+  }
+  // Re-read even under our locks: a caller may have changed a revision earlier in this tx.
+  const [groupRow] = await tx.select().from(qualityActionGroups)
+    .where(and(eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, locked.group.id)));
+  const [usageRow] = await tx.select().from(qualityPolicyUsage)
+    .where(and(eq(qualityPolicyUsage.companyId, input.companyId), eq(qualityPolicyUsage.id, locked.usage.id)));
+  const [action] = await tx.select().from(qualityActions)
+    .where(and(eq(qualityActions.companyId, input.companyId), eq(qualityActions.id, input.actionId)));
+  if (!groupRow || !usageRow || !action || groupRow.revision !== locked.group.revision
+    || usageRow.revision !== locked.usage.revision || action.revision !== locked.action.revision) {
+    throw new Error("quality_usage_revision_conflict");
+  }
+  if (action.groupId !== locked.group.id || action.policyVersionId !== locked.action.policyVersionId
+    || groupRow.policyVersionId !== locked.group.policyVersionId
+    || usageRow.policyVersionId !== locked.action.policyVersionId
+    || usageRow.windowStart.getTime() !== locked.windowStart.getTime()
+    || usageRow.windowEnd.getTime() !== locked.windowEnd.getTime()) {
+    throw new Error("quality_budget_scope_changed");
+  }
+  const { envelope, policy, windowStart, windowEnd } = locked;
+  // Keep the existing all-policy-version company-period cost/attempt contract.
+  const totals = await readPolicyUsageTotals(tx, {
     companyId: input.companyId, policyVersionId: action.policyVersionId, windowStart, windowEnd,
   });
   if (totals.executionAttempts + 1 > envelope.maxExecutorAttempts) {
@@ -67,74 +140,26 @@ export async function reserveQualityRetryUsage(tx: Tx, input: {
   if (totals.reservedCostCents + totals.chargedCostCents > policy.maxCostCentsPerPeriod) {
     throw new Error("quality_period_cost_exhausted");
   }
-  const [groupRow] = await tx.select().from(qualityActionGroups)
-    .where(and(eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, envelope.groupId))).for("update");
-  if (!groupRow) throw new Error("quality_group_not_found");
   const usage = (groupRow.usage ?? {}) as GroupUsage;
   const groupAttempts = Number(usage.executionAttempts ?? 0);
   if (groupAttempts + 1 > envelope.maxExecutorAttempts) {
     throw new Error("quality_execution_attempts_exhausted");
   }
-  if ((Number(usage.reservedCostCents ?? 0) + Number(usage.chargedCostCents ?? 0)) > envelope.maxCumulativeCostCents) {
+  if (Number(usage.reservedCostCents ?? 0) + Number(usage.chargedCostCents ?? 0) > envelope.maxCumulativeCostCents) {
     throw new Error("quality_group_cost_exhausted");
   }
-
-  // 예약 기록: group.usage.executionAttempts + policy_usage.executionAttempts (+0 예약 금액).
-  const nextUsage: GroupUsage = { ...usage, executionAttempts: groupAttempts + 1 };
   const groupClaimed = await tx.update(qualityActionGroups)
-    .set({ usage: nextUsage, revision: groupRow.revision + 1, updatedAt: input.now })
+    .set({ usage: { ...usage, executionAttempts: groupAttempts + 1 }, revision: groupRow.revision + 1, updatedAt: input.now })
     .where(and(
-      eq(qualityActionGroups.companyId, input.companyId),
-      eq(qualityActionGroups.id, envelope.groupId),
+      eq(qualityActionGroups.companyId, input.companyId), eq(qualityActionGroups.id, groupRow.id),
       eq(qualityActionGroups.revision, groupRow.revision),
-    ))
-    .returning({ id: qualityActionGroups.id });
+    )).returning({ id: qualityActionGroups.id });
   if (groupClaimed.length === 0) throw new Error("quality_usage_revision_conflict");
-
-  const [existingUsage] = await tx.select().from(qualityPolicyUsage)
+  const usageClaimed = await tx.update(qualityPolicyUsage)
+    .set({ executionAttempts: usageRow.executionAttempts + 1, revision: usageRow.revision + 1 })
     .where(and(
-      eq(qualityPolicyUsage.companyId, input.companyId),
-      eq(qualityPolicyUsage.policyVersionId, action.policyVersionId),
-      eq(qualityPolicyUsage.windowStart, windowStart),
-    )).for("update");
-  if (existingUsage) {
-    const claimed = await tx.update(qualityPolicyUsage)
-      .set({
-        executionAttempts: existingUsage.executionAttempts + 1,
-        revision: existingUsage.revision + 1,
-      })
-      .where(and(
-        eq(qualityPolicyUsage.companyId, input.companyId),
-        eq(qualityPolicyUsage.id, existingUsage.id),
-        eq(qualityPolicyUsage.revision, existingUsage.revision),
-      ))
-      .returning({ id: qualityPolicyUsage.id });
-    if (claimed.length === 0) throw new Error("quality_usage_revision_conflict");
-    return;
-  }
-  const inserted = await tx.insert(qualityPolicyUsage).values({
-    companyId: input.companyId,
-    policyVersionId: action.policyVersionId,
-    windowStart,
-    windowEnd,
-    reservedCostCents: 0,
-    chargedCostCents: 0,
-    executionAttempts: 1,
-    revision: 1,
-  })
-    .onConflictDoNothing()
-    .returning({ id: qualityPolicyUsage.id });
-  if (inserted.length === 0) {
-    // 동시 삽입 승자: 다시 읽어 증가시킨다(같은 tx 잠금 순서로 직렬화).
-    const [winner] = await tx.select().from(qualityPolicyUsage)
-      .where(and(
-        eq(qualityPolicyUsage.companyId, input.companyId),
-        eq(qualityPolicyUsage.policyVersionId, action.policyVersionId),
-        eq(qualityPolicyUsage.windowStart, windowStart),
-      )).for("update");
-    if (!winner) throw new Error("quality_usage_write_failed");
-    await tx.update(qualityPolicyUsage)
-      .set({ executionAttempts: winner.executionAttempts + 1, revision: winner.revision + 1 })
-      .where(eq(qualityPolicyUsage.id, winner.id));
-  }
+      eq(qualityPolicyUsage.companyId, input.companyId), eq(qualityPolicyUsage.id, usageRow.id),
+      eq(qualityPolicyUsage.revision, usageRow.revision),
+    )).returning({ id: qualityPolicyUsage.id });
+  if (usageClaimed.length === 0) throw new Error("quality_usage_revision_conflict");
 }

@@ -52,19 +52,26 @@ async function productionSeal(file: string) {
   }
 }
 
-/** Called only after registeredProducer's original admission/fence checks, inside the write transaction. */
-export async function sealedProducerMetadata(product: LocalProduct & { provider: string },
-  producer: Awaited<ReturnType<typeof registeredProducer>>) {
+export type ProductionSeal = { sha256: string; byteSize: number };
+
+/** Called only after registeredProducer's original admission/fence checks, inside the write transaction.
+ * Return the same measurement separately for the progress audit; never remeasure or read caller hashes.
+ */
+export async function sealProducerWrite(product: LocalProduct & { provider: string },
+  producer: Awaited<ReturnType<typeof registeredProducer>>): Promise<{
+    metadata: Record<string, unknown>; seal: ProductionSeal | null;
+  }> {
   const metadata = preserveProducerMetadata(product.metadata, producer);
   if (producer?.schemaVersion !== "workflow.work-product-producer.v1"
-    || !["local", "local_file"].includes(product.provider)) return metadata;
+    || !["local", "local_file"].includes(product.provider)) return { metadata, seal: null };
   const file = resolveWorkProductLocalFilePath(product);
   try {
     if (!file) throw new Error("workproduct_producer_path_missing");
-    metadata.workflowProducer = { ...producer, ...await productionSeal(file) };
+    const seal = await productionSeal(file);
+    metadata.workflowProducer = { ...producer, ...seal };
+    return { metadata, seal };
   } catch {
     // A new local write cannot silently become a legacy, unsealed record.
     throw conflict("workproduct_producer_file_unreadable");
   }
-  return metadata;
 }

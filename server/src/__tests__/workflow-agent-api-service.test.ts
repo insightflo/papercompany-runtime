@@ -31,6 +31,7 @@ import { clearWorkflowAgentApiTestDb } from "./helpers/workflow-agent-api-cleanu
 import { errorHandler } from "../middleware/index.js";
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { completeWorkflowIssue, registerWorkflowArtifact, submitWorkflowVerdict, type WorkflowApiActor } from "../services/workflow/agent-api.js";
+import { createIssueRecord } from "../services/issue-create-records.js";
 import { workProductService } from "../services/work-products.js";
 import { hasWorkflowValidationCompletionLedger } from "../services/workflow/validation-verdict-ledger.js";
 
@@ -131,17 +132,15 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       triggeredBy: "system",
       status: "running",
     });
-    await db.insert(issues).values({
+    const issue = await createIssueRecord(db, companyId, {
       id: issueId,
-      companyId,
-      identifier: "RES-1",
       title: input.title,
       status: "in_progress",
       originKind: "workflow_execution",
       originRunId: workflowRunId,
       missionId,
       startedAt: new Date("2026-07-06T00:00:00.000Z"),
-    });
+    }, false);
     await db.insert(workflowStepRuns).values({
       id: randomUUID(),
       workflowRunId,
@@ -150,7 +149,6 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       status: "running",
       startedAt: new Date("2026-07-06T00:00:01.000Z"),
     });
-    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
     return issue;
   }
 

@@ -221,15 +221,15 @@ describeDb("terminal alert wakeup liveness", () => {
     expect(rows.transitions[0]?.idempotencyKey).toBeTruthy();
   });
 
-  it("suppresses alerts for a cancelled mission", async () => {
+  it.each(["completed", "cancelled"])("suppresses alerts for a %s mission without producing an anchor", async (status) => {
     const f = await seedFixture(db); await addWakeup(db, f, "deferred_issue_execution", null);
-    await db.update(missions).set({ status: "cancelled" }).where(eq(missions.id, f.missionId));
+    await db.update(missions).set({ status }).where(eq(missions.id, f.missionId));
     const [beforeMission] = await db.select({ status: missions.status }).from(missions).where(eq(missions.id, f.missionId));
     await supervise(db, f);
     const [afterMission] = await db.select({ status: missions.status }).from(missions).where(eq(missions.id, f.missionId));
     expect(afterMission?.status).toBe(beforeMission?.status);
-    expect(afterMission?.status).toBe("cancelled");
-    // Supervision's diagnosis comment is pre-existing; §3 checks cancelled status and alert artifacts.
+    expect(afterMission?.status).toBe(status);
+    // Supervision may diagnose, but terminal missions must not produce anchors or alerts.
     const rows = await reportRows(db, f);
     expect(rows.activities).toHaveLength(0);
     expect(rows.transitions).toHaveLength(0);

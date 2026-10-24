@@ -1,10 +1,12 @@
 import path from "node:path";
 import { withSelectedInputTransaction } from "./selected-input-transaction.js";
+import { selectQaCorrectionConsumer } from "./control-flow/qa-correction-selection.js";
 import { resolveSelectedPaths } from "./workproduct-selector.js";
 import { resolveToolResultPaths } from "./artifact-step-result.js";
 import { and, desc, eq, inArray, not } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, issueWorkProducts, workflowStepOutputBindings, workflowStepRuns } from "@paperclipai/db";
+import { artifactContractSchema } from "@paperclipai/shared";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { assertPinnedProductConsumable } from "./workproduct-pinned-path.js";
 import {
@@ -13,7 +15,14 @@ import {
 import { isWorkProductBindingEnabled } from "./run-reopen-guard-flag.js";
 import { isWorkProductSelectorRejectEnabled } from "./workproduct-selector-reject-flag.js";
 import { findWorkflowSeed } from "./workflow-seed-evidence.js";
-import { collectAncestorStepIds, collectArtifactReferences, STEP_ARTIFACT_TOKEN, type WorkflowArtifactReferenceStep } from "./step-artifact-references.js";
+import { collectAncestorStepIds, collectArtifactReferences, type WorkflowArtifactReferenceStep } from "./step-artifact-references.js";
+import { renderWorkflowToolStepArgsWithResolvedValues } from "./tool-step-template-render.js";
+export {
+  stringifyWorkflowRunMetadataValue,
+  renderWorkflowToolStepArgsWithResolvedValues,
+  stripShellEscapeResidue,
+  runMonthFromRunDate,
+} from "./tool-step-template-render.js";
 type WorkflowArgStep = WorkflowArtifactReferenceStep & {
   workProductSelectors?: unknown;
   toolArtifactContract?: unknown;
@@ -26,38 +35,15 @@ type WorkflowArgRun = {
   metadata?: Record<string, unknown> | null;
 };
 
-const RUN_METADATA_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
-/**
- * [workflow child fix P2-9] 자식 run 입력 토큰 — 부모 workflow 스텝 inputs 가
- * 자식 run metadata.workflowChildInputs 에 저장되고, 자식의 tool 스텝이
- * {$childInputs.<key>} 로 개별 소비한다. 미지 키는 토큰 잔존 → 기존 strict
- * fail-closed(ANY_UNRESOLVED_TOKEN_RE) 가 dispatch 를 거부한다.
- */
-const CHILD_INPUTS_TOKEN = /\{\$childInputs\.([A-Za-z0-9_]+)\}/g;
-/** 렌더 후 잔존 검출용(fail-closed) — 유효 문자셋 밖의 키(customer-id 등)도 포괄한다(fix3 P2-6). */
-const UNRESOLVED_CHILD_INPUTS_TOKEN = /\{\$childInputs\.[^}]*\}/u;
-
-/**
- * 문자열이 아닌 run metadata 값을 템플릿 치환 문자열로 변환.
- * undefined(키 부재와 동급)는 null을 반환해 호출자가 토큰을 유지하게 한다.
- */
-export function stringifyWorkflowRunMetadataValue(value: unknown): string | null {
-  if (value === undefined) return null;
-  if (typeof value === "string") return value;
-  const json = JSON.stringify(value);
-  return typeof json === "string" ? json : null;
-}
-
-/** [발행검증 영수증 우선 2026-10-22] 이 스텝이 publication-verify 계약이면 영수증 파라미터 값이
- *  참조하는 조상 단계들 — 이 참조들은 발행 정식 영수증 경로로만 해석된다(work product 사본 불가). */
-function readVerifyReceiptReferences(step: WorkflowArgStep, args: unknown, references: Set<string>): Set<string> {
-  const contract = step.toolArtifactContract;
-  if (contract === null || typeof contract !== "object") return new Set();
-  const declared = contract as Record<string, unknown>;
-  if (declared.role !== "publication-verify") return new Set();
-  const consumerParams = declared.consumerParams;
-  if (consumerParams === null || typeof consumerParams !== "object") return new Set();
-  const receiptParam = (consumerParams as Record<string, unknown>).receipt;
+/** Receipt references resolve through verified machine results, never work-product copies. */
+function readVerifyReceiptReferences(step: WorkflowArgStep, consumerArtifactContract: unknown,
+  args: unknown, references: Set<string>): Set<string> {
+  const declared = step.toolArtifactContract;
+  if (declared === null || typeof declared !== "object"
+    || (declared as Record<string, unknown>).role !== "publication-verify") return new Set();
+  const parsed = artifactContractSchema.safeParse(consumerArtifactContract);
+  if (!parsed.success || parsed.data.role !== "publication-verify") return new Set();
+  const receiptParam = parsed.data.consumerParams?.receipt;
   if (typeof receiptParam !== "string" || typeof args !== "object" || args === null) return new Set();
   const receiptValue = (args as Record<string, unknown>)[receiptParam];
   if (receiptValue === undefined) return new Set();
@@ -65,19 +51,21 @@ function readVerifyReceiptReferences(step: WorkflowArgStep, args: unknown, refer
   return new Set(Array.from(references).filter(id => receiptRefs.has(id)));
 }
 
-
 export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (input: {
   db: Db;
   run: WorkflowArgRun;
   step: WorkflowArgStep;
   workflowSteps: WorkflowArgStep[];
   consumerStepRunId?: string | null;
+  consumerArtifactContract?: unknown;
 }): Promise<unknown> => {
   const args = input.step.toolArgs ?? {};
   const runMetadata = input.run.metadata ?? {};
   const references = collectArtifactReferences(args);
   if (references.size === 0) {
-    return renderChecked(args, input.run.runDate ?? "", input.run.id, new Map(), runMetadata);
+    return renderWorkflowToolStepArgsWithResolvedValues({
+      args, runDate: input.run.runDate ?? "", runId: input.run.id, pathsByStepId: new Map(), runMetadata,
+    });
   }
 
   const ancestors = collectAncestorStepIds(input.step.id, input.workflowSteps);
@@ -88,16 +76,9 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   }
 
   const pathsByStepId = new Map<string, string>();
-  // [발행검증 영수증 우선 2026-10-22] publication-verify 스텝의 영수증 파라미터(consumerParams.receipt)는
-  //   발행 스텝의 정식 기계 영수증(metadata.toolResult.artifactPath — 바이트·스코프 검증됨)만 의미한다.
-  //   이슈 산출물(work product) 사본이 이 참조를 가로채면 소비자는 반드시 거절한다(실제 사례:
-  //   PAQO 액션 발행 스텝이 “발행 결과를 workProduct로 남긴다” 계약으로 단계 폴더 사본을 등록 →
-  //   readback 검증 qa_artifact_consumer_receipt_required 반려, 2026-10-22 dsh-purge 수정 런 9c6cf35d).
-  //   영수증 참조는 정식 경로 해석을 우선하고 핀·폴백 산출물 해석 대상에서 제외한다.
-  const verifyReceiptRefs = readVerifyReceiptReferences(input.step, args, references);
-  if (verifyReceiptRefs.size > 0) {
-    await resolveToolResultPaths(input, Array.from(verifyReceiptRefs), pathsByStepId);
-  }
+  const verifyReceiptRefs = readVerifyReceiptReferences(input.step, input.consumerArtifactContract, args, references);
+  // Resolve canonical receipts first; an unresolved receipt must never fall back to a copy.
+  await resolveToolResultPaths(input, Array.from(verifyReceiptRefs), pathsByStepId);
   const pinByStepRun = input.consumerStepRunId
     ? Boolean(input.step.workProductSelectors) || await isWorkProductBindingEnabled(input.db)
     : false;
@@ -129,7 +110,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
         inArray(workflowStepOutputBindings.referencedStepId, Array.from(references)),
       ));
     for (const pinned of pinnedRows) {
-      if (verifyReceiptRefs.has(pinned.referencedStepId)) continue; // 영수증 참조는 핀 경로를 쓰지 않는다
+      if (verifyReceiptRefs.has(pinned.referencedStepId)) continue;
       pinIds.set(pinned.referencedStepId, pinned.workProductId);
       pinnedTargets.set(pinned.referencedStepId, { type: pinned.type, title: pinned.title });
       pathsByStepId.set(
@@ -140,6 +121,15 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   }
   const selected = await resolveSelectedPaths(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id,
     selectors: input.step.workProductSelectors, references, pins: pinIds });
+  for (const [stepId, value] of selected) {
+    if (!("correction" in value) || !value.correction) continue;
+    if (input.consumerStepRunId) {
+      const consumer = await selectQaCorrectionConsumer(input.db, value.correction, input.consumerStepRunId, stepId);
+      if (pinIds.get(stepId) !== consumer.binding.row.workProductId) throw new Error("workproduct_selector_pin_conflict");
+    }
+    // Keep the existing binding and generation; render all sibling paths from the issued B main.
+    if (!verifyReceiptRefs.has(stepId)) pathsByStepId.set(stepId, value.file);
+  }
   // [소비 하드닍 4단계] selector 없는 참조 중 시드 없음(=레거시 폴백/핀 소비 대상)을 분류한다.
   // 분류는 resolveSelectedPaths 와 동일하게 findWorkflowSeed 를 재사용한다 — 시드가 존재하면
   // (tool-output 은 resolveToolResultPaths, 비 tool-output 은 위 explicit_selector_required)
@@ -147,7 +137,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   const declaredSelectors = input.step.workProductSelectors as Record<string, unknown> | undefined;
   const selectorlessSeedless = new Set<string>();
   for (const stepId of references) {
-    if (verifyReceiptRefs.has(stepId)) continue; // 영수증 참조는 산출물 소비 게이트의 대상이 아니다
+    if (verifyReceiptRefs.has(stepId)) continue;
     if (declaredSelectors?.[stepId] !== undefined) continue;
     if (await findWorkflowSeed(input.db, { companyId: input.run.companyId, workflowRunId: input.run.id, stepId })) continue;
     selectorlessSeedless.add(stepId);
@@ -178,6 +168,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   // 후보) — 핀 생성 이전에 게이트가 “무엇이 폴백으로 소비되는가”를 판정하기 위한 미러다.
   const fallbackTarget = new Map<string, (typeof products)[number]>();
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (fallbackTarget.has(product.stepId) || pathsByStepId.has(product.stepId)) continue;
     if (product.provider !== "local" && product.provider !== "local_file") continue;
     if (!resolveWorkProductLocalFilePath(product)) continue;
@@ -200,6 +191,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
   const pinCandidates: typeof products = [];
   const candidateStepIds = new Set<string>();
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (candidateStepIds.has(product.stepId)) continue;
     if (pathsByStepId.has(product.stepId)) continue; // 이미 핀된 참조는 재핀 대상 아니다
     if (product.provider !== "local" && product.provider !== "local_file") continue;
@@ -241,6 +233,7 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
     });
   }
   for (const product of products) {
+    if (verifyReceiptRefs.has(product.stepId)) continue;
     if (pathsByStepId.has(product.stepId)) continue;
     if (product.provider !== "local" && product.provider !== "local_file") continue;
     const localPath = resolveWorkProductLocalFilePath(product);
@@ -288,107 +281,14 @@ export const resolveWorkflowToolStepArgs = withSelectedInputTransaction(async (i
     );
   }
 
-  await resolveToolResultPaths(input, Array.from(references).filter(id => !pathsByStepId.has(id)), pathsByStepId);
+  await resolveToolResultPaths(input, Array.from(references).filter(id => !verifyReceiptRefs.has(id) && !pathsByStepId.has(id)), pathsByStepId);
   for (const stepId of references) {
     if (!pathsByStepId.has(stepId)) {
       throw new Error(`Workflow tool step "${input.step.id}" could not resolve an active local workProduct for ancestor step "${stepId}".`);
     }
   }
 
-  return renderChecked(args, input.run.runDate ?? "", input.run.id, pathsByStepId, runMetadata);
+  return renderWorkflowToolStepArgsWithResolvedValues({
+    args, runDate: input.run.runDate ?? "", runId: input.run.id, pathsByStepId, runMetadata,
+  });
 });
-
-/**
- * [fix2 P2-7] 렌더 후 미해결 {$childInputs.*} 토큰은 fail-closed — enqueue/실행 이전에
- * 구조화 실패(throw)로 마감된다. 도구 실행기가 알 수 없는 자식 입력 토큰을 받는 일은 없다.
- */
-function renderChecked(value: unknown, runDate: string, runId: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
-  const rendered = renderTemplates(value, runDate, runId, pathsByStepId, runMetadata);
-  const serialized = JSON.stringify(rendered ?? "");
-  const unresolved = UNRESOLVED_CHILD_INPUTS_TOKEN.exec(serialized);
-  if (unresolved) {
-    throw new Error(
-      `Unresolved {$childInputs} token in tool args: ${unresolved[0]}`
-      + " (child input keys must be declared on the parent workflow step inputs)",
-    );
-  }
-  return rendered;
-}
-
-/**
- * [수정 변경맵 Q11 — 대상층 재렌더] seed 물화 재검증용 순수 렌더: 실행 경로와 동일한 renderChecked
- * 파이프라인으로 인자를 재렌더하되, 해석 결과값(run 좌표·run metadata·참조 경로 맵)을 호출자가
- * 명시적으로 공급받는다. DB 조회·핀 기록은 수행하지 않는다(해석 기계의 렌더 단말만 재사용).
- */
-export function renderWorkflowToolStepArgsWithResolvedValues(input: {
-  args: unknown; runDate: string; runId: string; pathsByStepId: Map<string, string>; runMetadata: Record<string, unknown>;
-}): unknown {
-  return renderChecked(input.args, input.runDate, input.runId, input.pathsByStepId, input.runMetadata);
-}
-
-/**
- * [arg hygiene — 2026-09-02] bash ANSI-C 이스케이프 잔여 정화.
- * 오너/에이전트가 셸 오류 메시지에서 복사한 경로가 `$'/srv/...'` 또는 `$/srv/...` 형태로
- * 인자에 섞여 들어오면 도구가 존재하지 않는 경로(`$/...`)를 열다 실패한다(2026-08-29/31
- * enqueue-naver-publish 오염 2건, 25.6분 현수). `$/`·`$'`로 시작하는 문자열 값은
- * 정상 경로/값으로 존재할 수 없으므로 선행 `$`를 제거한다.
- */
-export function stripShellEscapeResidue(value: unknown): unknown {
-  if (typeof value === "string") {
-    if (value.startsWith("$/") || value.startsWith("$'")) return value.slice(1);
-    return value;
-  }
-  if (Array.isArray(value)) return value.map((item) => stripShellEscapeResidue(item));
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = stripShellEscapeResidue(entry);
-    }
-    return out;
-  }
-  return value;
-}
-
-/**
- * [runMonth — 2026-09-03] runDate(YYYY-MM-DD)에서 월 폴더용 YYYYMM 추출.
- * 파싱 실패 시 null — 렌더러는 원문 토큰을 그대로 둔다(렌더 실패보다 눈에 보이는 실패).
- */
-export function runMonthFromRunDate(runDate: string): string | null {
-  const match = /^(\d{4})-(\d{2})/.exec(runDate);
-  return match ? `${match[1]}${match[2]}` : null;
-}
-
-function renderTemplates(value: unknown, runDate: string, runId: string, pathsByStepId: Map<string, string>, runMetadata: Record<string, unknown>): unknown {
-  if (typeof value === "string") {
-    return stripShellEscapeResidue(value
-      .replaceAll("{$runDate}", runDate)
-      .replaceAll("{$date}", runDate)
-      .replaceAll("{$workflowRunId}", runId)
-      .replaceAll("{$runMonth}", runMonthFromRunDate(runDate) ?? "{$runMonth}")
-      .replace(STEP_ARTIFACT_TOKEN, (token, stepId: string, field: string) => {
-        const workProductPath = pathsByStepId.get(stepId);
-        if (!workProductPath) return token;
-        if (field === "workProductPath") return workProductPath;
-        if (field === "siblingAssetsDir") return path.join(path.dirname(workProductPath), "assets");
-        return path.dirname(workProductPath);
-      })
-      .replace(RUN_METADATA_TOKEN, (token, key: string) => {
-        if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
-        const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
-        return rendered === null ? token : rendered;
-      })
-      .replace(CHILD_INPUTS_TOKEN, (token, key: string) => {
-        const childInputs = runMetadata.workflowChildInputs;
-        if (!childInputs || typeof childInputs !== "object" || Array.isArray(childInputs)) return token;
-        const bag = childInputs as Record<string, unknown>;
-        if (!Object.prototype.hasOwnProperty.call(bag, key)) return token;
-        const rendered = stringifyWorkflowRunMetadataValue(bag[key]);
-        return rendered === null ? token : rendered;
-      }));
-  }
-  if (Array.isArray(value)) return value.map((item) => renderTemplates(item, runDate, runId, pathsByStepId, runMetadata));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplates(item, runDate, runId, pathsByStepId, runMetadata)]));
-  }
-  return value;
-}

@@ -16,6 +16,8 @@ import { drainHeartbeatRuns } from "./helpers/cap-override-fixtures.js";
 import { failIssueBackedAttempt, seedIssueBackedRetryWorkflow } from "./helpers/workflow-step-retry-issue-fixture.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import { getMissionOwnerActionResult } from "../services/missions/mission-owner-execute.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import * as delivery from "../services/workflow/replacement-agent-delivery.js";
 
 const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
 vi.mock("../adapters/index.js", () => ({
@@ -108,6 +110,8 @@ describe("mission owner execute issue step (real DB + native source-issue resume
   const resumeWakes = (s: Scenario) => db.select().from(agentWakeupRequests).where(and(
     eq(agentWakeupRequests.companyId, s.companyId), eq(agentWakeupRequests.issueId, s.issueId),
     eq(agentWakeupRequests.requestKind, "workflow_resume")));
+  const workerHeartbeats = (s: Scenario) => db.select().from(heartbeatRuns)
+    .where(eq(heartbeatRuns.issueId, s.issueId)).orderBy(heartbeatRuns.id);
   const snapshot = async (s: Scenario) => JSON.stringify({ run: await runRow(s), step: await stepRow(s),
     authorities: await authorities(s), wakes: await resumeWakes(s) });
   async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<void> {
@@ -188,36 +192,98 @@ describe("mission owner execute issue step (real DB + native source-issue resume
       expect(await snapshot(s)).toBe(before);
     });
 
-  it("keeps delivery pending after a post-recovery wake rejection and recovers only delivery on replay", async () => {
-    const s = await seed({ issueStatus: "in_review" }); // not runnable → native wake refused
-    const body = ownerBody(s);
-    const first = await callExecute(s, body);
+  // C02/C03 + addendum:4: request admission failure rolls recovery back; owner intent commits separately.
+  it("refuses an in-review source before recovery and preserves its existing execution records", async () => {
+    const s = await seed({ issueStatus: "in_review" });
+    executeSpy.mockClear();
+    const before = await snapshot(s), heartbeats = await workerHeartbeats(s);
+    const requests = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.issueId, s.issueId)).orderBy(agentWakeupRequests.id);
+    expect(await runRow(s)).toMatchObject({ status: "failed", dispatchAuthorityVersion: 0 });
+    expect(await stepRow(s)).toMatchObject({ status: "failed", executionGeneration: 0 });
+    const first = await callExecute(s, ownerBody(s));
     expect(first.status).toBe(200);
     const action = first.body.data as { actionId: string; state: string };
-    expect(action.state).toBe("delivery_pending");
-    const [authority] = await authorities(s); // official recovery committed
-    expect(authority).toBeTruthy();
-    const run = await runRow(s);
-    expect(run.status).toBe("running"); // never reverted to an old-version failed run
-    expect(run.dispatchAuthorityVersion).toBe(1);
-    const step = await stepRow(s);
-    expect(step.status).toBe("running");
-    expect(step.executionGeneration).toBe(1);
-    expect(await resumeWakes(s)).toHaveLength(0);
-    // Replay of the SAME action recovers delivery only — no second reset or cap consumption.
-    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, s.issueId));
-    const replay = await callExecute(s, body);
-    expect(replay.status).toBe(200);
-    expect(replay.body.data).toMatchObject({ actionId: action.actionId });
-    expect(["executing", "resolved"]).toContain((replay.body.data as { state: string }).state);
-    expect(await authorities(s)).toHaveLength(1);
-    expect((await stepRow(s)).executionGeneration).toBe(1);
-    await waitFor(async () => (await stepRow(s)).status === "completed");
-    expect((await getResult(s, action.actionId)).state).toBe("resolved");
-    // A NEW action with the consumed failure target stays blocked (needs a new exact failure).
-    const stale = await callExecute(s, ownerBody(s));
-    expect((stale.body.data as { state: string }).state).toBe("blocked");
-    expect(await authorities(s)).toHaveLength(1);
+    expect(action.state).toBe("blocked"); // Old delivery_pending/authority 1/version 1/generation 1 was pre-atomicity.
+    expect(await snapshot(s)).toBe(before); // run, step, authority, generations and requests only, not all DB writes
+    expect(await authorities(s)).toHaveLength(0);
+    expect(await workerHeartbeats(s)).toEqual(heartbeats);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, s.issueId))
+      .orderBy(agentWakeupRequests.id)).toEqual(requests);
+    expect(executeSpy).not.toHaveBeenCalled();
+    const intents = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, s.companyId), eq(workflowTransitionEvents.issueId, s.ownerActionIssueId),
+      eq(workflowTransitionEvents.eventType, "owner_execute_intent_v1")));
+    expect(intents).toEqual([{ id: action.actionId }]); // This separate durable intent is allowed to remain.
+  });
+
+  it("reuses the committed request after lost notification and completes through the native queue re-read", async () => {
+    const s = await seed({ issueStatus: "blocked" });
+    executeSpy.mockClear(); // Seed dispatch has already drained; measure only the recovery worker.
+    const drain = vi.spyOn(delivery, "drainReplacementRootNotifications")
+      .mockRejectedValueOnce(new Error("committed source delivery lost"));
+    let failed = false;
+    try {
+      const body = ownerBody(s);
+      const first = await callExecute(s, body);
+      expect(first.status).toBe(200);
+      const action = first.body.data as { actionId: string; state: string };
+      expect(action.state).toBe("executing"); // Existing queued projection; NOT proof of adapter start.
+      const authorityRows = await authorities(s);
+      expect(authorityRows).toHaveLength(1);
+      const [authority] = authorityRows;
+      expect(authority).toMatchObject({ requestReference: `mission-owner-execute:${action.actionId}`,
+        recoveryKind: "supervision_tool_retry", targetAuthorityVersion: 0, resultingAuthorityVersion: 1 });
+      expect(await runRow(s)).toMatchObject({ status: "running", dispatchAuthorityVersion: 1 });
+      expect(await stepRow(s)).toMatchObject({ status: "running", executionGeneration: 1 });
+      const wakes = await resumeWakes(s);
+      expect(wakes).toHaveLength(1);
+      const [wake] = wakes;
+      expect(wake).toMatchObject({ agentId: s.agentId, issueId: s.issueId, workflowRunId: s.workflowRunId,
+        workflowStepRunId: s.stepRunId, workflowExecutionGeneration: 1, requestKind: "workflow_resume" });
+      const heartbeats = await workerHeartbeats(s);
+      const linked = heartbeats.filter(row => row.wakeupRequestId === wake.id);
+      expect(linked).toHaveLength(1);
+      const [heartbeat] = linked;
+      expect(heartbeat).toMatchObject({ status: "queued", companyId: s.companyId, agentId: s.agentId,
+        issueId: s.issueId, wakeupRequestId: wake.id });
+      expect(wake.runId).toBe(heartbeat.id);
+      expect(heartbeat.contextSnapshot).toMatchObject({ issueId: s.issueId, missionId: s.missionId,
+        workflowRunId: s.workflowRunId, workflowStepRunId: s.stepRunId });
+      expect(drain).toHaveBeenCalledTimes(1);
+      expect(executeSpy).not.toHaveBeenCalled();
+      const committed = await snapshot(s);
+      const replay = await callExecute(s, body);
+      expect(replay.status).toBe(200);
+      expect(replay.body.data).toMatchObject({ actionId: action.actionId, state: "executing" });
+      expect(await snapshot(s)).toBe(committed); // Same authority 1, generation 1 and exact request ID.
+      expect(await workerHeartbeats(s)).toEqual(heartbeats); // Same queued heartbeat ID and wake linkage.
+      expect(executeSpy).not.toHaveBeenCalled();
+      await heartbeatService(db).resumeQueuedRuns(s.agentId);
+      await waitFor(async () => (await stepRow(s)).status === "completed"
+        && (await workerHeartbeats(s)).some(row => row.id === heartbeat.id && row.status === "succeeded"));
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+      expect(executeSpy.mock.calls[0]?.[0]).toMatchObject({ runId: heartbeat.id });
+      expect((await workerHeartbeats(s)).filter(row => row.wakeupRequestId === wake.id))
+        .toMatchObject([{ id: heartbeat.id, wakeupRequestId: wake.id, status: "succeeded",
+          workflowStepRunId: s.stepRunId, workflowExecutionGeneration: 1 }]);
+      expect((await getResult(s, action.actionId)).state).toBe("resolved");
+      expect((await resumeWakes(s)).map(row => row.id)).toEqual([wake.id]);
+      expect(await authorities(s)).toHaveLength(1);
+      expect((await stepRow(s)).executionGeneration).toBe(1);
+      expect((await runRow(s)).dispatchAuthorityVersion).toBe(1);
+      // A NEW action against the consumed failure still needs a new exact failure.
+      const stale = await callExecute(s, ownerBody(s));
+      expect((stale.body.data as { state: string }).state).toBe("blocked");
+      expect(await authorities(s)).toHaveLength(1);
+    } catch (error) { failed = true; throw error; }
+    finally {
+      drain.mockRestore();
+      try {
+        await heartbeatService(db).resumeQueuedRuns(s.agentId);
+        await drainHeartbeatRuns(db);
+      } catch (error) { if (!failed) throw error; console.error("Recovery cleanup failed after test failure", error); }
+    }
   });
 
   it("never reaches the privileged cap-override branch for automatic retries", async () => {

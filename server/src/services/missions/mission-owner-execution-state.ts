@@ -1,16 +1,13 @@
 // server/src/services/missions/mission-owner-execution-state.ts
 //
-// [목적] 미션 오너 실행 권한의 공통 상태 계약: intent/applied machine 이벤트 기록·멱등 key·
-//   최신 intent 비교·결과 투영, 그리고 실제 실행 경계(invocation/wake admission)의 현재성 펜스.
-//   facade(mission-owner-execute.ts)와 dag-engine 의 wake 승인 지점이 같은 잠금 순서
-//   (mission→run→step)로 재확인한다. 자연어 기록은 권위가 아니며 machine contract 만 읽는다.
+// [목적] 미션 오너 실행의 intent/applied 원장·멱등 key·결과 투영과 실제 실행 현재성 펜스.
+// facade와 dag-engine은 같은 잠금 순서(mission→run→step)로 machine contract만 재확인한다.
 import { and, desc, eq } from "drizzle-orm";
 import {
-  missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns,
-  workflowTransitionEvents, type Db,
+  missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import type { MissionOwnerAction } from "@paperclipai/shared/validators/mission-owner-authority";
-
+import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE } from "./owner-human-request-contract.js";
 export type OwnerActionResult = {
   schemaVersion: 1; actionId: string; operation: MissionOwnerAction["operation"];
   state: "accepted" | "applied" | "delivery_pending" | "executing" | "needs_evidence" | "resolved" | "blocked" | "superseded";
@@ -24,14 +21,40 @@ export type OwnerActionResult = {
 };
 export type OwnerExecutionAdmission = { schemaVersion: 1; actionId: string;
   expectedAuthorityVersion: number; expectedExecutionGeneration: number };
-export const INTENT_EVENT = "owner_execute_intent_v1";
-export const APPLIED_EVENT = "owner_execute_applied_v1";
+export const INTENT_EVENT = "owner_execute_intent_v1", APPLIED_EVENT = "owner_execute_applied_v1";
+const CONSUMED_EVENT = "owner_human_consumed_v1";
 const LAYER = "mission_owner_authority";
 const SOURCE = "mission_owner_execute";
 const REFERENCE_PREFIX = "mission-owner-execute:";
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const num = (value: unknown): number | null => typeof value === "number" && Number.isInteger(value) ? value : null;
+type OwnerResponse = { lifetimeId: string | null; operatorDecisionId: string; responseRunId: string; responseWake: { id: string }; actualWake: { id: string } } | null;
+export function ownerIntentResponseSource(response: OwnerResponse, heartbeatRunId: string) {
+  return response?.lifetimeId ? { schemaVersion: 1, lifetimeId: response.lifetimeId,
+    operatorDecisionId: response.operatorDecisionId, heartbeatRunId, wakeupRequestId: response.actualWake.id,
+    responseHeartbeatRunId: response.responseRunId, responseWakeupRequestId: response.responseWake.id } : null;
+}
+async function intentResponseSourceValid(db: Db, companyId: string, missionId: string, issueId: string, heartbeatRunId: string | null, lifetimeId: string | null, value: unknown) {
+  if (value === null || value === undefined) return lifetimeId === null;
+  const source = record(value);
+  if (typeof lifetimeId !== "string" || source.schemaVersion !== 1 || source.lifetimeId !== lifetimeId
+    || typeof source.operatorDecisionId !== "string" || source.heartbeatRunId !== heartbeatRunId
+    || typeof source.wakeupRequestId !== "string" || typeof source.responseHeartbeatRunId !== "string"
+    || typeof source.responseWakeupRequestId !== "string") return false;
+  const [consumed] = await db.select({ missionId: workflowTransitionEvents.missionId, issueId: workflowTransitionEvents.issueId,
+    wakeupRequestId: workflowTransitionEvents.wakeupRequestId, layer: workflowTransitionEvents.layer, reason: workflowTransitionEvents.reason, reasonCode: workflowTransitionEvents.reasonCode, payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.eventType, CONSUMED_EVENT),
+    eq(workflowTransitionEvents.heartbeatRunId, heartbeatRunId!), eq(workflowTransitionEvents.idempotencyKey, `${CONSUMED_EVENT}:${source.lifetimeId}:${heartbeatRunId}`))).limit(1);
+  const payload = record(consumed?.payload);
+  return consumed?.missionId === missionId && consumed.issueId === issueId && consumed.wakeupRequestId === source.wakeupRequestId
+    && consumed.layer === OWNER_HUMAN_LAYER && consumed.reason === OWNER_HUMAN_SOURCE && consumed.reasonCode === OWNER_HUMAN_SOURCE
+    && payload.schemaVersion === 1 && payload.kind === CONSUMED_EVENT
+    && payload.lifetimeId === source.lifetimeId && payload.operatorDecisionId === source.operatorDecisionId
+    && payload.heartbeatRunId === source.heartbeatRunId && payload.wakeupRequestId === source.wakeupRequestId
+    && payload.responseHeartbeatRunId === source.responseHeartbeatRunId
+    && payload.responseWakeupRequestId === source.responseWakeupRequestId;
+}
 export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") {
@@ -51,17 +74,21 @@ export async function latestIntentEventId(db: Db, companyId: string, ownerAction
       eq(workflowTransitionEvents.eventType, INTENT_EVENT), eq(workflowTransitionEvents.layer, LAYER),
       eq(workflowTransitionEvents.reason, SOURCE)))
     .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id)).limit(1);
-  return latest?.id ?? null;
+  return latest && await loadIntentEvent(db, companyId, latest.id) ? latest.id : null;
 }
 async function loadIntentEvent(db: Db, companyId: string, actionId: string): Promise<{
   issueId: string; missionId: string; agentId: string | null; bodyFingerprint: unknown;
 } | null> {
-  const [intent] = await db.select({ issueId: workflowTransitionEvents.issueId,
-    missionId: workflowTransitionEvents.missionId, payload: workflowTransitionEvents.payload })
+  const [intent] = await db.select({ issueId: workflowTransitionEvents.issueId, missionId: workflowTransitionEvents.missionId,
+    heartbeatRunId: workflowTransitionEvents.heartbeatRunId, correlationId: workflowTransitionEvents.correlationId,
+    payload: workflowTransitionEvents.payload })
     .from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.id, actionId),
       eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.eventType, INTENT_EVENT),
       eq(workflowTransitionEvents.layer, LAYER), eq(workflowTransitionEvents.reason, SOURCE))).limit(1);
   if (!intent?.issueId || !intent.missionId) return null;
+  if (!(await intentResponseSourceValid(db, companyId, intent.missionId, intent.issueId,
+    intent.heartbeatRunId, intent.correlationId,
+    record(intent.payload).ownerHumanResponse))) return null;
   return { issueId: intent.issueId, missionId: intent.missionId,
     agentId: typeof record(intent.payload).agentId === "string" ? record(intent.payload).agentId as string : null,
     bodyFingerprint: record(intent.payload).bodyFingerprint };

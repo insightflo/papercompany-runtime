@@ -7,6 +7,7 @@ import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import { producerAttempt } from "../work-products/producer-attempt.js";
 import { workProductProducerMismatches } from "./workproduct-producer-comparison.js";
 import { ProducerRebindRequired, withAutomaticProducerRebind } from "./automatic-producer-rebind.js";
+import { readQaCorrectionSelectedProduct, type CorrectionSelectedProduct } from "./control-flow/qa-correction-selection.js";
 
 /**
  * [producer provenance rebind] 보드 승인 재바인딩 표시가 생산 사실과 정합한지 검증.
@@ -50,7 +51,7 @@ export function selectSameRunWorkProduct(db: Db, scope: SameRunScope) {
   return withAutomaticProducerRebind(db, () => readSameRunWorkProduct(db, scope));
 }
 
-async function readSameRunWorkProduct(db: Db, scope: SameRunScope) {
+async function readSameRunWorkProduct(db: Db, scope: SameRunScope): Promise<CorrectionSelectedProduct> {
   const [source] = await db.select({ run: workflowRuns, step: workflowStepRuns }).from(workflowRuns)
     .innerJoin(workflowStepRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
     .where(and(eq(workflowRuns.id, scope.workflowRunId), eq(workflowRuns.companyId, scope.companyId), eq(workflowStepRuns.stepId, scope.stepId)));
@@ -61,6 +62,9 @@ async function readSameRunWorkProduct(db: Db, scope: SameRunScope) {
     eq(issueWorkProducts.type, scope.selector.type), eq(issueWorkProducts.title, scope.selector.title)));
   if (products.length !== 1) throw new Error("workproduct_selector_not_exactly_one");
   const product = products[0];
+  if (Object.hasOwn(product.metadata ?? {}, "qaCorrection")) {
+    return readQaCorrectionSelectedProduct(db, scope, product);
+  }
   const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
   if (!parsed.success) throw new Error("workproduct_selector_provenance_missing");
   const p = parsed.data, s = source.step;

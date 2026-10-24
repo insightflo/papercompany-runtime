@@ -292,36 +292,36 @@ describeEP("issue-less workflow retry exhaustion Human Operator reporting", () =
       const seed = await seedIssueLessConsumedRecovery(db, { cardStatus });
       const svc = missionService(db);
 
+      const [historical] = await db.select().from(issues).where(eq(issues.id, seed.recoveryIssueId));
+      const snapshot = async () => ({
+        unblocks: await db.select().from(issues).where(and(eq(issues.companyId, seed.companyId),
+          eq(issues.missionId, seed.missionId), eq(issues.originKind, "mission_main_executor_unblock"))).orderBy(issues.id),
+        reports: await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.companyId, seed.companyId),
+          eq(workflowTransitionEvents.missionId, seed.missionId), eq(workflowTransitionEvents.eventType, REPORT_EVENT_TYPE))),
+        audits: await db.select().from(activityLog).where(and(
+          eq(activityLog.companyId, seed.companyId), eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION))),
+        comments: await db.select().from(issueComments).where(eq(issueComments.issueId, seed.recoveryIssueId)),
+        operatorRequests: await listCompanyHumanOperatorRequests(db, { companyId: seed.companyId }),
+      });
       const first = await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-10-14T13:30:00.000Z") });
-      const second = await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-10-14T13:31:00.000Z") });
-
+      const current = await snapshot();
       expect(first.findings.filter((finding) => finding.includes("terminal_mission_human_operator_request_emitted"))).toHaveLength(1);
+      expect(current.unblocks).toHaveLength(2);
+      expect(current.unblocks.find((issue) => issue.id === seed.recoveryIssueId)).toEqual(historical);
+      const open = current.unblocks.filter((issue) => !["done", "cancelled"].includes(issue.status));
+      expect(open).toHaveLength(1);
+      expect(open[0]).toMatchObject({ status: "todo", originId: seed.authorityIssueId, completedAt: null });
+      expect(open[0]!.id).not.toBe(seed.recoveryIssueId);
+      expect(current.reports).toHaveLength(1);
+      expect(current.reports[0]).toMatchObject({ workflowRunId: seed.workflowRunId, issueId: seed.recoveryIssueId, correlationId: seed.recoveryIssueId });
+      expect(current.audits).toHaveLength(1);
+      expect(current.audits[0]!.entityId).toBe(seed.recoveryIssueId);
+      expect(current.comments).toHaveLength(1);
+      expect(current.operatorRequests).toHaveLength(1);
+      expect(current.operatorRequests[0]).toMatchObject({ missionId: seed.missionId, issueId: seed.authorityIssueId });
+      const second = await svc.runMainExecutorSupervision({ missionId: seed.missionId, staleAfterMinutes: 1, now: new Date("2026-10-14T13:31:00.000Z") });
       expect(second.findings.filter((finding) => finding.includes("terminal_mission_human_operator_request_emitted"))).toHaveLength(0);
-
-      const reports = await db.select().from(workflowTransitionEvents).where(and(
-        eq(workflowTransitionEvents.eventType, REPORT_EVENT_TYPE),
-        eq(workflowTransitionEvents.correlationId, seed.recoveryIssueId),
-      ));
-      expect(reports).toHaveLength(1);
-      expect(reports[0]!.workflowRunId).toBe(seed.workflowRunId);
-
-      const audits = await db.select().from(activityLog).where(and(
-        eq(activityLog.entityId, seed.recoveryIssueId),
-        eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION),
-      ));
-      expect(audits).toHaveLength(1);
-
-      const unblocks = await db.select().from(issues).where(and(
-        eq(issues.companyId, seed.companyId),
-        eq(issues.missionId, seed.missionId),
-        eq(issues.originKind, "mission_main_executor_unblock"),
-      ));
-      expect(unblocks).toHaveLength(1);
-
-      const operatorRequests = await listCompanyHumanOperatorRequests(db, { companyId: seed.companyId });
-      expect(operatorRequests).toHaveLength(1);
-      expect(operatorRequests[0]!.missionId).toBe(seed.missionId);
-      expect(operatorRequests[0]!.issueId).toBe(seed.authorityIssueId);
+      expect(await snapshot()).toEqual(current);
     },
   );
 

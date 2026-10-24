@@ -91,10 +91,23 @@ export async function cuCase(fixture: ExecutionDefinitionFixtureDb) {
     cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 export type CuCase = Awaited<ReturnType<typeof cuCase>>;
+const CU_ENV_KEYS = ["PAPERCLIP_CU_OBSERVERS_JSON", "PAPERCLIP_CU_LOCAL_OBJECT_ROOT", "PAPERCLIP_CU_EVIDENCE_ROOT",
+  "PAPERCLIP_CU_RECEIVER_PYTHON", "PAPERCLIP_CU_RECEIVER_SCRIPT"] as const;
+function captureCuEnvironment() {
+  return CU_ENV_KEYS.map(key => [key, process.env[key]] as const);
+}
+function applyCuEnvironment(values: ReturnType<typeof captureCuEnvironment>) {
+  for (const [key, value] of values) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 export function cuApp(fixture: ExecutionDefinitionFixtureDb, c: CuCase) {
   const app = express(); app.use(express.json({ limit: "12mb" }));
+  app.use((_req, res, next) => { res.locals.cuEnvironment = captureCuEnvironment(); next(); });
   app.use(actorMiddleware(fixture.db, { deploymentMode: "authenticated", resolveSession: async req =>
     req.header("x-fixture-board") ? { user: { id: "cu-board" }, session: {} } as never : null }));
+  app.use((_req, res, next) => { applyCuEnvironment(res.locals.cuEnvironment); next(); });
   app.use(boardMutationGuard()); app.use(workflowResumeRoutes(fixture.db));
   app.use((error: any, _req: any, res: any, _next: any) => res.status(error.status ?? 500).json({ error: error.message }));
   return app;
@@ -104,15 +117,8 @@ export async function boardMembership(fixture: ExecutionDefinitionFixtureDb, c: 
     VALUES (${c.companyId},'user','cu-board','active','owner')`;
 }
 export function snapshotCuEnvironment() {
-  const keys = ["PAPERCLIP_CU_OBSERVERS_JSON", "PAPERCLIP_CU_LOCAL_OBJECT_ROOT", "PAPERCLIP_CU_EVIDENCE_ROOT",
-    "PAPERCLIP_CU_RECEIVER_PYTHON", "PAPERCLIP_CU_RECEIVER_SCRIPT"];
-  const prior = keys.map(key => [key, process.env[key]] as const);
-  return () => {
-    for (const [key, value] of prior) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
+  const prior = captureCuEnvironment();
+  return () => applyCuEnvironment(prior);
 }
 export function configureCu(c: CuCase, receiver?: { executable: string; script: string }) {
   process.env.PAPERCLIP_CU_OBSERVERS_JSON = JSON.stringify([c.principal]);

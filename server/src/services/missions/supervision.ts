@@ -1870,7 +1870,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                       decision: "retry_source_issue",
                       resultStatus: ownerWakeupStatus,
                     });
-                    findings.push(`owner_action_retry_unresolved_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked; owner action reopened`);
+                    findings.push(`owner_action_retry_unresolved_escalated: ${label} retry_source_issue source=${sourceCandidateLabel} terminal=${sourceCandidate.status}; ${blockedOriginIssue.identifier ?? blockedOriginIssue.id} remains blocked; canonical owner anchor ensured`);
                     appliedActions.push({
                       type: "owner_decision_retry_unresolved",
                       missionId: mission.id,
@@ -2366,7 +2366,7 @@ export function createSupervision({ db, deps, ownerActions }: {
         }
       }
       if (
-        issue.status === "blocked" &&
+        issue.status === "blocked" && !issue.hiddenAt && !isTerminalMissionStatus(mission.status) &&
         issue.originKind !== "mission_main_executor_unblock" &&
         !isRejectedPlanningIssue &&
         !qaCapSourceIssueIds.has(issue.id)

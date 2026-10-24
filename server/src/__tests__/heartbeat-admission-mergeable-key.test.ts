@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { agentWakeupRequests, agents, companies, createDb } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { mergeableWakeupKeyCondition } from "../services/quality/heartbeat-admission.js";
+import { findExistingQualityWakeRow, mergeableWakeupKeyCondition } from "../services/quality/heartbeat-admission.js";
 
 const describeEP = (await getEmbeddedPostgresTestSupport()).supported ? describe : describe.skip;
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -42,23 +42,32 @@ async function matches(id: string, incomingKey: string | null) {
 }
 
 describeEP("mergeableWakeupKeyCondition", () => {
-  it("matches only the exact operator-decision attempt key", async () => {
+  it("keeps bounded operator-decision keys out of generic payload merging", async () => {
     const decisionA = randomUUID();
     const decisionB = randomUUID();
     const stored = `operator-decision-wake:${decisionA}:g1:a1`;
     const id = await insertWake(stored);
 
-    expect(await matches(id, stored)).toBe(true);
+    expect(await matches(id, stored)).toBe(false);
     expect(await matches(id, `operator-decision-wake:${decisionA}:g1:a2`)).toBe(false);
     expect(await matches(id, `operator-decision-wake:${decisionB}:g1:a1`)).toBe(false);
     expect(await matches(id, null)).toBe(false);
   });
 
-  it("keeps the same exact-only rule for qa-remediation refires", async () => {
+  it("keeps qa-remediation refires out of generic payload merging", async () => {
     const stored = `qa-remediation-refire:${randomUUID()}:g1:a1`;
     const id = await insertWake(stored);
-    expect(await matches(id, stored)).toBe(true);
+    expect(await matches(id, stored)).toBe(false);
     expect(await matches(id, `${stored}-other`)).toBe(false);
     expect(await matches(id, null)).toBe(false);
+  });
+
+  it("reuses only the exact bounded key through the admission lookup", async () => {
+    const stored = `operator-decision-wake:${randomUUID()}:g1:a1`;
+    const id = await insertWake(stored);
+    expect(await findExistingQualityWakeRow(db, { companyId, idempotencyKey: stored }))
+      .toMatchObject({ id, idempotencyKey: stored });
+    expect(await findExistingQualityWakeRow(db, { companyId,
+      idempotencyKey: `${stored}-other` })).toBeNull();
   });
 });

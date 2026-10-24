@@ -18,7 +18,7 @@ import {
   type WorkflowRetryAttemptSummary,
 } from "./retry-policy.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
-import { readQualityStepActionId, reserveQualityRetryUsage } from "../quality/retry-budget.js";
+import { lockQualityAttemptBudget, readQualityStepActionId, reserveQualityRetryUsage } from "../quality/retry-budget.js";
 import {
   appendWorkflowAuthorityTransition,
   supersedeWorkflowDelegationsForGeneration,
@@ -114,6 +114,11 @@ export async function scheduleWorkflowStepRetry(
 
   try {
     return await db.transaction(async (tx) => {
+      const qualityActionId = readQualityStepActionId(input.observedMetadataSnapshot);
+      // Budget prefix precedes mission/run; locking alone never rejects an exhausted duplicate.
+      const qualityBudget = qualityActionId
+        ? await lockQualityAttemptBudget(tx, { companyId: input.companyId, actionId: qualityActionId, now })
+        : undefined;
       await lockUnreplacedRun(tx as unknown as Db, input.workflowRunId, input.companyId);
       // Step 1: idempotent event insert.
       const claimed = await tx
@@ -147,9 +152,8 @@ export async function scheduleWorkflowStepRetry(
 
       // [T4 quality] quality-owned step 는 이 retry tx 안에서 group+policy 실행 사용량을
       // 예약한다. 한도 초과면 예외로 전체 tx(이벤트 포함)가 롤백된다.
-      const qualityActionId = readQualityStepActionId(input.observedMetadataSnapshot);
       if (qualityActionId) {
-        await reserveQualityRetryUsage(tx, { companyId: input.companyId, actionId: qualityActionId, now });
+        await reserveQualityRetryUsage(tx, { companyId: input.companyId, actionId: qualityActionId, now }, qualityBudget);
       }
       const qualityOwned = qualityActionId !== null;
 

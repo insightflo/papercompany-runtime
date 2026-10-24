@@ -53,6 +53,15 @@ async function missionRuntimeNotBusy(db: ProbeDb, run: HeartbeatRun): Promise<bo
   return Number(n ?? 0) === 0;
 }
 
+/** Shared resource observations only; this does not prove that an executor has stopped. */
+export async function observeQuiescenceResources(db: ProbeDb, run: HeartbeatRun): Promise<Record<string, boolean>> {
+  return {
+    [Q_STAGE.workspaceOperationsSettled]: await noRunningWorkspaceOperations(db, run),
+    [Q_STAGE.runtimeServicesStopped]: await runOwnedRuntimeServicesStopped(db, run),
+    [Q_STAGE.missionRuntimeIdle]: await missionRuntimeNotBusy(db, run),
+  };
+}
+
 export interface QuiescenceProof {
   observedAt: string;
   checks: Record<string, boolean>;
@@ -69,9 +78,7 @@ export async function observeQuiescenceProof(
 ): Promise<QuiescenceProof | null> {
   const checks: Record<string, boolean> = {
     [Q_STAGE.executorQuiescence]: isExecutorProcessAbsent(run),
-    [Q_STAGE.workspaceOperationsSettled]: await noRunningWorkspaceOperations(db, run),
-    [Q_STAGE.runtimeServicesStopped]: await runOwnedRuntimeServicesStopped(db, run),
-    [Q_STAGE.missionRuntimeIdle]: await missionRuntimeNotBusy(db, run),
+    ...await observeQuiescenceResources(db, run),
   };
   const allObserved = Object.values(checks).every(Boolean);
   if (!allObserved) return null;

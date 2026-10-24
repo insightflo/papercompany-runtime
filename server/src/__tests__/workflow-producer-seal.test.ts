@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { agents, companies, createDb, issues, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, issues, issueWorkProducts, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { admittedProducer } from "./helpers/admitted-producer.js";
 import { workProductService } from "../services/work-products.js";
@@ -131,4 +131,119 @@ it("rejects stale restamps before changing a previously recorded seal", async ()
   await writeFile(f.file, "changed");
   await expect(f.svc.restampProducer(product!.id, f.heartbeatId, {})).rejects.toThrow("workproduct_producer_stale_generation");
   expect(await f.svc.getById(product!.id)).toEqual(product);
+});
+
+async function progressRows(companyId: string) {
+  return db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId),
+    eq(activityLog.action, "issue.work_product_progress_accepted"))).orderBy(activityLog.createdAt);
+}
+
+// C07: known file bytes, not caller hashes or registration frequency, define progress.
+it("records creation, excludes identical restamps, and attributes changed bytes to the admitted attempt", async () => {
+  const f = await fixture();
+  const product = await f.create({ workflowProducer: { ...binarySeal } });
+  const [created] = await progressRows(f.companyId);
+  expect(created).toMatchObject({ runId: f.heartbeatId, entityType: "issue_work_product", entityId: product!.id,
+    details: { progressEvidence: { schemaVersion: 1, companyId: f.companyId, issueId: f.issueId,
+      runId: f.heartbeatId, workProductId: product!.id, previousSha256: null,
+      newSha256: abcSeal.sha256, byteSize: 3, created: true, contentChanged: true,
+      workflowAttempt: { schemaVersion: "workflow.work-product-producer.v1", heartbeatRunId: f.heartbeatId,
+        stepRunId: f.stepRunId, stepId: "write", executionGeneration: 4, retryCount: 0, iterationIndex: 0 } } } });
+  expect(await progressRows(f.companyId)).toHaveLength(1);
+  await db.update(workflowStepRuns).set({ iterationIndex: 1 }).where(eq(workflowStepRuns.id, f.stepRunId));
+  const nextHeartbeatId = randomUUID();
+  await admittedProducer(db, { ...f, heartbeatId: nextHeartbeatId, status: "running" });
+  await f.svc.restampProducer(product!.id, nextHeartbeatId, { workflowProducer: { ...binarySeal } });
+  const identical = await progressRows(f.companyId);
+  expect(identical).toHaveLength(2);
+  const same = identical.find(row => row.id !== created.id)!;
+  expect(same).toMatchObject({ runId: nextHeartbeatId, details: { progressEvidence: {
+    previousSha256: abcSeal.sha256, newSha256: abcSeal.sha256, created: false, contentChanged: false,
+    workflowAttempt: { heartbeatRunId: nextHeartbeatId, iterationIndex: 1, retryCount: 0, executionGeneration: 4 },
+  } } });
+  await writeFile(f.file, Buffer.from([0, 255, 195, 169]));
+  await f.svc.restampProducer(product!.id, nextHeartbeatId, { workflowProducer: { ...abcSeal } });
+  const changed = await progressRows(f.companyId);
+  expect(changed).toHaveLength(3);
+  expect(changed.find(row => row.id !== created.id && row.id !== same.id)).toMatchObject({
+    runId: nextHeartbeatId, entityId: product!.id, details: { progressEvidence: {
+      previousSha256: abcSeal.sha256, newSha256: binarySeal.sha256, byteSize: 4,
+      created: false, contentChanged: true,
+      workflowAttempt: { heartbeatRunId: nextHeartbeatId, iterationIndex: 1 },
+    } },
+  });
+  // A later attempt must not rewrite the original event's historical attribution.
+  expect(changed.find(row => row.id === created.id)).toEqual(created);
+});
+
+// C07: legacy absence is unknown, even when today's bytes and caller hashes differ.
+it("does not infer changed content when the persisted previous seal is absent", async () => {
+  const f = await fixture(), product = await f.create();
+  const legacyProducer = { ...(product!.metadata!.workflowProducer as Record<string, unknown>) };
+  delete legacyProducer.sha256; delete legacyProducer.byteSize;
+  await db.update(issueWorkProducts).set({ metadata: { ...product!.metadata, workflowProducer: legacyProducer } })
+    .where(eq(issueWorkProducts.id, product!.id));
+  const before = await progressRows(f.companyId);
+  await writeFile(f.file, Buffer.from([0, 255, 195, 169]));
+  const updated = await f.svc.restampProducer(product!.id, f.heartbeatId, { workflowProducer: { ...abcSeal } });
+  expect(updated?.metadata?.workflowProducer).toMatchObject(binarySeal);
+  const after = await progressRows(f.companyId);
+  expect(after).toHaveLength(before.length + 1);
+  expect(after.find(row => !before.some(old => old.id === row.id))).toMatchObject({
+    details: { progressEvidence: { previousSha256: null, newSha256: binarySeal.sha256,
+      created: false, contentChanged: false } },
+  });
+});
+
+// C07/C03: audit persistence is part of each official write, never an after-commit effect.
+it.each(["create", "restamp"] as const)("rolls back both product and progress record on %s audit failure", async mode => {
+  const f = await fixture(), product = await f.create();
+  const beforeProducts = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.companyId, f.companyId));
+  const beforeEvents = await progressRows(f.companyId);
+  await writeFile(f.file, Buffer.from([0, 255, 195, 169]));
+  await db.$client.unsafe(`CREATE FUNCTION c07_product_progress_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.company_id='${f.companyId}' AND NEW.action='issue.work_product_progress_accepted'
+    THEN RAISE EXCEPTION 'c07 progress persistence failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER c07_product_progress_failure AFTER INSERT ON activity_log
+    FOR EACH ROW EXECUTE FUNCTION c07_product_progress_failure()`);
+  try {
+    await expect(mode === "create" ? f.create()
+      : f.svc.restampProducer(product!.id, f.heartbeatId, { note: "must roll back" })).rejects.toThrow();
+  } finally {
+    await db.$client.unsafe(`DROP TRIGGER c07_product_progress_failure ON activity_log;
+      DROP FUNCTION c07_product_progress_failure()`);
+  }
+  expect(await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.companyId, f.companyId))).toEqual(beforeProducts);
+  expect(await progressRows(f.companyId)).toEqual(beforeEvents);
+  expect(await f.svc.getById(product!.id)).toEqual(product);
+  const retried = mode === "create" ? await f.create() : await f.svc.restampProducer(product!.id, f.heartbeatId, {});
+  expect(retried?.metadata?.workflowProducer).toMatchObject(binarySeal);
+  const after = await progressRows(f.companyId);
+  expect(after).toHaveLength(beforeEvents.length + 1);
+  expect(after.find(row => !beforeEvents.some(old => old.id === row.id))).toMatchObject({
+    details: { progressEvidence: { newSha256: binarySeal.sha256, contentChanged: true,
+      previousSha256: mode === "create" ? null : abcSeal.sha256, created: mode === "create" } },
+  });
+});
+
+// C07: rejected late submissions cannot create positive or negative acceptance records.
+it("leaves accepted progress unchanged when late creation and restamping are rejected", async () => {
+  const f = await fixture(), product = await f.create();
+  const before = await progressRows(f.companyId);
+  await db.update(workflowStepRuns).set({ executionGeneration: 5 }).where(eq(workflowStepRuns.id, f.stepRunId));
+  await writeFile(f.file, Buffer.from([0, 255, 195, 169]));
+  await expect(f.create()).rejects.toThrow("workproduct_producer_stale_generation");
+  await expect(f.svc.restampProducer(product!.id, f.heartbeatId, {})).rejects.toThrow("workproduct_producer_stale_generation");
+  expect(await f.svc.getById(product!.id)).toEqual(product);
+  expect(await progressRows(f.companyId)).toEqual(before);
+});
+
+it("does not turn ordinary or unmeasured remote registrations into byte progress evidence", async () => {
+  const ordinary = await fixture();
+  await ordinary.create({ workflowProducer: { ...abcSeal } }, null);
+  expect(await progressRows(ordinary.companyId)).toEqual([]);
+  const remote = await fixture("github");
+  const product = await remote.create({ workflowProducer: { ...abcSeal } });
+  await remote.svc.restampProducer(product!.id, remote.heartbeatId, { workflowProducer: { ...binarySeal } });
+  expect(await progressRows(remote.companyId)).toEqual([]);
 });

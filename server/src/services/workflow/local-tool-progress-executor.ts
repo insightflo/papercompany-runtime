@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { wireQaTransport } from "./qa-byte-transport.js";
+import { collectQaProcessGuard, qaProcessGuardNodeArgs, QA_PROCESS_GUARD_FD, type QaProcessGuard } from "./qa-process-guard.js";
 import type { Readable } from "node:stream";
 import { toolProgressEventSchema, type ToolProgressPolicy } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import { ToolProgressError } from "../tools/progress-policy.js";
-import { createToolProgressStore } from "../tools/progress-store.js";
+import { createToolProgressStore, type ProgressEvidenceContext } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
 import type { ProgressScope } from "../tools/progress-scope.js";
 
@@ -35,22 +36,24 @@ async function readProgress(stream: Readable, accept: (raw: unknown) => Promise<
 }
 export async function executeLocalToolWithProgress(input: {
   db: Db; scope: ProgressScope; policy: ToolProgressPolicy;
+  progressEvidenceContext?: ProgressEvidenceContext; agentId?: string | null; stepRunId?: string | null;
   executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
   launch?: <T>(start: () => T) => Promise<{ result: T }>;
-  inputBytes?: Buffer; qaResult?: boolean;
-}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer }> {
+  inputBytes?: Buffer; qaResult?: boolean; acceptQaExit1?: boolean;
+}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }> {
   const store = createToolProgressStore(input.db);
   const heartbeat = await store.start(input.scope, input.policy);
   let cleanup: (() => Promise<void>) | undefined;
-  return withToolProgress({ store, heartbeat, succeeded: () => true, cleanup: async () => { await cleanup?.(); },
+  return withToolProgress<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }>({ store, heartbeat, succeeded: value => value.exitCode === 0, cleanup: async () => { await cleanup?.(); },
     operation: async (signal) => {
       const start = async () => {
       signal.throwIfAborted();
-      const child = spawn(input.executable, input.args, { cwd: input.cwd,
+      const guarded = !!(input.qaResult && input.acceptQaExit1);
+      const child = spawn(input.executable, [...(guarded ? qaProcessGuardNodeArgs() : []), ...input.args], { cwd: input.cwd,
         env: { ...input.env, PAPERCOMPANY_TOOL_EXECUTION_ID: heartbeat.id, PAPERCOMPANY_TOOL_PROGRESS_FD: "3" },
-        stdio: [input.inputBytes ? "pipe" : "ignore", "pipe", "pipe", "pipe", input.qaResult ? "pipe" : "ignore"],
+        stdio: [input.inputBytes ? "pipe" : "ignore", "pipe", "pipe", "pipe", input.qaResult ? "pipe" : "ignore", guarded ? "pipe" : "ignore"],
       });
-      let childError: Error | undefined;
+      let childError: Error | undefined, guard: QaProcessGuard | undefined;
       let closed = false;
       let ownedExited = false;
       let terminating = false;
@@ -60,7 +63,8 @@ export async function executeLocalToolWithProgress(input: {
         // Descendants may retain descriptors after our owned process has exited.
         // Destroy only this invocation's read handles, and only on failure/abort.
         if (!terminating || !ownedExited) return;
-        child.stdout?.destroy(); child.stderr?.destroy(); channel.destroy();
+        guard?.dispose(childError ?? new ToolProgressError(500, "tool_progress_execution_failed"));
+        child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy(); channel.destroy();
         (child.stdio[4] as Readable | null)?.destroy();
       };
       const ownedExit = () => {
@@ -78,6 +82,7 @@ export async function executeLocalToolWithProgress(input: {
       };
       const fail = (error: Error) => { childError ??= error; terminate(); };
       const qaResult = wireQaTransport(child, input.inputBytes, !!input.qaResult, fail);
+      guard = guarded ? collectQaProcessGuard(child.stdio.at(QA_PROCESS_GUARD_FD) as Readable | null | undefined, fail) : undefined;
       const collected: Buffer[][] = [[], []];
       const sizes = [0, 0];
       [child.stdout!, child.stderr!].forEach((stream, index) => {
@@ -93,9 +98,12 @@ export async function executeLocalToolWithProgress(input: {
           if (child.pid === undefined) ownedExit(); // Spawn failure has no exit event.
           fail(new ToolProgressError(500, "tool_progress_child_error"));
         });
-        child.once("exit", (code) => {
+        child.once("exit", (code, signal) => {
           ownedExit();
-          if (code !== 0) fail(Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code }));
+          // Keep guarded candidates open until close and every intake has drained.
+          if (signal || (code !== 0 && !(guarded && code === 1))) {
+            fail(Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code }));
+          }
         });
         child.once("close", (code) => {
           closed = true; clearTimeout(killTimer); signal.removeEventListener("abort", terminate); resolve(code);
@@ -106,17 +114,24 @@ export async function executeLocalToolWithProgress(input: {
       const intake = readProgress(channel, async (raw) => {
         const parsed = toolProgressEventSchema.safeParse(raw);
         if (!parsed.success) throw protocolError();
-        await store.acceptLocal(input.scope.companyId, heartbeat.id, parsed.data);
+        await store.acceptLocal(input.scope.companyId, heartbeat.id, parsed.data, input.progressEvidenceContext && {
+          ...input.progressEvidenceContext, scope: input.scope, agentId: input.agentId, stepRunId: input.stepRunId,
+        });
       }, signal).catch((error: unknown) => fail(error instanceof ToolProgressError ? error : protocolError()));
-      cleanup = async () => { await close; await intake; };
+      cleanup = async () => { await close; await intake; await guard?.drained; guard?.dispose(); };
       const code = await close;
       await intake;
+      await guard?.drained;
       signal.throwIfAborted();
+      try { guard?.assertHealthy(); } catch (error) { childError ??= error as Error; }
       const stdout = Buffer.concat(collected[0]).toString("utf8");
       const stderr = Buffer.concat(collected[1]).toString("utf8");
-      if (childError) throw Object.assign(childError, { stdout, stderr });
-      if (code !== 0) throw Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code, stdout, stderr });
-      return { stdout, stderr, qaResultBytes: input.qaResult ? qaResult() : undefined };
+      const qaResultBytes = input.qaResult ? qaResult() : undefined;
+      if (childError) throw Object.assign(childError, { stdout, stderr, qaResultBytes });
+      if (code !== 0 && !(guarded && code === 1)) {
+        throw Object.assign(new ToolProgressError(500, "tool_progress_child_failed"), { code, stdout, stderr, qaResultBytes });
+      }
+      return { stdout, stderr, qaResultBytes, exitCode: code! };
       };
       return input.launch ? (await input.launch(start)).result : start();
     },

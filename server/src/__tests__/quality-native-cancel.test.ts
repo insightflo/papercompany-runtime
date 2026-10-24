@@ -10,7 +10,6 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { and, eq, or, sql } from "drizzle-orm";
 import {
   activityLog,
-  agentRuntimeState,
   agentWakeupRequests,
   agents,
   heartbeatRunEvents,
@@ -23,8 +22,11 @@ import { createQualityTestDb, describeQualityDb, type QualityTestDb } from "./he
 import { seedQualityFixture, type QualityFixture } from "./helpers/quality-fixture.js";
 import { deliverQualityIntent, cancelQualityIntent, readQualityCancellation } from "../services/quality/native-delivery.js";
 import { ensureCanonicalQualityExecution } from "../services/quality/native-records.js";
-import type { Db } from "@paperclipai/db";
 import { expectCancelledAdapterBoundary } from "./helpers/quality-cancel-boundary.js";
+import {
+  countLockQueueBehind, countWaitersBlockedBy, openGatedRowLock,
+  parkRunnerInSetupBarrier, pollBlockedBackend, pollUntil,
+} from "./helpers/quality-cancel-locks.js";
 
 const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
 vi.mock("../adapters/index.js", () => ({
@@ -34,105 +36,6 @@ vi.mock("../adapters/index.js", () => ({
 
 function successfulAdapterResult() {
   return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
-}
-
-/** 조건 폴링(마감 있는 condition wait) — 고정 sleep 을 증거로 쓰지 않는다. */
-async function pollUntil(deadlineMs: number, probe: () => Promise<boolean>): Promise<boolean> {
-  const deadline = Date.now() + deadlineMs;
-  while (Date.now() < deadline) {
-    if (await probe()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return await probe();
-}
-
-/** 특정 holder pid 를 막은 대기 backend 수 — 실제 잠금 대기 관찰(pg_blocking_pids). */
-async function countWaitersBlockedBy(db: Db, holderPid: number): Promise<number> {
-  const waiting = (await db.execute(sql`
-    select pid from pg_stat_activity
-    where datname = current_database() and state = 'active' and wait_event_type = 'Lock'
-      and cardinality(pg_blocking_pids(pid)) > 0 and ${holderPid} = any(pg_blocking_pids(pid))
-  `)) as unknown as Array<{ pid: number }>;
-  return waiting.length;
-}
-
-/** holder pid 를 막은 대기 행렬 깊이(직접 + 한 단계 대기 중인 대기자) — 잠금 큐 순서 관찰용. */
-async function countLockQueueBehind(db: Db, holderPid: number): Promise<number> {
-  const rows = (await db.execute(sql`
-    with waiters as (
-      select pid, pg_blocking_pids(pid) as blockers from pg_stat_activity
-      where datname = current_database() and state = 'active' and wait_event_type = 'Lock'
-        and cardinality(pg_blocking_pids(pid)) > 0
-    )
-    select count(*)::int as n from waiters
-    where ${holderPid} = any(blockers)
-       or exists (select 1 from waiters w2 where w2.pid = any(waiters.blockers) and ${holderPid} = any(w2.blockers))
-  `)) as unknown as Array<{ n: number }>;
-  return rows[0]?.n ?? 0;
-}
-
-/** [barrier] agent_runtime_state PK 투기적 INSERT — 러너의 세팅 ensureRuntimeState INSERT(claim 이후,
- * 어댑터 이전)이 이 트랜잭션이 결정될 때까지 결정론적으로 주차된다. 해제 모드는 gate 로 나중에 정한다. */
-async function parkRunnerInSetupBarrier(db: Db, seeded: QualityFixture) {
-  const gate = { settle: (_mode: "commit" | "rollback") => {} };
-  let holderPid = 0;
-  let assigned = false;
-  const settled = db.transaction(async (tx) => {
-    await tx.insert(agentRuntimeState)
-      .values({ agentId: seeded.authorAgentId, companyId: seeded.companyId, adapterType: "codex_local" });
-    const pidRows = (await tx.execute(sql`select pg_backend_pid() as pid`)) as unknown as Array<{ pid: number }>;
-    holderPid = pidRows[0]!.pid;
-    const mode = await new Promise<"commit" | "rollback">((resolve) => {
-      gate.settle = resolve;
-      assigned = true;
-    });
-    if (mode === "rollback") throw new Error("barrier rollback");
-  });
-  const ready = await pollUntil(10_000, async () => assigned);
-  return { gate, settled, holderPid, ready };
-}
-
-/** [ordering-D 지원] 게이트로 해제를 통제하는 테스트 소유 행 잠금. acquire 콜백이 잠금 문장을
- * 실행하고, 게이트 해제 전까지 트랜잭션이 해당 행을 홀드한다(주차/큐 순서 관찰용). */
-async function openGatedRowLock(db: Db, acquire: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<unknown>) {
-  const gate = { settle: () => {} };
-  let holderPid = 0;
-  let assigned = false;
-  const settled = db.transaction(async (tx) => {
-    await acquire(tx);
-    const pidRows = (await tx.execute(sql`select pg_backend_pid() as pid`)) as unknown as Array<{ pid: number }>;
-    holderPid = pidRows[0]!.pid;
-    await new Promise<void>((resolve) => {
-      gate.settle = resolve;
-      assigned = true;
-    });
-  });
-  const ready = await pollUntil(10_000, async () => assigned);
-  return { gate, settled, holderPid, ready };
-}
-
-type BlockedBackend = { pid: number; query: string; blockers: number[] };
-
-/** [ordering-D 지원] 조건에 맞는 잠금 대기 backend 를 실제 pg_stat_activity/pg_blocking_pids
- * 관찰로 찾는다(주차 증명 — sleep 이나 확률에 의존하지 않는다). */
-async function pollBlockedBackend(
-  db: Db,
-  match: (row: BlockedBackend) => boolean,
-  deadlineMs = 20_000,
-): Promise<BlockedBackend | null> {
-  let found: BlockedBackend | null = null;
-  const ok = await pollUntil(deadlineMs, async () => {
-    const rows = (await db.execute(sql`
-      select pid, left(query, 240) as query, pg_blocking_pids(pid) as blockers
-      from pg_stat_activity
-      where datname = current_database() and pid <> pg_backend_pid()
-        and state = 'active' and wait_event_type = 'Lock'
-        and cardinality(pg_blocking_pids(pid)) > 0
-    `)) as unknown as Array<{ pid: number; query: string; blockers: number[] }>;
-    found = rows.find(match) ?? null;
-    return found !== null;
-  });
-  return ok ? found : null;
 }
 
 describeQualityDb("Quality native cancel", () => {
@@ -432,12 +335,9 @@ describeQualityDb("Quality native cancel", () => {
     const seeded = await seedQualityFixture(db);
     await db.update(agents).set({ adapterType: "codex_local", adapterConfig: { promptTemplate: "Test." }, runtimeConfig: {}, permissions: {} })
       .where(eq(agents.companyId, seeded.companyId));
-    // [choreography] 결정론적 교차: (1) 러너를 세팅 창(ensureRuntimeState)에 주차,
-    // (2) 이슈 행 FOR UPDATE 홀드 — 취소 release tx 의 issues 선점 시도가 여기 주차,
-    // (3) 러너 해제 — resume 직렬화 tx 가 run 행을 먼저 잡고 upsert FK 로 issues 를 요구,
-    // (4) 이슈 홀드 해제 — 수정 전이라면 issues×heartbeat_runs AB-BA 사이클이 성립하고
-    //     PG 교착 탐지기가 40P01 을 발화한다. 수정 후에는 release tx 가 run 행 선점(FOR UPDATE)
-    //     을 먼저 하므로 두 차례 모두 한쪽이 다른 쪽의 커밋을 기다리는 직렬 대기만 남는다.
+    // [choreography] 러너를 세팅에 주차하고 이슈/root prefix를 홀드한다.
+    // 취소의 root 무효화가 먼저 이 홀드에 대기한 뒤 러너를 풀어
+    // runner → cancel → issue holder의 실제 PID 연결을 증명한다.
     const barrier = await parkRunnerInSetupBarrier(db, seeded);
     expect(barrier.ready).toBe(true);
     const adapterGate = { release: () => {} };
@@ -461,7 +361,7 @@ describeQualityDb("Quality native cancel", () => {
         (await countWaitersBlockedBy(db, barrier.holderPid)) > 0);
       expect(runnerParkedAtSetup).toBe(true);
 
-      // 이슈 행 홀드 — release tx 의 첫 잠금 시도(issues FOR UPDATE)가 이 홀드에 주차한다.
+      // 이슈/root prefix 홀드 — 취소의 root 무효화를 release 정리 전에 주차한다.
       const [linkedIssue] = await db.select({ id: issues.id }).from(issues)
         .where(and(
           eq(issues.companyId, seeded.companyId),
@@ -472,25 +372,24 @@ describeQualityDb("Quality native cancel", () => {
         tx.select({ id: issues.id }).from(issues).where(eq(issues.id, linkedIssue!.id)).for("update"));
       expect(issueLock.ready).toBe(true);
 
-      // 취소 시작 — setRunStatus/wakeup/event 는 자유롭게 통과하고 release tx 만 issues 홀드에 주차한다.
+      // 러너가 아직 세팅 장벽에 있으므로 이 홀드의 새 대기자는 취소 lane이다.
       cancelOutcome = (async () => {
         try { return await cancelQualityIntent(db, { companyId: seeded.companyId, actionId: seeded.actionId }); }
         catch (err) { cancelError = err; return null; }
       })();
-      const cancelAtIssues = await pollBlockedBackend(db, (r) =>
-        r.blockers.includes(issueLock!.holderPid) && /issues/.test(r.query) && /for update/.test(r.query));
-      expect(cancelAtIssues).toBeTruthy(); // 취소 release tx 가 실제 잠금 대기 중이다.
-      const cancelPid = cancelAtIssues!.pid;
+      const cancelAtRoot = await pollBlockedBackend(db, { blockedByPid: issueLock.holderPid });
+      expect(cancelAtRoot).toBeTruthy();
+      const cancelPid = cancelAtRoot!.pid;
 
-      // 러너 해제(ROLLBACK — 세팅 실패가 아니라 계속 진행이 목적) — resume 직렬화 tx 가
-      // run 행 FOR UPDATE 를 선점한 뒤 upsert FK 로 issues 를 요구한다.
+      // ROLLBACK으로 세팅을 계속 진행시킨 뒤 취소가 보유한 prefix 뒤의 대기를 확인한다.
       barrier.gate.settle("rollback");
       barrierResolved = true;
       await barrier.settled.catch(() => undefined);
-      const runnerSerialized = await pollBlockedBackend(db, (r) =>
-        r.pid !== cancelPid
-        && (r.blockers.includes(issueLock!.holderPid) || r.blockers.includes(cancelPid)));
-      expect(runnerSerialized).toBeTruthy(); // 러너도 실제 잠금 대기 중(수정 전: upsert FK / 수정 후: run 행 선점 대기).
+      const runnerSerialized = await pollBlockedBackend(db, {
+        blockedByPid: cancelPid, blockerBlockedByPid: issueLock.holderPid,
+        excludePids: [cancelPid, issueLock.holderPid],
+      });
+      expect(runnerSerialized).toBeTruthy(); // 같은 관찰에서 runner → cancel → issue holder.
       console.log("[ordering-D] runner parked at:", JSON.stringify(runnerSerialized));
 
       // 이슈 홀드 해제 — 교차의 결정 지점. 이 시점부터 수정 전에는 40P01 사이클, 수정 후에는 직렬 대기.
@@ -537,10 +436,9 @@ describeQualityDb("Quality native cancel", () => {
     const seeded = await seedQualityFixture(db);
     await db.update(agents).set({ adapterType: "codex_local", adapterConfig: { promptTemplate: "Test." }, runtimeConfig: {}, permissions: {} })
       .where(eq(agents.companyId, seeded.companyId));
-    // [choreography] 반대 부여 순서: 러너가 먼저 resume 직렬화 tx 로 run 행을 잡고 upsert FK 로
-    // 이슈 행(테스트 홀드)을 기다린다. 그 다음 취소가 시작되면 setRunStatus UPDATE 는 러너가
-    // 보유한 run 행에서 대기한다(취소측은 아무것도 보유하지 않는다 — 사이클 불가능). 이슈 홀드를
-    // 풀면 러너가 직렬화를 마치고 커밋한 뒤 취소가 이어진다. 수정 전후 모두 무교착이어야 한다.
+    // [choreography] 반대 부여 순서: 러너가 먼저 resume prefix를 잡고 이슈 홀드에 대기한다.
+    // 취소를 시작한 뒤 cancel → runner → issue holder를 증명한다.
+    // 대기 중인 prefix가 mission인지 heartbeat인지는 SQL 문구로 판정하지 않는다.
     const barrier = await parkRunnerInSetupBarrier(db, seeded);
     expect(barrier.ready).toBe(true);
     const adapterGate = { release: () => {} };
@@ -574,24 +472,24 @@ describeQualityDb("Quality native cancel", () => {
         tx.select({ id: issues.id }).from(issues).where(eq(issues.id, linkedIssue!.id)).for("update"));
       expect(issueLock.ready).toBe(true);
 
-      // 러너를 먼저 푼다(ROLLBACK — 세팅 실패가 아니라 계속 진행) — run 행 선점 후 upsert FK 가
-      // 이슈 홀드에 주차한다.
+      // 취소 시작 전에 러너를 풀어 이슈/root prefix 홀드의 대기 PID를 식별한다.
       barrier.gate.settle("rollback");
       barrierResolved = true;
       await barrier.settled.catch(() => undefined);
-      const runnerAtUpsert = await pollBlockedBackend(db, (r) =>
-        r.blockers.includes(issueLock!.holderPid) && /mission_agent_runtimes/.test(r.query));
-      expect(runnerAtUpsert).toBeTruthy();
-      const runnerPid = runnerAtUpsert!.pid;
+      const runnerAtRoot = await pollBlockedBackend(db, { blockedByPid: issueLock.holderPid });
+      expect(runnerAtRoot).toBeTruthy();
+      const runnerPid = runnerAtRoot!.pid;
 
-      // 취소 시작 — setRunStatus UPDATE 가 러너 보유 run 행에서 대기한다(취소측 보유 잠금 없음).
+      // 취소는 러너가 실제로 보유한 prefix 뒤에 대기해야 한다.
       cancelOutcome = (async () => {
         try { return await cancelQualityIntent(db, { companyId: seeded.companyId, actionId: seeded.actionId }); }
         catch (err) { cancelError = err; return null; }
       })();
-      const cancelAtRunRow = await pollBlockedBackend(db, (r) =>
-        r.pid !== runnerPid && r.blockers.includes(runnerPid) && /heartbeat_runs/.test(r.query));
-      expect(cancelAtRunRow).toBeTruthy();
+      const cancelBehindRunner = await pollBlockedBackend(db, {
+        blockedByPid: runnerPid, blockerBlockedByPid: issueLock.holderPid,
+        excludePids: [runnerPid, issueLock.holderPid],
+      });
+      expect(cancelBehindRunner).toBeTruthy();
 
       // 이슈 홀드 해제 — 러너 완료→커밋→취소 진행. 어느 쪽으로도 교찰이 아니어야 한다.
       issueLock.gate.settle();

@@ -8,12 +8,12 @@
 //   단일 소유자) 로 wake 한다. native link 를 증명할 수 없으면 report-only (wake 안 함).
 // [주요 흐름]
 //   1. source issue 의 최신 workflowStepRun 조회(없으면 report-only).
-//   2. workflowRun 조회 — 반드시 status=running(아니면 report-only).
+//   2. workflowRun 조회 — running 또는 공식 복구 가능한 failed 실행만 허용한다.
 //   3. workflowDefinition 조회(없으면 report-only).
 //   4. loadExecutionDefinition(db, run.id) 의 검증된 steps(frozen snapshot, 없으면 genuine legacy 만
 //      current fallback) 로 persisted step 을 해석 — stepId 불일치면 report-only.
 //   5. (agentId 제공 시) findExistingWorkflowResumeWake 로 이미 native wake 가 있으면 already_in_flight.
-//   6. wakeExistingWorkflowStepIssue(allowBlockedIssue) 로 wake. 거부되면 report-only.
+//   6. failed 복구와 native 요청을 함께 저장한다. 확정 뒤 루트 DB 로 전달하며 거부는 report-only.
 // [계약] 공식 retry/iteration/QA verdict 는 workflow layer 소유. 여기서 source status 를 직접
 //   변경/checkout 하지 않는다(wakeExistingWorkflowStepIssue 는 assignee 누락 시에만 assignee 를
 //   복원하고 status 는 건드리지 않는다 — 이것이 native 계약). 새 endpoint · 범용 retry framework 없음.
@@ -22,13 +22,12 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { wakeExistingWorkflowStepIssue, type WorkflowStep } from "./dag-engine.js";
+import type { wakeExistingWorkflowStepIssue, WorkflowStep } from "./dag-engine.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
-import { acceptSourceIssueRecovery } from "./source-issue-recovery-accept.js";
+import { queueSourceIssueResume } from "./source-issue-recovery-accept.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
-import { findAcceptedWorkflowResumeWakeForStep, findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
-import { restoreFailedSourceIssueWorkflowState } from "./source-issue-failed-state-restore.js";
+import { findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts 와 동일. 이 상태의 wake/heartbeat 보유 시 중복 dispatch 금지.
 const LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution", "coalesced"] as const;
@@ -263,99 +262,14 @@ export async function dispatchSourceIssueNativeResume(
     };
   }
 
-  const existingNativeWakeIds = new Set(
-    (await db
-      .select({ id: agentWakeupRequests.id })
-      .from(agentWakeupRequests)
-      .where(and(
-        eq(agentWakeupRequests.companyId, input.companyId),
-        eq(agentWakeupRequests.issueId, input.issueId),
-        eq(agentWakeupRequests.workflowRunId, run.id),
-        eq(agentWakeupRequests.workflowStepRunId, stepRun.id),
-        eq(agentWakeupRequests.requestKind, "workflow_resume"),
-      )))
-      .map((row) => row.id),
-  );
-
-  let wakeRun = run;
-  const revivedFailedRun = run.status === "failed";
-  // [봇 지적 교정 — bug·high] 공식 복구로 되살아난 run 은 실패 경로에서 무조건 failed 로
-  //   되돌리지 않는다: 복구가 이미 권한버전 v+1 로 커밋된 뒤 결정은 v 에 남아 있어,
-  //   원상복구는 "버전은 올라갔는데 대응 결정 없는 종결" 혼합 상태를 만든다. 복구 자체는
-  //   정당했으므로 run 을 running@v+1 로 두고 wake 결과만 report_only 로 보고한다(스텝은
-  //   기존 재시도 채널이 다시 구동한다).
-  let handledByRecoveryService = false;
-  const restoreFailedState = async () => {
-    if (!revivedFailedRun || handledByRecoveryService) return;
-    await restoreFailedSourceIssueWorkflowState(db, run, stepRun);
-  };
-  // [owner admission] typed strict 경로의 wake 승인값 — 실패 시도(v,g) 기준 입력을 복구 후 상태로
-  //   치환한다. run 이 이미 running 이면(전달 복구) 호출자가 준 현재값 그대로 검증한다.
-  let ownerWakeAdmission = input.ownerExecution ? {
-    schemaVersion: 1 as const, actionId: input.ownerExecution.actionId,
-    expectedAuthorityVersion: input.ownerExecution.expectedAuthorityVersion,
-    expectedExecutionGeneration: input.ownerExecution.expectedExecutionGeneration,
-  } : undefined;
-  if (revivedFailedRun) {
-    if (stepRun.status !== "failed") {
-      return {
-        kind: "report_only",
-        reason: "wake_rejected",
-        workflowRunId: run.id,
-        workflowStepRunId: stepRun.id,
-        stepId: step.id,
-      };
-    }
-    const accepted = await acceptSourceIssueRecovery(db, { run, stepRunId: stepRun.id, issueId: input.issueId,
-      ...(input.ownerExecution ? { ownerExecution: input.ownerExecution } : {}) });
-    if (!accepted) return { kind: "report_only", reason: "wake_rejected", workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: step.id };
-    wakeRun = accepted.run;
-    handledByRecoveryService = accepted.official;
-    if (input.ownerExecution) ownerWakeAdmission = { ...ownerWakeAdmission!,
-      expectedAuthorityVersion: wakeRun.dispatchAuthorityVersion,
-      expectedExecutionGeneration: input.ownerExecution.expectedExecutionGeneration + 1 };
-  }
-
-  // 6. 검증 완료 — wakeExistingWorkflowStepIssue 가 workflow_step_runnable/workflow_resume 계약으로
-  //   native wake 를 소유한다. 이 호출만이 공식 retry/iteration/QA verdict 를 보존한다.
-  let queued = false;
-  try {
-    queued = await (input.wakeFn ?? wakeExistingWorkflowStepIssue)({
-      db,
-      run: wakeRun,
-      definition,
-      step,
-      stepRunId: stepRun.id,
-      stepRunMetadata: stepRun.metadata,
-      issueId: input.issueId,
-      allowBlockedIssue: input.allowBlockedIssue ?? true,
-      ...(ownerWakeAdmission ? { ownerExecution: ownerWakeAdmission } : {}),
-    });
-  } catch {
-    await restoreFailedState();
-    return {
-      kind: "report_only",
-      reason: "wake_rejected",
-      workflowRunId: run.id,
-      workflowStepRunId: stepRun.id,
-      stepId: step.id,
-    };
-  }
-  const newNativeWakes = (await findAcceptedWorkflowResumeWakeForStep(db, {
-    companyId: input.companyId,
-    issueId: input.issueId,
-    workflowRunId: run.id,
-    workflowStepRunId: stepRun.id,
-  })).filter((row) => !existingNativeWakeIds.has(row.id));
-  if (newNativeWakes.length !== 1) {
-    await restoreFailedState();
-    return {
-      kind: "report_only",
-      reason: "wake_rejected",
-      workflowRunId: run.id,
-      workflowStepRunId: stepRun.id,
-      stepId: step.id,
-    };
+  const queued = await queueSourceIssueResume(db, {
+    run, definition, step, stepRun, issueId: input.issueId,
+    allowBlockedIssue: input.allowBlockedIssue ?? true,
+    wakeFn: input.wakeFn, ownerExecution: input.ownerExecution,
+  });
+  if (!queued) {
+    return { kind: "report_only", reason: "wake_rejected",
+      workflowRunId: run.id, workflowStepRunId: stepRun.id, stepId: step.id };
   }
   return {
     kind: "dispatched",

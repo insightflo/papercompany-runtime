@@ -6,9 +6,19 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual as same } from "node:util";
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { readFrozenArtifactAttempt } from "./artifact-contract-runtime.js";
+import { findWorkflowVerdictCorrection } from "./workflow-verdict-current.js";
+import { prepareWorkflowVerdictLocks, lockWorkflowVerdictDependencies } from "./workflow-verdict-write.js";
+import { lockQualityAttemptBudget } from "../quality/retry-budget.js";
+import { lockUnreplacedRun } from "./run-replacement-guard.js";
+import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
+import { QaCorrectionReadError } from "./control-flow/qa-correction-authority.js";
+import { observeQaCorrectionFollowup, readCurrentQaCorrectionFollowup,
+  readQaCorrectionFollowupConsumption, QaCorrectionFollowupReadError } from "./control-flow/qa-correction-followup.js";
 import { dependencyToolEvidence } from "./dependency-tool-evidence.js";
 import { isIssueLessToolStep } from "./issue-less-tool-shape.js";
-import { readWorkflowToolArtifactPath } from "./tool-artifact-path.js";
 import {
   ensureWorkflowStepRunRecords,
   type MaterializationOutcome,
@@ -17,25 +27,25 @@ import {
   type ChildStartFence,
 } from "./workflow-child-start-state.js";
 import path from "node:path";
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
+import { createQaRemediationRefire } from "./control-flow/qa-remediation.js";
+import { withQaCorrectionFollowupReconcile,
+  queueCurrentIssuedQaCorrectionTargets } from "./control-flow/qa-correction-followup-reconcile.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
 import type { DagValidationResult, WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
-  recordWorkflowStepStatusTransition,
   recordWorkflowStepStatusTransitions,
   type WorkflowSyncSource,
 } from "./workflow-sync-source.js";
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
-import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
-import { lockFailureObservationScope, persistFailedToolDispatch } from "./tool-dispatch-failure.js";
+import { persistFailedToolDispatch } from "./tool-dispatch-failure.js";
 import { settleToolQueueMetadata } from "./tool-queue-settle.js";
-import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
 import {
   dispatchWorkflowChildStep,
   isWorkflowChildStep,
@@ -46,9 +56,12 @@ import { heartbeatService } from "../heartbeat.js";
 import { applyWorkflowIssueCreatedSideEffects as applyIssueCreatedSideEffects, wakeReplacementAwareIssueRetry as wakeIssueBackedRetryAndMarkDispatching } from "./replacement-agent-delivery.js";
 import { syncQualityStepIssueCommitBeforeWake } from "../quality/native-records.js";
 import { desiredStepRunStatusFromIssueStatus, uniqueIssueRowsByIssueId } from "./workflow-step-issue-records.js";
-import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
-import { admitOwnerLinkedStepWake, ownerPlanExecutionIntentCurrent, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
-import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
+import { ownerPlanExecutionIntentCurrent } from "../missions/mission-owner-execution-state.js";
+import { wakeExistingWorkflowStepIssue, resolveWorkflowStepAssigneeAgentId } from "./workflow-step-wake.js";
+import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
+import { finalizeWorkflowRunState } from "./workflow-run-finalization.js";
+import { acceptWorkflowToolResult } from "./workflow-tool-result-acceptance.js";
+export { wakeExistingWorkflowStepIssue };
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
 import { isQaLikeStep } from "../missions/supervision-helpers.js";
@@ -80,8 +93,6 @@ import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { cancelResolvedQaSourceDefectOwnerCards } from "./qa-source-defect-owner-card.js";
 import { closeResolvedWorkflowUnblocks } from "./resolved-unblock-closeout.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
-// [run-terminal-boundary v1] plain 종결의 경계 우회 + 커밋 후 부작용 즉시 실행(호출자 게이팅).
-import { executeTerminalEffectIntents, finalizeRunTerminal } from "./run-terminal-boundary.js";
 import { isRunTerminalBoundaryV1Enabled } from "./run-terminal-boundary-flag.js";
 import { isRunReopenGuardEnabled } from "./run-reopen-guard-flag.js";
 import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from "./control-flow/structural-gate-rework.js";
@@ -94,8 +105,6 @@ import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acce
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
 import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
 import { readAttempts } from "./control-flow/verdict-store.js";
-import { loadWorkflowApiFindings } from "./validation-verdict-ledger.js";
-import type { WorkflowVerdictFinding } from "@paperclipai/shared/validators/workflow-agent-api";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
@@ -106,9 +115,8 @@ import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workf
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
 import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue, stripShellEscapeResidue } from "./tool-step-args.js";
-import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
+import { isStructuralGateStep } from "./control-flow/structural-gate.js";
 import { STEP_MACHINE_CHECKS_TOOL, evaluateStepMachineChecks, renderMachineCheckFailure } from "./step-machine-checks.js";
-import { applyMachineContractTruth } from "./tool-result-truth.js";
 import { validateWorkflowControlNodes } from "./control-flow/control-node-validation.js";
 import {
   executeWorkflowControlNode,
@@ -120,12 +128,6 @@ import {
   evaluateSemanticStructuralReadiness,
   renderStructuralGateCoverageLines,
 } from "./control-flow/structural-semantic-readiness.js";
-import {
-  shouldRejectStructuralCallback,
-  planStructuralCompletion,
-  atomicStructuralCompletion,
-  checkDependencyFreshness,
-} from "./control-flow/structural-completion.js";
 import {
   readWorkflowRetryMetadata,
 } from "./retry-policy.js";
@@ -149,8 +151,6 @@ import {
   type WorkflowDefinitionExecutionShape,
 } from "./execution-steps.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
-import { readArtifactDigest } from "./artifact-files.js";
-import { verifyArtifactStepCompletion } from "./artifact-step-result.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
 import { loadWorkflowExecutionContext } from "./workflow-execution-context.js";
 import { assertResumeAccepted } from "./resume/acceptance.js";
@@ -169,11 +169,8 @@ import {
   cancelDescendantWorkflowRunWithChildFence,
   cancelWorkflowRunWithChildFence,
   logWorkflowRunCancellationRefused,
-  logWorkflowRunFinalizationRefused,
-  resolveWorkflowRunFinalizationGate,
   type CancelledRunRef,
 } from "./workflow-cancel-bridge.js";
-import { applyLinkedWorkflowRunFinalization, reloadWorkflowRunForFinalization } from "./workflow-child-native-finalization.js";
 export { markRetryDispatching };
 
 /** workflow-type 스텝 id 집합 — 리셋/재오픈 금지(D2) 필터에 쓴다. */
@@ -747,118 +744,6 @@ function buildDependencyStepContractLines(input: {
   return lines;
 }
 
-async function commentOnValidationRecheckQueued(input: {
-  db: Db;
-  companyId: string;
-  issueId: string;
-  workflowRunId: string;
-  step: WorkflowStep;
-  priorFindings?: readonly WorkflowVerdictFinding[];
-}): Promise<void> {
-  const dependencyStepIds = input.step.dependencies;
-  const dependencyRows = dependencyStepIds.length > 0
-    ? await input.db
-      .select({
-        stepId: workflowStepRuns.stepId,
-        issueId: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        status: issues.status,
-      })
-      .from(workflowStepRuns)
-      .innerJoin(issues, eq(workflowStepRuns.issueId, issues.id))
-      .where(and(
-        eq(workflowStepRuns.workflowRunId, input.workflowRunId),
-        inArray(workflowStepRuns.stepId, dependencyStepIds),
-      ))
-    : [];
-
-  const order = new Map(dependencyStepIds.map((stepId, index) => [stepId, index]));
-  dependencyRows.sort((a, b) => (order.get(a.stepId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.stepId) ?? Number.MAX_SAFE_INTEGER));
-
-  const workProductRows = dependencyRows.length > 0
-    ? await input.db
-      .select({
-        issueId: issueWorkProducts.issueId,
-        title: issueWorkProducts.title,
-        type: issueWorkProducts.type,
-        provider: issueWorkProducts.provider,
-        url: issueWorkProducts.url,
-        externalId: issueWorkProducts.externalId,
-        metadata: issueWorkProducts.metadata,
-        status: issueWorkProducts.status,
-      })
-      .from(issueWorkProducts)
-      .where(inArray(issueWorkProducts.issueId, dependencyRows.map((row) => row.issueId)))
-    : [];
-
-  const workProductsByIssueId = new Map<string, typeof workProductRows>();
-  for (const product of workProductRows) {
-    const products = workProductsByIssueId.get(product.issueId) ?? [];
-    products.push(product);
-    workProductsByIssueId.set(product.issueId, products);
-  }
-
-  const renderWorkProductSummary = (product: typeof workProductRows[number]) => {
-    const metadata = normalizeRecord(product.metadata);
-    const metadataPath = typeof metadata.path === "string" ? metadata.path : null;
-    const artifactRef = metadataPath ?? product.url ?? product.externalId ?? (
-      product.metadata ? JSON.stringify(product.metadata) : "no artifact ref"
-    );
-    return `${product.title} [${product.type}/${product.status}] ${artifactRef}`;
-  };
-
-  const dependencyIssueLines = dependencyRows.flatMap((row) => {
-    const products = workProductsByIssueId.get(row.issueId) ?? [];
-    const lines = [
-      `- ${row.stepId}: ${row.identifier ?? row.issueId} (${row.status}) — ${row.title}`,
-    ];
-    if (products.length > 0) {
-      lines.push(`  workProducts: ${products.map(renderWorkProductSummary).join("; ")}`);
-    } else {
-      lines.push("  workProducts: none registered");
-    }
-    return lines;
-  });
-
-  const missingWorkProductLines = dependencyRows
-    .filter((row) => (workProductsByIssueId.get(row.issueId) ?? []).length === 0)
-    .map((row) => `- ${row.stepId}: ${row.identifier ?? row.issueId} has no registered dependency workProduct.`);
-
-  await input.db.insert(issueComments).values({
-    companyId: input.companyId,
-    issueId: input.issueId,
-    body: [
-      "### Workflow validation recheck\nA validation recheck was requested because the dependency artifacts changed. Next action: inspect the updated inputs and the next official verdict; this request does not confirm a new review result.",
-      "",
-      "The producer/dependency completed after the previous REQUEST_CHANGES verdict.",
-      "Re-run this validation using the current dependency workProducts below.",
-      "",
-      `- workflowRunId: ${input.workflowRunId}`,
-      `- stepId: ${input.step.id}`,
-      `- dependencyStepIds: ${JSON.stringify(dependencyStepIds)}`,
-      "",
-      ...(input.priorFindings && input.priorFindings.length > 0
-        ? [
-          "**Verify these previous REQUEST_CHANGES findings FIRST**, then continue the full checklist:",
-          ...input.priorFindings.map((finding) => `- [${finding.layer}] ${finding.id}: ${finding.summary}`),
-          "",
-        ]
-        : []),
-      "Current dependency issue inputs:",
-      ...(dependencyIssueLines.length > 0 ? dependencyIssueLines : ["- No dependency issue inputs are registered for this step."]),
-      ...(missingWorkProductLines.length > 0
-        ? [
-            "",
-            "Missing dependency hard-stop:",
-            ...missingWorkProductLines,
-            "- If this validation needs a missing dependency deliverable, submit `REQUEST_CHANGES` with a findings entry naming the missing workProduct.",
-          ]
-        : []),
-    ].join("\n"),
-  });
-}
-
 type ValidationVerdict = "pass" | "request_changes";
 
 interface ValidationVerdictObservation {
@@ -1032,25 +917,29 @@ async function syncStepRunsFromIssueState(
   steps: WorkflowStep[] = [],
   context?: WorkflowExecutionContext,
 ): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
+  const correctionToolIds = new Set<string>();
+  if (context) {
+    for (const stepRun of stepRuns) {
+      const step = steps.find(s => s.id === stepRun.stepId);
+      if (step && await readWorkflowToolCorrection(db, context.run, stepRun, step)) correctionToolIds.add(stepRun.id);
+    }
+  }
+  // Issued tool targets settle through the tool queue, never through an old issue status or agent wake.
   const issueIds = stepRuns
     .map((stepRun) => stepRun.issueId)
     .filter((issueId): issueId is string => Boolean(issueId));
   if (issueIds.length === 0) return stepRuns;
-
-  const issueRows = await db
-    .select({
-      id: issues.id,
-      companyId: issues.companyId,
-      status: issues.status,
-      startedAt: issues.startedAt,
-      completedAt: issues.completedAt,
-      cancelledAt: issues.cancelledAt,
-      title: issues.title,
-      originKind: issues.originKind,
-    })
-    .from(issues)
-    .where(inArray(issues.id, issueIds));
-  const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
+  // Preserve status/verdict sync; reserve only the issued agent targets from ordinary recheck.
+  const correctionIssueIds = context ? await queueCurrentIssuedQaCorrectionTargets(db, context.run,
+    stepRuns.filter(s => !correctionToolIds.has(s.id))) : new Set<string>();
+  const issueRows = await db.select({
+    id: issues.id, companyId: issues.companyId, status: issues.status, startedAt: issues.startedAt,
+    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, title: issues.title, originKind: issues.originKind,
+  }).from(issues).where(inArray(issues.id, issueIds));
+  const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
+  const issueById = new Map(issueRows
+    .filter(issue => issue.status === "cancelled" || !correctionToolIssueIds.has(issue.id))
+    .map((issue) => [issue.id, issue]));
   const stepById = new Map(steps.map((step) => [step.id, step]));
   const workProductDependencyGate = await loadWorkProductDependencyGate(db, stepRuns, steps);
   const validationCandidateIssueIds = collectUniqueStepRunIssueIds(stepRuns.filter((stepRun) => {
@@ -1076,128 +965,16 @@ async function syncStepRunsFromIssueState(
     });
   }
   const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationBindings);
-  // [Patch 3] validation-recheck idempotency: 각 validation issue 의 latest succeeded heartbeat 시각.
-  const latestSucceededHeartbeatByIssueId = await loadLatestSucceededHeartbeatAt(db, validationCandidateIssueIds);
-
-  const stepRunByStepId = new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
-  for (const stepRun of stepRuns) {
-    if (!stepRun.issueId) continue;
-    const issue = issueById.get(stepRun.issueId);
-    if (!issue || (issue.status !== "blocked" && issue.status !== "done")) continue;
-    const step = stepById.get(stepRun.stepId);
-    if (!step || step.dependencies.length === 0) continue;
-    if (!isValidationGateCandidate({ issueTitle: issue.title, issueOriginKind: issue.originKind, step })) continue;
-
-    const latestVerdict = latestValidationVerdictByIssueId.get(issue.id);
-    if (latestVerdict?.verdict !== "request_changes" || !latestVerdict.observedAt) continue;
-
-    // [Hybrid QA] Tolerate issue-less structural tool gate dependencies (extracted).
-    const depCheck = checkDependencyFreshness(step.dependencies, stepRunByStepId, issueById);
-    if (!depCheck.allFound || !depCheck.allDone) continue;
-    if (depCheck.maxCompletedAt === 0) continue;
-    // [Transitive producer freshness] A reworked producer can sit 2+ hops above
-    //   the QA step (producer → intermediate QA/gate → semantic QA). Direct-dep
-    //   freshness then never advances after a producer rework and the recheck is
-    //   skipped forever — the QA re-fire chain dead-ends silently and the run
-    //   finalizes failed (gazua-evening 2026-08-20: producer gen2 completed 09:22,
-    //   direct-dep max stayed 09:04 < RC verdict 09:11 → owner-action stall).
-    //   Include gate-validated producers' completion times so a reworked producer
-    //   generation re-arms the recheck regardless of DAG topology.
-    let freshnessMaxCompletedAt = depCheck.maxCompletedAt;
-    for (const producerStepIds of collectGateValidatedProducerStepIds(step.dependencies, stepById).values()) {
-      for (const producerStepId of producerStepIds) {
-        const producerRun = stepRunByStepId.get(producerStepId);
-        if (!producerRun) continue;
-        const producerIssue = producerRun.issueId ? issueById.get(producerRun.issueId) : undefined;
-        const producerCompletedMs = producerIssue
-          ? (producerIssue.completedAt?.getTime() ?? 0)
-          : (producerRun.completedAt?.getTime() ?? 0);
-        if (producerCompletedMs > freshnessMaxCompletedAt) freshnessMaxCompletedAt = producerCompletedMs;
-      }
-    }
-    if (freshnessMaxCompletedAt <= latestVerdict.observedAt.getTime()) continue;
-    // [Patch 3 recheck idempotency] 같은 producer generation 에 대해 validation 이 이미 재실행됐으면
-    //   중복 실행 요청을 만들지 않는다. producer 최종 완료(dependencyMaxCompletedAt) 이후에 succeeded heartbeat 가
-    //   한 번이라도 있으면 이미 이 generation 산출물을 recheck 한 것 — explicit verdict 유무와 무관하게 duplicate
-    //   request 를 끊는다. 이후 producer 가 다시 rework 되면 dependencyMaxCompletedAt 이 더 뒤로 갱신돼 재요청이 허용된다.
-    const dependencyMaxCompletedAt = freshnessMaxCompletedAt;
-    const latestRecheckAt = latestSucceededHeartbeatByIssueId.get(issue.id);
-    if (latestRecheckAt && latestRecheckAt.getTime() >= dependencyMaxCompletedAt) continue;
-
-    if (!context) continue;
-    // [recheck priority] Load the structured findings from the latest REQUEST_CHANGES
-    //   so the re-check can verify the previous fixes FIRST, then run the full
-    //   checklist. Machine contract only (workflow_api findings payload); absent
-    //   findings (legacy verdicts) degrade to the previous behavior.
-    let priorFindings: readonly WorkflowVerdictFinding[] | undefined;
-    try {
-      priorFindings = await loadWorkflowApiFindings({
-        db,
-        companyId: issue.companyId,
-        issueId: issue.id,
-        workflowRunId: stepRun.workflowRunId,
-        workflowStepRunId: stepRun.id,
-      }) ?? undefined;
-    } catch {
-      priorFindings = undefined;
-    }
-    // [Hybrid QA] Force fresh session on semantic QA recheck so stale verdict/session
-    //   state is not reused after a new producer generation.
-    const queued = await wakeExistingWorkflowStepIssue({
-      db,
-      run: context.run,
-      definition: context.definition,
-      step,
-      stepRunId: stepRun.id,
-      stepRunMetadata: stepRun.metadata,
-      issueId: issue.id,
-      allowCompletedIssue: true,
-      allowBlockedIssue: true,
-      forceFreshSession: true,
-      priorFindings,
-    });
-    if (!queued) continue;
-
-    const [updatedIssue] = await db
-      .select({
-        id: issues.id,
-        companyId: issues.companyId,
-        status: issues.status,
-        startedAt: issues.startedAt,
-        completedAt: issues.completedAt,
-        cancelledAt: issues.cancelledAt,
-        title: issues.title,
-        originKind: issues.originKind,
-      })
-      .from(issues)
-      .where(eq(issues.id, issue.id))
-      .limit(1);
-    if (updatedIssue) issueById.set(updatedIssue.id, updatedIssue);
-    await commentOnValidationRecheckQueued({
-      db,
-      companyId: issue.companyId,
-      issueId: issue.id,
-      workflowRunId: stepRun.workflowRunId,
-      step,
-      ...(priorFindings && priorFindings.length > 0 ? { priorFindings } : {}),
-    });
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: "system",
-      actorId: "workflow:validation-recheck",
-      action: "workflow.validation_recheck_queued",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        workflowRunId: stepRun.workflowRunId,
-        workflowStepRunId: stepRun.id,
-        stepId: step.id,
-        dependencyStepIds: step.dependencies,
-        reason: "dependency_completed_after_request_changes",
-        requestChangesObservedAt: latestVerdict.observedAt.toISOString(),
-      },
-    });
-  }
+  await recheckValidationStepIssues({
+    db,
+    stepRuns,
+    stepById,
+    issueById,
+    validationCandidateIssueIds: validationCandidateIssueIds.filter(id => !correctionIssueIds.has(id)),
+    // The callee iterates stepRuns; its private verdict view is the actual wake fence.
+    latestValidationVerdictByIssueId: new Map([...latestValidationVerdictByIssueId].filter(([id]) => !correctionIssueIds.has(id))),
+    context,
+  }, { isValidationGateCandidate, collectGateValidatedProducerStepIds });
 
   // A rework reset ignores the prior issue completion but accepts a later
   // completion from the current iteration.
@@ -1801,245 +1578,6 @@ async function createWorkflowStepIssue(input: {
   return createdIssue.id;
 }
 
-// [Patch 3 recheck idempotency] validation issue 별 latest succeeded heartbeat finishedAt.
-//   syncStepRunsFromIssueState 가 같은 producer generation 에 대해 중복 실행 요청을 만들지 않도록 한다:
-//   "이미 recheck heartbeat 가 producer 최종 완료 이후에 성공했다면 재요청 금지" 판정 재료.
-//   A1 RES-424 사례: 재실행 run 은 succeeded 였으나 explicit PASS verdict 가 없어 latestValidationVerdict
-//   가 구 REQUEST_CHANGES 에 머물 → 이후 sync 마다 QA 실행 요청이 반복되던 stale duplicate.
-async function loadLatestSucceededHeartbeatAt(db: Db, issueIds: string[]): Promise<Map<string, Date>> {
-  const latest = new Map<string, Date>();
-  if (issueIds.length === 0) return latest;
-  const rows = await db
-    .select({ issueId: heartbeatRuns.issueId, finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
-    .from(heartbeatRuns)
-    .where(and(inArray(heartbeatRuns.issueId, issueIds), eq(heartbeatRuns.status, "succeeded")))
-    .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
-  for (const row of rows) {
-    if (!row.issueId) continue;
-    if (latest.has(row.issueId)) continue; // desc 정렬 → 첫 행이 최신
-    const at = row.finishedAt ?? row.createdAt;
-    if (at) latest.set(row.issueId, at);
-  }
-  return latest;
-}
-
-export async function wakeExistingWorkflowStepIssue(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  definition: typeof workflowDefinitions.$inferSelect;
-  step: WorkflowStep;
-  stepRunId?: string;
-  stepRunMetadata?: unknown;
-  issueId: string;
-  allowCompletedIssue?: boolean;
-  allowBlockedIssue?: boolean;
-  /** When true, the heartbeat session is forced fresh (no stale context reuse). */
-  forceFreshSession?: boolean;
-  /** [recheck priority] Structured findings from the previous REQUEST_CHANGES that
-   *  this recheck should verify FIRST (then continue the full checklist). Machine
-   *  contract only — never natural-language parsing. */
-  priorFindings?: readonly WorkflowVerdictFinding[];
-  /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
-  idempotencyKey?: string | null;
-  /** [owner admission] owner-linked 실행의 typed 승인 정보 — 생략해도 저장 영수증 맥락에서
-   *  동일 검사가 적용된다(인자 생략으로 우회 불가). */
-  ownerExecution?: OwnerExecutionAdmission;
-}): Promise<boolean> {
-  // [Task5a2a] external recovery paths 는 live steps/definition 을 넘길 수 있다. 진입 시 1회 로드해 snapshot 이면
-  //   caller 입력을 캡처 정의/저장 step 으로 대체하고(구조게이트·QA-cap 배열 소비자 모두 캡처 배열), 저장 step 이
-  //   없으면 mutation/wake 없이 false. legacy_current 는 caller step/definition 동작 + legacy builder 배열 유지.
-  const execution = await loadExecutionDefinition(input.db, input.run.id, { requireHistorical: false });
-  let effectiveInput = input;
-  if (execution.source === "snapshot") {
-    const storedStep = execution.steps.find((candidate) => candidate.id === input.step.id);
-    if (!storedStep) return false;
-    effectiveInput = {
-      ...input,
-      definition: projectExecutionDefinition(input.definition, execution),
-      step: storedStep,
-    };
-  }
-  const executionSteps = execution.steps;
-  // This guards every resume entry point (normal recheck, reconciler, owner
-  // recovery). A semantic QA issue may not be queued from status alone.
-  const structuralReadiness = await evaluateSemanticStructuralReadiness({
-    db: input.db,
-    companyId: input.run.companyId,
-    workflowRunId: input.run.id,
-    step: effectiveInput.step,
-    steps: executionSteps,
-  });
-  if (!structuralReadiness.ready) return false;
-
-  const [issue] = await input.db
-    .select({
-      id: issues.id,
-      companyId: issues.companyId,
-      assigneeAgentId: issues.assigneeAgentId,
-      status: issues.status,
-    })
-    .from(issues)
-    .where(eq(issues.id, input.issueId))
-    .limit(1);
-  if (!issue) return false;
-  const isRunnableIssue =
-    issue.status === "todo" ||
-    (input.allowCompletedIssue === true && issue.status === "done") ||
-    (input.allowBlockedIssue === true && issue.status === "blocked");
-  if (!isRunnableIssue) return false;
-
-  let wakeIssue = issue;
-  if (!wakeIssue.assigneeAgentId) {
-    const assigneeAgentId = await resolveWorkflowStepAssigneeAgentId(input.db, input.run.companyId, effectiveInput.step);
-    if (!assigneeAgentId) return false;
-
-    const [updatedIssue] = await input.db
-      .update(issues)
-      .set({
-        assigneeAgentId,
-        updatedAt: new Date(),
-      })
-      .where(eq(issues.id, wakeIssue.id))
-      .returning({
-        id: issues.id,
-        companyId: issues.companyId,
-        assigneeAgentId: issues.assigneeAgentId,
-        status: issues.status,
-      });
-    if (!updatedIssue) return false;
-
-    await logActivity(input.db, {
-      companyId: updatedIssue.companyId,
-      actorType: "system",
-      actorId: `workflow:${input.definition.id}`,
-      action: "issue.assignee_restored",
-      entityType: "issue",
-      entityId: updatedIssue.id,
-      details: {
-        assigneeAgentId,
-        reason: "workflow_step_runnable",
-        workflowRunId: input.run.id,
-        workflowDefinitionId: input.definition.id,
-        stepId: input.step.id,
-      },
-    });
-
-    wakeIssue = updatedIssue;
-  }
-
-  const stepRunMetadata = normalizeRecord(input.stepRunMetadata);
-  const reworkContract = readWorkflowReworkContract(stepRunMetadata.workflowReworkContract);
-  const reworkContext = reworkContract
-    ? { paperclipWorkflowReworkContract: reworkContract }
-    : {};
-  const priorFindingsContext = input.priorFindings && input.priorFindings.length > 0
-    ? { priorQaFindings: input.priorFindings.map((finding) => ({ id: finding.id, summary: finding.summary, layer: finding.layer })) }
-    : {};
-  // [qa-cap acceptance] resumed downstream issue sees predecessor cap-accepted limitations.
-  const capAcceptanceContext = await loadDownstreamQaCapAcceptanceContext({
-    db: input.db,
-    workflowRunId: input.run.id,
-    predecessorStepIds: resolveEdges(effectiveInput.step).filter((e) => e.isBackEdge !== true).map((e) => e.stepId),
-  });
-  const capAcceptancePayload = capAcceptanceContext.accepted.length > 0
-    ? { acceptedQaLimitations: capAcceptanceContext }
-    : {};
-  const executionStepRuns = await input.db
-    .select({
-      stepId: workflowStepRuns.stepId,
-      status: workflowStepRuns.status,
-      iterationIndex: workflowStepRuns.iterationIndex,
-    })
-    .from(workflowStepRuns)
-    .where(eq(workflowStepRuns.workflowRunId, input.run.id));
-  const qaCapAcceptanceContract = buildQaCapAcceptanceRuntimeContract({
-    qaStep: effectiveInput.step,
-    qaIssueId: issue.id,
-    steps: executionSteps,
-    stepRuns: executionStepRuns,
-  });
-  const qaCapAcceptancePayload = qaCapAcceptanceContract
-    ? { paperclipQaCapAcceptanceContract: qaCapAcceptanceContract }
-    : {};
-
-  // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재
-  //   intent/권한버전/세대를 재확인한다(무연결 run은 무변화 통과). 검사와 wake 사이에 다른 await 없음.
-  if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
-    workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
-    ownerExecution: input.ownerExecution ?? null }))) return false;
-  await queueIssueAssignmentWakeup({
-    heartbeat: heartbeatService(input.db),
-    issue: wakeIssue,
-    reason: "workflow_step_runnable",
-    mutation: "workflow_resume",
-    contextSource: "workflow.resume",
-    payload: {
-      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
-      workflowRunId: input.run.id,
-      workflowDefinitionId: input.definition.id,
-      stepId: input.step.id,
-      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
-      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
-      ...reworkContext,
-      ...priorFindingsContext,
-      ...capAcceptancePayload,
-      ...qaCapAcceptancePayload,
-    },
-    contextSnapshot: {
-      issueId: issue.id,
-      taskId: issue.id,
-      ...(input.run.missionId ? { missionId: input.run.missionId } : {}),
-      workflowRunId: input.run.id,
-      workflowDefinitionId: input.definition.id,
-      ...(input.stepRunId ? { workflowStepRunId: input.stepRunId } : {}),
-      workflowStepId: input.step.id,
-      stepId: input.step.id,
-      source: "workflow.resume",
-      wakeReason: "workflow_step_runnable",
-      ...(input.forceFreshSession ? { forceFreshSession: true } : {}),
-      ...(structuralReadiness.coverage.length > 0 ? { structuralGateCoverage: structuralReadiness.coverage } : {}),
-      ...reworkContext,
-      ...capAcceptancePayload,
-      ...qaCapAcceptancePayload,
-    },
-    requestedByActorType: "system",
-    requestedByActorId: `workflow:${input.definition.id}`,
-    idempotencyKey: input.idempotencyKey ?? null,
-    rethrowOnError: isCapOverrideWakeKey(input.idempotencyKey),
-  });
-  return true;
-}
-
-async function resolveWorkflowStepAssigneeAgentId(
-  db: Db,
-  companyId: string,
-  step: WorkflowStep,
-): Promise<string | undefined> {
-  if (typeof step.agentId === "string" && step.agentId.trim()) {
-    return step.agentId.trim();
-  }
-
-  const rawAgentName = (step as PersistedWorkflowStep).agentName;
-  const agentName = typeof rawAgentName === "string"
-    ? rawAgentName.trim()
-    : "";
-  if (!agentName) return undefined;
-
-  const [agent] = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(and(
-      eq(agents.companyId, companyId),
-      eq(agents.name, agentName),
-      ne(agents.status, "terminated"),
-      ne(agents.status, "pending_approval"),
-    ))
-    .orderBy(asc(agents.createdAt))
-    .limit(1);
-  return agent?.id;
-}
-
 function buildStepRunMap(
   stepRuns: (typeof workflowStepRuns.$inferSelect)[],
 ): Map<string, typeof workflowStepRuns.$inferSelect> {
@@ -2441,7 +1979,7 @@ async function completeToolStepRunFromCache(input: {
 }): Promise<void> {
   const sourceMetadata = normalizeRecord(input.sourceStepRun.metadata);
   const sourceToolResult = normalizeRecord(sourceMetadata.toolResult);
-  const metadata: Record<string, unknown> = {
+  const metadata = settleToolQueueMetadata({
     ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
     toolInvocation: {
       toolName: input.toolName,
@@ -2454,10 +1992,8 @@ async function completeToolStepRunFromCache(input: {
       toolName: input.toolName,
       completedAt: input.now.toISOString(),
     },
-  };
+  }, input.now.toISOString());
   delete metadata.concurrencyBlocked;
-  // [종료 시 toolQueue 정리] 캐시 히트 완료도 종료 전이다 — 큐 기록을 settled 로 남긴다.
-  const settledCacheMetadata = settleToolQueueMetadata(metadata, input.now.toISOString());
 
   // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
   await setWorkflowStepRunStatus(input.db, {
@@ -2466,7 +2002,7 @@ async function completeToolStepRunFromCache(input: {
     patch: {
       startedAt: input.stepRun.startedAt ?? input.now,
       completedAt: input.now,
-      metadata: settledCacheMetadata,
+      metadata,
     },
     expectedStatuses: [input.stepRun.status],
   });
@@ -2474,6 +2010,96 @@ async function completeToolStepRunFromCache(input: {
 
 async function failToolStepRunWithDispatchError(input: Parameters<typeof persistFailedToolDispatch>[0]): Promise<void> {
   await persistFailedToolDispatch(input, buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata));
+}
+
+type WorkflowToolCorrection = NonNullable<Awaited<ReturnType<typeof findWorkflowVerdictCorrection>>>;
+
+/** Narrow discovery only; a matching event still needs issuance, currentness and byte proof. */
+function workflowToolQueueCandidate() {
+  return or(isNull(workflowStepRuns.issueId), sql`exists (
+    select 1 from ${workflowTransitionEvents}
+    where ${workflowTransitionEvents.companyId} = ${workflowRuns.companyId}
+      and ${workflowTransitionEvents.workflowRunId} = ${workflowRuns.id}
+      and ${workflowTransitionEvents.workflowStepRunId} = ${workflowStepRuns.id}
+      and ${workflowTransitionEvents.issueId} = ${workflowStepRuns.issueId}
+      and ${workflowTransitionEvents.eventType} = 'qa_correction_followup_requested'
+  )`);
+}
+
+function isQaCorrectionToolStep(step: WorkflowStep) {
+  const toolNames = Array.isArray(step.toolNames)
+    ? step.toolNames.filter(name => typeof name === "string" && name.trim()) : [];
+  return !isStructuralGateStep(step) && !isWorkflowControlNode(step) && !isWorkflowChildStep(step)
+    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa"
+    && toolNames.length === 1;
+}
+
+async function readWorkflowToolCorrection(db: Pick<Db, "select">, run: typeof workflowRuns.$inferSelect,
+  stepRun: typeof workflowStepRuns.$inferSelect, step: WorkflowStep) {
+  if (!stepRun.issueId || !isQaCorrectionToolStep(step)) return null;
+  const correction = await findWorkflowVerdictCorrection(db, { companyId: run.companyId,
+    issueId: stepRun.issueId, workflowRunId: run.id, workflowStepRunId: stepRun.id });
+  if (!correction || correction.issued.preparation.missionId !== run.missionId
+    || !same(correction.followup.target, { stepRunId: stepRun.id, stepId: stepRun.stepId,
+      issueId: stepRun.issueId, executionGeneration: stepRun.executionGeneration,
+      retryCount: stepRun.retryCount, iterationIndex: stepRun.iterationIndex })) return null;
+  return correction;
+}
+
+/** The ref is a lookup binding, never permission. Keep it across existing dispatch-failure metadata. */
+function hasWorkflowToolCorrectionInvocation(stepRun: typeof workflowStepRuns.$inferSelect,
+  correction: WorkflowToolCorrection) {
+  const invocation = getMetadataRecord(stepRun.metadata, "toolInvocation");
+  const request = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
+  const ref = normalizeRecord(stepRun.metadata).qaCorrectionToolFollowup ?? request.qaCorrectionFollowup;
+  return same(ref, correction.ref) && typeof invocation.requestId === "string"
+    && invocation.requestId === stepRun.lastDispatchRequestId;
+}
+
+/** Real root only: observe files first, then reuse the accepted ordered dependency locks and reservation. */
+async function withWorkflowToolCorrection<T>(input: {
+  db: Db; run: typeof workflowRuns.$inferSelect; stepRun: typeof workflowStepRuns.$inferSelect;
+  step: WorkflowStep; correction: WorkflowToolCorrection;
+}, write: (tx: Db) => Promise<T>): Promise<T | null> {
+  const { db, run, stepRun, step, correction } = input;
+  if (is(db, PgTransaction)) return null;
+  try {
+    const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
+    if (!same(execution.steps.find(s => s.id === step.id), step)
+      || await readQaCorrectionFollowupConsumption(db, correction.ref,
+        createQaCorrectionHistorySession(db, correction.ref))) return null;
+    const observation = await observeQaCorrectionFollowup(db, correction.ref,
+      createQaCorrectionHistorySession(db, correction.ref));
+    const dependencies = await prepareWorkflowVerdictLocks(db, correction, []);
+    return await db.transaction(async tx => {
+      const p = correction.issued.preparation;
+      if (p.authority.kind === "quality_current_output") {
+        await lockQualityAttemptBudget(tx, { companyId: run.companyId, actionId: p.authority.actionId, now: new Date() });
+      }
+      const currentRun = await lockUnreplacedRun(tx as unknown as Db, run.id, run.companyId);
+      if (!currentRun || currentRun.status !== "running" || currentRun.missionId !== run.missionId) return null;
+      await assertResumeAccepted(tx, run.id, currentRun.dispatchAuthorityVersion);
+      await lockWorkflowVerdictDependencies(tx, dependencies);
+      const current = await readCurrentQaCorrectionFollowup(tx, correction.ref, observation,
+        createQaCorrectionHistorySession(tx, correction.ref));
+      const latest = await readWorkflowToolCorrection(tx, currentRun, current.database.target.step, step);
+      const captured = await loadExecutionDefinition(tx, run.id, { requireHistorical: false });
+      if (!latest || !same(latest.ref, correction.ref) || !same(current.database.target.step, stepRun)
+        || captured.definitionHash !== execution.definitionHash
+        || !same(captured.steps.find(s => s.id === step.id), step)
+        || await readQaCorrectionFollowupConsumption(tx, correction.ref,
+          createQaCorrectionHistorySession(tx, correction.ref))) return null;
+      const rows = await tx.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
+      if (!classifyStepActivation(step, buildPredFactsMap(captured.steps, buildStepRunMap(rows))).runnable
+        || !await ownerPlanExecutionIntentCurrent(tx as unknown as Db, run.companyId,
+          { runMetadata: currentRun.metadata, stepMetadata: current.database.target.step.metadata })) return null;
+      return write(tx as unknown as Db);
+    });
+  } catch (error) {
+    // A refused/stale observation leaves the request unclaimed; unexpected DB errors still propagate.
+    if (!(error instanceof QaCorrectionReadError) && !(error instanceof QaCorrectionFollowupReadError)) throw error;
+    return null;
+  }
 }
 
 async function startIssueLessToolStepRun(input: {
@@ -2488,33 +2114,45 @@ async function startIssueLessToolStepRun(input: {
 }): Promise<boolean> {
   const { db, run, definition, step, stepRun, now } = input;
 
+  const correction = stepRun.issueId ? await readWorkflowToolCorrection(db, run, stepRun, step) : null;
+  if (stepRun.issueId && (!correction || is(db, PgTransaction))) return true;
+  if (correction && hasWorkflowToolCorrectionInvocation(stepRun, correction)) return true;
   const toolName = getSingleToolStepName(step);
-  const requestId = `${run.id}:${step.id}:${Date.now()}`;
+  const storedRequest = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
+  const reuseRequest = correction && same(storedRequest.qaCorrectionFollowup, correction.ref)
+    && typeof storedRequest.requestId === "string" && storedRequest.requestId === stepRun.lastDispatchRequestId;
+  const requestId = reuseRequest ? storedRequest.requestId as string
+    : correction?.ref.requestId ?? `${run.id}:${step.id}:${Date.now()}`;
   const workflowSteps = input.steps;
   let args: unknown;
   let artifactExecution: Awaited<ReturnType<typeof freezeCompanyArtifactAttempt>>;
+  const failStart = async (error: unknown, failedArgs: unknown): Promise<boolean> => {
+    const write = async (writer: Db) => {
+      await failToolStepRunWithDispatchError({ db: writer, step,
+        stepRun: correction ? { ...stepRun, metadata: { ...stepRun.metadata,
+          qaCorrectionToolFollowup: correction.ref } } : stepRun,
+        now, requestId, toolName, args: failedArgs, error });
+      return false;
+    };
+    return correction ? (await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, write)) ?? true
+      : write(db);
+  };
   try {
+    // Reuse request identity and contract, not prepared arguments: QA preparation needs original paths.
+    artifactExecution = reuseRequest
+      ? readFrozenArtifactAttempt(stepRun.metadata.artifactExecution,
+        { executionGeneration: stepRun.executionGeneration, requestId })
+      : await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
+        executionGeneration: stepRun.executionGeneration, requestId });
     args = await resolveWorkflowToolStepArgs({
-      db,
-      run,
-      step: step as PersistedWorkflowStep,
-      workflowSteps,
-      consumerStepRunId: stepRun.id,
+      db, run, step: step as PersistedWorkflowStep, workflowSteps, consumerStepRunId: stepRun.id,
+      consumerArtifactContract: artifactExecution?.contract,
     });
-    artifactExecution = await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
-      executionGeneration: stepRun.executionGeneration, requestId });
+    if (reuseRequest && !same(storedRequest.artifactExecution, artifactExecution)) {
+      throw new Error("artifact_contract_snapshot_stale");
+    }
   } catch (error) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args: step.toolArgs ?? {},
-      error,
-    });
-    return false;
+    return failStart(error, step.toolArgs ?? {});
   }
   const concurrencyKey = step.executionControls?.concurrencyKey;
   const concurrencyLimit = step.executionControls?.concurrencyLimit;
@@ -2526,8 +2164,8 @@ async function startIssueLessToolStepRun(input: {
       concurrencyKey,
     });
     if (runningCount >= concurrencyLimit) {
-      await blockToolStepRunForConcurrency({
-        db,
+      const block = (writer: Db) => blockToolStepRunForConcurrency({
+        db: writer,
         step,
         stepRun,
         concurrencyKey,
@@ -2535,11 +2173,13 @@ async function startIssueLessToolStepRun(input: {
         runningCount,
         now,
       });
+      if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, block);
+      else await block(db);
       return true;
     }
   }
   // QA/artifact attempts need current request-bound evidence, never generic cached results.
-  if (!isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
+  if (!correction && !isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
     const cachedStepRun = await findCachedToolStepRun({
       db,
       run,
@@ -2564,38 +2204,19 @@ async function startIssueLessToolStepRun(input: {
   }
 
   if (toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL && !workflowToolStepExecutor) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args,
-      error: "Workflow tool step executor is not configured.",
-    });
-    return false;
+    return failStart("Workflow tool step executor is not configured.", args);
   }
 
   const structuralGateProducerToken = isStructuralGateStep(step)
     ? await captureStructuralGateProducerToken({ db, workflowRunId: run.id, gate: step, steps: workflowSteps })
     : null;
   if (isStructuralGateStep(step) && !structuralGateProducerToken) {
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun,
-      now,
-      requestId,
-      toolName,
-      args,
-      error: "Structural gate producer generation is unavailable.",
-    });
-    return false;
+    return failStart("Structural gate producer generation is unavailable.", args);
   }
 
   const metadata: Record<string, unknown> = {
     ...artifactAttemptMetadata(buildWorkflowStepRunMetadata(step, stepRun.metadata), artifactExecution),
+    ...(correction ? { qaCorrectionToolFollowup: correction.ref } : {}),
     toolInvocation: {
       requestId,
       toolName,
@@ -2612,7 +2233,7 @@ async function startIssueLessToolStepRun(input: {
 
   // [step-status fencing v1] 스냅샷 status CAS — 이미 다른 실행자가 전이시킨 행으로의
   //   늦은 running 덮어쓰기(running 재기입 + requestId 교체)를 폐기한다.
-  await setWorkflowStepRunStatus(db, {
+  const enqueue = (writer: Db) => setWorkflowStepRunStatus(writer, {
     stepRunId: stepRun.id,
     status: "running",
     patch: {
@@ -2626,7 +2247,12 @@ async function startIssueLessToolStepRun(input: {
       metadata,
     },
     expectedStatuses: [stepRun.status],
+    extraConditions: correction ? [eq(workflowStepRuns.metadata, stepRun.metadata),
+      eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
+      eq(workflowStepRuns.retryCount, stepRun.retryCount), eq(workflowStepRuns.iterationIndex, stepRun.iterationIndex)] : [],
   });
+  if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, enqueue);
+  else await enqueue(db);
 
   return true;
 }
@@ -2678,7 +2304,7 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
     .where(and(
       eq(workflowRuns.status, "running"),
       eq(workflowStepRuns.status, "running"),
-      isNull(workflowStepRuns.issueId),
+      workflowToolQueueCandidate(),
       isNull(workflowStepRuns.lastDispatchErrorAt),
       isNotNull(workflowStepRuns.lastDispatchAcceptedAt),
       isNotNull(workflowStepRuns.lastDispatchRequestId),
@@ -2694,7 +2320,13 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
     //   persisted invocation 권위/에러 fallback 은 변경 없다.
     const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-    if (!step || !isIssueLessToolStep(step)) {
+    if (!step || (!isIssueLessToolStep(step) && !(row.stepRun.issueId && isQaCorrectionToolStep(step)))) {
+      skippedCount += 1;
+      continue;
+    }
+    const correction = row.stepRun.issueId
+      ? await readWorkflowToolCorrection(db, row.run, row.stepRun, step) : null;
+    if (row.stepRun.issueId && (!correction || !hasWorkflowToolCorrectionInvocation(row.stepRun, correction))) {
       skippedCount += 1;
       continue;
     }
@@ -2715,17 +2347,26 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
       skippedCount += 1;
       continue;
     }
-    await failToolStepRunWithDispatchError({
-      db,
-      step,
-      stepRun: row.stepRun,
-      now,
-      requestId,
-      toolName,
-      args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
-      error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
-      provenance: { run: row.run, source: "workflow_tool_queue" },
-    });
+    const failOrphan = async (writer: Db) => {
+      await failToolStepRunWithDispatchError({
+        db: writer,
+        step,
+        stepRun: row.stepRun,
+        now,
+        requestId,
+        toolName,
+        args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
+        error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
+        provenance: { run: row.run, source: "workflow_tool_queue" },
+      });
+      return true;
+    };
+    if (correction) {
+      if (!await withWorkflowToolCorrection({ db, run: row.run, stepRun: row.stepRun, step, correction }, failOrphan)) {
+        skippedCount += 1;
+        continue;
+      }
+    } else await failOrphan(db);
     await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
     orphanedCount += 1;
   }
@@ -2737,6 +2378,31 @@ export async function processQueuedWorkflowToolStepRuns(
   options: { limit?: number; now?: Date } = {},
 ): Promise<WorkflowToolStepQueueDispatchResult> {
   const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
+  // A nested sync cannot observe correction files or take a late quality prefix. Admit issued
+  // targets here on the existing root queue tick, including a prior failed/completed QA attempt.
+  if (!is(db, PgTransaction)) {
+    const correctionRows = await db
+      .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
+      .from(workflowStepRuns)
+      .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+      .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
+      .where(and(eq(workflowRuns.status, "running"), isNotNull(workflowStepRuns.issueId),
+        inArray(workflowStepRuns.status, ["pending", "running", "failed", "completed"]), workflowToolQueueCandidate()))
+      .orderBy(asc(workflowStepRuns.startedAt), asc(workflowStepRuns.id))
+      .limit(limit);
+    for (const row of correctionRows) {
+      const context = await loadWorkflowExecutionContext(db, row.run.id);
+      const step = context.steps.find(s => s.id === row.stepRun.stepId);
+      if (!step || step.triggerOn === "escalation"
+        || isRetryDelayBlockingDispatch(row.stepRun.metadata, options.now ?? new Date())) continue;
+      const launched = getDynamicLaunchStepIds(context);
+      if (launched && !launched.has(step.id)) continue;
+      const correction = await readWorkflowToolCorrection(db, row.run, row.stepRun, step);
+      if (!correction || hasWorkflowToolCorrectionInvocation(row.stepRun, correction)) continue;
+      await startIssueLessToolStepRun({ db, run: row.run, definition: context.definition,
+        step, steps: context.steps, stepRun: row.stepRun, now: options.now ?? new Date() });
+    }
+  }
   const orphanReconcile = await reconcileOrphanedWorkflowToolStepClaims(db, { ...options, limit });
   const queuedRows = await db
     .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
@@ -2746,7 +2412,7 @@ export async function processQueuedWorkflowToolStepRuns(
     .where(and(
       eq(workflowRuns.status, "running"),
       eq(workflowStepRuns.status, "running"),
-      isNull(workflowStepRuns.issueId),
+      workflowToolQueueCandidate(),
       isNull(workflowStepRuns.lastDispatchAcceptedAt),
       isNull(workflowStepRuns.lastDispatchErrorAt),
       sql`${workflowStepRuns.lastDispatchRequestId} is not null`,
@@ -2768,7 +2434,7 @@ export async function processQueuedWorkflowToolStepRuns(
     const execution = await loadExecutionDefinition(db, row.run.id, { requireHistorical: false });
     const steps = execution.steps;
     const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-    if (!step || !isIssueLessToolStep(step)) {
+    if (!step || (!isIssueLessToolStep(step) && !(row.stepRun.issueId && isQaCorrectionToolStep(step)))) {
       result.skippedCount += 1;
       continue;
     }
@@ -2784,12 +2450,29 @@ export async function processQueuedWorkflowToolStepRuns(
     // [owner plan admission] 오래된 owner 계획 intent 소유 run 의 실제 실행 admission 은 연기한다(스텝은 queued 유지).
     if (!(await ownerPlanExecutionIntentCurrent(db, row.run.companyId, { runMetadata: row.run.metadata, stepMetadata: row.stepRun.metadata }))) { result.skippedCount += 1; continue; }
 
+    const correction = row.stepRun.issueId
+      ? await readWorkflowToolCorrection(db, row.run, row.stepRun, step) : null;
     const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
     const requestId = readMetadataString(invocation.requestId) ?? readMetadataString(row.stepRun.lastDispatchRequestId);
     const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+    if (row.stepRun.issueId) {
+      if (!correction || !hasWorkflowToolCorrectionInvocation(row.stepRun, correction)
+        || invocation.requestId !== requestId || toolName !== getSingleToolStepName(step)
+        || !Object.prototype.hasOwnProperty.call(invocation, "args")) {
+        result.skippedCount += 1;
+        continue;
+      }
+      readFrozenArtifactAttempt(row.stepRun.metadata.artifactExecution,
+        { executionGeneration: row.stepRun.executionGeneration, requestId: requestId! });
+    }
     // [arg hygiene] 저장된 인자 재사용 시에도 셸 이스케이프 잔여($/, $')를 정화한다 —
     // 렌더 직후 값과 동일한 위생 보장(2026-09-02 enqueue 오염 사고).
-    const args = Object.prototype.hasOwnProperty.call(invocation, "args")
+    const hasPersistedArgs = Object.prototype.hasOwnProperty.call(invocation, "args");
+    const queuedArtifactExecution = !hasPersistedArgs && requestId && row.stepRun.metadata.artifactExecution
+      ? readFrozenArtifactAttempt(row.stepRun.metadata.artifactExecution,
+        { executionGeneration: row.stepRun.executionGeneration, requestId })
+      : null;
+    const args = hasPersistedArgs
       ? stripShellEscapeResidue(invocation.args)
       : await resolveWorkflowToolStepArgs({
         db,
@@ -2797,6 +2480,7 @@ export async function processQueuedWorkflowToolStepRuns(
         step: step as PersistedWorkflowStep,
         workflowSteps: steps,
         consumerStepRunId: row.stepRun.id,
+        consumerArtifactContract: queuedArtifactExecution?.contract,
       });
     if (!requestId) {
       await failToolStepRunWithDispatchError({
@@ -2852,7 +2536,9 @@ export async function processQueuedWorkflowToolStepRuns(
       ))
       .returning()
       .then((rows) => rows[0] ?? null);
-    const claimedStepRun = row.run.missionId === null
+    const claimedStepRun = correction
+      ? await withWorkflowToolCorrection({ db, run: row.run, stepRun: row.stepRun, step, correction }, claimStepRun)
+      : row.run.missionId === null
       ? await claimStepRun(db)
       : await withResumeSerialization(db, {
         companyId: row.run.companyId,
@@ -3068,229 +2754,14 @@ export async function completeWorkflowToolStepFromResult(
     allowTerminalRecovery?: boolean;
   },
 ): Promise<WorkflowExecutionResult | null> {
-  const row = await db
-    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
-    .from(workflowStepRuns)
-    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-    .where(eq(workflowStepRuns.id, input.stepRunId))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-
-  if (!row || row.run.companyId !== input.companyId) return null;
-  if (input.workflowRunId && input.workflowRunId !== row.run.id) return null;
-  if (input.stepId && input.stepId !== row.stepRun.stepId) return null;
-  // [Task6c-A] resume run 결과 수용은 정확한 dispatch 신원을 요구한다. requestId 가 없거나
-  //   현재 dispatch 와 다르면 이 결과는 이전/미지 세대의 늦은 도착물 — zero write 로
-  //   snapshot 만 돌려준다(ordinary run 은 이 가드가 없어 기존과 byte-identical). 이 가드는
-  //   resetForResume 이 stamp 한 own non-null metadata.resumeRequestId 로만 판정한다.
-  const resumeScopeRequestId = readOwnResumeRequestId(row.stepRun.metadata);
-  if (
-    resumeScopeRequestId !== null
-    && (input.requestId === undefined || input.requestId !== row.stepRun.lastDispatchRequestId)
-  ) {
-    return getWorkflowExecutionResultSnapshot(db, row.run.id);
-  }
-  if (input.requestId && row.stepRun.lastDispatchRequestId && input.requestId !== row.stepRun.lastDispatchRequestId) {
-    return null;
-  }
-  // [Hybrid QA] Structural gate callback guard and verdict handling (extracted).
-  // [Task5a2a] snapshot 을 artifact/step metadata/status mutation(terminal recovery 포함) 전에
-  //   검증한다(422 fail-closed). 이후 두 step lookup 이 같은 로드 배열을 쓴다(2차 raw 정규화 삭제).
-  const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
-  const stepForGuard = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 거부한다 — toolName/status/
-  //   metadata 는 완료 권위가 아니고, 자식 정산은 settlement writers(전체 신원 형태) 전용이다.
-  //   무변이 스냅숏으로 양보한다. 일반 tool 브랜치는 기존 동작을 그대로 유지한다.
-  if (stepForGuard && isWorkflowChildStep(stepForGuard)) {
-    return getWorkflowExecutionResultSnapshot(db, row.run.id);
-  }
-  // [tool truth — 2026-09-02] 기계 계약 실패(data.ok===false)는 success=true여도 실패로 기록.
-  // 구조 게이트는 verdict 원장 계약상 제외. 상세: tool-result-truth.ts
-  input = {
-    ...input,
-    ...applyMachineContractTruth({
-      success: input.success,
-      data: input.data,
-      error: input.error,
-      exitCode: input.exitCode,
-      isStructuralGate: isStructuralGateStep(stepForGuard),
-    }),
-  };
-  if (shouldRejectStructuralCallback(stepForGuard, input.requestId, row.stepRun.lastDispatchRequestId)) {
-    return null;
-  }
-  const canRecoverTerminalFailure = input.allowTerminalRecovery === true
-    && input.success
-    && row.stepRun.status === "failed";
-  if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status) && !canRecoverTerminalFailure) {
-    return getWorkflowExecutionResultSnapshot(db, row.run.id);
-  }
-
-  const now = new Date();
-  const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
-    ? row.stepRun.metadata
-    : {};
-  const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-  const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
-  const artifactCompletion = await verifyArtifactStepCompletion(row, (step as PersistedWorkflowStep | undefined)?.toolArtifactContract, input);
-  const toolArtifactReceipt = artifactCompletion?.receipt ?? null;
-  const artifactDataRecord = normalizeRecord(input.data);
-  const relativeArtifactCandidate = [
-    typeof input.artifactPath === "string" ? input.artifactPath.trim() : "",
-    readMetadataString(artifactDataRecord.rawPath) ?? "",
-    readMetadataString(artifactDataRecord.artifactPath) ?? "",
-  ].find((candidate) => candidate.length > 0 && !path.isAbsolute(candidate));
-  if (relativeArtifactCandidate) {
-    throw new Error(`workflow_tool_result_rejected: artifact path is not absolute (${relativeArtifactCandidate})`);
-  }
-  const artifactPath = toolArtifactReceipt ? null : readWorkflowToolArtifactPath({
-    artifactPath: input.artifactPath,
-    data: input.data,
+  return acceptWorkflowToolResult(db, input, {
+    normalizeRecord,
+    getMetadataRecord,
+    readMetadataString,
+    buildWorkflowStepRunMetadata,
+    getWorkflowExecutionResultSnapshot,
+    syncWorkflowRunState,
   });
-  // [Q3 생산 시점 다이제스트 — 2026-10-04] 영수증 없이 완료되는 내구 toolResult 도 완료 시점
-  //   artifactSha256 를 함께 기록한다: 이후 tool-output seed 검증(workflow-seed-tool-output.ts)이
-  //   승인 시점 bytes 를 생산 시점 값과 비교해 변조를 가리고, 기록에 없으면 재사용이 fail-closed
-  //   로 거절된다. additive — 영수증 분기·기존 소비자 무변경, 안전 읽기 실패 시 필드만 비운다.
-  const producedArtifactSha256 = artifactPath && input.success ? await readArtifactDigest(artifactPath) : null;
-  const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
-    || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
-  const baseToolResult = {
-    requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
-    toolName: input.toolName ?? null,
-    success: input.success,
-    stdout: input.stdout ?? null,
-    ...(input.data === undefined ? {} : { data: toolArtifactReceipt ? { ...artifactDataRecord, artifactPath: undefined, rawPath: undefined } : input.data }),
-    ...(artifactPath ? { artifactPath, ...(producedArtifactSha256 ? { artifactSha256: producedArtifactSha256 } : {}) } : {}),
-    stderr: input.stderr ?? null,
-    exitCode: input.exitCode ?? null,
-    error: input.error ?? null,
-    completedAt: now.toISOString(),
-  };
-  const toolResult = input.allowTerminalRecovery === true
-    ? { ...baseToolResult, recoveredBy: "owner-action" }
-    : baseToolResult;
-  let resultMetadata: Record<string, unknown> = deleteAfterUse
-    ? {
-      ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
-      retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
-    }
-    : { ...existingMetadata, toolResult, ...(toolArtifactReceipt ? { toolArtifactReceipt } : {}) };
-  // [종료 시 toolQueue 정리 — 2026-10-22] 완료/실패 전이와 함께 큐 기록을 settled 로 바꾼다.
-  //   종료 행에 queued/claimed 가 남아 resume 검사기·복구 뷰가 잔여를 계속 읽는 것을 막는다.
-  //   toolQueue 기록이 없으면 키를 만들지 않는다(settleToolQueueMetadata 불변식).
-  resultMetadata = settleToolQueueMetadata(resultMetadata, now.toISOString());
-  if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
-  const completionPlan = planStructuralCompletion({
-    step: stepForGuard, success: input.success, data: input.data,
-  });
-  if (completionPlan.effectiveSuccess) {
-    resultMetadata = stripRetryTrackingOnSuccess(resultMetadata) ?? resultMetadata;
-  }
-
-  // [Hybrid QA] Structural gates: atomic ledger+status transaction with CAS.
-  // The status patch is derived PURELY (no DB/ledger write) via
-  // planStructuralCompletion; the authoritative verdict is recorded exactly once
-  // INSIDE the atomic transaction below. Never pre-write the ledger outside the
-  // transaction — a pre-tx write cannot roll back on CAS loss and would orphan a
-  // verdict row with no matching step status update.
-  // Non-structural tool steps: unchanged non-transactional path.
-  if (isStructuralGateStep(stepForGuard)) {
-    const structuralGateProducerToken = readStructuralGateProducerToken(
-      existingMetadata.structuralGateProducerToken,
-    );
-    const atomic = await atomicStructuralCompletion({
-      db, step: stepForGuard, success: input.success, data: input.data,
-      companyId: row.run.companyId, workflowRunId: row.run.id,
-      workflowStepRunId: row.stepRun.id, missionId: row.run.missionId, issueId: row.stepRun.issueId, requestId: toolRequestId!,
-      source: "workflow_tool_result",
-      observedStatus: row.stepRun.status,
-      observedIterationIndex: row.stepRun.iterationIndex ?? null,
-      observedRequestId: row.stepRun.lastDispatchRequestId,
-      observedCompletedAt: row.stepRun.completedAt,
-      observedExecutionGeneration: row.stepRun.executionGeneration,
-      producerToken: structuralGateProducerToken,
-      patch: {
-        startedAt: row.stepRun.startedAt ?? now, completedAt: now,
-        metadata: resultMetadata,
-        fallbackFailureSummary: input.error ?? input.stderr ?? null,
-      },
-    });
-    if (!atomic.casWon) return getWorkflowExecutionResultSnapshot(db, row.run.id);
-    return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
-  }
-
-  // Non-structural path: reuse the pure completion plan.
-  // When finalization v1 is enabled, tool steps must also set dispatch_ready_at
-  // so that v1Enforcement-enabled edge-condition evaluation admits downstream steps.
-  // Heartbeat-backed steps get this via settlement.ts; tool steps bypass heartbeat
-  // entirely, so we set it here on successful completion (only if not already set).
-  const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
-  const nextStatus = effectiveSuccess ? "completed" : "failed";
-  // [Task6c-A] 완료 UPDATE 는 세대 CAS 로 강화된다: load 시점과 update 시점 사이
-  //   resetForResume 이 executionGeneration/statusTransitionVersion 을 정확히 함께 +1 하고 새
-  //   resumeRequestId 로 stamp 을 교체하므로, (generation, transitionVersion) 이 여전히 일치하는
-  //   resume 행은 필연히 같은 resumeRequestId 를 가진다(metadata 동등성은 이 CAS 가 보장 — 별도
-  //   where 불필요). ordinary run 도 generation 만으로 낡은 종결/복구 결과를 차단한다. 0 row 이면
-  //   stale 결과 — 전이 기록/동기화 없이 snapshot 만 돌려준다.
-  const completionCasCondition = and(
-    eq(workflowStepRuns.executionGeneration, row.stepRun.executionGeneration),
-    ...(artifactCompletion ? [eq(workflowStepRuns.lastDispatchRequestId, artifactCompletion.requestId), eq(workflowStepRuns.status, "running")] : []),
-    ...(resumeScopeRequestId !== null
-      ? [eq(workflowStepRuns.statusTransitionVersion, row.stepRun.statusTransitionVersion)]
-      : []),
-  );
-  // [descope D5 — DAG:3447] unfenced generic 완료 경로는 workflow S 를 절대 마감하지 않는다 —
-  //   자식 정산 권위는 workflow-child-settlement-writers 의 전체 신원 형태뿐이다(위에서 거부됨).
-  const observeFailure = nextStatus === "failed" && isQaRebindConsumer(row.stepRun.issueId, stepForGuard, existingMetadata);
-  const writeCompletion = async (writer: Db) => {
-    const [updated] = await writer.update(workflowStepRuns).set({
-      status: nextStatus,
-      startedAt: row.stepRun.startedAt ?? now, completedAt: now,
-      dispatchReadyAt: effectiveSuccess && !row.stepRun.dispatchReadyAt ? now : undefined,
-      lastDispatchErrorAt: effectiveSuccess ? null : now,
-      lastDispatchErrorSummary: effectiveSuccess ? null
-        : structuralGateRejected ? "structural_gate_request_changes"
-        : structuralContractFailure ? "structural_gate_contract_failure"
-        : (input.error ?? input.stderr ?? null),
-      metadata: resultMetadata,
-    }).where(and(eq(workflowStepRuns.id, row.stepRun.id), completionCasCondition)).returning({
-      id: workflowStepRuns.id,
-      transitionVersion: workflowStepRuns.statusTransitionVersion,
-    });
-    if (updated && observeFailure) {
-      await persistQaRebindCandidate(writer, { companyId: row.run.companyId,
-        workflowRunId: row.run.id, consumerStepRunId: updated.id });
-    }
-    return updated;
-  };
-  // Lock order mission → run → step (see lockFailureObservationScope).
-  const updatedStepRun = observeFailure
-    ? await db.transaction(async tx => {
-      await lockFailureObservationScope(tx as unknown as Db, row.run);
-      return writeCompletion(tx as unknown as Db);
-    }) : await writeCompletion(db);
-  if (!updatedStepRun) {
-    // [Task6c-A] stale resume 결과: 한 건도 쓰지 않고 현재 상태 snapshot 으로 수렴.
-    return getWorkflowExecutionResultSnapshot(db, row.run.id);
-  }
-  {
-    await recordWorkflowStepStatusTransition(db, {
-      companyId: row.run.companyId,
-      missionId: row.run.missionId,
-      workflowRunId: row.run.id,
-      workflowStepRunId: row.stepRun.id,
-      issueId: row.stepRun.issueId,
-      fromStatus: row.stepRun.status,
-      toStatus: nextStatus,
-      source: "workflow_tool_result",
-      transitionVersion: updatedStepRun.transitionVersion > row.stepRun.statusTransitionVersion
-        ? updatedStepRun.transitionVersion
-        : null,
-    });
-  }
-
-  return syncWorkflowRunState(db, row.run.id, "workflow_tool_result");
 }
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
@@ -3313,163 +2784,6 @@ export async function retryIssueLessToolWorkflowStep(
       resetUnlaunchedTerminalStepRuns(resetDb, rows, workflowChildStepIds(preflight.steps)),
     syncWorkflowRunState: (syncDb, runId) => syncWorkflowRunState(syncDb, runId, "workflow_retry"),
   });
-}
-
-async function finalizeWorkflowRunState(
-  db: Db,
-  context: WorkflowExecutionContext,
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-  boundaryEnabled: boolean,
-  reopenGuardEnabled: boolean,
-): Promise<typeof workflowRuns.$inferSelect> {
-  // [run-terminal-boundary v1] failureCascadeSkipped 는 reconciler cascade 로 죽은 관측이다 —
-  //   완료 스텝이 하나도 없는 런이 completed 로 재수렴하는 것을 항상 차단한다(플래그 무관).
-  //   완료 스텝이 하나라도 있으면 실제 산출이 존재하므로 기존 수렴을 유지한다
-  //   (workflow-failure-cascade-skip-sticky 계약 — sentinel 스텝은 종말 정산을 방해하지 않는다).
-  //   아래 cancelled 분기 우선순위는 그대로 유지된다.
-  const hasCascadeKill = stepRuns.some((stepRun) => normalizeRecord(stepRun.metadata).failureCascadeSkipped === true);
-  const hasCompletedStep = stepRuns.some((stepRun) => stepRun.status === "completed");
-  const hasFailedStep = stepRuns.some((stepRun) => stepRun.status === "failed")
-    || (hasCascadeKill && !hasCompletedStep);
-  const hasActiveStep = stepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
-  const dynamicLaunchStepIds = getDynamicLaunchStepIds(context);
-  const executableStepRuns = dynamicLaunchStepIds
-    ? stepRuns.filter((stepRun) => dynamicLaunchStepIds.has(stepRun.stepId))
-    : stepRuns;
-  const executableHasActiveStep = executableStepRuns.some((stepRun) => !WORKFLOW_STEP_TERMINAL_STATUSES.has(stepRun.status));
-  const allStepsTerminal = dynamicLaunchStepIds
-    ? executableStepRuns.length === dynamicLaunchStepIds.size && !executableHasActiveStep
-    : stepRuns.length === context.steps.length && !hasActiveStep;
-  const nextStatus =
-    context.run.status === "cancelled"
-      ? "cancelled"
-      : hasFailedStep && allStepsTerminal
-        ? "failed"
-        : !hasFailedStep && allStepsTerminal
-          ? "completed"
-          : "running";
-  const patch: Partial<typeof workflowRuns.$inferInsert> = {
-    status: nextStatus,
-    startedAt: context.run.startedAt ?? new Date(),
-    completedAt: nextStatus === "completed" || nextStatus === "failed" || nextStatus === "cancelled" ? new Date() : null,
-  };
-
-  const dynamicOwnerPlan = isDynamicOwnerPlanWorkflowDefinition(buildWorkflowDefinitionExecutionShape(context));
-  // [descope D5][r9 §1] 링크 자식 최종 변이는 유한 writer(잠금 하 P→I→S→C + 대상 재평가)로만 — 0행/경합은 실패닫힌 관찰(내구 행 재적재).
-  const gate = await resolveWorkflowRunFinalizationGate(db, { runId: context.run.id, companyId: context.run.companyId, nextStatus });
-  let finalRun: typeof workflowRuns.$inferSelect;
-  // 경계 분기가 최종화를 소유하면 legacy 미션 전역 stop 은 하지 않는다(스코프 대상만 효과로 실행).
-  let boundaryHandledFinalization = false;
-  if (gate.kind === "refused-invalid") {
-    await logWorkflowRunFinalizationRefused(db, { companyId: context.run.companyId, runId: context.run.id, reason: gate.reason });
-    finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
-  } else if (gate.kind === "linked") {
-    const result = await applyLinkedWorkflowRunFinalization(db, {
-      bound: gate.bound, companyId: context.run.companyId, nextStatus,
-      patch: { startedAt: patch.startedAt, completedAt: patch.completedAt }, boundWhere: gate.boundWhere,
-    });
-    if (result.outcome !== "updated" && nextStatus === "completed") {
-      // 동일 종말 반복은 오염이 아니다 — 상실 사유만 구조화 감사에 남는다(실행/재시도 권위 없음 — 규칙 9).
-      await logWorkflowRunFinalizationRefused(db, {
-        companyId: context.run.companyId, runId: context.run.id,
-        reason: `linked finalization gate lost (${result.outcome}: identity/status/receipt)`,
-      });
-    }
-    finalRun = result.outcome === "updated"
-      ? result.run
-      : await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
-  } else if (boundaryEnabled && (nextStatus === "failed" || nextStatus === "completed" || nextStatus === "cancelled")) {
-    // [run-terminal-boundary v1] plain 종결을 경계로 우회한다 — CAS/원인 스탬프/스코프 정지 대상
-    //   캡처는 코어 계약(run-terminal-boundary.ts)이 소유한다. 유예(deferred)면 run 은 비종말로,
-    //   stale/이미 종결이면 기존 상태로 남고 그 외 어떤 행도 건드리지 않는다.
-    const boundary = await finalizeRunTerminal(db, {
-      runId: context.run.id,
-      companyId: context.run.companyId,
-      expectedAuthorityVersion: context.run.dispatchAuthorityVersion,
-      decision: nextStatus,
-      cause: { policy: "outcome_convergence", discovery: "engine_recompute", origin: "dag_engine" },
-      gatePolicy: nextStatus === "failed" ? "defer_on_open_recovery" : "immediate",
-      now: new Date(),
-      stepRuns,
-      dynamicOwnerPlanCompleted: dynamicOwnerPlan && nextStatus === "completed",
-    });
-    finalRun = boundary.run;
-    // [봇 지적 교정] legacy 종결 행(결정 기록 없음)의 already_finalized 는 대체 kill 인텐트도
-    //   원결정의 효과도 없다 — legacy 와 동일하게 미션 스톱을 계속 맡기게 한다. 결정 기록이 있는
-    //   already_finalized/finalized 만 경계가 부작용을 소유한다(스윕이 재처리).
-    boundaryHandledFinalization = boundary.kind === "finalized"
-      || (boundary.kind === "already_finalized" && boundary.existingDecision !== null);
-    if (boundary.kind !== "finalized" && boundary.kind !== "already_finalized") {
-      // [관측 계약] deferred/stale_authority 는 조용히 유실되지 않는다 — 구조화 감사로 남긴다.
-      await logActivity(db, {
-        companyId: context.run.companyId,
-        actorType: "system",
-        actorId: "dag-engine",
-        action: "workflow_run.terminal_boundary_not_finalized",
-        entityType: "workflow_run",
-        entityId: context.run.id,
-        details: {
-          boundaryKind: boundary.kind,
-          expectedAuthorityVersion: context.run.dispatchAuthorityVersion,
-          currentAuthorityVersion: boundary.kind === "stale_authority" ? boundary.currentAuthorityVersion : undefined,
-          gateKind: boundary.kind === "deferred" ? boundary.gateKind : undefined,
-          computedDecision: nextStatus,
-        },
-      });
-    }
-    if (boundary.kind === "finalized") {
-      try {
-        await executeTerminalEffectIntents(db, boundary.decisionId);
-      } catch (error) {
-        // [규칙 8] 부작용 실행 실패는 관측일 뿐 권위가 아니다 — pending 인텐트는 reconciler sweep 이 재처리한다.
-        await logActivity(db, {
-          companyId: context.run.companyId,
-          actorType: "system",
-          actorId: "dag-engine",
-          action: "workflow_run.terminal_effect_execution_failed",
-          entityType: "workflow_run",
-          entityId: context.run.id,
-          details: {
-            decisionId: boundary.decisionId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        });
-      }
-    }
-  } else if (
-    // [run-reopen-guard v1] 재계산 부활 차단 — 종결 권위(completed/cancelled/aborted/failed/timed-out)는
-    //   비종결 스텝 재계산 같은 관측 사실만으로 running 으로 부활하지 않는다. 쓰기 없이 종결 상태를
-    //   유지하고 거부 사유만 구조화 감사에 남긴다(실행 권위 없음 — 규칙 8/9). 공식 재개는 회복 경로의
-    //   소관이며, cancelled 분기는 위 nextStatus 우선순위가 이미 cancelled 로 수렴하므로 여기서 유지된다.
-    reopenGuardEnabled
-    && nextStatus === "running"
-    && TERMINAL_WORKFLOW_STATUSES.has(context.run.status)
-  ) {
-    await logWorkflowRunFinalizationRefused(db, {
-      companyId: context.run.companyId,
-      runId: context.run.id,
-      reason: "recompute revive refused — terminal authority stands (reopen requires the official recovery path)",
-    });
-    finalRun = await reloadWorkflowRunForFinalization(db, { runId: context.run.id, companyId: context.run.companyId });
-  } else {
-    const [updatedRun] = await db.update(workflowRuns).set(patch)
-      .where(eq(workflowRuns.id, context.run.id)).returning();
-    finalRun = updatedRun ?? { ...context.run, ...patch } as typeof workflowRuns.$inferSelect;
-  }
-  const missionId = finalRun.missionId;
-  const shouldStopMissionRuntimes = !boundaryHandledFinalization
-    && missionId !== null
-    && TERMINAL_WORKFLOW_STATUSES.has(finalRun.status)
-    && !(dynamicOwnerPlan && finalRun.status === "completed");
-  if (shouldStopMissionRuntimes) {
-    await stopMissionRuntimesForMission(db, {
-      companyId: finalRun.companyId,
-      missionId,
-      reason: `workflow ${finalRun.id} ${finalRun.status}`,
-    });
-  }
-
-  return finalRun;
 }
 
 async function cancelOutstandingWorkflowIssues(
@@ -3812,7 +3126,8 @@ async function loadIssueStatusesForStepRuns(
 
 export async function syncWorkflowRunStateWithOutcome(db: Db, runId: string, source: WorkflowSyncSource = "workflow_sync",
   options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean }): Promise<WorkflowSyncOutcome> {
-  return withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options));
+  return withQaCorrectionFollowupReconcile(db, runId, () =>
+    withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options)));
 }
 async function syncWorkflowRunStateCore(
   db: Db,
@@ -4028,27 +3343,8 @@ async function syncWorkflowRunStateCore(
       stepRuns,
       predsByStepId: reworkPredsByStepId,
       validationVerdictsByIssueId,
-      // [qa mechanical remediation] QA 스텝 재실행(wake) 주입 — loop-driver 는 dag-engine 을 import
-      //   하지 않으므로 여기서 래핑한다. 기존 validation-recheck 와 동일한 wake 경로/조건을 재사용해
-      //   재발행 세션 강제(fresh session)로 현재 산출물만 재검증한다.
-      refireQaStep: async (qa) => {
-        const stepDef = context.steps.find((s) => s.id === qa.stepId);
-        if (!stepDef || !qa.issueId) return false;
-        const qaRun = stepRuns.find((sr) => sr.id === qa.stepRunId);
-        return wakeExistingWorkflowStepIssue({
-          db,
-          run: context.run,
-          definition: context.definition,
-          step: stepDef,
-          stepRunId: qa.stepRunId,
-          stepRunMetadata: qaRun?.metadata,
-          issueId: qa.issueId,
-          allowCompletedIssue: true,
-          allowBlockedIssue: true,
-          forceFreshSession: true,
-          idempotencyKey: `qa-remediation-refire:${context.run.id}:${qa.stepRunId}`,
-        });
-      },
+      refireQaStep: createQaRemediationRefire({ db, run: context.run, definition: context.definition,
+        steps: context.steps, stepRuns }),
     });
     stepRuns = reworkResult.stepRuns;
   }
@@ -4149,7 +3445,7 @@ async function syncWorkflowRunStateCore(
           continue;
         }
 
-        if (isIssueLessToolStep(step)) {
+        if (isIssueLessToolStep(step) || await readWorkflowToolCorrection(db, context.run, stepRun, step)) {
           const started = await startIssueLessToolStepRun({
             db,
             run: context.run,
@@ -4307,7 +3603,9 @@ async function syncWorkflowRunStateCore(
   }
   // [run-reopen-guard v1] 플래그는 sync 당 1회 읽는다(terminal-parent 가드에서 읽은 값을 재사용).
   const terminalBoundaryEnabled = await isRunTerminalBoundaryV1Enabled(db);
-  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled, reopenGuardEnabled);
+  const updatedRun = await finalizeWorkflowRunState(db, context, stepRuns, terminalBoundaryEnabled, reopenGuardEnabled, {
+    normalizeRecord, getDynamicLaunchStepIds, buildWorkflowDefinitionExecutionShape,
+  });
   // [workflow child step] 자식 run 종말 → 부모 waiting 스텝 마감 훅. 훅 실패는 sync 를 깨뜨리지 않는다
   //   (reconciler 가 회복). 훅은 자기 waiting 스텝만 마감한다(규칙 7/8).
   if (TERMINAL_WORKFLOW_STATUSES.has(updatedRun.status)) {

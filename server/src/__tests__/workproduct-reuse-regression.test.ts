@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import {
   agentWakeupRequests,
   agents,
@@ -14,6 +14,9 @@ import {
   heartbeatRuns,
   issues,
   missions,
+  operatorDecisions,
+  operatorDecisionContinuations,
+  workflowTransitionEvents,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
@@ -132,9 +135,35 @@ describeEP("RES-1318 workproduct-reuse bounded registration", () => {
     expect(r.dispatched.length).toBe(0);
   });
 
-  it("two Unblock actions plus a claimed QA wakeup → qa_recovery_live (dispatch 0)", async () => {
-    const r = await run("two-unblock-live");
-    expect(r.dispatched.length).toBe(0);
-    expect(r.producerAfter?.status).toBe("blocked");
+  it("two open owner unblock anchors plus a claimed QA wakeup → conflict without mutation or reuse dispatch", async () => {
+    const s = await seed(db, "two-unblock-live");
+    const dispatched: Array<Record<string, unknown>> = [];
+    const svc = missionService(db, {
+      onWorkProductReuseWakeRequested: async (input: Record<string, unknown>) => { dispatched.push(input); },
+    } as never);
+    const snapshot = () => Promise.all([
+      // Supervision may reconcile the mission or create unrelated oversight/QA actions.
+      // The existing sources and every anchor for this producer must remain untouched.
+      db.select().from(issues).where(and(eq(issues.companyId, s.companyId), or(
+        inArray(issues.id, [s.producerIssueId, s.qaIssueId]),
+        and(eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, s.producerIssueId)),
+      ))).orderBy(issues.id),
+      db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, s.companyId)).orderBy(heartbeatRuns.id),
+      db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, s.companyId)).orderBy(agentWakeupRequests.id),
+      db.select().from(workflowRuns).where(eq(workflowRuns.companyId, s.companyId)).orderBy(workflowRuns.id),
+      db.select().from(workflowStepRuns).innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+        .where(eq(workflowRuns.companyId, s.companyId)).orderBy(workflowStepRuns.id),
+      db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.companyId, s.companyId)).orderBy(workflowTransitionEvents.id),
+      db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, s.companyId)).orderBy(operatorDecisions.id),
+      db.select().from(operatorDecisionContinuations).where(eq(operatorDecisionContinuations.companyId, s.companyId)).orderBy(operatorDecisionContinuations.id),
+    ]);
+    const before = await snapshot();
+    await expect(svc.runActiveMissionOwnerSupervision({ staleAfterMinutes: 30, applySafeActions: true, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: true, dispatchStaleSourceIssueWakeups: false, now: new Date("2026-07-12T10:00:00.000Z") })).rejects.toMatchObject({
+      status: 409,
+      message: "Owner unblock anchor conflict",
+      details: { reason: "owner_unblock_anchor_changed" },
+    });
+    expect(await snapshot()).toEqual(before);
+    expect(dispatched).toHaveLength(0);
   });
 });

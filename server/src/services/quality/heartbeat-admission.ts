@@ -12,6 +12,8 @@
 //   호출되는 함수들이다(§3.3: 커밋 전 이벤트·깨우기 금지 준수).
 
 import { and, asc, eq, sql } from "drizzle-orm";
+import { conflict } from "../../errors.js";
+import { QA_CORRECTION_WAKE_PREFIX } from "../work-products/qa-correction-producer-attempt.js";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, qualityActions } from "@paperclipai/db";
 import { insertWorkflowWakeRequest } from "../heartbeat-workflow-wake.js";
@@ -24,7 +26,8 @@ import {
   buildPlanQaResubmissionAcceptancePatch,
 } from "./plan-qa-wake-admission.js";
 import {
-  findQualityWakeRowByExactKey, isQualityWakeKey, parsePlanQaResubmissionWakeKey, parseQualityWakeKey,
+  findBoundedWakeRowByExactKey, findQualityWakeRowByExactKey, isBoundedExecutionWakeKey, isQaCorrectionWakeKey,
+  isQualityWakeKey, parsePlanQaResubmissionWakeKey, parseQualityWakeKey, unboundedExecutionWakeKeyCondition,
   type QualityAttemptRow,
 } from "./native-wake.js";
 
@@ -119,11 +122,27 @@ export async function queuePausedAgentWakeupRequest(
     requestedByActorId: string | null;
     idempotencyKey: string | null;
     missionIdForWake: string | null;
+    contextSnapshot?: Record<string, unknown>;
+    contextSnapshotKey?: string;
     recordEvent: HeartbeatQueueEventRecorder;
   },
 ): Promise<void> {
+  // 이 helper는 현재성·잠금 권한을 소유하지 않는다. 교정은 root 입장 경계에서만 작성한다.
+  if (isQaCorrectionWakeKey(input.idempotencyKey) || Object.hasOwn(input.payload ?? {}, "qaCorrectionFollowup")) {
+    throw conflict("qa_correction_root_admission_required");
+  }
+  const storedPayload = input.contextSnapshot && input.contextSnapshotKey
+    ? { ...(input.payload ?? {}), [input.contextSnapshotKey]: input.contextSnapshot } : input.payload;
   let wakeupRequestId: string | null = null;
-  if (input.typedQueueColumns.issueId) {
+  let recordWaiting = true;
+  if (isBoundedExecutionWakeKey(input.idempotencyKey)) {
+    const existing = await findBoundedWakeRowByExactKey(db, { companyId: input.companyId,
+      agentId: input.agentId, issueId: input.typedQueueColumns.issueId, idempotencyKey: input.idempotencyKey });
+    if (existing && (existing.agentId !== input.agentId || existing.issueId !== input.typedQueueColumns.issueId
+      || existing.idempotencyKey !== input.idempotencyKey)) throw conflict("bounded_wakeup_identity_mismatch");
+    wakeupRequestId = existing?.id ?? null;
+    recordWaiting = !existing;
+  } else if (input.typedQueueColumns.issueId) {
     const existingQueuedWake = await db
       .select({ id: agentWakeupRequests.id, coalescedCount: agentWakeupRequests.coalescedCount, payload: agentWakeupRequests.payload })
       .from(agentWakeupRequests)
@@ -142,7 +161,7 @@ export async function queuePausedAgentWakeupRequest(
       await db
         .update(agentWakeupRequests)
         .set({
-          payload: preserveWorkflowAttemptProof(existingQueuedWake.payload, input.payload),
+          payload: preserveWorkflowAttemptProof(existingQueuedWake.payload, storedPayload),
           coalescedCount: (existingQueuedWake.coalescedCount ?? 0) + 1,
           updatedAt: new Date(),
         })
@@ -158,7 +177,7 @@ export async function queuePausedAgentWakeupRequest(
         source: input.source,
         triggerDetail: input.triggerDetail,
         reason: input.reason,
-        payload: input.payload,
+        payload: storedPayload,
         ...input.typedQueueColumns,
         status: "queued",
         requestedByActorType: input.requestedByActorType,
@@ -168,7 +187,7 @@ export async function queuePausedAgentWakeupRequest(
     wakeupRequestId = inserted?.id ?? null;
   }
 
-  await input.recordEvent(db, {
+  if (recordWaiting) await input.recordEvent(db, {
     companyId: input.companyId,
     missionId: input.missionIdForWake,
     issueId: input.typedQueueColumns.issueId,
@@ -185,27 +204,23 @@ export async function queuePausedAgentWakeupRequest(
 }
 
 /**
- * 병합 조회용 bounded-execution 조건: 저장 행의 키가 유한 시도 키가 아니거나, 들어오는 키와
- * 정확히 같을 때만 병합 대상이 된다. generic 요청(키 없음)은 bounded 행과 절대 병합되지 않고,
- * bounded 요청도 다른 결정·세대·시도 행과 병합되지 않는다. isBoundedExecutionWakeKey의 네 접두사와
- * 반드시 같이 유지한다.
+ * 교정 요청은 같은 키도 일반 payload 병합에서 제외한다. 정확한 재사용은 root 입장 책임이다.
+ * 저장된 교정 표시도 제외하며, 비교정 quality·PLAN-QA·generic의 기존 후보 조건은 유지한다.
  */
 export function mergeableWakeupKeyCondition(incomingKey: string | null | undefined) {
-  const exact = typeof incomingKey === "string" && incomingKey.length > 0 ? incomingKey : "";
-  return sql`(${agentWakeupRequests.idempotencyKey} is null
-    or (${agentWakeupRequests.idempotencyKey} not like 'quality-action-wake:%'
-      and ${agentWakeupRequests.idempotencyKey} not like 'plan-qa-resubmit:%'
-      and ${agentWakeupRequests.idempotencyKey} not like 'operator-decision-wake:%'
-      and ${agentWakeupRequests.idempotencyKey} not like 'qa-remediation-refire:%')
-    or ${agentWakeupRequests.idempotencyKey} = ${exact})`;
+  if (isBoundedExecutionWakeKey(incomingKey)) return sql`false`;
+  return sql`(
+    ${unboundedExecutionWakeKeyCondition()}
+    and not (coalesce(${agentWakeupRequests.payload}, '{}'::jsonb) ? 'qaCorrectionFollowup')
+  )`;
 }
 
-/** admission tx 시작점에서 같은 bounded 실행 키(quality·PLAN-QA 재제출)의 기존 행을 찾는다(멱등 재전달). */
+/** admission tx 시작점에서 같은 bounded 실행 키의 기존 행을 찾는다(멱등 재전달). */
 export async function findExistingQualityWakeRow(
   db: Pick<Db, "select">,
   input: { companyId: string; idempotencyKey: string | null },
 ): Promise<QualityAttemptRow | null> {
-  if (!isQualityWakeKey(input.idempotencyKey) && !parsePlanQaResubmissionWakeKey(input.idempotencyKey)) return null;
+  if (!isBoundedExecutionWakeKey(input.idempotencyKey)) return null;
   return findQualityWakeRowByExactKey(db as Db, { companyId: input.companyId, idempotencyKey: input.idempotencyKey! });
 }
 

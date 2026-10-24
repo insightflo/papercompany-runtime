@@ -16,9 +16,10 @@ import { freezeArtifactAttempt } from '../../services/workflow/artifact-contract
 let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>, root: string;
 beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase("qa-receipt-v31-"); db = createDb(temp.connectionString);
   root = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-v31-"))); }, 60000);
-afterAll(async () => { await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
+afterAll(async () => { await db?.$client.end(); await temp?.cleanup(); execFileSync("chmod", ["-R", "u+w", root]); await rm(root, { recursive: true, force: true }); });
 
 export function database() { return db; }
+export function databaseConnectionString() { return temp.connectionString; }
 
 export async function fixture(producerScript?: string) {
   const companyId = randomUUID(), agentId = randomUUID(), missionId = randomUUID(), workflowId = randomUUID(), runId = randomUUID(),

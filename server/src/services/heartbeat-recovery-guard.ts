@@ -1,34 +1,41 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, is, or } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { PgTransaction } from "drizzle-orm/pg-core";
+import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
+import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { conflict } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
 import { budgetBlockers } from "./workflow/resume/preview-facts.js";
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import { claimQueuedHeartbeatRun } from "./heartbeat-finalization/shadow-writes.js";
+import { preparePauseChildAdmission, assertCurrentPauseChild, type PauseChildAdmission } from "./heartbeat-pause-admission.js";
+import { acceptOwnerHumanResponseAtClaim, assertOwnerHumanResponseDelivery,
+  recordOwnerHumanAdapterStart, type OwnerResponseRun, type OwnerResponseScope,
+} from "./missions/owner-human-response.js";
 
-type Scope = {
-  companyId: string;
-  agentId: string;
-  issueId?: string | null;
-  workflowRunId?: string | null;
-  workflowStepRunId?: string | null;
-  contextSnapshot?: unknown;
-  wakeupRequestId?: string | null;
+type Scope = OwnerResponseScope & {
+  id?: string;
+  companyId: string; agentId: string;
+  issueId?: string | null; missionId?: string | null;
+  workflowRunId?: string | null; workflowStepRunId?: string | null;
+  contextSnapshot?: unknown; wakeupRequestId?: string | null; idempotencyKey?: string | null;
+  source?: string | null; reason?: string | null; payload?: unknown;
+  requestedByActorType?: string | null; requestedByActorId?: string | null;
+  operatorDecisionInitialAdmission?: boolean; operatorDecisionStoredAdmission?: boolean; operatorDecisionOnly?: boolean;
 };
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
+function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function text(value: unknown): string | null { return typeof value === "string" && value.trim() ? value : null; }
 
-/** All identity paths are OR-ed: an explicit hint never hides the issue's actual run.
- * Owner/oversight issue mission membership alone is deliberately NOT an execution link.
- * Caller owns a transaction; acquire mission → run before issue/wake/heartbeat locks.
- */
+/** OR all identity paths; owner issue membership alone is not execution linkage. Caller owns the transaction. */
 export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
   const context = record(input.contextSnapshot);
+  let ownerDelivery = Boolean(await assertOwnerHumanResponseDelivery(db, input));
+  if (!ownerDelivery && input.id && input.wakeupRequestId
+    && !input.operatorDecisionInitialAdmission && !input.operatorDecisionStoredAdmission) {
+    ownerDelivery = Boolean(await acceptOwnerHumanResponseAtClaim(db, input as OwnerResponseRun));
+  }
+  if (input.operatorDecisionOnly) return;
   const issueIds = [...new Set([input.issueId, text(context.issueId)].filter((id): id is string => !!id))];
   const stepIds = [...new Set([input.workflowStepRunId, text(context.workflowStepRunId)].filter((id): id is string => !!id))];
   const runIds = new Set([input.workflowRunId, text(context.workflowRunId)].filter((id): id is string => !!id));
@@ -47,10 +54,15 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
       eq(issues.companyId, input.companyId), inArray(issues.id, issueIds), eq(issues.originKind, "workflow_execution")));
     for (const origin of origins) if (origin.runId) runIds.add(origin.runId);
   }
-  if (!runIds.size) return;
+  if (!runIds.size && !input.missionId && !ownerDelivery) return;
   const runs = await db.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, input.companyId), inArray(workflowRuns.id, [...runIds])));
   if (runs.length !== runIds.size) throw conflict("heartbeat_workflow_scope_missing");
   runs.sort((a, b) => (a.missionId ?? "").localeCompare(b.missionId ?? "") || a.id.localeCompare(b.id));
+  // A pause receipt can carry an explicit original mission without borrowing a workflow from context.
+  if (input.missionId && !runs.some(r => r.missionId === input.missionId)) {
+    await db.select().from(missions).where(and(eq(missions.id, input.missionId), eq(missions.companyId, input.companyId))).for("no key update");
+    await assertMissionRuntimeAcceptsWork(db, { companyId: input.companyId, missionId: input.missionId });
+  }
   for (const run of runs) {
     // NO KEY UPDATE conflicts with replacement's UPDATE lock but permits FK key-share
     // reads by the existing session initializer on its separate connection.
@@ -76,10 +88,11 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
 }
 
 /** Claim and replacement admission serialize on the same mission/source-run locks. */
-export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
-  return db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    await assertHeartbeatRecoveryAdmission(t, run);
+async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
+  let pause: PauseChildAdmission | null = null;
+  return withQaCorrectionClaimRoot(db, run, async t => {
+    pause = await preparePauseChildAdmission(t, run, missionId => assertHeartbeatRecoveryAdmission(t, { ...run, missionId }));
+  }, async t => {
     const [agent] = await t.select().from(agents).where(eq(agents.id, run.agentId));
     if (!agent || ["paused", "terminated", "pending_approval"].includes(agent.status)) throw conflict("Cancelled because the agent is not invokable");
     const context = record(run.contextSnapshot);
@@ -87,25 +100,35 @@ export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartb
     if (block) throw conflict(block.reason);
     const missionId = text(context.missionId);
     if (missionId) await assertMissionRuntimeAcceptsWork(t, { companyId: run.companyId, missionId });
+    await assertCurrentPauseChild(t, run, pause);
     return claimQueuedHeartbeatRun(t, run, claimedAt);
   });
+}
+
+/** Preserve the existing direct claim API; public queue callers also distinguish registered deferral. */
+export async function claimHeartbeatWithRecoveryGuard(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
+  const outcome = await guardedClaim(db, run, claimedAt);
+  return outcome.kind === "performed" ? outcome.value : null;
 }
 
 function executionIdentity(run: typeof heartbeatRuns.$inferSelect) {
   const context = record(run.contextSnapshot);
   return JSON.stringify([run.agentId, run.issueId, run.wakeupRequestId, run.workflowStepRunId,
-    run.workflowExecutionGeneration, context.issueId, context.workflowRunId, context.workflowStepRunId]);
+    run.workflowExecutionGeneration, run.retryOfRunId, context.issueId, context.workflowRunId, context.workflowStepRunId]);
 }
 
 /** Start the adapter under the lock, but never hold a DB transaction for its lifetime.
  * The returned box prevents Promise assimilation until after the transaction commits.
  */
 export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof heartbeatRuns.$inferSelect, execute: () => Promise<T>): Promise<T> {
-  const started = await db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    await assertHeartbeatRecoveryAdmission(t, run).catch((error) => {
-      throw Object.assign(error, { code: "heartbeat_recovery_blocked" });
-    });
+  let pause: PauseChildAdmission | null = null;
+  const started = await withQaCorrectionClaimRoot(db, run, async t => {
+    pause = await preparePauseChildAdmission(t, run, missionId => assertHeartbeatRecoveryAdmission(t, { ...run, missionId }));
+  }, async t => {
+    await assertCurrentPauseChild(t, run, pause);
+    // C08 currentness owns the mission/authority prefix before the heartbeat lock.
+    // The locked heartbeat is then revalidated before the adapter can start.
+    await recordOwnerHumanAdapterStart(t, run);
     const [current] = await t.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).for("share");
     if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(run)) {
       throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });
@@ -114,6 +137,110 @@ export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof h
     // Attach immediately so an adapter's synchronous rejection cannot be unhandled while committing.
     void result.catch(() => {});
     return { result };
+  }).catch(error => {
+    throw Object.assign(error, { code: "heartbeat_recovery_blocked" });
   });
-  return started.result;
+  if (started.kind !== "performed") {
+    throw Object.assign(conflict("heartbeat_execution_deferred"), { code: "heartbeat_recovery_blocked" });
+  }
+  return started.value.result;
+}
+
+type Run = typeof heartbeatRuns.$inferSelect;
+export type ClaimOutcome =
+  | { kind: "claimed"; run: Run }
+  | { kind: "not_claimed" }
+  | { kind: "root_deferred" }
+  | { kind: "correction_rejected" };
+type ClaimEffects = {
+  db: Db;
+  cancelRun: (id: string, reason: string, resumeQueue: false) => Promise<unknown>;
+  recordQueueTransitionEvent: (event: Parameters<typeof import("./heartbeat.js").recordHeartbeatQueueTransitionEvent>[1]) => Promise<void>;
+  publishLiveEvent: typeof import("./live-events.js").publishLiveEvent;
+  setWakeupStatus: (id: string | null, status: "claimed", patch: { claimedAt: Date }) => Promise<unknown>;
+};
+
+/** Cancellation is awaited after root rollback; only a real correction rejection enables queue refresh. */
+export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: Run): Promise<ClaimOutcome> {
+  if (run.status !== "queued") return { kind: "claimed", run };
+  const claimedAt = new Date();
+  let outcome: Awaited<ReturnType<typeof guardedClaim>>;
+  try { outcome = await guardedClaim(deps.db, run, claimedAt); }
+  catch (error) {
+    if (isQaCorrectionRootOwnerRequired(error)
+      || (is(deps.db, PgTransaction) && error instanceof QaCorrectionClaimRejected)) throw error;
+    await deps.cancelRun(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
+    return { kind: error instanceof QaCorrectionClaimRejected ? "correction_rejected" : "not_claimed" };
+  }
+  if (outcome.kind !== "performed") return outcome;
+  const claimed = outcome.value;
+  if (!claimed) return { kind: "not_claimed" };
+  // [Task 6C] queue_run_started event (queued→running transition)
+  await deps.recordQueueTransitionEvent({
+    companyId: claimed.companyId,
+    heartbeatRunId: claimed.id,
+    wakeupRequestId: claimed.wakeupRequestId,
+    issueId: claimed.issueId,
+    eventType: "queue_run_started",
+    layer: "heartbeat",
+    decision: "running",
+    reason: "claim_succeeded",
+    reasonCode: "claim_succeeded",
+    idempotencyKey: `queue-run-started:${claimed.id}`,
+  });
+
+  deps.publishLiveEvent({
+    companyId: claimed.companyId,
+    type: "heartbeat.run.status",
+    payload: {
+      runId: claimed.id,
+      agentId: claimed.agentId,
+      status: claimed.status,
+      invocationSource: claimed.invocationSource,
+      triggerDetail: claimed.triggerDetail,
+      error: claimed.error ?? null,
+      errorCode: claimed.errorCode ?? null,
+      startedAt: claimed.startedAt ? new Date(claimed.startedAt).toISOString() : null,
+      finishedAt: claimed.finishedAt ? new Date(claimed.finishedAt).toISOString() : null,
+    },
+  });
+
+  await deps.setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
+  return { kind: "claimed", run: claimed };
+}
+
+type QueueClaims = {
+  select: (slots: number, attempted: string[]) => Promise<Run[]>;
+  promote: (slots: number) => Promise<Run[]>;
+  claim: (run: Run) => Promise<ClaimOutcome>;
+  publish: (run: Run) => void;
+};
+/** Caller holds the existing agent-start lock. Removed rejected rows, rather than a new limit, bound progress. */
+export async function claimAvailableHeartbeatRuns(deps: QueueClaims, slots: number): Promise<Run[]> {
+  const claimed: Run[] = [], attempted = new Set<string>();
+  const take = async (runs: Run[]) => {
+    let rejected = false;
+    for (const run of runs) {
+      if (attempted.has(run.id)) continue;
+      attempted.add(run.id);
+      const result = await deps.claim(run);
+      if (result.kind === "claimed") claimed.push(result.run);
+      if (result.kind === "correction_rejected") rejected = true;
+    }
+    return rejected;
+  };
+  let queued = await deps.select(slots, []);
+  for (;;) {
+    const rejected = await take(queued);
+    if (claimed.length >= slots) break;
+    if (rejected) {
+      queued = await deps.select(slots - claimed.length, [...attempted]);
+      if (queued.length) continue;
+    }
+    const promoted = await deps.promote(slots - claimed.length);
+    for (const run of promoted) deps.publish(run);
+    if (!await take(promoted) || claimed.length >= slots) break;
+    queued = await deps.select(slots - claimed.length, [...attempted]);
+  }
+  return claimed;
 }

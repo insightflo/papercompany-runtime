@@ -28,7 +28,7 @@ export async function createCompanyFixture(name: string): Promise<string> {
   await db.insert(companies).values({
     id: companyId,
     name,
-    issuePrefix: name.slice(0, 2).toUpperCase() + companyId.replace(/-/g, "").slice(0, 4).toUpperCase(),
+    issuePrefix: name.slice(0, 2).toUpperCase() + companyId.replaceAll("-", "").toUpperCase(),
     requireBoardApprovalForNewAgents: false,
   });
   // ensureMissionForWorkflowRun (trigger 경로) 이 owner agent 를 요구한다.

@@ -27,11 +27,18 @@ export interface RunLogFinalizeSummary {
   compressed: boolean;
 }
 
+export type RunLogEvent = { stream: "stdout" | "stderr" | "system"; chunk: string; ts: string };
+
+// The storage budget and file writer must count exactly the same UTF-8 record.
+export function serializeRunLogEvent(event: RunLogEvent): string {
+  return JSON.stringify({ ts: event.ts, stream: event.stream, chunk: event.chunk }) + "\n";
+}
+
 export interface RunLogStore {
   begin(input: { companyId: string; agentId: string; runId: string }): Promise<RunLogHandle>;
   append(
     handle: RunLogHandle,
-    event: { stream: "stdout" | "stderr" | "system"; chunk: string; ts: string },
+    event: RunLogEvent,
   ): Promise<void>;
   finalize(handle: RunLogHandle): Promise<RunLogFinalizeSummary>;
   read(handle: RunLogHandle, opts?: RunLogReadOptions): Promise<RunLogReadResult>;
@@ -109,12 +116,7 @@ function createLocalFileRunLogStore(basePath: string): RunLogStore {
     async append(handle, event) {
       if (handle.store !== "local_file") return;
       const absPath = resolveWithin(basePath, handle.logRef);
-      const line = JSON.stringify({
-        ts: event.ts,
-        stream: event.stream,
-        chunk: event.chunk,
-      });
-      await fs.appendFile(absPath, `${line}\n`, "utf8");
+      await fs.appendFile(absPath, serializeRunLogEvent(event), "utf8");
     },
 
     async finalize(handle) {

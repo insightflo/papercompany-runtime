@@ -30,6 +30,7 @@ import { qualityWakeKey } from "../services/quality/native-wake.js";
 import { deliverQualityIntent } from "../services/quality/native-delivery.js";
 import { ensureCanonicalQualityExecution } from "../services/quality/native-records.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 function successfulAdapterResult() {
   return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
@@ -52,9 +53,12 @@ describeQualityDb("Quality native admission", () => {
     }).where(eq(agents.companyId, f.companyId));
   }, 180_000);
   afterAll(async () => {
+    if (owned) {
+      await waitForHeartbeatExecutionsToDrain(owned.db);
+      await owned.close();
+    }
     if (originalHome === undefined) delete process.env.PAPERCLIP_HOME;
     else process.env.PAPERCLIP_HOME = originalHome;
-    await owned?.close();
     if (home) await rm(home, { recursive: true, force: true });
   });
 

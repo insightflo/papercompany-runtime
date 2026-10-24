@@ -8,6 +8,7 @@ import type { WorkflowExecutionResult } from "./types.js";
 import { deliverAcceptedToolRecovery } from "./tool-recovery-delivery.js";
 import { replacementBudgetBlocked, replacementExecutionInFlight } from "./replacement-execution-safety.js";
 import { validateToolRecoveryDecision } from "./tool-recovery-outcome.js";
+import { reviveAuthorizedFailureCascade } from "./failure-cascade-recovery.js";
 import { claimQaRebindRecovery, completeQaRebindRecovery, validateQaRebindIntent,
   QaRebindRecoveryRejected, type QaRebindRecoveryIntent } from "./qa-rebind-recovery-intent.js";
 
@@ -108,6 +109,9 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
           return null;
         }
         authority = recovered.authority;
+        await reviveAuthorizedFailureCascade(tx as unknown as Db, {
+          observedRun: run, failedStep: stepRun, authority: recovered.authority,
+        });
         if (ownerDecision) await tx.update(workflowRecoveryAuthorities).set({ ownerDecisionEventId: ownerDecision.decisionEventId })
           .where(eq(workflowRecoveryAuthorities.id, authority.id));
       }
@@ -119,10 +123,13 @@ export async function retryIssueLessToolWorkflowStepInternal<TStep>(input: {
     for (const key of ["toolResult", "toolInvocation", "toolQueue", "cacheHit", "controlFlowSkipped", "ownerToolRetry"]) delete metadata[key];
     if (authority) metadata.ownerToolRetry = { schemaVersion: 1, authorityId: authority.id,
       authorityVersion: authority.resultingAuthorityVersion, executionGeneration: expected.executionGeneration + 1, ...ownerDecision };
-    await tx.update(workflowStepRuns).set({ status: "pending", startedAt: null, completedAt: null,
+    const [changed] = await tx.update(workflowStepRuns).set({ status: "pending", startedAt: null, completedAt: null,
       lastDispatchRequestId: null, lastDispatchAttemptAt: null, lastDispatchAcceptedAt: null,
       lastDispatchErrorAt: null, lastDispatchErrorSummary: null, metadata,
-    }).where(eq(workflowStepRuns.id, stepRun.id));
+    }).where(and(eq(workflowStepRuns.id, stepRun.id), eq(workflowStepRuns.status, "failed"),
+      eq(workflowStepRuns.executionGeneration, expected.executionGeneration + (authority ? 1 : 0)),
+    )).returning({ id: workflowStepRuns.id });
+    if (!changed) throw new Error("tool_recovery_target_cas_lost");
     // Legacy reset behavior is preserved; explicit v2 recovery resets only the named tool.
     if (!strict) await input.resetUnlaunchedTerminalStepRuns(tx as unknown as Db, rows);
     if (rebindTarget) {

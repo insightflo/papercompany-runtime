@@ -4,9 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { missions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Express } from "express";
 import type { ResumeRequestBody } from "@paperclipai/shared";
-import { loadExecutionDefinition } from "../../services/workflow/execution-definition.js";
 import type { ReviewedResumePolicy } from "../../services/workflow/resume/reviewed-policy.js";
-import { createWorkflowRun } from "../../services/workflow/workflow-store.js";
 import {
   captureHttpError,
   seedCompanyWithMission,
@@ -73,6 +71,10 @@ export async function seedResumeApplyScenario(
     base?: { companyId: string; agentId: string };
   } = {},
 ): Promise<ResumeApplyScenario> {
+  const [{ loadExecutionDefinition }, { createWorkflowRun }] = await Promise.all([
+    import("../../services/workflow/execution-definition.js"),
+    import("../../services/workflow/workflow-store.js"),
+  ]);
   const base = opts.base ?? (await seedCompanyWithMission(sql, prefix));
   const { companyId, agentId } = base;
   let missionId = (base as { missionId?: string }).missionId;

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ownerHumanRequestSchema } from "./owner-human-request.js";
 
 const workflowLocalArtifactTypeSchema = z.enum(["artifact", "document"]);
 
@@ -181,6 +182,7 @@ export const missionOwnerDecisionOptionSchema = z.enum([
 //   자연어 comment 는 더 이상 권위가 아니다 — 오직 이 구조 제출만 결정을 영속화한다.
 export const missionOwnerDecisionSubmitSchema = z.object({
   decision: missionOwnerDecisionOptionSchema,
+  humanRequest: ownerHumanRequestSchema.optional(),
   // Exact recovery identity; issue references remain artifact/reassignment inputs, not tool selectors.
   recoveryTarget: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("issue"), issueId: z.string().uuid() }).strict(),
@@ -205,6 +207,13 @@ export const missionOwnerDecisionSubmitSchema = z.object({
   recommendedOptionId: z.string().trim().min(1).max(80).optional().nullable(),
   recommendationReason: z.string().trim().min(1).max(2000).optional().nullable(),
 }).superRefine((value, ctx) => {
+  if (value.humanRequest !== undefined && value.decision !== "request_input" && value.decision !== "escalate") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["humanRequest"],
+      message: "humanRequest requires decision=request_input or escalate",
+    });
+  }
   // reassign_source_issue requires a same-company agent UUID; other decisions leave it optional.
   if (value.decision !== "reassign_source_issue") return;
   if (typeof value.targetAgentId === "string" && value.targetAgentId.length > 0) return;

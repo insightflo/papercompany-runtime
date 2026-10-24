@@ -1,19 +1,8 @@
-// server/src/services/quality/current-output.ts
-//
-// [purpose] T3 current_output 조치의 지원된 구조화 수정 연결. 새 mission/issue 를 만들지
-//   않고 원본 정식 실행·producer/QA binding 을 검증한 뒤, 기존 tryQaRemediationPass 의
-//   자격검사/기록 코어(qa-remediation.ts export)로만 패치를 적용한다. 원본 terminal 상태는
-//   바꾸지 않는다(완료·취소 원본 = 원본 유지/수정 미실행).
-// [evidence] 승인된 source attempt 와 파일 이전/이후 hash 를 머신 생성 receipt(kind 'use')로
-//   기록한다. 수정 확인은 재실행된 독립 QA(생산자 agent 아님)의 전용 검증 영수증(kind
-//   'observation') + 그 PASS verdict 가 있을 때만 조치 상태를 'corrected' 로 올린다.
-// [limits] 기존 QA 재실행에도 retryEnvelope 의 누적 한도(maxExecutorAttempts)를 적용한다.
-//   기술 재시도가 source attempt 승인을 바꾸지 않는다(target/effect 는 불변).
-// [boundary] 이 함수는 깨우지 않는다(깨우기 0회·요청 행 0개). 실행 전달은 T4다.
-
+/** Quality correction: C03 issuance/consumption first; unsupported legacy keeps its existing writer. */
 import { createHash } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, is, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import {
   heartbeatRuns,
   qualityActions,
@@ -42,12 +31,20 @@ import { ensureCanonicalQualityExecution } from "./native-records.js";
 import {
   collectQualifiableQaRemediations,
   writeQaRemediationPatches,
-  type PreparedFile,
-  type QualifiedQa,
 } from "../workflow/control-flow/qa-remediation.js";
 import { normalizeWorkflowStepsForExecution } from "../workflow/dag-engine.js";
 import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
 import type { EdgeBearingStep } from "../workflow/control-flow/edge-condition.js";
+
+import { discoverQaCorrection } from "../workflow/control-flow/qa-correction-followup-reconcile.js";
+import { parseQaCorrectionPreparationRow, requireQaCorrection } from "../workflow/control-flow/qa-correction-authority.js";
+import { beginQaCorrection } from "../workflow/control-flow/qa-correction-prepare.js";
+import { measureQaCorrectionSources } from "../workflow/control-flow/qa-correction-measure.js";
+import { storeQaCorrection } from "../workflow/control-flow/qa-correction-storage.js";
+import { commitQaCorrection } from "../workflow/control-flow/qa-correction-commit.js";
+import { readIssuedQaCorrection, type IssuedQaCorrection } from "../workflow/control-flow/qa-correction-reader.js";
+import { readQaCorrectionFollowupDb, readQaCorrectionFollowupConsumption } from "../workflow/control-flow/qa-correction-followup.js";
+import type { QaCorrectionPreparation } from "../workflow/control-flow/qa-correction-contract.js";
 
 export type CurrentOutputCorrectionStatus =
   | { status: "verification_pending"; evidenceRefId: string | null }
@@ -55,7 +52,6 @@ export type CurrentOutputCorrectionStatus =
   | { status: "source_preserved"; evidenceRefId: null };
 
 const UNSUPPORTED: CurrentOutputCorrectionStatus = { status: "unsupported_target", evidenceRefId: null };
-const PENDING: CurrentOutputCorrectionStatus = { status: "verification_pending", evidenceRefId: null };
 
 type ActionRow = typeof qualityActions.$inferSelect;
 
@@ -71,6 +67,16 @@ export async function applyCurrentOutputCorrection(db: Db, key: QualityKey): Pro
   if (!target.success || target.data.kind !== "current_output" || !effect.success || effect.data.kind !== "repair_supported_output" || !envelope.success) return UNSUPPORTED;
   if (hashContract(target.data) !== action.targetHash || hashContract(effect.data) !== action.effectHash
     || envelope.data.targetHash !== action.targetHash || envelope.data.effectHash !== action.effectHash) return UNSUPPORTED;
+  const source = target.data.source;
+  const history = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, parsed.companyId), eq(workflowTransitionEvents.eventType, "qa_correction_prepared"),
+    sql`${workflowTransitionEvents.payload}->'authority'->>'actionId' = ${action.id}`));
+  for (const row of history) {
+    const p = parseQaCorrectionPreparationRow(row);
+    requireQaCorrection(p.authority.kind === "quality_current_output" && p.authority.actionId === action.id
+      && hashContract(p.authority.source) === hashContract(source), "quality");
+    return issueQualityCorrection(db, p);
+  }
   if (action.cancelRequestedAt) return UNSUPPORTED;
   if (Date.now() >= Date.parse(envelope.data.deadlineAt)) return UNSUPPORTED;
 
@@ -86,14 +92,13 @@ export async function applyCurrentOutputCorrection(db: Db, key: QualityKey): Pro
     throw error;
   }
 
-  const source = target.data.source;
   const reviewItemId = await findActionReviewItem(db, parsed.companyId, action.occurrenceIds);
   const [usedRow] = await db.select({ n: sql<number>`count(*)::int` }).from(qualityEvidenceRefs)
     .where(and(eq(qualityEvidenceRefs.companyId, parsed.companyId), eq(qualityEvidenceRefs.qualityActionId, action.id), sql`${qualityEvidenceRefs.qualityContract}->>'kind' = 'use'`));
   const appliedCount = usedRow?.n ?? 0;
   if (!reviewItemId && appliedCount === 0) return UNSUPPORTED;
 
-  const prepared = await prepareQualification(db, { companyId: parsed.companyId, source, bindingStepRunId: binding.stepRunId });
+  const prepared = await prepareQualification(db, { companyId: parsed.companyId, source, bindingStepRunId: binding.stepRunId, action, reviewItemId });
   if (prepared instanceof CurrentOutputUnsupported && appliedCount === 0) return UNSUPPORTED;
 
   if (prepared instanceof CurrentOutputUnsupported || prepared.status === "waiting") {
@@ -102,6 +107,7 @@ export async function applyCurrentOutputCorrection(db: Db, key: QualityKey): Pro
     return await evaluateVerification(db, { key: parsed, actionId: action.id, binding, source });
   }
 
+  if (prepared.status === "correction") return issueQualityCorrection(db, prepared.preparation);
   // 누적 한도(T4 계약의 maxExecutorAttempts): 이 조치의 수정 실행 횟수 = application receipt 수.
   if (appliedCount >= envelope.data.maxExecutorAttempts) return UNSUPPORTED;
   if (!reviewItemId) return UNSUPPORTED;
@@ -138,27 +144,39 @@ export async function applyCurrentOutputCorrection(db: Db, key: QualityKey): Pro
   return { status: "verification_pending", evidenceRefId: linked.evidenceRefId };
 }
 
+/** Issuance is history only. Pending B uses the current reader; consumed B replays its stored effect. */
+async function issueQualityCorrection(db: Db, p: QaCorrectionPreparation): Promise<CurrentOutputCorrectionStatus> {
+  requireQaCorrection(!is(db, PgTransaction), "record");
+  const prepared = await beginQaCorrection(db, p);
+  let proof: IssuedQaCorrection, appliedEventId: string;
+  if (prepared.status === "already_applied") ({ proof, appliedEventId } = prepared);
+  else {
+    if (prepared.status !== "prepared" && prepared.status !== "existing") return UNSUPPORTED;
+    const measured = await measureQaCorrectionSources(db, {
+      preparationEventId: prepared.preparationEventId, preparationHash: prepared.preparationHash });
+    const committed = await commitQaCorrection(db, await storeQaCorrection(db, measured));
+    if (committed.status === "stopped") return UNSUPPORTED;
+    ({ proof, appliedEventId } = committed);
+  }
+  for (const f of proof.followups) {
+    const ref = { companyId: p.companyId, workflowRunId: p.workflowRunId, appliedEventId, requestId: f.requestId };
+    if (!await readQaCorrectionFollowupConsumption(db, ref, readIssuedQaCorrection)) {
+      await readQaCorrectionFollowupDb(db, ref, readIssuedQaCorrection);
+    }
+  }
+  return { status: "verification_pending", evidenceRefId: proof.applied.qualityUseEvidenceRefId };
+}
+
 class CurrentOutputUnsupported extends Error {}
-
-type PreparedQualified = {
-  status: "qualified";
-  run: { id: string; companyId: string; status: string; missionId: string | null };
-  producerStep: EdgeBearingStep;
-  producerRun: typeof workflowStepRuns.$inferSelect;
-  qualified: readonly QualifiedQa[];
-  fileBuffers: Map<string, PreparedFile>;
-  verifierHeartbeatId: string;
-  verifierEpoch: number;
-};
-
-type Prepared = PreparedQualified | { status: "waiting" } | CurrentOutputUnsupported;
 
 /** 원본 실행 정의/step runs 에서 rejected QA 목록을 만들고 공용 자격검사를 돌린다. */
 async function prepareQualification(db: Db, input: {
   companyId: string;
   source: SourceAttempt;
   bindingStepRunId: string;
-}): Promise<Prepared> {
+  action: ActionRow;
+  reviewItemId: string | null;
+}) {
   const source = input.source;
   const sourceWorkflow = source.workflow;
   if (sourceWorkflow.kind !== "workflow_step") return new CurrentOutputUnsupported();
@@ -186,6 +204,22 @@ async function prepareQualification(db: Db, input: {
     rejectedQas.push({ edge: { stepId: row.stepId }, qaRun: row });
     findingsByQaStepId.set(row.stepId, await loadWorkflowApiFindings({ db, companyId: input.companyId, issueId: row.issueId, workflowRunId: runId, workflowStepRunId: row.id }));
   }
+  const context = { db, run, steps, producerStep, producerRun, rejectedQas, findingsByQaStepId };
+  const found = await discoverQaCorrection(context);
+  if (found && input.reviewItemId) {
+    const p = found.p, a = input.action;
+    const [existing] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, p.correctionId));
+    if (existing) return new CurrentOutputUnsupported(); // A workflow issuance cannot be relabelled as a quality use.
+    const verifierId = p.authority.verdicts.find(v => v.qa.stepRunId === input.bindingStepRunId)?.heartbeatRunId;
+    const [verifier] = verifierId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, verifierId)) : [];
+    if (!verifier || verifier.executionEpoch === null) return new CurrentOutputUnsupported();
+    return { status: "correction" as const, preparation: { ...p, authority: {
+      kind: "quality_current_output" as const, verdicts: p.authority.verdicts, actionId: a.id, groupId: a.groupId,
+      policyVersionId: a.policyVersionId, intentKey: a.intentKey, targetHash: a.targetHash, effectHash: a.effectHash,
+      retryEnvelopeHash: hashContract(a.retryEnvelope), source, reviewItemId: input.reviewItemId,
+      verifierRunId: verifier.id, verifierEpoch: verifier.executionEpoch,
+    } } };
+  }
   const prepared = await collectQualifiableQaRemediations({
     db, run: { id: runId, companyId: input.companyId, status: run.status ?? "running", missionId: run.missionId ?? null },
     steps, producerStep, producerRun, rejectedQas, findingsByQaStepId,
@@ -198,7 +232,7 @@ async function prepareQualification(db: Db, input: {
     .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.id, prepared.qualified[0]!.heartbeatRunId ?? "")));
   if (!verifierHeartbeat || verifierHeartbeat.epoch === null) return new CurrentOutputUnsupported();
   return {
-    status: "qualified", run: { id: runId, companyId: input.companyId, status: run.status ?? "running", missionId: run.missionId ?? null },
+    status: "qualified" as const, run: { id: runId, companyId: input.companyId, status: run.status ?? "running", missionId: run.missionId ?? null },
     producerStep, producerRun, qualified: prepared.qualified, fileBuffers: prepared.fileBuffers,
     verifierHeartbeatId: verifierHeartbeat.id, verifierEpoch: verifierHeartbeat.epoch,
   };

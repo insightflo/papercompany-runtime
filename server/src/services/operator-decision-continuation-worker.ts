@@ -44,6 +44,7 @@ interface WakeupOptions {
   };
   contextSnapshot: {
     issueId: string;
+    missionId?: string;
     wakeReason: "operator_decision_resolved";
     operatorDecisionId: string;
     paperclipOperatorDecisionResolution: OperatorDecisionResolutionSummary;
@@ -84,6 +85,7 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       companyId: issues.companyId,
       status: issues.status,
       assigneeAgentId: issues.assigneeAgentId,
+      missionId: issues.missionId,
     }).from(issues).where(and(
       eq(issues.id, continuation.issueId),
       eq(issues.companyId, continuation.companyId),
@@ -119,13 +121,17 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       await store.block(continuation.id, workerId, "requester_unavailable", now);
       return;
     }
-    const idempotencyKey = continuation.idempotencyKey;
-    if (!idempotencyKey || !decision.result || !decision.resolvedByUserId) {
+    if (!continuation.idempotencyKey || !decision.result || !decision.resolvedByUserId) {
       await store.failDispatch(continuation.id, workerId, now);
       return;
     }
-    const targeted = await store.setTarget(continuation.id, workerId, targetAgentId);
-    if (!targeted) return;
+    const targeted = await store.setTarget(continuation.id, workerId, targetAgentId, {
+      generation: continuation.generation,
+      attemptCount: continuation.attemptCount,
+      idempotencyKey: continuation.idempotencyKey,
+      issueId: continuation.issueId,
+    });
+    if (!targeted?.targetAgentId || !targeted.idempotencyKey || !targeted.issueId) return;
     const resolutionSummary = buildOperatorDecisionResolutionSummary(decision);
     const wakeupOptions: WakeupOptions = {
       source: "automation",
@@ -134,29 +140,34 @@ export function operatorDecisionContinuationWorker(db: Db, options: OperatorDeci
       payload: {
         kind: "operator_decision_resolution",
         operatorDecisionId: decision.id,
-        issueId: issue.id,
+        issueId: targeted.issueId,
         actionId: decision.result.actionId,
         selectedOptionIds: decision.result.selectedOptionIds,
         paperclipOperatorDecisionResolution: resolutionSummary,
       },
       contextSnapshot: {
-        issueId: issue.id,
+        issueId: targeted.issueId,
+        ...(issue.missionId ? { missionId: issue.missionId } : {}),
         wakeReason: "operator_decision_resolved",
         operatorDecisionId: decision.id,
         paperclipOperatorDecisionResolution: resolutionSummary,
       },
       requestedByActorType: "user",
       requestedByActorId: decision.resolvedByUserId,
-      idempotencyKey,
+      idempotencyKey: targeted.idempotencyKey,
     };
     try {
-      await options.wakeup(targetAgentId, wakeupOptions);
+      await options.wakeup(targeted.targetAgentId, wakeupOptions);
     } catch {
       // Durable proof, not the call result, determines acceptance.
     } finally {
-      const proof = await store.findProof(continuation.companyId, idempotencyKey);
-      if (proof) {
-        await store.accept(continuation.id, workerId, proof.agentId, proof.id, now);
+      const proof = await store.findProof(targeted.companyId, targeted.idempotencyKey);
+      if (proof && proof.agentId === targeted.targetAgentId && proof.issueId === targeted.issueId) {
+        await store.accept(targeted as typeof targeted & {
+          targetAgentId: string;
+          idempotencyKey: string;
+          issueId: string;
+        }, workerId, proof.id, now);
       } else {
         await store.failDispatch(continuation.id, workerId, now);
       }
