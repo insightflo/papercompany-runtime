@@ -21,6 +21,13 @@ import type { MissionServiceDeps } from "../missions.js";
 import { buildWorkProductReuseWakeIdempotencyKey } from "./mission-owner-recovery-events.js";
 import { hasStructuredSourceRecoveryDecision, loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { acquireOwnerRetryLock, resolveOwnerRetryKey } from "./mission-owner-retry-identity.js";
+import {
+  DEAD_TARGET_RETRY_BREAKER_THRESHOLD,
+  countOwnerDecisionNotApplied,
+  ensureDeadTargetHumanEscalation,
+  recordOwnerDecisionNotApplied,
+  type OwnerDecisionNotAppliedReasonCode,
+} from "./mission-owner-dead-target-loop.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
 import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
@@ -1393,6 +1400,57 @@ export function createSupervision({ db, deps, ownerActions }: {
         if (toolRecovery) {
           recoveryOutcomes.push(toolRecovery.outcome);
           if (toolRecovery.appliedAction) appliedActions.push(toolRecovery.appliedAction);
+          // [dead-target circuit breaker — 2026-10-18 사고] tool recovery 카드가 있는데 결정에 tool-step
+          //   recoveryTarget 이 없으면 no_op(target_missing, requires_decision) 이 매 틱 반복되며 감시를
+          //   무한 대기시킨다(라이브 관측: RES-8604, 17h+). 같은 조합이 3회 반복되면 재노출을 억제하고
+          //   사람 결정 카드로 1회 에스컬레이션한다. 다른 no_op 사유는 기존 진단 그대로 유지한다.
+          if (toolRecovery.outcome.kind === "no_op" && toolRecovery.outcome.reason === "target_missing") {
+            const toolLoopKey = "tool_recovery_target_missing";
+            const toolDeadTargetId = issue.originId ?? "none";
+            // [2단계 — 실행 불가 회복 카드 즉시 승격 2026-10-23] 결정이 이미 기록됐는데 도구 단계 대상이
+            //   없으면(죽은 결정) 회복 카드의 전제가 소멸했다 — 오너가 다음 틱에 대상을 보완할 가능성만
+            //   기다리며 no_op 를 재기록·재노출하는 것은 무한 대기 루프다(라이브 관측: RES-8604 17h+,
+            //   2026-10-23 RES-9071 3회 반복). 즉시 1회 사람 에스컬레이션으로 전환한다. 결정 자체가 없는
+            //   대기는 오너 응답 대기이므로 기존 3회 브레이컈를 그대로 쓴다.
+            const hasRecordedDecision = toolRecovery.outcome.decisionEventId != null;
+            const priorToolNoOp = hasRecordedDecision ? DEAD_TARGET_RETRY_BREAKER_THRESHOLD : await countOwnerDecisionNotApplied(db, {
+              companyId: mission.companyId, ownerActionIssueId: issue.id,
+              decision: toolLoopKey, sourceIssueId: toolDeadTargetId,
+              decisionEventId: toolRecovery.outcome.decisionEventId ?? "auto",
+            });
+            if (priorToolNoOp >= DEAD_TARGET_RETRY_BREAKER_THRESHOLD) {
+              const immediateDeadDecision = hasRecordedDecision;
+              const escalation = await ensureDeadTargetHumanEscalation(db, {
+                companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                loopKey: toolLoopKey,
+                anchors: [issue, oversightIssue],
+                ownerActionIssueId: issue.id, sourceIssueId: issue.originId,
+                reason: immediateDeadDecision
+                  ? `Tool recovery owner action ${label} has a recorded decision without an explicit tool-step recovery target (dead target) — waiting for the owner to patch it re-exposes the same no_op every supervision tick, an infinite decision-wait loop. Escalating immediately; choose replan, an explicit recovery target, or cancel this recovery.`
+                  : `Tool recovery owner action ${label} has repeated no_op(target_missing) ${priorToolNoOp} times: the recovery card requires an explicit tool-step recovery target but the owner decision has not arrived. Re-exposing the same no_op every supervision tick is an infinite decision-wait loop.`,
+                evidence: `owner-action=${label} reason=target_missing ${immediateDeadDecision ? "dead-recorded-decision" : `repeats=${priorToolNoOp}`} supervisionTick=${now.toISOString()}`,
+              });
+              findings.push(`owner_tool_recovery_dead_target_breaker: ${label} tool recovery no_op(target_missing) ${immediateDeadDecision ? "dead recorded decision — escalated immediately" : `repeated ${priorToolNoOp}x`} — further no-op re-exposure suppressed; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: record a decision with an explicit tool-step recovery target, replan, or cancel this recovery`);
+              addRecommendation({
+                type: "escalate_blocked",
+                missionId: mission.id,
+                issueId: issue.id,
+                reason: `Tool recovery ${label} waits forever on a missing tool-step recovery target (${priorToolNoOp} repeated no_op); a human must choose replan, an explicit recovery target, or cancellation`,
+                safeToAutoApply: false,
+              });
+              continue;
+            }
+            if (!hasRecordedDecision) {
+              // 결정 자체가 없는 대기만 no_op 로 기록한다(기존 3회 브레이컈 대상).
+              await recordOwnerDecisionNotApplied(db, {
+                companyId: mission.companyId, missionId: mission.id, ownerActionIssueId: issue.id,
+                decision: toolLoopKey, sourceIssueId: toolDeadTargetId,
+                decisionEventId: toolRecovery.outcome.decisionEventId ?? "auto",
+                reason: "tool recovery card present but decision has no tool-step recovery target",
+                reasonCode: "tool_target_missing", occurredAt: now,
+              });
+            }
+          }
           findings.push(`tool_step_recovery_${toolRecovery.outcome.kind}: ${label} reason=${toolRecovery.outcome.reason}`);
           // Missing/stale/consumed tool targets never fall through to generic issue retry.
           continue;
@@ -1428,13 +1486,48 @@ export function createSupervision({ db, deps, ownerActions }: {
             const ageMs = Date.now() - new Date(issue.createdAt).getTime();
             const GRACE_MS = 20 * 60 * 1000;
             if (ageMs >= GRACE_MS) {
-              autoDefaulted = true;
-              ownerDecision = {
-                decision: "retry_source_issue",
-                reason: `auto-default (owner grace ${GRACE_MS / 60000}min expired)`,
-                sourceIssueRef: issue.originId,
-              };
-              findings.push(`owner_action_grace_default_retry: ${label} age=${Math.round(ageMs / 60000)}min — auto-defaulting retry_source_issue`);
+              // [dead-target grace guard — 2026-10-18 사고] 자동 retry default 를 고르기 전에 대상
+              //   실행 가능성을 본다. 캐노니컬 소스가 종결/숨김/누락(그리고 DAG producer 재시도 대체도
+              //   없으면) 같은 죽은 대상을 매 틱 반복 지정하는 no-op 순환이므로 retry 대신 escalate 로
+              //   자동 전환하고 사람 결정 카드를 1회 보증한다. 살아있는 대상은 기존 retry default 유지.
+              const graceSource = missionIssueById.get(issue.originId) ?? null;
+              const graceSourceNotRetryable = !graceSource
+                || Boolean(graceSource.hiddenAt)
+                || (isTerminalIssueStatus(graceSource.status)
+                  && (stepRowsByIssueId.get(issue.originId) ?? []).length === 0);
+              const gracePriorNotApplied = graceSourceNotRetryable
+                ? await countOwnerDecisionNotApplied(db, {
+                  companyId: mission.companyId, ownerActionIssueId: issue.id,
+                  decision: "retry_source_issue", sourceIssueId: issue.originId,
+                  decisionEventId: "auto",
+                })
+                : 0;
+              if (graceSourceNotRetryable || gracePriorNotApplied >= DEAD_TARGET_RETRY_BREAKER_THRESHOLD) {
+                const graceSourceLabel = graceSource ? (graceSource.identifier ?? graceSource.id) : issue.originId;
+                const escalation = await ensureDeadTargetHumanEscalation(db, {
+                  companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                  loopKey: "retry_source_issue",
+                  anchors: [issue, oversightIssue],
+                  ownerActionIssueId: issue.id, sourceIssueId: issue.originId,
+                  reason: `Auto-defaulted retry_target for owner action ${label} points at ${graceSourceLabel}, which is ${graceSource ? (graceSource.hiddenAt ? `hidden` : `terminal status=${graceSource.status}`) : "missing from this mission"}. Retrying it can never be applied, so the auto-default switched to escalate instead of repeating a no-op retry every supervision tick.`,
+                  evidence: `owner-action=${label} target=${graceSourceLabel} targetStatus=${graceSource?.status ?? "missing"} priorNotApplied=${gracePriorNotApplied} graceAgeMin=${Math.round(ageMs / 60000)}`,
+                });
+                autoDefaulted = true;
+                ownerDecision = {
+                  decision: "escalate",
+                  reason: `auto-default (owner grace ${GRACE_MS / 60000}min expired; retry target ${graceSourceLabel} is not actionable — escalate to human)`,
+                  sourceIssueRef: issue.originId,
+                };
+                findings.push(`owner_action_grace_default_dead_target: ${label} source=${graceSourceLabel} is not actionable (${graceSource ? (graceSource.hiddenAt ? "hidden" : `terminal status=${graceSource.status}`) : "missing"}${(stepRowsByIssueId.get(issue.originId) ?? []).length > 0 ? "; producer-rework candidates exist so application decides" : ""}, prior not_applied=${gracePriorNotApplied}) — auto-default switched retry_source_issue to escalate; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: replan, retry a live source, or cancel this recovery`);
+              } else {
+                autoDefaulted = true;
+                ownerDecision = {
+                  decision: "retry_source_issue",
+                  reason: `auto-default (owner grace ${GRACE_MS / 60000}min expired)`,
+                  sourceIssueRef: issue.originId,
+                };
+                findings.push(`owner_action_grace_default_retry: ${label} age=${Math.round(ageMs / 60000)}min — auto-defaulting retry_source_issue`);
+              }
             }
           }
         }
@@ -1546,8 +1639,60 @@ export function createSupervision({ db, deps, ownerActions }: {
                 if (autoDefaulted && isProducerRework && missionHasNativeLoop && !producerBudgetRemaining) {
                   findings.push(`owner_action_native_loop_cap_exhausted: ${label} producer rework cap exhausted — native loop no longer owns rework; routing to owner action/replan. source=${sourceLabel}`);
                 }
+                // [dead-target circuit breaker — 2026-10-18 사고] 같은 (owner-action, retry_source_issue,
+                //   대상, 결정이벤트) 조합이 구조적 사유(원천 없음/미발견/타 미션/숨김/종결)로 이미 N번
+                //   not_applied 였다면 같은 거부를 매 틱 반복하지 않는다 — 재적용을 억제하고 루프 탈출
+                //   안내 + 사람 결정 카드(1회)로 전환한다. owner 가 새 결정(새 eventId)을 기록하면 카운트가
+                //   초기화되어 즉시 다시 평가된다(수동 결정 자유 불변). 대상이 살아나면 이 사유family 자체가
+                //   발생하지 않으므로 살아있는 대상 재시도는 영향 없다.
+                const deadTargetDecisionEventId = decisionRecord?.eventId ?? "auto";
+                const handleDeadTargetNotApplied = async (
+                  reasonCode: OwnerDecisionNotAppliedReasonCode,
+                  reason: string,
+                  markerTargetId: string,
+                  deadLabel: string,
+                ): Promise<void> => {
+                  const priorNotAppliedCount = await countOwnerDecisionNotApplied(db, {
+                    companyId: mission.companyId, ownerActionIssueId: issue.id,
+                    decision: "retry_source_issue", sourceIssueId: markerTargetId,
+                    decisionEventId: deadTargetDecisionEventId,
+                  });
+                  if (priorNotAppliedCount >= DEAD_TARGET_RETRY_BREAKER_THRESHOLD) {
+                    const escalation = await ensureDeadTargetHumanEscalation(db, {
+                      companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                      loopKey: "retry_source_issue",
+                      anchors: [issue, oversightIssue],
+                      ownerActionIssueId: issue.id, sourceIssueId: markerTargetId === "none" ? null : markerTargetId,
+                      reason: `Owner retry_source_issue decision for ${label} targets ${deadLabel}, which has been rejected as unusable (dead target) ${priorNotAppliedCount} times (${reason}). Re-applying the same decision every supervision tick is an infinite no-op loop with no execution and no escalation.`,
+                      evidence: `owner-action=${label} decision=retry_source_issue target=${deadLabel} notAppliedCount=${priorNotAppliedCount} lastReason=${reason}`,
+                    });
+                    findings.push(`owner_action_retry_dead_target_breaker: ${label} decision=retry_source_issue source=${deadLabel} not_applied=${priorNotAppliedCount}x (${reason}) — further re-application suppressed; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: replan_mission, retry a live source, or cancel this recovery`);
+                    addRecommendation({
+                      type: "request_replan",
+                      missionId: mission.id,
+                      issueId: issue.id,
+                      reason: `Retry target ${deadLabel} was rejected ${priorNotAppliedCount} times (dead target); owner must replan or pick a live source instead of repeating the same retry`,
+                      safeToAutoApply: false,
+                    });
+                    addRecommendation({
+                      type: "escalate_blocked",
+                      missionId: mission.id,
+                      issueId: issue.id,
+                      reason: `Retry target ${deadLabel} is not actionable; repeated retry_source_issue application is suppressed by the dead-target circuit breaker and needs a human decision`,
+                      safeToAutoApply: false,
+                    });
+                    return;
+                  }
+                  await recordOwnerDecisionNotApplied(db, {
+                    companyId: mission.companyId, missionId: mission.id, ownerActionIssueId: issue.id,
+                    decision: "retry_source_issue", sourceIssueId: markerTargetId,
+                    decisionEventId: deadTargetDecisionEventId,
+                    reason, reasonCode, occurredAt: now,
+                  });
+                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: deadLabel, reason }));
+                };
                 if (!sourceIssueId) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel, reason: "owner-action issue has no canonical originId source issue" }));
+                  await handleDeadTargetNotApplied("source_unresolvable", "owner-action issue has no canonical originId source issue", "none", sourceLabel);
                   break;
                 }
                 const sourceCandidate = await db
@@ -1558,19 +1703,19 @@ export function createSupervision({ db, deps, ownerActions }: {
                   .then((rows) => rows[0] ?? null);
                 const sourceCandidateLabel = sourceCandidate ? (sourceCandidate.identifier ?? sourceCandidate.id) : sourceLabel;
                 if (!sourceCandidate) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue is missing or outside this company" }));
+                  await handleDeadTargetNotApplied("source_missing", "canonical source issue is missing or outside this company", sourceIssueId, sourceCandidateLabel);
                   break;
                 }
                 if (sourceCandidate.missionId !== mission.id) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue belongs to a different mission" }));
+                  await handleDeadTargetNotApplied("source_other_mission", "canonical source issue belongs to a different mission", sourceIssueId, sourceCandidateLabel);
                   break;
                 }
                 if (sourceCandidate.hiddenAt) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: "canonical source issue is hidden" }));
+                  await handleDeadTargetNotApplied("source_hidden", "canonical source issue is hidden", sourceIssueId, sourceCandidateLabel);
                   break;
                 }
                 if (isTerminalIssueStatus(sourceCandidate.status) && !isProducerRework) {
-                  findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: `canonical source issue is already terminal status=${sourceCandidate.status}` }));
+                  await handleDeadTargetNotApplied("source_terminal", `canonical source issue is already terminal status=${sourceCandidate.status}`, sourceIssueId, sourceCandidateLabel);
                   break;
                 }
                 const sourcePlanGateReason = activePlanRecoveryGateReason(

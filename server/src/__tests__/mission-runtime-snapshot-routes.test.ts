@@ -283,6 +283,9 @@ describeEmbeddedPostgres("mission runtime snapshot route", () => {
       snapshot: expect.objectContaining({
         missionId: seeded.missionId,
         comments: expect.objectContaining({ controlSource: "display_only" }),
+        // [안내 상태 기반화 2026-10-23] 오너 안내 근거 신호 — 등록된 재개 정책이 없으면 빈 배열,
+        //   리비전 시작 대기도 없으면 false(존재하지 않는 화면 안내 방지 근거).
+        operatorGuidance: { resumableRuns: [], revisionBoardWaitReady: false },
         legacyFallbackDiagnostics: [],
       }),
     }));

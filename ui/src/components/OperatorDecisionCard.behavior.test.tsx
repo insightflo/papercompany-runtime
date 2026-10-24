@@ -78,6 +78,8 @@ function click(element: Element) {
   act(() => (element as HTMLElement).click());
 }
 
+const optionRow = (id: string) => host.querySelector(`[data-operator-decision-option="${id}"]`)!;
+
 describe("OperatorDecisionCard behavior", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -92,7 +94,7 @@ describe("OperatorDecisionCard behavior", () => {
 
   it("submits a single choice and trimmed optional comment", async () => {
     const onResolve = await renderCard();
-    click(host.querySelector('input[value="two"]')!);
+    click(optionRow("two"));
     const comment = host.querySelector("textarea")!;
     act(() => {
       const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
@@ -124,11 +126,11 @@ describe("OperatorDecisionCard behavior", () => {
       },
     };
     const onResolve = await renderCard(multi);
-    click(host.querySelector('input[value="one"]')!);
+    click(optionRow("one"));
     click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!);
     expect(onResolve).not.toHaveBeenCalled();
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("Select 2");
-    click(host.querySelector('input[value="two"]')!);
+    click(optionRow("two"));
     click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!);
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("comment");
   });
@@ -176,12 +178,41 @@ describe("OperatorDecisionCard behavior", () => {
   it("preserves draft and focuses an announced mutation error", async () => {
     const onResolve = vi.fn().mockRejectedValue(new Error("Conflict"));
     await renderCard(baseDecision, onResolve);
-    click(host.querySelector('input[value="one"]')!);
+    click(optionRow("one"));
     await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
     const alert = host.querySelector('[role="alert"]') as HTMLElement;
     expect(alert.textContent).toContain("Conflict");
     expect(document.activeElement).toBe(alert);
-    expect((host.querySelector('input[value="one"]') as HTMLInputElement).checked).toBe(true);
+    expect(optionRow("one").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("registers rapid consecutive clicks so the last clicked option is selected", async () => {
+    const onResolve = await renderCard();
+    // 2026-10-20 운영자 보고: 첫 클릭은 등록되지만 바로 다른 선택지를 클릭하면 무시되고,
+    // 체크 표시가 남아 있어도 제출 시 '선택지를 1개 선택하세요'로 거부되던 사례 방지.
+    click(optionRow("one"));
+    expect(optionRow("one").getAttribute("aria-checked")).toBe("true");
+    click(optionRow("two"));
+    expect(optionRow("one").getAttribute("aria-checked")).toBe("false");
+    expect(optionRow("two").getAttribute("aria-checked")).toBe("true");
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
+    expect(host.querySelector('[role="alert"]')?.textContent).not.toContain("Select");
+    expect(onResolve).toHaveBeenCalledWith("decision-1", {
+      actionId: "choose", selectedOptionIds: ["two"], comment: null,
+    });
+  });
+
+  it("hides display-only approved/forbidden scope metadata and packet impact boilerplate", async () => {
+    await renderCard();
+    // 표시 전용 메타데이터(수정·제어 경로 없음)와 승인하면/확인할 내용 블록은 카드에서 제거했다(2026-10-20 운영자 요청).
+    expect(host.textContent).not.toContain("Internal draft");
+    expect(host.textContent).not.toContain("External contact");
+    expect(host.textContent).not.toContain("If approved");
+    expect(host.textContent).not.toContain("To confirm");
+    expect(host.textContent).not.toContain("Is the evidence sufficient?");
+    // 판단에 필요한 핵심(해석/근거/다음 단계)은 그대로다.
+    expect(host.textContent).toContain("One internal opportunity may be selected.");
+    expect(host.textContent).toContain("Review the linked work and decide.");
   });
 
   it("uses Korean chrome without translating agent-authored content", async () => {
@@ -212,6 +243,50 @@ describe("OperatorDecisionCard behavior", () => {
     expect(host.querySelector("[data-operator-decision-heading]")?.textContent).toBe("Choose one opportunity?");
     expect(host.textContent).toContain("Choose an opportunity");
     expect(host.textContent).toContain("What needs deciding?");
+  });
+
+  it("shows the requester's recommendation badge and reason on the matching option only", async () => {
+    await renderCard();
+    expect(host.querySelector("[data-operator-decision-recommended]")).toBeNull();
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")).toBeNull();
+    const onResolve = vi.fn().mockResolvedValue(undefined);
+    await renderCard({
+      ...baseDecision,
+      definition: {
+        ...baseDecision.definition,
+        options: [
+          { id: "one", label: "One", description: "First", facts: [], evidenceRefs: [], recommended: true, recommendationReason: "Cheapest path with verified evidence" },
+          { id: "two", label: "Two", description: null, facts: [], evidenceRefs: [] },
+        ],
+      },
+    }, onResolve);
+    const badge = host.querySelector("[data-operator-decision-recommended]")!;
+    expect(badge).toBeTruthy();
+    expect(badge.textContent).toBe("Recommended");
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")?.textContent).toContain("Cheapest path with verified evidence");
+    expect([...host.querySelectorAll("[data-operator-decision-option]")].filter((row) => row.querySelector("[data-operator-decision-recommended]"))).toHaveLength(1);
+    // resolve 동작 불변 — 배지는 표시일 뿐 선택 구조를 바꾸지 않는다.
+    click(optionRow("one"));
+    await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
+    expect(onResolve).toHaveBeenCalledWith("decision-1", {
+      actionId: "choose", selectedOptionIds: ["one"], comment: null,
+    });
+  });
+
+  it("localizes the recommendation badge to Korean", async () => {
+    const decision = {
+      ...baseDecision,
+      definition: {
+        ...baseDecision.definition,
+        options: [
+          { id: "one", label: "One", description: null, facts: [], evidenceRefs: [], recommended: true, recommendationReason: "검증된 증거가 있는 최저 비용 경로" },
+          { id: "two", label: "Two", description: null, facts: [], evidenceRefs: [] },
+        ],
+      },
+    };
+    await act(async () => root.render(<CompanyContext.Provider value={koCompanyContext}><OperatorDecisionCard decision={decision} onResolve={vi.fn()} /></CompanyContext.Provider>));
+    expect(host.querySelector("[data-operator-decision-recommended]")?.textContent).toBe("추천");
+    expect(host.querySelector("[data-operator-decision-recommendation-reason]")?.textContent).toContain("추천 사유: 검증된 증거가 있는 최저 비용 경로");
   });
 
   it("shows shared facts once and preserves unique, unknown and long facts", async () => {
@@ -263,17 +338,17 @@ describe("OperatorDecisionCard option groups", () => {
     const legends = [...host.querySelectorAll("legend")].map((el) => el.textContent);
     expect(legends).toContain("소재 후보(1개 선택)");
     expect(legends).toContain("이미지 유형(1개 선택)");
-    const radios = [...host.querySelectorAll('input[type="radio"]')];
-    const checkboxes = [...host.querySelectorAll('input[type="checkbox"]')];
+    const radios = [...host.querySelectorAll('[role="radio"]')];
+    const checkboxes = [...host.querySelectorAll('[role="checkbox"]')];
     expect(radios.length).toBe(4);
     expect(checkboxes.length).toBe(0);
   });
 
   it("replaces the selection within a group but keeps other groups", async () => {
     const onResolve = await renderCard(groupedDecision);
-    click(host.querySelector('input[value="cand-1"]')!);
-    click(host.querySelector('input[value="cand-2"]')!);
-    click(host.querySelector('input[value="style-vox"]')!);
+    click(optionRow("cand-1"));
+    click(optionRow("cand-2"));
+    click(optionRow("style-vox"));
     await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
     expect(onResolve).toHaveBeenCalledWith("decision-1", {
       actionId: "choose", selectedOptionIds: ["cand-2", "style-vox"], comment: null,
@@ -282,7 +357,7 @@ describe("OperatorDecisionCard option groups", () => {
 
   it("blocks submit while a group has no selection", async () => {
     const onResolve = await renderCard(groupedDecision);
-    click(host.querySelector('input[value="cand-1"]')!);
+    click(optionRow("cand-1"));
     await act(async () => click([...host.querySelectorAll("button")].find((button) => button.textContent === "Choose")!));
     expect(onResolve).not.toHaveBeenCalled();
     expect(host.textContent).toContain("이미지 유형: 1개를 선택하세요");

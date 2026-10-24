@@ -40,6 +40,8 @@ export function buildToolStepRecoveryDescription(input: {
       "- 이 도구 복구에는 위 결정별 적용 범위가 적용됩니다. 재배정·재계획·불가능 보고를 제출해도 도구가 자동 재실행되거나 완료되지 않습니다. 표시된 별도 절차가 필요합니다."),
     prose("- Missing authority, input or credentials may require request_input/escalate. Do not repeat a failed action without new evidence; do not rewrite producer provenance or infer success from a filename.",
       "- 권한·입력·인증 정보가 없으면 request_input/escalate가 필요할 수 있습니다. 새 증거 없이 같은 실패 행동을 반복하거나 생산자 기록을 고치거나 파일명만으로 성공을 추정하지 마세요."),
+    prose("- When request_input/escalate hands a choice to a human, state which option you recommend and why (recommendedOptionId + recommendationReason); do not pass the judgment burden along without a grounded recommendation.",
+      "- request_input/escalate로 선택지를 사람에게 넘길 때는 어떤 선택지를 추천하는지와 그 이유를 함께 명시하세요(recommendedOptionId, recommendationReason). 근거 없이 판단 부담만 넘기지 않습니다."),
     prose("- If the producer work-product file bytes were modified directly (for example to fix a QA finding), `retry_source_issue` will be rejected by generation and byte validation (`producer_rebind_bytes_changed`). Submit `adopt_producer_edits` with your measured attestation, rerun the producer step, or register a corrected revision through the official producer registration path; if none is possible from this card, submit `request_input` or `escalate` so a human operator can decide.",
       "- 생산자 산출물 파일 바이트를 직접 수정했다면(예: QA 지적 수정) `retry_source_issue`는 세대·바이트 검증에서 거부됩니다(`producer_rebind_bytes_changed`). 측정한 증명과 함께 `adopt_producer_edits`를 제출하거나, 생산 단계를 다시 실행하거나, 공식 등록 절차로 수정본을 새 생산자 버전으로 등록하세요. 이 카드에서 어느 것도 불가능하면 `request_input` 또는 `escalate`를 제출해 운영자 판단을 받으세요."),
     "",

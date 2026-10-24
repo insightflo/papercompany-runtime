@@ -28,7 +28,9 @@ import {
  *   owner-capability.ts: executorOwnerReleasedAt 만 소유 역량 해제 증명이고 만료 임대 단독은 아니다.
  * [검사 규칙(번호 순, heartbeat 당 첫 실패 규칙 1개)] 1) scope/link 정합성 → scope_mismatch/
  *   settlement_scope_mismatch(reader 가 대부분 거부하지만 독립 호출 방어). 2) terminal status.
- *   3) v1+settledAt+ownerRelease+terminalDecision 내구 증명. 4) pending 무임대 v1 parent 가
+ *   2.5) 정산 엔진 미관여(finalizationVersion null/0) legacy 행은 terminal status + 유효한
+ *   finishedAt 로 종료 증명(2026-10-22 liveness 교정 — 미관여 행에 v1 증명을 소급 요구하면
+ *   어떤 미션도 재개 불가). 3) v1+settledAt+ownerRelease+terminalDecision 내구 증명. 4) pending 무임대 v1 parent 가
  *   execution identity 에 정확 결속. 5) 기록된 모든 stage 의 kind/class/state/lease 와
  *   required Q/C 충족. 수행 대상은 입력 heartbeat 전부(구세대/legacy JSON-only 포함, generation
  *   필터 없음)이며 caller 배열은 절대 변이하지 않고 copy 를 id codepoint 순으로 정렬해 본다.
@@ -223,6 +225,19 @@ export function checkRecordedHeartbeatSettlements(input: RecordedSettlementInput
     // 규칙 2 — terminal status(미지 포함 비단말은 활성 작업).
     if (!TERMINAL_OUTCOMES.has(heartbeat.status)) {
       emit("active_work", heartbeat.id, "heartbeat_not_terminal");
+      continue;
+    }
+
+    // 규칙 2.5 — legacy 종료 하트비트(정산 엔진이 관여하지 않은 finalizationVersion null/0 행)는
+    //   terminal status + 유효한 finishedAt 로 종료를 증명한다. v1 정산 프로토콜의 소유 해제·stage
+    //   증명을 엔진이 관여한 적 없는 행에 소급 요구하면 어떤 미션도 재개할 수 없다(실측 2026-10-22:
+    //   인스턴스 전체 v1 정산 3.8%). 실제 활성 자원은 observed resource/wakeup 검사가 현재 상태로
+    //   잡는다 — 여기는 기록된 정산 증명의 범위 일치다. 미지 버전(2+)은 legacy 로 해석하지 않고
+    //   규칙 3 이 그대로 차단한다.
+    if (heartbeat.finalizationVersion === null || heartbeat.finalizationVersion === 0) {
+      if (!isValidDate(heartbeat.finishedAt)) {
+        emit("active_work", heartbeat.id, "settlement_unproven");
+      }
       continue;
     }
 

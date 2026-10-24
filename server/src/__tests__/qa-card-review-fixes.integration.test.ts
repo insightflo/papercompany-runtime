@@ -42,7 +42,7 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
   async function seed(companyId: string, kind: string, current = false) {
     const payload = fixture(kind).payload;
     return (await operatorDecisionWriteService(db).create(companyId, {
-      ...payload, ...(current ? { requestKey: String(payload.requestKey).replace("qa-source-defect:", "qa-source-defect:v2:") } : {}),
+      ...payload, ...(current ? { requestKey: String(payload.requestKey).replace("qa-source-defect:", "qa-source-defect:v3:") } : {}),
     }, system)).decision;
   }
 

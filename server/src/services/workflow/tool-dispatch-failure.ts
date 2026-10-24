@@ -7,6 +7,7 @@ import type { WorkflowStep } from "./dag-engine.js";
 import { setWorkflowStepRunStatus } from "./step-status-fencing.js";
 import { recordWorkflowStepStatusTransition, type WorkflowSyncSource } from "./workflow-sync-source.js";
 import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
+import { settleToolQueueMetadata } from "./tool-queue-settle.js";
 
 type FailedToolDispatch = {
   db: Db; step: WorkflowStep; stepRun: typeof workflowStepRuns.$inferSelect; now: Date;
@@ -47,14 +48,17 @@ export async function persistFailedToolDispatch(input: FailedToolDispatch, baseM
     ...(rebindDiagnostic ? { producerRebindDiagnostic: rebindDiagnostic } : {}),
   } };
   delete metadata.concurrencyBlocked;
-  if (input.stepRun.lastDispatchRequestId !== input.requestId) delete metadata.artifactExecution;
+  // [종료 시 toolQueue 정리 — 2026-10-22] 실패로 종료할 때도 큐 기록을 settled 로 남긴다.
+  //   종료 행에 claimed 가 남으면 복구 뷰·resume 검사기가 잔여를 계속 읽는다.
+  const settledMetadata = settleToolQueueMetadata(metadata, input.now.toISOString());
+  if (input.stepRun.lastDispatchRequestId !== input.requestId) delete settledMetadata.artifactExecution;
   const observe = !!input.provenance && isQaRebindConsumer(input.stepRun.issueId, input.step, input.stepRun.metadata);
   const writeFailure = async (writer: Db) => {
     const updated = await setWorkflowStepRunStatus(writer, {
       stepRunId: input.stepRun.id, status: "failed", patch: {
         startedAt: input.stepRun.startedAt ?? input.now, completedAt: input.now,
         lastDispatchAttemptAt: input.now, lastDispatchErrorAt: input.now,
-        lastDispatchErrorSummary: errorSummary, lastDispatchRequestId: input.requestId, metadata,
+        lastDispatchErrorSummary: errorSummary, lastDispatchRequestId: input.requestId, metadata: settledMetadata,
       }, expectedStatuses: [input.stepRun.status],
     });
     if (!updated || !input.provenance) return;

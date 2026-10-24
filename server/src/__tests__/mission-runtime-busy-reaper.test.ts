@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   applyPendingMigrations,
@@ -283,6 +283,22 @@ describe("mission runtime stale-busy reaper", () => {
     expect(summary.reaped).toHaveLength(1);
     expect(summary.skippedTerminalMission).toBe(1);
     expect(onReaped).toHaveLength(0);
+  });
+
+  it("reaps a stale busy runtime whose updated_at has microsecond precision (DB default now())", async () => {
+    const ctx = await seed();
+    const runtimeId = await insertRuntime({ ...ctx, currentIssueId: null, updatedAt: staleUpdated });
+    // 재현: 재개 파견 INSERT 는 updated_at 을 DB 기본값 now()(µs)로 쓴다. 정확 일치 CAS 는
+    // JS Date 밀리초 반올림 때문에 영원히 실패(casLost 무한)했었다.
+    await db.execute(sql`update mission_agent_runtimes set updated_at = ${now.toISOString()}::timestamptz - interval '10 minutes' where id = ${runtimeId}`);
+
+    const summary = await reapStaleBusyMissionRuntimes(db, { now, graceMs });
+
+    expect(summary.casLost).toBe(0);
+    expect(summary.reaped).toHaveLength(1);
+    expect(summary.reaped[0]!.runtimeId).toBe(runtimeId);
+    const [row] = await db.select().from(missionAgentRuntimes).where(eq(missionAgentRuntimes.id, runtimeId));
+    expect(row?.status).toBe("idle");
   });
 
   it("uses the documented default grace", () => {

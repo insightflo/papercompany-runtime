@@ -202,6 +202,10 @@ export const missionOwnerDecisionSubmitSchema = z.object({
   reason: z.string().trim().max(2000).optional().nullable(),
   nextAction: z.string().trim().max(2000).optional().nullable(),
   evidence: z.string().trim().max(4000).optional().nullable(),
+  // [사람 결정 추천] 선택지를 사람에게 넘길 때 요청자의 추천+사유(선택). 카드 옵션 id 와 일치할 때만
+  //   카드에 반영되고, 일치하지 않으면 무시된다(fail-open) — 사람 판단을 대체하지 않는 비구속 추천.
+  recommendedOptionId: z.string().trim().min(1).max(80).optional().nullable(),
+  recommendationReason: z.string().trim().min(1).max(2000).optional().nullable(),
 }).superRefine((value, ctx) => {
   if (value.humanRequest !== undefined && value.decision !== "request_input" && value.decision !== "escalate") {
     ctx.addIssue({

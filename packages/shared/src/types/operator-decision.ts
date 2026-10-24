@@ -39,6 +39,11 @@ export interface OperatorDecisionOption {
   description: string | null;
   facts: OperatorDecisionFact[];
   evidenceRefs: OperatorDecisionEvidenceRef[];
+  /** [요청자 추천] 요청자(오너/시스템)가 선택지와 함께 제시하는 비구속 추천 표시.
+ *  정의당 최대 1개 옵션에만 true — 검증기가 강제한다. 없으면 사람 판단에 그대로 남는다(기존 동작). */
+  recommended?: boolean;
+  /** 추천 사유 한 줄 — recommended 인 옵션에만 붙을 수 있다(검증기 강제). */
+  recommendationReason?: string | null;
 }
 
 export interface OperatorDecisionAction {

@@ -75,6 +75,24 @@ describeDb("operator decision routes", () => {
     // agent_runtime_state/agent_task_sessions(웨이크업 경로가 agents 참조 행을 만듦)·
     // company_skills(웨이크업 실행 준비가 번들 스킬을 upsert)·
     // activity_log(run_id) 행까지 정리(heartbeat_runs.wakeupRequestId FK → wakeup 행을 나중에 삭제)
+    // [2026-10-23 경합 수리] 이전 테스트의 비동기 체인이 깨움 종료 후에도 런타임 확보로
+    //   agent_runtime_state 를 늦게 삽입해 agents 삭제 FK 위반(라이브 CI 반복 관측) — 깨움 종료 +
+    //   런타임 상태 행 수 안정(연속 2회 동일)까지 대기하고 남은 극단 경합은 agents 삭제 재시도로 흡수한다.
+    const runtimeStateSettled = async () => {
+      const before = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const after = await db.select({ agentId: agentRuntimeState.agentId }).from(agentRuntimeState);
+      return before.length === after.length
+        && before.every((row) => after.some((other) => other.agentId === row.agentId));
+    };
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const wakeups = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests);
+      if (!wakeups.some((row) => ["queued", "claimed", "deferred_issue_execution"].includes(row.status))
+        && await runtimeStateSettled()) break;
+      if (Date.now() > deadline) throw new Error(`wakeup chains did not settle within 10s: ${JSON.stringify(wakeups)}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
@@ -86,7 +104,17 @@ describeDb("operator decision routes", () => {
     await db.delete(operatorDecisionContinuations);
     await db.delete(operatorDecisions);
     await db.delete(issues);
-    await db.delete(agents);
+    // [경합 수리] 안정 대기 후에도 극단적으로 늦은 삽입이 남으면 agents 삭제가 FK 위반 — 최대 3회 재정리한다.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await db.delete(agents);
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await db.delete(agentRuntimeState);
+      }
+    }
     await db.delete(companies);
     companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Routes", issuePrefix: `D${companyId.slice(0, 4)}` });

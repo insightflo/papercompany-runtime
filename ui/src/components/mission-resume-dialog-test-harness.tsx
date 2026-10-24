@@ -106,6 +106,11 @@ export function setDialogOpen(open: boolean) {
   dialogProps = { open };
 }
 
+/** 다이얼로그 onOpenChange 로 마지막 전달된 open 상태(닫힘 전파 관찰용). */
+export function dialogOpen(): boolean | null {
+  return dialogProps?.open ?? null;
+}
+
 export async function mountDialog() {
   host = document.createElement("div");
   document.body.appendChild(host);

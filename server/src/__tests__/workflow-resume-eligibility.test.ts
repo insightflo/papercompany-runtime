@@ -184,6 +184,37 @@ describe("checkStepEligibility — control", () => {
   });
 });
 
+describe("checkStepEligibility — failed/skipped with traces (2026-10-22 liveness correction)", () => {
+  const traces = {
+    issueId: "issue-7",
+    startedAt: "2026-10-21T11:43:53.597Z",
+    hasAttempt: true,
+    hasQueue: true,
+  };
+
+  it("allows re-run of failed/skipped agent/tool steps with recorded traces when effect is reviewed", () => {
+    for (const kind of ["agent", "tool"] as const) {
+      for (const status of ["failed", "skipped"] as const) {
+        for (const effect of ["none", "read_only", "external"] as const) {
+          expect(checkStepEligibility(history({ kind, status, effect, ...traces }))).toBeNull();
+        }
+      }
+    }
+  });
+
+  it("still blocks failed/skipped with traces when effect is unknown", () => {
+    expect(
+      checkStepEligibility(history({ kind: "tool", status: "failed", effect: "unknown", ...traces })),
+    ).toBe("external_effect_unknown");
+  });
+
+  it("still blocks pending with traces as executed_step (status mismatch)", () => {
+    expect(checkStepEligibility(history({ kind: "tool", status: "pending", ...traces }))).toBe(
+      "executed_step",
+    );
+  });
+});
+
 describe("checkStepEligibility — scope", () => {
   it("null is strictly per-step: identical histories judge identically regardless of stepId", () => {
     const a = history({ stepId: "a" });

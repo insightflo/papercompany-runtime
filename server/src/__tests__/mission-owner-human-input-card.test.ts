@@ -28,7 +28,7 @@ import {
   MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
   type MissionOwnerHumanInputCardSpec,
 } from "../services/missions/mission-owner-human-input-card.js";
-import { createOperatorDecisionSchema } from "@paperclipai/shared/validators/operator-decision";
+import { createOperatorDecisionSchema, operatorDecisionDefinitionSchema } from "@paperclipai/shared/validators/operator-decision";
 import { publishLiveEvent } from "../services/live-events.js";
 
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
@@ -138,6 +138,162 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.humanReview!.decisionSubject).toContain("escalate");
     expect(card.definition.humanReview!.recommendedNextStep).toBe(spec({ decision: "escalate" }).nextAction);
   });
+
+  // ---------- system escalate: nextAction 열거에서 복구 경로 옵션 파생(일반 규칙) ----------
+
+  const SYSTEM_ESCALATE_NEXT_ACTION_EN = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
+  const SYSTEM_ESCALATE_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다.";
+
+  it("derives the enumerated recovery paths as options for system escalate", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.map((option) => option.id)).toEqual([
+      "retry-with-revised-input", "replan", "reassign", "cancel",
+    ]);
+    expect(card.definition.options.map((option) => option.label)).toEqual([
+      "retry with revised input", "replan", "reassign", "cancel",
+    ]);
+    expect(card.definition.actions).toHaveLength(1);
+    expect(card.definition.actions[0]).toMatchObject({ id: "submit", outcome: "submit", tone: "primary", requiresSelection: true });
+    expect(card.definition.selection).toEqual({ min: 1, max: 1 });
+    expect(card.definition.comment.mode).toBe("optional");
+    expect(card.definition.humanReview!.recommendedNextStep).toBe(SYSTEM_ESCALATE_NEXT_ACTION_EN);
+  });
+
+  it("derives the same recovery paths from the Korean system escalate nextAction", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.map((option) => option.label)).toEqual([
+      "운영자가 입력 수정 후 재시도", "계획 변경", "담당자 변경", "취소",
+    ]);
+  });
+
+  // ---------- 파생 선택지별 결과(영향) 설명 — 표준 복구 동사 매칭, 미매칭은 기존 안내 ----------
+
+  it("fills per-option consequences for standard recovery verbs (EN)", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    const byId = new Map(card.definition.options.map((option) => [option.id, option.description ?? ""]));
+    expect(byId.get("retry-with-revised-input")).toContain("입력을 수정해");
+    expect(byId.get("replan")).toContain("기존 계획을 폐기");
+    expect(byId.get("reassign")).toContain("다른 담당자");
+    expect(byId.get("cancel")).toContain("복구를 중단");
+  });
+
+  it("fills per-option consequences for standard recovery verbs (KO)", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
+    }));
+    const labels = new Map(card.definition.options.map((option) => [option.label, option.description ?? ""]));
+    expect(labels.get("계획 변경")).toContain("기존 계획을 폐기");
+    expect(labels.get("취소")).toContain("복구를 중단");
+  });
+
+  it("keeps the generic guidance for unmatched path labels", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system",
+      nextAction: "Pick one (defrost the moonrock, repaint the observatory, or cancel).",
+    }));
+    expect(card.definition.options.length).toBeGreaterThan(1);
+    const byId = new Map(card.definition.options.map((option) => [option.id, option.description]));
+    expect(byId.get("cancel")).toContain("복구를 중단");
+    for (const [id, description] of byId) {
+      if (id !== "cancel") expect(description).toContain("복구 경로 후보");
+    }
+  });
+
+  it("keeps the default approve/hold/reject for agent submissions even with an enumerated nextAction", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(card.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+    expect(card.definition.comment.mode).toBe("required");
+  });
+
+  it("keeps the default options for system request_input and system escalate without an enumeration", () => {
+    const requestInput = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "request_input", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(requestInput.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+    const noEnumeration = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: "운영자 승인 후 다음 단계를 진행해 주세요",
+    }));
+    expect(noEnumeration.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+  });
+
+  // ---------- 요청자 추천(recommended) 주입 — 선택지와 함께 추천+사유 제시 ----------
+
+  it("marks the submitted recommendation on the matching default option with its reason", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      recommendedOptionId: "approve",
+      recommendationReason: "내부 진단상 승인 후 진행이 안전합니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    const approve = card.definition.options.find((option) => option.id === "approve")!;
+    expect(approve.recommended).toBe(true);
+    expect(approve.recommendationReason).toBe("내부 진단상 승인 후 진행이 안전합니다");
+    for (const other of card.definition.options.filter((option) => option.id !== "approve")) {
+      expect(other.recommended).toBeUndefined();
+      expect(other.recommendationReason).toBeUndefined();
+    }
+  });
+
+  it("marks the recommendation on structured options by the submitter's option id", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      structuredOptions: [
+        { id: "alpha", label: "옵션 알파", description: "알파로 진행" },
+        { id: "beta", label: "옵션 베타", description: null },
+      ],
+      recommendedOptionId: "alpha",
+      recommendationReason: "알파가 비용·위험 모두 우세합니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.find((option) => option.id === "alpha")?.recommended).toBe(true);
+    expect(card.definition.options.find((option) => option.id === "beta")?.recommended).toBeUndefined();
+  });
+
+  it("marks the recommendation on a derived recovery-path option for system escalate", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+      recommendedOptionId: "replan",
+      recommendationReason: "재시도 대상이 죽어 있어 재계획만 실행 가능 경로입니다",
+    }));
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    expect(card.definition.options.find((option) => option.id === "replan")?.recommended).toBe(true);
+  });
+
+  it("ignores an unknown recommended option id (fail-open) and keeps cards without a recommendation unchanged", () => {
+    const unknown = buildMissionOwnerHumanInputDecisionCard(spec({ recommendedOptionId: "not-an-option", recommendationReason: "무시되어야 하는 사유" }));
+    expect(() => createOperatorDecisionSchema.parse(unknown)).not.toThrow();
+    expect(unknown.definition.options.every((option) => option.recommended !== true)).toBe(true);
+    expect(unknown.definition.options.every((option) => option.recommendationReason == null)).toBe(true);
+    const plain = buildMissionOwnerHumanInputDecisionCard(spec());
+    expect(() => createOperatorDecisionSchema.parse(plain)).not.toThrow();
+    expect(plain.definition.options.every((option) => option.recommended !== true)).toBe(true);
+    const derived = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
+    }));
+    expect(derived.definition.options.every((option) => option.recommended !== true)).toBe(true);
+  });
+
+  it("allows at most one recommended option and requires the reason to ride the recommended option", () => {
+    const base = JSON.parse(JSON.stringify(buildMissionOwnerHumanInputDecisionCard(spec()).definition));
+    const withOne = structuredClone(base);
+    withOne.options[0].recommended = true;
+    withOne.options[0].recommendationReason = "승인 추천 사유";
+    expect(() => operatorDecisionDefinitionSchema.parse(withOne)).not.toThrow();
+    const withTwo = structuredClone(withOne);
+    withTwo.options[1].recommended = true;
+    expect(() => operatorDecisionDefinitionSchema.parse(withTwo)).toThrow();
+    const orphanReason = structuredClone(base);
+    orphanReason.options[0].recommendationReason = "추천 없는 사유";
+    expect(() => operatorDecisionDefinitionSchema.parse(orphanReason)).toThrow();
+  });
 });
 
 // ---------- Part B: submission bridge (embedded Postgres) ----------
@@ -227,6 +383,23 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(activity?.action).toBe("mission.owner.human_input_requested");
   });
 
+  it("carries the owner's submitted recommendation onto the card option", async () => {
+    const s = await seedOversight();
+    await submit(s, {
+      decision: "request_input",
+      reason: "습인이 필요합니다",
+      nextAction: "운영자 승인 후 진행",
+      recommendedOptionId: "approve",
+      recommendationReason: "재시도는 이미 3회 실패해 승인 후 다음 단계 진행이 안전합니다",
+    });
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, s.companyId));
+    const options = (card!.definition as { options: { id: string; recommended?: boolean; recommendationReason?: string | null }[] }).options;
+    const approve = options.find((option) => option.id === "approve")!;
+    expect(approve.recommended).toBe(true);
+    expect(approve.recommendationReason).toBe("재시도는 이미 3회 실패해 승인 후 다음 단계 진행이 안전합니다");
+    expect(options.filter((option) => option.id !== "approve").every((option) => option.recommended !== true)).toBe(true);
+  });
+
   it("reuses the same card on dedup replay of an identical resubmission", async () => {
     const s = await seedOversight();
     const data = { decision: "request_input", reason: "Need approval." };
@@ -237,6 +410,21 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(cards).toHaveLength(1);
     expect(cards[0]!.requestKey).toBe(`moi1:${first.eventId}`);
     expect(humanAlertPublishes()).toHaveLength(1);
+  });
+
+  it("keeps every event/alert row while merging the repeat into one card (no suppression)", async () => {
+    const s = await seedOversight();
+    await submit(s, { decision: "request_input", reason: "Need approval." });
+    await submit(s, { decision: "request_input", reason: "Still need approval, second event." });
+    // 원장·인박스 행·알림은 매 이벤트마다 그대로 기록된다(발화 억제 금지).
+    const activityRows = await db.select().from(activityLog).where(eq(activityLog.entityId, s.issueId));
+    expect(activityRows).toHaveLength(2);
+    expect(humanAlertPublishes()).toHaveLength(2);
+    // 카드 계층만 병합된다 — 1장 + repeatCount.
+    const cards = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, s.companyId));
+    expect(cards).toHaveLength(1);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
   });
 
   it("fails closed 5xx when post-commit card creation fails, keeps the ledger, and recreates via requestKey on resubmission", async () => {
@@ -283,5 +471,119 @@ describeEP("mission owner human input submission creates decision cards", () => 
     expect(card).toMatchObject({ requestKey: `moi1:${result.eventId}`, status: "pending", requestedByAgentId: s.ownerId });
     const definition = card!.definition as { humanReview?: { decisionSubject: string } };
     expect(definition.humanReview!.decisionSubject).toContain("escalate");
+  });
+});
+
+// ---------- Part C: pending duplicate merge (카드 생성 계층 병합, 2026-10-18) ----------
+// 계약: 같은 (companyId, missionId, 앵커 issueId, decision 종류)의 pending 카드가 있으면 새 생성 대신
+// 기존 카드를 최신화(updatedAt+repeatCount)하고 반환한다. 발화/이벤트/원장은 억제하지 않는다.
+// 대조 실패·종결 카드·유형/앵커 불일치는 모두 신규 생성(fail-open) — 잘못된 중복체크로 카드 발화를
+// 막는 방향으로는 절대 작동하지 않는다.
+
+describeEP("mission owner human input card duplicate merge", () => {
+  let dedupDb!: ReturnType<typeof createDb>;
+  beforeAll(() => { dedupDb = createDb(tempDb!.connectionString); });
+  afterEach(async () => {
+    vi.clearAllMocks();
+    await dedupDb.delete(activityLog);
+    await dedupDb.delete(operatorDecisions);
+    await dedupDb.delete(issues);
+    await dedupDb.delete(missions);
+    await dedupDb.delete(agents);
+    await dedupDb.delete(companies);
+  });
+
+  async function seedDedupCase() {
+    const companyId = randomUUID(), ownerId = randomUUID(), missionId = randomUUID(), issueId = randomUUID();
+    await dedupDb.insert(companies).values({ id: companyId, name: "Dedup", issuePrefix: `CD${companyId.slice(0, 4)}`, requireBoardApprovalForNewAgents: false });
+    await dedupDb.insert(agents).values({ id: ownerId, companyId, name: "owner", role: "operator", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await dedupDb.insert(missions).values({ id: missionId, companyId, ownerAgentId: ownerId, title: "Dedup mission", status: "active" });
+    await dedupDb.insert(issues).values({ id: issueId, companyId, missionId, title: "Owner oversight", status: "in_progress", originKind: "mission_main_executor_oversight", assigneeAgentId: ownerId });
+    return { companyId, ownerId, missionId, issueId };
+  }
+
+  const dedupSpec = (s: Awaited<ReturnType<typeof seedDedupCase>>, overrides: Partial<MissionOwnerHumanInputCardSpec> = {}): MissionOwnerHumanInputCardSpec => ({
+    companyId: s.companyId,
+    missionId: s.missionId,
+    decisionEventId: randomUUID(),
+    decision: "request_input",
+    ownerActionIssueId: s.issueId,
+    ownerActionIssueStatus: "in_progress",
+    requestedByAgentId: s.ownerId,
+    reason: "사람 승인이 필요합니다",
+    ...overrides,
+  });
+
+  const cardsOf = (companyId: string) => dedupDb.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, companyId));
+
+  it("merges a repeat submission into the pending card with repeatCount instead of a second card", async () => {
+    const s = await seedDedupCase();
+    const first = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    const before = (await cardsOf(s.companyId))[0]!;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { reason: "여전히 승인이 필요합니다" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.id).toBe(first.decision.id);
+    expect(cards[0]!.sourceId).toBe(cards[0]!.sourceId); // 대표 카드는 첫 이벤트 그대로
+    expect(second.decision.id).toBe(first.decision.id); // 병합 결과 = 기존 카드 반환
+    expect(second.replayed).toBe(true);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number; lastSeenDecisionEventId?: string } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
+    expect(cards[0]!.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime()); // 최신화
+    // 제목·선택지·humanReview 는 기존 카드 유지 — 병합은 updatedAt/메타데이터만 만진다.
+    expect(cards[0]!.title).toBe(before.title);
+    expect(cards[0]!.definition).toEqual(before.definition);
+  });
+
+  it("keeps separate cards when the decision kind differs (request_input vs escalate)", async () => {
+    const s = await seedDedupCase();
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "request_input" }));
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "escalate" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((card) => card.title))).toHaveLength(2);
+  });
+
+  it("keeps separate cards when the anchor issue differs", async () => {
+    const s = await seedDedupCase();
+    const otherIssueId = randomUUID();
+    await dedupDb.insert(issues).values({ id: otherIssueId, companyId: s.companyId, missionId: s.missionId, title: "다른 앵커 이슈", status: "in_progress", originKind: "mission_main_executor_unblock", assigneeAgentId: s.ownerId });
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(new Set(cards.map((card) => card.issueId))).toHaveLength(2);
+  });
+
+  it("creates a fresh card when the previous card is no longer pending", async () => {
+    const s = await seedDedupCase();
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
+    const [firstCard] = await cardsOf(s.companyId);
+    await dedupDb.update(operatorDecisions).set({
+      status: "resolved",
+      result: { actionId: "approve", outcome: "approve", selectedOptionIds: ["approve"], comment: "테스트 종결" },
+      resolvedByUserId: "test-user",
+      resolvedAt: new Date(),
+    }).where(eq(operatorDecisions.id, firstCard!.id));
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { reason: "다시 승인이 필요합니다" }));
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(2);
+    expect(second.decision.id).not.toBe(firstCard!.id);
+    expect(cards.filter((card) => card.status === "pending")) .toHaveLength(1);
+  });
+
+  it("replay of the same decision event keeps the single card without bumping repeatCount", async () => {
+    const s = await seedDedupCase();
+    const spec = dedupSpec(s);
+    const first = await createMissionOwnerHumanInputDecisionCard(dedupDb, spec);
+    const replay = await createMissionOwnerHumanInputDecisionCard(dedupDb, spec);
+    const cards = await cardsOf(s.companyId);
+    expect(cards).toHaveLength(1);
+    expect(replay.decision.id).toBe(first.decision.id);
+    expect(replay.replayed).toBe(true);
+    expect(cards[0]!.requestKey).toBe(`moi1:${spec.decisionEventId}`);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput).toBeUndefined(); // 멱등 replay 는 repeat 로 세지 않는다
   });
 });

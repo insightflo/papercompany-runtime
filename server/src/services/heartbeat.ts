@@ -58,7 +58,7 @@ import { knowledgeService } from "./knowledge/base.js";
 import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
-import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { capHeartbeatRunResultJsonForStorage, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
   attentionHeartbeatRuns,
   clampRunListLimit,
@@ -7449,7 +7449,7 @@ export function heartbeatService(db: Db) {
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
-        resultJson: adapterResult.resultJson ?? null,
+        resultJson: capHeartbeatRunResultJsonForStorage(adapterResult.resultJson),
         sessionIdAfter: persistedSessionIdAfter,
         stdoutExcerpt: runLog.stdoutExcerpt,
         stderrExcerpt: runLog.stderrExcerpt,

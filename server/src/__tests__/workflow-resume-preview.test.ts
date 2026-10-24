@@ -27,8 +27,9 @@ import { seedReadModelStepRun } from "./helpers/workflow-resume-resource-fixture
 
 /**
  * [purpose] Task6a 실제 preview 서비스 테스트 — 실제 임베디드 PostgreSQL + 실제 frozen 캡처 +
- *   실제 REPEATABLE READ READ ONLY 트랜잭션. 검토 정책 레지스트리는 실제(비어 있음) 상태로
- *   fail-closed 를 검증한다. mock DB/loader/해시/토큰 없음, skip 없음.
+ *   실제 REPEATABLE READ READ ONLY 트랜잭션. 검토 정책 레지스트리는 실제 상태를 그대로 쓰며
+ *   픽스처 회사/definitionHash 는 실제 엔트리와 매치되지 않아 policy-missing fail-closed 를
+ *   검증한다. mock DB/loader/해시/토큰 없음, skip 없음.
  */
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();

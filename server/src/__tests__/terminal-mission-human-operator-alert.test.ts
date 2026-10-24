@@ -7,6 +7,9 @@ import {
   buildTerminalMissionSnapshotKey,
   classifyTerminalMissionContinuation,
   emitTerminalMissionHumanOperatorReport,
+  reviewedResumePolicyFullyResolves,
+  terminalResumeGuidanceText,
+  terminalCardStructuredOptions,
 } from "../services/missions/terminal-mission-human-operator-alert.js";
 import { missionWorkflowContinuationRemains, type WorkflowContinuationStepRow } from "../services/missions/terminal-mission-workflow-continuation.js";
 
@@ -188,5 +191,59 @@ describe("buildTerminalMissionHumanOperatorComment (system-authored, bounded, sa
       failedRuns: [{ id: "r1", status: "cancelled", errorCode: null }],
     });
     expect(result.emitted).toBe(false);
+  });
+});
+// [재개 경로 안내 2026-10-23] 검토된 재개 정책이 온전히 resolve 되는 경우에만 실제 클릭 경로를 안내한다.
+describe("terminal resume guidance (reviewed resume policy surfacing)", () => {
+  it("terminalResumeGuidanceText returns null unless a reviewed path is available", () => {
+    expect(terminalResumeGuidanceText(false, "ko")).toBeNull();
+    expect(terminalResumeGuidanceText(false, "en")).toBeNull();
+    expect(terminalResumeGuidanceText(true, "ko")).toContain("이 실행 이어서 진행");
+    expect(terminalResumeGuidanceText(true, "en")).toContain("resume");
+  });
+
+  it("reviewedResumePolicyFullyResolves requires every binding to resolve against current rows", () => {
+    const registryRows = [
+      { id: "tool-1", enabled: true, updatedAt: new Date("2026-10-02T00:02:12.308Z"),
+        name: "manual-onboarding-qa", adapterType: "builtin", adapterConfig: { a: 1 }, inputSchema: null },
+    ] as never as (typeof import("@paperclipai/db").toolDefinitions.$inferSelect)[];
+    const policy = {
+      schemaVersion: 1 as const, companyId: "c1", definitionHash: "h".repeat(64),
+      steps: {
+        "qa-gate": { effect: "none" as const, toolBindings: [{ id: "tool-1", updatedAt: "2026-10-02T00:02:12.308Z", configHash: "deadbeef" }] },
+        "agent-step": { effect: "none" as const, toolBindings: [] },
+      },
+      requiredGateStepIds: ["qa-gate"], publicationStepIds: [], generationStepIds: [],
+    };
+    // binding configHash does not match the row → not fully resolved → no guidance.
+    expect(reviewedResumePolicyFullyResolves(policy, registryRows)).toBe(false);
+    const bindingFree = { ...policy, steps: { "agent-step": { effect: "none" as const, toolBindings: [] } } };
+    expect(reviewedResumePolicyFullyResolves(bindingFree, registryRows)).toBe(true);
+  });
+
+  it("comment appends the resume path line only when guidance is provided", () => {
+    const base = {
+      issueId: "owner-1", issueIdentifier: "RES-1", missionTitle: "T", sourceIssueIdentifier: "RES-42",
+      failedRuns: [{ id: "r1", status: "failed", errorCode: null }] as const,
+    };
+    expect(buildTerminalMissionHumanOperatorComment(base)).not.toContain("Resume path:");
+    expect(buildTerminalMissionHumanOperatorComment({ ...base, resumeGuidance: terminalResumeGuidanceText(true, "ko") }))
+      .toContain("Resume path: 이 미션의 실패 실행은 검토된 재개 경로가 있습니다");
+  });
+});
+
+// [승인=재개 2026-10-23] 재개 옵션 구성 — 재개 가능할 때만 첫 옵션+추천으로 추가.
+describe("terminalCardStructuredOptions (resume option on the terminal card)", () => {
+  const nextAction = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
+  it("returns null when resume is not available", () => {
+    expect(terminalCardStructuredOptions(false, nextAction)).toBeNull();
+  });
+  it("prepends the resume option with recommendation and keeps derived recovery paths", () => {
+    const options = terminalCardStructuredOptions(true, nextAction)!;
+    expect(options.structuredOptions[0]).toMatchObject({ id: "resume-this-run" });
+    expect(options.structuredOptions[0]!.label).toContain("이 실행 이어서 진행");
+    expect(options.structuredOptions.length).toBeGreaterThan(1);
+    expect(options.recommendedOptionId).toBe("resume-this-run");
+    expect(options.structuredOptions.slice(1).map((o) => o.id)).toContain("replan");
   });
 });

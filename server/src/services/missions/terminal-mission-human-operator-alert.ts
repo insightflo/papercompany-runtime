@@ -13,17 +13,27 @@ import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { type SystemLanguage } from "./system-language.js";
-import { companies, issueComments, issues, workflowTransitionEvents } from "@paperclipai/db";
+import { activityLog, issueComments, issues, missions, operatorDecisions, workflowRuns, workflowTransitionEvents, companies } from "@paperclipai/db";
+import { logger } from "../../middleware/logger.js";
 import {
   materializeHumanOperatorRequestPayload,
   publishHumanOperatorRequestEvent,
   type HumanOperatorRequestPayload,
 } from "./human-operator-alert-events.js";
 import {
+  buildHumanInputDecisionCardRequestKey,
+  createMissionOwnerHumanInputDecisionCard,
+  MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
+} from "./mission-owner-human-input-card.js";
+import {
   missionWorkflowContinuationRemains,
   type ValidationVerdictObservation,
   type WorkflowContinuationStepRow,
 } from "./terminal-mission-workflow-continuation.js";
+import { resumableRunSignalForRun, resumePreviewEligibleForRun } from "./resume-signals.js";
+export { reviewedResumePolicyFullyResolves } from "./resume-signals.js";
+import { deriveRecoveryPathOptionsFromNextAction } from "./mission-owner-human-input-card.js";
+import { TERMINAL_RESUME_OPTION_DESCRIPTION, TERMINAL_RESUME_OPTION_ID, TERMINAL_RESUME_OPTION_LABEL } from "./terminal-resume-from-decision.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
@@ -31,10 +41,41 @@ const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled", "canceled"]
 const TERMINAL_REPORT_EVENT_TYPE = "terminal_mission_human_operator_report";
 const TERMINAL_REPORT_LAYER = "workflow_validation";
 const TERMINAL_REPORT_DECISION = "escalate";
+const TERMINAL_HUMAN_INPUT_CARD_FAILURE_ACTION = "mission.owner.human_input_card_failed";
 const TITLE_MAX = 120;
 const TOKEN_MAX = 80;
 const EVIDENCE_MAX = 240;
 const FAILED_RUN_AGGREGATE_MAX = 8;
+
+// 시스템 에스컬레이션 next-action 문구 — comment 텍스트와 사람 결정 카드/ payload 가 같은 원본을
+// 공유한다(텍스트 변경 금지: 기존 발신 문구 그대로).
+const TERMINAL_NEXT_ACTION_EN = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
+const TERMINAL_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다.";
+
+// [재개 경로 안내 2026-10-23] 실패 실행의 frozen 정의가 검토된 재개 정책으로 완전히 resolve 되면
+//   next-action 에 실제 클릭 경로(보드 '이 실행 이어서 진행')를 덧붙인다. 정책 부재·binding 불일치면
+//   안내하지 않는다(preview 가 fail-closed 로 거절할 것이므로 거짓 안내가 되지 않게).
+const TERMINAL_RESUME_GUIDANCE_KO = "이 미션의 실패 실행은 검토된 재개 경로가 있습니다: 이 카드의 '이 실행 이어서 진행(재개)' 선택 또는 미션 상세 화면의 재개 버튼으로 실패한 단계부터 이어서 실행할 수 있습니다.";
+const TERMINAL_RESUME_GUIDANCE_EN = "A reviewed resume path is available for this mission's failed run: choose the '이 실행 이어서 진행' (resume) option on this card (or the resume action on the mission detail page) to continue from the failed step.";
+
+export function terminalResumeGuidanceText(available: boolean, language: "ko" | "en" | SystemLanguage): string | null {
+  if (!available) return null;
+  return language === "ko" ? TERMINAL_RESUME_GUIDANCE_KO : TERMINAL_RESUME_GUIDANCE_EN;
+}
+
+/** 실패 실행 중 하나라도 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 재개 옵션이 실제로 작동함).
+ *  [재개 약속 정직화 2026-10-23] 정책 등록만으로 재개를 약속하면 프리뷰가 거절하는 경로를 카드가
+ *  약속하게 된다(dsh-purge 사례) — 정책 resolve 사전필터 후 실제 프리뷰로 확정한다. */
+async function terminalResumePathAvailable(db: Db, companyId: string, missionId: string,
+  failedRunIds: readonly string[]): Promise<boolean> {
+  for (const runId of failedRunIds) {
+    const signal = await resumableRunSignalForRun(db, companyId, runId);
+    if (signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId })) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export type TerminalMissionOwnerActionIssue = {
   id: string;
@@ -114,13 +155,13 @@ export type TerminalMissionHumanOperatorCommentInput = {
   retryMaxRetries?: number | null;
   /** [provider 403 ladder] 소진된 scheduled 재시도 요약(구조화). 표시 텍스트는 이 값에서만 파생. */
   provider403Ladder?: { attempts: number; delaysMin: number[] } | null;
+  /** [재개 경로 안내 2026-10-23] 검토된 재개 정책이 resolve 되는 경우의 실제 클릭 안내(null 이면 미표시). */
+  resumeGuidance?: string | null;
 };
 
 
-// system-authored structured owner-decision comment. owner 귀속 ❌, raw 출력 ❌.
-export function buildTerminalMissionHumanOperatorComment(
-  input: TerminalMissionHumanOperatorCommentInput,
-): string {
+// [shared evidence] comment 와 사람 결정 카드/ payload 가 같은 bounded evidence 원본을 쓴다.
+export function buildTerminalMissionEvidenceToken(input: TerminalMissionHumanOperatorCommentInput): string {
   const missionToken = sanitizeToken(input.missionTitle, TITLE_MAX) || "(untitled)";
   const ownerActionToken = sanitizeToken(input.issueIdentifier, TOKEN_MAX) || input.issueId;
   const sourceToken = sanitizeToken(input.sourceIssueIdentifier, TOKEN_MAX) || "(unknown)";
@@ -144,14 +185,23 @@ export function buildTerminalMissionHumanOperatorComment(
     evidenceParts.push(`provider403-retries=${input.provider403Ladder.attempts}/${input.provider403Ladder.delaysMin.join("/")}`);
   }
   evidenceParts.push("continuation=none");
-  const evidence = sanitizeToken(evidenceParts.join("; "), EVIDENCE_MAX);
+  return sanitizeToken(evidenceParts.join("; "), EVIDENCE_MAX);
+}
+
+// system-authored structured owner-decision comment. owner 귀속 ❌, raw 출력 ❌.
+export function buildTerminalMissionHumanOperatorComment(
+  input: TerminalMissionHumanOperatorCommentInput,
+): string {
+  const sourceToken = sanitizeToken(input.sourceIssueIdentifier, TOKEN_MAX) || "(unknown)";
+  const evidence = buildTerminalMissionEvidenceToken(input);
 
   return [
     "### Mission owner decision",
     `Decision: ${TERMINAL_REPORT_DECISION}`,
     `Source issue: ${sourceToken}`,
     input.language === "ko" ? "Reason: 자동으로 계속할 수 없습니다. 작업 흐름 또는 복구 업무가 실패로 종결됐고, 실행 중인 작업이나 재개 요청, 실행 가능한 다음 단계가 남아 있지 않습니다." : "Reason: Mission cannot continue automatically. The workflow or its owner-action recovery reached a terminal failure and no heartbeat, wakeup, tool recovery, source resume, or runnable workflow step remains.",
-    input.language === "ko" ? "Next action: 운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다." : "Next action: Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.",
+    input.language === "ko" ? `Next action: ${TERMINAL_NEXT_ACTION_KO}` : `Next action: ${TERMINAL_NEXT_ACTION_EN}`,
+    ...(input.resumeGuidance ? [`Resume path: ${input.resumeGuidance}`] : []),
     `Evidence: ${evidence}`,
   ].join("\n");
 }
@@ -186,7 +236,124 @@ export type EmitTerminalMissionHumanOperatorInput = {
   provider403Ladder?: { attempts: number; delaysMin: number[] } | null;
 };
 
-export type EmitTerminalMissionHumanOperatorResult = { emitted: boolean; reason: string };
+export type EmitTerminalMissionHumanOperatorResult = {
+  emitted: boolean;
+  reason: string;
+  /** 결정 이벤트(신규 claim 또는 이미 보고된 스냅샷의 기존 이벤트) — 카드 보증용. */
+  decisionEventId?: string;
+  /** 카드 보증 결과 — 표시·진단용(실패는 activity 에 기록되므로 결과를 바꾸지 않는다). */
+  card?: { ensured: boolean; reason: string };
+};
+
+// 시스템 발신 에스컬레이션에 매핍할 카드 맥락 — tx 안에서 수집한 실제 값만 담는다.
+type TerminalHumanInputCardContext = {
+  companyId: string;
+  missionId: string;
+  decisionEventId: string;
+  issue: { id: string; status: string; title: string | null; identifier: string | null; originId: string | null };
+  ownerAgentId: string | null;
+  reason: string;
+  nextAction: string;
+  evidence: string;
+  workflowRunId: string | null;
+  /** [승인=재개 2026-10-23] 재개 정책이 온전히 resolve 되는 실패 실행이 있으면 재개 옵션을 카드에 추가한다. */
+  resumeAvailable: boolean;
+};
+
+/** [승인=재개] 재개 가능시 카드 선택지 구성 — 재개 옵션 첫 번째+추천, 나머지는 nextAction 파생. */
+export function terminalCardStructuredOptions(resumeAvailable: boolean,
+  nextAction: string): { structuredOptions: { id: string; label: string; description?: string }[];
+  recommendedOptionId: string; recommendationReason: string } | null {
+  if (!resumeAvailable) return null;
+  return {
+    structuredOptions: [
+      { id: TERMINAL_RESUME_OPTION_ID, label: TERMINAL_RESUME_OPTION_LABEL, description: TERMINAL_RESUME_OPTION_DESCRIPTION },
+      ...(deriveRecoveryPathOptionsFromNextAction(nextAction) ?? []),
+    ],
+    recommendedOptionId: TERMINAL_RESUME_OPTION_ID,
+    recommendationReason: "실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다.",
+  };
+}
+
+// [fail-loud] 시스템 경로는 제출 응답이 없으므로 카드 매핑/생성 실패를 activity+로그 로 남긴다.
+async function recordTerminalHumanInputCardFailure(
+  db: Db,
+  context: Pick<TerminalHumanInputCardContext, "companyId" | "issue" | "decisionEventId">,
+  failure: { stage: "mapping" | "create"; error: string },
+): Promise<void> {
+  try {
+    await db.insert(activityLog).values({
+      companyId: context.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: TERMINAL_HUMAN_INPUT_CARD_FAILURE_ACTION,
+      entityType: "issue",
+      entityId: context.issue.id,
+      details: {
+        schemaVersion: 1,
+        decisionEventId: context.decisionEventId,
+        requestKey: buildHumanInputDecisionCardRequestKey(context.decisionEventId),
+        sourceType: MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
+        stage: failure.stage,
+        error: failure.error.slice(0, 1_000),
+      },
+    });
+  } catch (error) {
+    logger.warn({ err: error, decisionEventId: context.decisionEventId }, "failed to record terminal-mission human input card failure");
+  }
+  logger.warn({ decisionEventId: context.decisionEventId, stage: failure.stage, error: failure.error }, "terminal-mission human input decision card not created");
+}
+
+// [시스템 경로 카드 보증] 결정 이벤트 1건 = 카드 1건(moi1:{decisionEventId} 멱등). 기존 카드가
+//   있으면 재사용하고, 없으면 기존 카드 빌더(mission-owner-human-input-card)로 생성한다.
+//   실패는 throw 하지 않고 activity 에 기록한다 — 발신(이슈·인박스·알림)은 이미 커밋된 상태다.
+export async function ensureTerminalHumanInputDecisionCard(
+  db: Db,
+  context: TerminalHumanInputCardContext,
+): Promise<{ ensured: boolean; reason: string }> {
+  // [#390 스윕 정책 정합] 앵커 이슈가 이미 종결됐으면 moi 카드는 스윕 대상(죽은 카드) — 만들지 않고
+  //   에러도 아니다(정책에 따른 스킵).
+  if (context.issue.status === "done" || context.issue.status === "cancelled") {
+    return { ensured: false, reason: "anchor-issue-terminal" };
+  }
+  if (!context.ownerAgentId) {
+    await recordTerminalHumanInputCardFailure(db, context, { stage: "mapping", error: "mission owner agent is missing — card cannot be addressed" });
+    return { ensured: false, reason: "owner-agent-missing" };
+  }
+  const requestKey = buildHumanInputDecisionCardRequestKey(context.decisionEventId);
+  const existing = await db.select({ id: operatorDecisions.id }).from(operatorDecisions)
+    .where(and(eq(operatorDecisions.companyId, context.companyId), eq(operatorDecisions.requestKey, requestKey)))
+    .limit(1);
+  if (existing.length > 0) return { ensured: true, reason: "card-exists" };
+  try {
+    await createMissionOwnerHumanInputDecisionCard(db, {
+      companyId: context.companyId,
+      missionId: context.missionId,
+      decisionEventId: context.decisionEventId,
+      decision: "escalate",
+      ownerActionIssueId: context.issue.id,
+      ownerActionIssueStatus: context.issue.status,
+      requestedByAgentId: context.ownerAgentId,
+      reason: context.reason,
+      nextAction: context.nextAction,
+      evidence: context.evidence,
+      issueTitle: context.issue.title,
+      issueIdentifier: context.issue.identifier,
+      sourceIssueId: context.issue.originId,
+      workflowRunId: context.workflowRunId,
+      actorType: "system",
+      // [승인=재개 2026-10-23] 재개가 실제로 작동할 때만 “이 실행 이어서 진행(재개)” 선택지를 추가한다.
+      ...(terminalCardStructuredOptions(context.resumeAvailable, context.nextAction) ?? {}),
+    });
+    return { ensured: true, reason: "card-created" };
+  } catch (error) {
+    await recordTerminalHumanInputCardFailure(db, context, {
+      stage: "create",
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+    return { ensured: false, reason: "card-create-failed" };
+  }
+}
 
 // 단일 tx atomic claim(workflowTransitionEvents unique index) + scope 검증 + system comment + activity.
 //   concurrency-safe(claim conflict 로 한 명만 승), retry-safe(rollback → claim 도 제거).
@@ -211,6 +378,8 @@ export async function emitTerminalMissionHumanOperatorReport(
     workflowRunId: input.workflowRunId,
     failedRuns: terminalFailedRuns,
   });
+  const resumePathAvailable = await terminalResumePathAvailable(db, input.expectedCompanyId,
+    input.expectedMissionId, terminalFailedRuns.map((run) => run.id));
   const body = buildTerminalMissionHumanOperatorComment({
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,
@@ -220,6 +389,7 @@ export async function emitTerminalMissionHumanOperatorReport(
     retryAttempts: input.retryAttempts,
     retryMaxRetries: input.retryMaxRetries,
     provider403Ladder: input.provider403Ladder ?? null,
+    resumeGuidance: terminalResumeGuidanceText(resumePathAvailable, "en"),
   });
   const sanitizedFailedRunsPayload = terminalFailedRuns
     .slice(0, FAILED_RUN_AGGREGATE_MAX)
@@ -228,7 +398,7 @@ export async function emitTerminalMissionHumanOperatorReport(
   const txResult = await db.transaction(async (tx) => {
     // [finding 6] scope enforcement: issue 행을 잠그고 companyId/missionId/originKind 검증. mismatch → fail-closed.
     const locked = await tx
-      .select({ id: issues.id, companyId: issues.companyId, missionId: issues.missionId, originKind: issues.originKind, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
+      .select({ id: issues.id, companyId: issues.companyId, missionId: issues.missionId, originKind: issues.originKind, status: issues.status, language: sql<string>`(select ${companies.defaultLanguage} from ${companies} where ${companies.id} = ${issues.companyId})` })
       .from(issues)
       .where(eq(issues.id, input.issue.id))
       .limit(1)
@@ -241,6 +411,50 @@ export async function emitTerminalMissionHumanOperatorReport(
     ) {
       throw new Error("terminal-mission-human-operator-scope-mismatch");
     }
+
+    // [카드 맥락 수집] 같은 tx 에서 실제 값만 — 미션 오너(requestedByAgentId), 이슈 상태(D5 앵커),
+    //   실제 workflowRuns 행이 확인된 run id(엉큻은 값은 스냅샷에 넣지 않는다, D5).
+    const [missionRow] = await tx.select({ ownerAgentId: missions.ownerAgentId }).from(missions)
+      .where(and(eq(missions.id, input.expectedMissionId), eq(missions.companyId, input.expectedCompanyId)))
+      .limit(1);
+    let verifiedRunId: string | null = null;
+    if (input.workflowRunId) {
+      const [runRow] = await tx.select({ id: workflowRuns.id }).from(workflowRuns)
+        .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.expectedCompanyId)))
+        .limit(1);
+      verifiedRunId = runRow?.id ?? null;
+    }
+    const nextActionText = [locked.language === "ko" ? TERMINAL_NEXT_ACTION_KO : TERMINAL_NEXT_ACTION_EN,
+      terminalResumeGuidanceText(resumePathAvailable, locked.language === "ko" ? "ko" : "en")]
+      .filter(Boolean).join(" ");
+    const evidenceText = buildTerminalMissionEvidenceToken({
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      missionTitle: input.missionTitle,
+      sourceIssueIdentifier: input.sourceIssueIdentifier,
+      failedRuns: terminalFailedRuns,
+      retryAttempts: input.retryAttempts,
+      retryMaxRetries: input.retryMaxRetries,
+      provider403Ladder: input.provider403Ladder ?? null,
+      language: locked.language === "ko" ? "ko" : "en",
+    });
+    const cardBase = {
+      companyId: input.expectedCompanyId,
+      missionId: input.expectedMissionId,
+      issue: {
+        id: input.issue.id,
+        status: locked.status,
+        title: input.issue.title ?? null,
+        identifier: input.issue.identifier ?? null,
+        originId: input.issue.originId ?? null,
+      },
+      ownerAgentId: missionRow?.ownerAgentId ?? null,
+      reason: body.slice(0, 2000),
+      nextAction: nextActionText,
+      evidence: evidenceText,
+      workflowRunId: verifiedRunId,
+      resumeAvailable: resumePathAvailable,
+    };
 
     // atomic claim: 동시/재시도 중 정확히 한 번만 통과(design section 9 unique-index 패턴).
     const claimed = await tx
@@ -270,7 +484,16 @@ export async function emitTerminalMissionHumanOperatorReport(
       .onConflictDoNothing()
       .returning({ id: workflowTransitionEvents.id });
     if (claimed.length === 0) {
-      return { emitted: false as const, reason: "snapshot-already-reported" };
+      // [자가치유] 이미 보고된 스냅샷 — 기존 결정 이벤트 id 를 돌려줘 카드가 없으면 같은 requestKey
+      //   로 재생성하게 한다(카드 브리지 없던 배포에서 발신된 라이브 스냅샷 복구).
+      const [existingClaim] = await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+        .where(and(eq(workflowTransitionEvents.companyId, input.expectedCompanyId), eq(workflowTransitionEvents.idempotencyKey, snapshotKey)))
+        .limit(1);
+      return {
+        emitted: false as const,
+        reason: "snapshot-already-reported",
+        ...(existingClaim ? { cardContext: { ...cardBase, decisionEventId: existingClaim.id } } : {}),
+      };
     }
 
     // system-authored comment (owner 귀속 ❌). 같은 tx — rollback 시 함께 사라진다.
@@ -281,7 +504,7 @@ export async function emitTerminalMissionHumanOperatorReport(
         issueId: input.issue.id,
         authorAgentId: null,
         authorUserId: null,
-        body: locked.language === "ko" ? buildTerminalMissionHumanOperatorComment({ ...input, issueId: input.issue.id, issueIdentifier: input.issue.identifier, failedRuns: terminalFailedRuns, language: "ko" }) : body,
+        body: locked.language === "ko" ? buildTerminalMissionHumanOperatorComment({ ...input, issueId: input.issue.id, issueIdentifier: input.issue.identifier, failedRuns: terminalFailedRuns, language: "ko", resumeGuidance: terminalResumeGuidanceText(resumePathAvailable, "ko") }) : body,
       })
       .returning();
     void comment;
@@ -298,17 +521,36 @@ export async function emitTerminalMissionHumanOperatorReport(
       ...(input.issue.title ? { issueTitle: input.issue.title } : {}),
       ...(input.issue.identifier ? { issueIdentifier: input.issue.identifier } : {}),
       reason: body.slice(0, 2000),
+      // 시스템 발신 문구에서 파생한 실제 값 — 인박스 표시·카드 humanReview 원본으로 쓰인다.
+      nextAction: nextActionText,
+      evidence: evidenceText,
       actorType: "system",
       actorId: "system",
     };
     const materialized = await materializeHumanOperatorRequestPayload(tx as unknown as Db, terminalPayload, input.expectedCompanyId);
 
-    return { emitted: true as const, reason: "terminal-mission human operator request recorded", payload: materialized.payload };
+    return {
+      emitted: true as const,
+      reason: "terminal-mission human operator request recorded",
+      payload: materialized.payload,
+      cardContext: { ...cardBase, decisionEventId: claimed[0]!.id },
+    };
   });
 
   if (txResult.emitted) {
     // live-event 는 commit 후 발행(tx rollback 시 spurious event 방지).
     publishHumanOperatorRequestEvent(input.expectedCompanyId, txResult.payload);
   }
-  return txResult;
+  // [시스템 경로 카드] 발신(신규/기존 스냅샷)마다 카드를 보증한다. 카드 생성은 write.create 자체
+  //   트랜잭션을 쓰므로 발신 tx 밖에서 호출하고, 실패는 activity+로그 로 기록한다(fail-loud).
+  const decisionEventId = txResult.cardContext?.decisionEventId;
+  const card = decisionEventId
+    ? await ensureTerminalHumanInputDecisionCard(db, { ...txResult.cardContext!, decisionEventId })
+    : undefined;
+  return {
+    emitted: txResult.emitted,
+    reason: txResult.reason,
+    ...(decisionEventId ? { decisionEventId } : {}),
+    ...(card ? { card } : {}),
+  };
 }
