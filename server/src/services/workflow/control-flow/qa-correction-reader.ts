@@ -1,6 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   assets, heartbeatRuns, issueAttachments, issueWorkProducts, qualityEvidenceRefs,
   workflowStepOutputBindings, workflowTransitionEvents, type Db,
@@ -44,7 +44,9 @@ type Scope = { companyId: string; workflowRunId: string; appliedEventId: string 
 type Event = typeof workflowTransitionEvents.$inferSelect;
 type IssuedCache = Map<string, { issued: IssuedQaCorrection; ancestors: Set<string>; bindingCheck?: Promise<void> }>
   & { attempts: QaCorrectionAttemptCache };
-const observationCache = (): IssuedCache => Object.assign(new Map(), { attempts: new WeakMap() });
+const observationCache = (): IssuedCache => Object.assign(new Map(), {
+  attempts: Object.assign(new WeakMap(), { scopes: new WeakMap() }),
+});
 function productFile(product: typeof issueWorkProducts.$inferSelect, registeredLegacy = false): string {
   const selected = product.url ?? product.externalId ?? ["path", "filePath", "artifactPath", "outputPath"]
     .map(key => product.metadata?.[key]).find((value): value is string => typeof value === "string" && value.trim().length > 0);
@@ -153,6 +155,18 @@ async function readEvent(db: QaCorrectionDb, scope: Scope, id: string, type: str
   requireQaCorrection(row, "record");
   return row;
 }
+async function readLinkedEvents(db: QaCorrectionDb, scope: Scope,
+  links: readonly { id: string; type: string }[]): Promise<Event[]> {
+  const rows = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, scope.companyId),
+    eq(workflowTransitionEvents.workflowRunId, scope.workflowRunId),
+    inArray(workflowTransitionEvents.id, links.map(link => link.id))));
+  return links.map(link => {
+    const row = rows.find(candidate => candidate.id === link.id && candidate.eventType === link.type);
+    requireQaCorrection(row, "record");
+    return row;
+  });
+}
 
 /** A moved binding is accepted only through actual later issuance records for that SAME binding. */
 async function verifyBindingSuccessors(db: QaCorrectionDb, scope: Scope, issued: IssuedQaCorrection, cache: IssuedCache) {
@@ -208,8 +222,10 @@ async function readIssued(db: QaCorrectionDb, scope: Scope, activePath: Set<stri
   const visited = new Set(activePath).add(scope.appliedEventId);
   const appliedRow = await readEvent(db, scope, scope.appliedEventId, "qa_remediation_applied");
   const a = parseQaCorrectionEventPayload("qa_remediation_applied", appliedRow.payload);
-  const preparedRow = await readEvent(db, scope, a.preparationEventId, "qa_correction_prepared");
-  const measuredRow = await readEvent(db, scope, a.sourceMeasuredEventId, "qa_correction_source_measured");
+  const [preparedRow, measuredRow] = await readLinkedEvents(db, scope, [
+    { id: a.preparationEventId, type: "qa_correction_prepared" },
+    { id: a.sourceMeasuredEventId, type: "qa_correction_source_measured" },
+  ]);
   const p = parseQaCorrectionEventPayload("qa_correction_prepared", preparedRow.payload);
   const m = parseQaCorrectionEventPayload("qa_correction_source_measured", measuredRow.payload);
   requireQaCorrection(p.correctionId === preparedRow.id && p.companyId === scope.companyId

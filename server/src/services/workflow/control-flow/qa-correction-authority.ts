@@ -36,7 +36,9 @@ export function requireQaCorrection(value: unknown, reason: QaCorrectionFailureR
   if (!value) throw new QaCorrectionReadError(reason);
 }
 
-export type QaCorrectionAttemptCache = WeakMap<QaCorrectionDb, Map<string, ReturnType<typeof readAttemptRows>>>;
+type ScopeRows = ReturnType<typeof readScopeRows>;
+export type QaCorrectionAttemptCache = WeakMap<QaCorrectionDb, Map<string, ReturnType<typeof readAttemptRows>>>
+  & { scopes?: WeakMap<QaCorrectionDb, Map<string, ScopeRows>> };
 async function readAttemptRows(db: QaCorrectionDb, p: QaCorrectionPreparation, attempt: QaCorrectionAttempt) {
   const [step] = await db.select().from(workflowStepRuns).where(and(
     eq(workflowStepRuns.id, attempt.stepRunId), eq(workflowStepRuns.workflowRunId, p.workflowRunId)));
@@ -68,10 +70,15 @@ export async function readQaCorrectionAttempt(db: QaCorrectionDb, p: QaCorrectio
 
 export async function readQaCorrectionScope(db: QaCorrectionDb, p: QaCorrectionPreparation,
   current: boolean, cache?: QaCorrectionAttemptCache) {
-  const [run] = await db.select().from(workflowRuns).where(and(
-    eq(workflowRuns.id, p.workflowRunId), eq(workflowRuns.companyId, p.companyId)));
-  const [mission] = await db.select().from(missions).where(and(
-    eq(missions.id, p.missionId), eq(missions.companyId, p.companyId)));
+  let rows: ScopeRows;
+  if (!current && cache?.scopes) {
+    let entries = cache.scopes.get(db);
+    if (!entries) { entries = new Map(); cache.scopes.set(db, entries); }
+    const key = JSON.stringify([p.companyId, p.workflowRunId, p.missionId]);
+    rows = entries.get(key) ?? readScopeRows(db, p);
+    entries.set(key, rows);
+  } else rows = readScopeRows(db, p);
+  const { run, mission } = await rows;
   requireQaCorrection(run && mission && run.missionId === mission.id, "scope");
   const producer = await readQaCorrectionAttempt(db, p, p.producer, current, cache);
   if (current) {
@@ -80,6 +87,13 @@ export async function readQaCorrectionScope(db: QaCorrectionDb, p: QaCorrectionP
     requireQaCorrection(producer.status === "completed" && producer.completedAt, "qualification");
   }
   return { run, mission, producer };
+}
+async function readScopeRows(db: QaCorrectionDb, p: QaCorrectionPreparation) {
+  const [run] = await db.select().from(workflowRuns).where(and(
+    eq(workflowRuns.id, p.workflowRunId), eq(workflowRuns.companyId, p.companyId)));
+  const [mission] = await db.select().from(missions).where(and(
+    eq(missions.id, p.missionId), eq(missions.companyId, p.companyId)));
+  return { run, mission };
 }
 
 /** An official event plus its real original wake is required, including for legacy NULL identities. */

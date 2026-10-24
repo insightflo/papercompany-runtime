@@ -16,7 +16,6 @@ import { beginQaCorrection } from "../../services/workflow/control-flow/qa-corre
 import { measureQaCorrectionSources } from "../../services/workflow/control-flow/qa-correction-measure.js";
 import { storeQaCorrection } from "../../services/workflow/control-flow/qa-correction-storage.js";
 import { commitQaCorrection } from "../../services/workflow/control-flow/qa-correction-commit.js";
-import { readIssuedQaCorrection } from "../../services/workflow/control-flow/qa-correction-reader.js";
 import { appendQaVerdict } from "./qa-correction-fixture.js";
 import { seedReplacement } from "./replacement-scenario.js";
 import { createCommitSourceHarness, issueC02, issueNextC02, deliveryInput, deliver, correctionRows } from "./c02-delivery-fixture.js";
@@ -173,7 +172,10 @@ export function createClaimFixture(owned: Harness, track: (db: Db) => Db, roots:
 
 /** C02/C12: a fresh genuine QA authority per correction, with registered prior bytes and public C03 writers. */
 export async function issueFollowingC02(previous: C02Case, index: number): Promise<C02Case> {
-  const { s, peer } = previous, prior = await readIssuedQaCorrection(peer, previous.ref);
+  const { s, peer } = previous;
+  // The preceding call already read and validated this committed issuance before returning it.
+  // Reuse that fixture proof here; every newly issued correction is still read back below.
+  const prior = { preparation: s.p, applied: previous.applied };
   if (s.mode !== "content-only" || prior.preparation.authority.kind !== "workflow_qa") throw Error("content-only workflow QA required");
   const revision = prior.applied.revisions[0]!, main = revision.files.find(file => file.role === "main")!;
   const file = path.join(revision.root, revision.mainRelativePath), bytes = await readFile(file);
@@ -217,9 +219,10 @@ export async function issueFollowingC02(previous: C02Case, index: number): Promi
   if (prepared.status !== "prepared") throw Error("real history preparation required: " + prepared.status);
   const measured = await measureQaCorrectionSources(s.db, {
     preparationEventId: prepared.preparationEventId, preparationHash: prepared.preparationHash });
-  const stored = await storeQaCorrection(s.db, measured), result = await commitQaCorrection(s.db, stored);
+  const stored = await storeQaCorrection(s.db, measured);
+  const result = await commitQaCorrection(s.db, stored);
   if (result.status !== "committed") throw Error("real history issuance required: " + result.status);
-  const issued = await readIssuedQaCorrection(peer, { ...previous.ref, appliedEventId: result.appliedEventId });
+  const issued = result.proof;
   const applied = issued.applied, followup = issued.followups[0]!;
   const [appliedRow] = await peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, result.appliedEventId));
   const [followupRow] = await peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, applied.followupEventIds[0]!));
