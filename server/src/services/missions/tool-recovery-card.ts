@@ -1,5 +1,5 @@
 import { and, eq, or, sql } from "drizzle-orm";
-import { heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issues, missions, operatorDecisions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import type { MissionRow, MissionServiceDeps } from "../missions.js";
 import type { WorkflowStep } from "../workflow/dag-engine.js";
 import type { IssueCreateInput, IssueRow } from "./shared-types.js";
@@ -113,7 +113,7 @@ export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, i
       return { issue: open[0]!, created: false, classification, toolNames };
     }
     if (anchors.length) {
-      const decided: Array<{ issue: IssueRow; human: boolean }> = [];
+      const decided: Array<{ issue: IssueRow; human: boolean; eventId: string }> = [];
       const relevant = current
         ? anchors.filter((anchor) => anchor.id === current!.pointer.anchorIssueId)
         : anchors;
@@ -123,10 +123,21 @@ export async function ensureToolRecoveryCard(db: Db, deps: MissionServiceDeps, i
         if (!decision) continue;
         if (decision.authorAgentId !== mission.ownerAgentId || decision.missionId !== mission.id
           || decision.sourceIssueId !== source.id) return fail();
-        decided.push({ issue: anchor, human: ownerDecisionRequestsHuman(decision.decision.decision) });
+        decided.push({ issue: anchor, human: ownerDecisionRequestsHuman(decision.decision.decision), eventId: decision.eventId });
       }
       const nonhuman = decided.filter((entry) => !entry.human);
-      if (nonhuman.length > 1 || (!current && decided.some((entry) => entry.human))) return fail();
+      const human = decided.filter((entry) => entry.human);
+      let closedLegacyHuman = false;
+      if (!current && human.length === 1) {
+        const cards = await tx.select().from(operatorDecisions).where(and(
+          eq(operatorDecisions.companyId, mission.companyId),
+          eq(operatorDecisions.sourceType, "mission_owner_human_input"),
+          eq(operatorDecisions.sourceId, human[0]!.eventId),
+        )).for("update");
+        closedLegacyHuman = cards.length === 1 && cards[0]!.status === "cancelled"
+          && cards[0]!.result === null && cards[0]!.cancelledAt instanceof Date;
+      }
+      if (nonhuman.length > 1 || (!current && human.length > 0 && !closedLegacyHuman)) return fail();
       if (nonhuman.length === 1) return { issue: nonhuman[0]!.issue, created: false, classification, toolNames };
     }
     const recurring = anchors.length > 0;

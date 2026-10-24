@@ -110,4 +110,45 @@ describe("C08 closed tool request recurrence", () => {
       humanRequest: { schemaVersion: 1, requestKey: originalKey, expectedCurrentLifetimeId: before.lifetimeId },
     } })).rejects.toMatchObject({ status: 409 });
   });
+
+  it("creates a fresh owner card after a cancelled legacy human handoff", async () => {
+    const s = await seedToolRecoveryScenario({ db, artifactExists: false }); roots.push(s.tempRoot);
+    const [mission] = await db.select().from(missions).where(eq(missions.id, s.missionId));
+    const [oversightIssue] = await db.select().from(issues).where(eq(issues.id, s.oversightIssueId));
+    const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, s.workflowRunId));
+    const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.stepRunId));
+    const [definition] = await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run.workflowId));
+    const step = (definition.stepsJson as WorkflowStep[]).find(value => value.id === stepRun.stepId)!;
+    const produce = () => ensureToolRecoveryCard(db, {}, {
+      mission, oversightIssue, run, stepRun, step, workflowName: definition.name,
+    }, async (tx, companyId, data) => (await tx.insert(issues).values({ ...data, companyId }).returning())[0]);
+    const first = await produce(), ownerRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: ownerRunId, companyId: s.companyId,
+      agentId: s.ownerAgentId, issueId: first.issue.id, status: "running" });
+    await issueService(db).checkout(first.issue.id, s.ownerAgentId, ["todo"], ownerRunId);
+    const target = { kind: "tool_step" as const, workflowRunId: s.workflowRunId, stepRunId: s.stepRunId,
+      expectedAuthorityVersion: run.dispatchAuthorityVersion, expectedExecutionGeneration: stepRun.executionGeneration,
+      failedDispatchRequestId: stepRun.lastDispatchRequestId };
+    const legacy = await submitMissionOwnerDecision({ db, issueId: first.issue.id,
+      actor: { actorType: "agent", actorId: s.ownerAgentId, agentId: s.ownerAgentId, runId: ownerRunId },
+      data: { decision: "escalate", reason: "legacy handoff", recoveryTarget: target } });
+    await issueService(db).update(first.issue.id, { status: "done" });
+    await db.update(operatorDecisions).set({ status: "cancelled", cancelledAt: new Date() })
+      .where(eq(operatorDecisions.sourceId, legacy.eventId));
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.sourceId, legacy.eventId));
+    expect(card).toMatchObject({ status: "cancelled", result: null });
+    const legacyState = await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.companyId, s.companyId));
+    const pointer = legacyState.find(row => row.eventType === "owner_human_current_v1");
+    if (pointer) await db.delete(workflowTransitionEvents).where(eq(workflowTransitionEvents.id, pointer.id));
+    if (legacy.lifetimeId) await db.delete(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.id, legacy.lifetimeId));
+    const next = await produce();
+    expect(next.created).toBe(true);
+    expect(next.issue).toMatchObject({ status: "todo", originId: s.oversightIssueId });
+    expect(next.issue.id).not.toBe(first.issue.id);
+    const [link] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.issueId, next.issue.id));
+    expect(link).toMatchObject({ eventType: "owner_tool_recovery_target_v1",
+      idempotencyKey: `owner-tool-card:v2:${s.stepRunId}:${next.issue.id}` });
+  });
 });
