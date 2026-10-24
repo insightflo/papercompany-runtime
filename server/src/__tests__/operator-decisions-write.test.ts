@@ -7,6 +7,8 @@ import {
   createDb,
   issueComments,
   issues,
+  missionPlanArtifacts,
+  missions,
   operatorDecisionContinuations,
   operatorDecisions,
   workflowDefinitions,
@@ -85,6 +87,8 @@ describeDb("operator decision write service", () => {
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
     await db.delete(issues);
+    await db.delete(missionPlanArtifacts);
+    await db.delete(missions);
     await db.delete(agents);
     await db.delete(companies);
     companyId = randomUUID();
@@ -107,6 +111,21 @@ describeDb("operator decision write service", () => {
     expect(replay).toMatchObject({ replayed: true, decision: { id: first.decision.id } });
     await expect(service.create(companyId, { ...input("same"), title: "Different" }, { type: "agent", id: agentId }))
       .rejects.toMatchObject({ status: 409 });
+  });
+
+  it("binds a mission-owner approval card to the active plan hash", async () => {
+    const missionId = randomUUID();
+    const decisionHash = "b".repeat(64);
+    await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: "Revision" });
+    await db.insert(missionPlanArtifacts).values({ companyId, missionId, revision: 1,
+      ownerAgentId: agentId, missionGoal: "Repair", status: "active",
+      refs: { ownerPlanDecision: { decisionHash } } });
+    const base = input("plan-bound");
+    const created = await operatorDecisionWriteService(db).create(companyId, {
+      ...base, sourceType: "mission_owner_human_input", sourceId: randomUUID(),
+      sourceContext: { ...base.sourceContext, missionId },
+    }, { type: "user", id: "board-user" });
+    expect(created.decision.sourceContext).toMatchObject({ missionId, planDecisionHash: decisionHash });
   });
 
   it("publishes exactly one operator_decision.created live event and stays silent on replay", async () => {

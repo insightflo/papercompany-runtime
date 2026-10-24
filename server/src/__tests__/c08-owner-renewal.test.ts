@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, companies, createDb, heartbeatRuns, issues, missions, operatorDecisions, operatorDecisionContinuations,
+import { activityLog, agents, companies, createDb, heartbeatRuns, issues, missionPlanArtifacts, missions, operatorDecisions, operatorDecisionContinuations,
   workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.js";
@@ -238,12 +238,17 @@ describeDb("C08 explicit anchor renewal state", () => {
     await operatorDecisionWriteService(db).resolve(old.decision.id,
       { actionId: "approve", selectedOptionIds: ["approve"], comment: "과거 승인" }, "board");
     await issueService(db).update(w.oldId, { status: "cancelled" });
+    const decisionHash = "d".repeat(64);
+    await db.insert(missionPlanArtifacts).values({ companyId: w.companyId, missionId: w.missionId,
+      revision: 1, ownerAgentId: w.agentId, missionGoal: "Renewal", status: "active",
+      refs: { ownerPlanDecision: { decisionHash } } });
     const before = await snapshot(w), key = randomUUID(), saved = await renewCard(w, key);
     expect(saved.cardCreated).toBe(true);
     expect(saved.card).toMatchObject({ status: "pending", result: null, resolvedAt: null,
       resolvedByUserId: null, cancelledAt: null, requestedByAgentId: w.agentId,
       issueId: w.nextId, sourceId: w.original.lifetime.decisionEventId,
       requestKey: `moi2:${saved.current.lifetime.lifetimeId}` });
+    expect(saved.card.sourceContext).toMatchObject({ missionId: w.missionId, planDecisionHash: decisionHash });
     const after = await snapshot(w);
     expect(after[3].find((card) => card.id === old.decision.id)).toEqual(before[3][0]);
     expect(after[6]).toEqual(before[6]);

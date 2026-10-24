@@ -14,6 +14,8 @@ import {
   readTargetSnapshot,
 } from "./operator-decision-currentness.js";
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
+import { startApprovedRevisionRun } from "./workflow/approved-revision-start.js";
+import { resumeRunFromOperatorDecision, TERMINAL_RESUME_OPTION_ID } from "./missions/terminal-resume-from-decision.js";
 
  type OperatorDecisionResolutionDependencies = {
   read: Pick<ReturnType<typeof operatorDecisionReadService>, "getRequired">;
@@ -159,6 +161,22 @@ export function operatorDecisionResolutionWriteService(
         operatorDecisionId: id, language: normalizeSystemLanguage(before.defaultLanguage),
         selectedOptions: resolveSelectedOptions(decision.definition, result.selectedOptionIds),
       });
+    }
+    if (applied && result.outcome === "approve" && decision.sourceContext.missionId) {
+      const missionId = decision.sourceContext.missionId;
+      void startApprovedRevisionRun(db, { companyId: decision.companyId, missionId })
+        .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId },
+          "approved revision start after decision resolve failed"));
+    }
+    if (applied && result.outcome === "submit"
+      && result.selectedOptionIds.includes(TERMINAL_RESUME_OPTION_ID)
+      && decision.sourceContext.missionId && decision.sourceContext.workflowRunId) {
+      const missionId = decision.sourceContext.missionId;
+      const workflowRunId = decision.sourceContext.workflowRunId;
+      void resumeRunFromOperatorDecision(db, { operatorDecisionId: id, resolvedByUserId,
+        companyId: decision.companyId, missionId, workflowRunId })
+        .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId, workflowRunId },
+          "operator-decision resume after decision resolve failed"));
     }
     return { decision, applied, continuation: decision.continuation };
   }

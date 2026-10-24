@@ -10,6 +10,7 @@ import { lockOwnerHumanRequestAuthority } from "./owner-human-request-authority.
 import { connectOwnerHumanRequestCard, lockOwnerHumanCurrentCard } from "./owner-human-request-card.js";
 import { ownerHumanLifetimeSchema, type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { renewOwnerHumanRequest } from "./owner-human-request-state.js";
+import { activePlanDecisionHash } from "../operator-decision-server-context.js";
 
 const fail = (): never => { throw conflict("Owner human request renewal conflict", {
   reason: "owner_human_request_renewal_mismatch",
@@ -51,12 +52,14 @@ export async function renewOwnerHumanRequestWithCard(tx: OwnerHumanTx, input: {
   // Only immutable request fields are copied. Results, approvals, cancellation and delivery
   // state are never inherited, and replay never resets a card that has since been resolved.
   const value = guard.input;
+  const sourceContext = { ...value.sourceContext,
+    planDecisionHash: await activePlanDecisionHash(tx, input.companyId, current.lifetime.scope.missionId) };
   const [card] = await tx.insert(operatorDecisions).values({
     companyId: input.companyId, schemaVersion: value.schemaVersion,
     requestKey: value.requestKey, requestHash: validated.requestHash, status: "pending",
     priority: value.priority, interactionType: value.interactionType,
     title: value.title, description: value.description, definition: value.definition,
-    sourceType: value.sourceType, sourceId: value.sourceId, sourceContext: value.sourceContext,
+    sourceType: value.sourceType, sourceId: value.sourceId, sourceContext,
     issueId: value.issueId, continuationMode: value.continuationMode,
     requestedByAgentId: current.lifetime.authorAgentId, requestedByUserId: null,
   }).returning();
