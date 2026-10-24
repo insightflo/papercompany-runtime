@@ -6,6 +6,7 @@ import { conflict } from "../errors.js";
 import { lockOwnerHumanRequestCard } from "./missions/owner-human-request-card.js";
 import type { OwnerHumanTx } from "./missions/owner-human-request-contract.js";
 import { validateAndHashOperatorDecisionCreate } from "./operator-decision-result.js";
+import { stripOperatorDecisionServerContext } from "./operator-decision-server-context.js";
 
 // [moi currentness 완화 2026-10-17] 사람 응답 대기 중 이슈 상태 churn(todo↔in_progress↔blocked)은
 //   정상 — moi 카드의 currentness는 이슈 종결 여부 기준이다(라이브 사고 2026-10-17 14:30Z: 사람이 볼
@@ -20,7 +21,8 @@ function createInputFromDecision(row: DecisionRow) {
   return validateAndHashOperatorDecisionCreate({ schemaVersion: row.schemaVersion,
     requestKey: row.requestKey, priority: row.priority,
     interactionType: row.interactionType, title: row.title, description: row.description,
-    sourceType: row.sourceType, sourceId: row.sourceId, sourceContext: row.sourceContext,
+    sourceType: row.sourceType, sourceId: row.sourceId,
+    sourceContext: stripOperatorDecisionServerContext(row.sourceContext),
     definition: row.definition, issueId: row.issueId, continuationMode: row.continuationMode }).input;
 }
 

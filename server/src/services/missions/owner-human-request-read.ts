@@ -13,6 +13,7 @@ import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, sameOwnerHumanValue,
   type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { buildMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
 import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
+import { stripOperatorDecisionServerContext } from "../operator-decision-server-context.js";
 
 const cardLinkSchema = z.object({
   schemaVersion: z.literal(1), kind: z.literal("owner_human_card_v1"),
@@ -53,7 +54,8 @@ async function readCardAndDelivery(tx: OwnerHumanTx, current: OwnerHumanCurrentR
   const actual = {
     schemaVersion: card.schemaVersion, requestKey: card.requestKey, priority: card.priority,
     interactionType: card.interactionType, title: card.title, description: card.description,
-    sourceType: card.sourceType, sourceId: card.sourceId, sourceContext: card.sourceContext,
+    sourceType: card.sourceType, sourceId: card.sourceId,
+    sourceContext: stripOperatorDecisionServerContext(card.sourceContext),
     definition: card.definition, issueId: card.issueId, continuationMode: card.continuationMode,
   };
   if (card.requestHash !== expected.requestHash || !sameOwnerHumanValue(actual, expected.input)

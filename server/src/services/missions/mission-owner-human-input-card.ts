@@ -379,6 +379,8 @@ async function tryMergePendingHumanInputCard(
   spec: MissionOwnerHumanInputCardSpec,
   cardInput: CreateOperatorDecisionInput,
 ) {
+  // Lifetime cards carry their own current binding and must replay through the verified writer.
+  if (cardInput.requestKey.startsWith("moi2:")) return null;
   try {
     const [existing] = await db.select({
       id: operatorDecisions.id,
