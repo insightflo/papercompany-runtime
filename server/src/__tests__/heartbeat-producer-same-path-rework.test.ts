@@ -1,12 +1,13 @@
 import { adapter, database, drain, fixture, flag, stopped } from "./helpers/heartbeat-producer-fixture.js";
 import { eq } from "drizzle-orm";
 import { expect, it } from "vitest";
-import { issues, issueWorkProducts, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { activityLog, issues, issueWorkProducts, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { issueService } from "../services/issues.js";
 import { workProductService } from "../services/work-products.js";
 import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
 import { resetStepRunForRework } from "../services/workflow/control-flow/step-reset.js";
-import { registerWorkflowArtifact } from "../services/workflow/agent-api.js";
+import { buildWorkflowReworkContract } from "../services/workflow/control-flow/rework-contract.js";
+import { completeWorkflowIssue, registerWorkflowArtifact } from "../services/workflow/agent-api.js";
 
 // Break caught: a QA rework that edits the artifact in place re-registers the SAME path.
 // The existing row must be re-stamped with the rework attempt, otherwise selection fails as stale.
@@ -48,4 +49,68 @@ it("same-path re-registration by the rework heartbeat re-stamps producer provena
     workflowProducer: { heartbeatRunId: ids[1], executionGeneration: 7, retryCount: 0, iterationIndex: 1 } });
   await db.update(workflowStepRuns).set({ status: "completed" }).where(eq(workflowStepRuns.id, f.stepRunId));
   expect((await f.select()).product.id).toBe(productIds[0]);
+});
+
+it("structured rework completion re-stamps the exact downstream-selected product", async () => {
+  await flag(false);
+  const f = await fixture({
+    captureDefinition: true,
+    stepsJson: [
+      { id: "write", name: "Write", type: "agent", agentId: undefined, dependencies: [], graphWorkProductRequired: true },
+      { id: "finish", name: "Finish", type: "complete", agentId: undefined, dependencies: ["write"],
+        workProductSelectors: { write: { type: "document", title: "content.json" } } },
+    ],
+  });
+  const db = database();
+  const ids: string[] = [];
+  adapter.mockReset().mockImplementation(async ({ runId }: { runId: string }) => {
+    ids.push(runId);
+    const run = await f.readRun(runId);
+    await issueService(db).checkout(run.issueId!, f.agentId, ["todo", "in_progress"], runId);
+    await syncWorkflowRunState(db, f.workflowRunId);
+    if (ids.length === 1) await f.register(runId);
+    return stopped;
+  });
+
+  await syncWorkflowRunState(db, f.workflowRunId);
+  await drain();
+  expect(ids).toHaveLength(1);
+  await db.update(workflowStepRuns).set({ status: "completed" }).where(eq(workflowStepRuns.id, f.stepRunId));
+  const original = await f.select();
+
+  await resetStepRunForRework({
+    db,
+    stepRun: await f.readStep(),
+    companyId: f.companyId,
+    reworkContract: buildWorkflowReworkContract({
+      producerStepId: "write",
+      qaFeedbacks: [{ qaStepId: "qa", qaIssueId: null, feedback: "Fix the selected document" }],
+      currentIteration: 0,
+      maxIterations: 2,
+    }),
+  });
+  await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, f.issueId));
+  await db.update(workflowRuns).set({ status: "running" }).where(eq(workflowRuns.id, f.workflowRunId));
+  await syncWorkflowRunState(db, f.workflowRunId);
+  await drain();
+  expect(ids).toHaveLength(2);
+  expect((await f.readRun(ids[1])).contextSnapshot).toMatchObject({
+    paperclipWorkflowReworkContract: { kind: "workflow_qa_rework", producerStepId: "write" },
+  });
+
+  const [currentIssue] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+  await completeWorkflowIssue({
+    db,
+    issue: currentIssue,
+    actor: { actorType: "agent", actorId: f.agentId, agentId: f.agentId, runId: ids[1] },
+    data: {},
+  });
+
+  const [stored] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, original.product.id));
+  expect(stored).toMatchObject({ createdByRunId: ids[1], sourceExecutionGeneration: 7 });
+  expect(stored.metadata).toMatchObject({ registeredVia: "workflow_completion", registeredByRunId: ids[1],
+    workflowProducer: { heartbeatRunId: ids[1], iterationIndex: 1 } });
+  expect((await f.select()).product.id).toBe(original.product.id);
+  const progress = await db.select().from(activityLog).where(eq(activityLog.runId, ids[1]));
+  expect(progress.some(row => row.action === "issue.work_product_progress_accepted")).toBe(true);
 });
