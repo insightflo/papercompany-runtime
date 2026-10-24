@@ -25,6 +25,8 @@ import type { MissionOwnerHumanInputCardSpec } from "./mission-owner-human-input
 
 export type OwnerHumanSubmissionInput = MissionOwnerDecisionSubmission & {
   readonly humanRequest?: NonNullable<MissionOwnerDecisionSubmit["humanRequest"]>;
+  readonly recommendedOptionId?: string;
+  readonly recommendationReason?: string;
 };
 
 // Human submission adds no quality-prefix lock of its own. Acquire the complete native

@@ -21,6 +21,8 @@ export const ownerHumanSubmissionSchema = z.object({
   reason: z.string().max(2000).optional(),
   nextAction: z.string().max(2000).optional(),
   evidence: z.string().max(4000).optional(),
+  recommendedOptionId: z.string().min(1).max(80).optional(),
+  recommendationReason: z.string().min(1).max(2000).optional(),
 }).strict();
 export type OwnerHumanSubmission = z.infer<typeof ownerHumanSubmissionSchema>;
 
@@ -41,6 +43,7 @@ const cardInputSchema = z.object({
   decision: z.enum(["request_input", "escalate"]),
   ownerActionIssueId: uuid, ownerActionIssueStatus: z.string().min(1), requestedByAgentId: uuid,
   reason: z.string().optional(), nextAction: z.string().optional(), evidence: z.string().optional(),
+  recommendedOptionId: z.string().optional(), recommendationReason: z.string().optional(),
   issueTitle: z.string().nullable(), issueIdentifier: z.string().nullable(),
   sourceIssueId: uuid.nullable(), workflowRunId: uuid.nullable(),
 }).strict();

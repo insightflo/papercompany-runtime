@@ -53,6 +53,8 @@ function toSubmission(data: MissionOwnerDecisionSubmit, oversight = false): Owne
     ...(trimmed(data.reason) ? { reason: trimmed(data.reason) } : {}),
     ...(trimmed(data.nextAction) ? { nextAction: trimmed(data.nextAction) } : {}),
     ...(trimmed(data.evidence) ? { evidence: trimmed(data.evidence) } : {}),
+    ...(trimmed(data.recommendedOptionId) ? { recommendedOptionId: trimmed(data.recommendedOptionId) } : {}),
+    ...(trimmed(data.recommendationReason) ? { recommendationReason: trimmed(data.recommendationReason) } : {}),
   };
 }
 

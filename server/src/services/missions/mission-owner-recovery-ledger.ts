@@ -49,7 +49,10 @@ type OwnerActionIssue = {
 export async function recordMissionOwnerDecision(input: {
   readonly db: MissionOwnerRecoveryLedgerDb;
   readonly issue: OwnerActionIssue;
-  readonly submission: MissionOwnerDecisionSubmission;
+  readonly submission: MissionOwnerDecisionSubmission & {
+    readonly recommendedOptionId?: string;
+    readonly recommendationReason?: string;
+  };
   readonly sourceIssueId?: string | null;
   readonly heartbeatRunId?: string | null;
   readonly commentId?: string | null;
@@ -75,6 +78,10 @@ export async function recordMissionOwnerDecision(input: {
     ...(input.submission.reason ? { reason: input.submission.reason } : {}),
     ...(input.submission.nextAction ? { nextAction: input.submission.nextAction } : {}),
     ...(input.submission.evidence ? { evidence: input.submission.evidence } : {}),
+    ...(input.submission.recommendedOptionId
+      ? { recommendedOptionId: input.submission.recommendedOptionId } : {}),
+    ...(input.submission.recommendationReason
+      ? { recommendationReason: input.submission.recommendationReason } : {}),
   };
   const idempotencyKey = human
     ? `mission-owner-decision:${ownerHumanLifetimeKey(human.requestKey)}`

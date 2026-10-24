@@ -47,6 +47,8 @@ async function lifetimeFromRow(tx: OwnerHumanTx, row: Event): Promise<OwnerHuman
     || card.requestedByAgentId !== lifetime.authorAgentId || card.sourceIssueId !== lifetime.sourceIssueId
     || card.decision !== lifetime.submission.decision || card.reason !== lifetime.submission.reason
     || card.nextAction !== lifetime.submission.nextAction || card.evidence !== lifetime.submission.evidence
+    || card.recommendedOptionId !== lifetime.submission.recommendedOptionId
+    || card.recommendationReason !== lifetime.submission.recommendationReason
     || (lifetime.scope.target.kind === "tool_step" && card.workflowRunId !== lifetime.scope.target.workflowRunId)) {
     fail("owner_human_request_corrupt");
   }
@@ -151,7 +153,9 @@ export async function saveOwnerHumanRequest(auth: OwnerHumanAuthority, input: {
       decisionEventId: input.decisionEventId, decision: submission.decision,
       ownerActionIssueId: auth.anchor.id, ownerActionIssueStatus: auth.anchor.status,
       requestedByAgentId: auth.agentId, reason: submission.reason, nextAction: submission.nextAction,
-      evidence: submission.evidence, issueTitle: auth.anchor.title, issueIdentifier: auth.anchor.identifier,
+      evidence: submission.evidence, recommendedOptionId: submission.recommendedOptionId,
+      recommendationReason: submission.recommendationReason,
+      issueTitle: auth.anchor.title, issueIdentifier: auth.anchor.identifier,
       sourceIssueId: auth.source?.id ?? null, workflowRunId: auth.run?.id ?? null },
   });
   await assertOwnerHumanOriginalDecision(auth.tx, lifetime);
