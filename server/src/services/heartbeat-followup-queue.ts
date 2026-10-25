@@ -1,7 +1,7 @@
 // 기존 입장 검사와 후보 선택을 보존한다. 실행 시작과 이벤트 발행은 호출자 책임이다.
 import { and, eq, is, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
-import { agents, agentWakeupRequests, heartbeatRuns, issues, workflowTransitionEvents, withTxTimeout, type Db } from "@paperclipai/db";
+import { agents, agentWakeupRequests, heartbeatRuns, workflowTransitionEvents, withTxTimeout, type Db } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
 import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
@@ -10,6 +10,7 @@ import { logger } from "../middleware/logger.js";
 import type { budgetService } from "./budgets.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
 import { lockStoredRecoveryAdmission } from "./heartbeat-stored-recovery-admission.js";
+import { lockQueuedIssueAdmission, queuedIssueExecutionIsBusy } from "./heartbeat-queued-issue-admission.js";
 import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.js";
@@ -160,20 +161,11 @@ async function promoteQueuedWakeupRequest(
       contextSnapshot: promotedContextSnapshot,
     });
     const promotedIssueId = readNonEmptyString(promotedContextSnapshot.issueId) ?? issueIdFromPayload;
-    const promotedIssue = promotedIssueId
-      ? await tx
-        .select({
-          id: issues.id,
-          companyId: issues.companyId,
-          projectId: issues.projectId,
-          missionId: issues.missionId,
-          originKind: issues.originKind,
-          status: issues.status,
-        })
-        .from(issues)
-        .where(and(eq(issues.id, promotedIssueId), eq(issues.companyId, agent.companyId)))
-        .then((rows) => rows[0] ?? null)
-      : null;
+    const admission = await lockQueuedIssueAdmission(tx, {
+      request, issueId: promotedIssueId, contextSnapshot: promotedContextSnapshot,
+    });
+    if (admission.kind !== "ready") return null;
+    const promotedIssue = admission.issue;
     const isPlanReworkPromotion =
       promotedReason === "mission_owner_plan_rework_requested" &&
       promotedIssue?.originKind === "mission_main_executor_plan";
@@ -279,6 +271,7 @@ async function promoteQueuedWakeupRequest(
     if (budgetBlock) {
       return failFollowupWake(tx, request.id, budgetBlock.reason);
     }
+    if (promotedIssue && await queuedIssueExecutionIsBusy(tx, promotedIssue)) return null;
     return deps.promote(tx, {
       agent, request, promotedContextSnapshot, promotedSource, promotedTriggerDetail,
       promotedIssueId, promotedTaskKey, missionIdForWake, promotedIssue,
