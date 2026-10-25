@@ -5044,6 +5044,10 @@ export function heartbeatService(db: Db) {
           // 중단시키지 않고 다음 run 으로 진행한다.
           try {
             await releaseIssueExecutionAndPromote(timedOutRun, { skipLocked: true });
+            const terminalRun = await getRun(timedOutRun.id);
+            if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
+              await settleHeartbeatAfterExecution(db, terminalRun, now);
+            }
             await finalizeAgentStatus(run.agentId, "timed_out");
             await startNextQueuedRunForAgent(run.agentId);
             reaped.push(run.id);
