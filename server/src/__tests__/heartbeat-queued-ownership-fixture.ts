@@ -94,7 +94,7 @@ export async function queuedWorld(finalization = false) {
   }))).returning();
   agentIds.add(owner!.id); agentIds.add(qa!.id);
   await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: owner!.id,
-    title: "Queued ownership", status: "running" });
+    title: "Queued ownership", status: "active" });
   const [issue] = await db.insert(issues).values({ companyId, missionId, title: "Ownership handoff",
     assigneeAgentId: owner!.id, status: "todo" }).returning();
   const service = heartbeatService(db), qaService = heartbeatService(peer);
