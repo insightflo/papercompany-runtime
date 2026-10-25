@@ -42,7 +42,9 @@ export function buildMissionWorkingNoteBriefLines(
     && COMPACTABLE_INSTRUCTIONS.every((line, index) => instructions[index] === line);
 
   return [
-    `- Mission working note: ${notePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`,
+    compact
+      ? `- Mission working note: ${notePath} (shared scratch context).`
+      : `- Mission working note: ${notePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`,
     ...instructionLines
       .filter((line) => !compact || line !== MISSION_DECISION_REPORT_INSTRUCTION)
       .map((line) => `- ${line}`),

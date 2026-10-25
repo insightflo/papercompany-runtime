@@ -21,7 +21,15 @@ const EXPECTED_INSTRUCTIONS = [
 ];
 const NOTE_PATH = "/paperclip/mission-working-notes/company-1/mission-1/working.md";
 const COMPACT_REPORT = "- Mission decision log: report mission-level decisions (new, changed, confirmed, or retired) via POST /api/missions/mission-1/decision-reports with updates [{id, summary, status, supersedes}]; statuses confirmed/under_review/retired; the mission decision log is the record.";
-const NOTE_HEADER = `- Mission working note: ${NOTE_PATH} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`;
+// H1: pin T1 after report deduplication; T2 may change only the header.
+const T1_NOTE_HEADER = `- Mission working note: ${NOTE_PATH} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`;
+const T1_NOTE_LINES = [
+  T1_NOTE_HEADER,
+  ...EXPECTED_INSTRUCTIONS.slice(0, 6).map((line) => `- ${line}`),
+  `- ${EXPECTED_INSTRUCTIONS[7]}`,
+  COMPACT_REPORT,
+];
+const NOTE_HEADER = `- Mission working note: ${NOTE_PATH} (shared scratch context).`;
 const COMPACT_NOTE_LINES = [
   NOTE_HEADER,
   ...EXPECTED_INSTRUCTIONS.slice(0, 6).map((line) => `- ${line}`),
@@ -36,7 +44,7 @@ function makeNote(overrides: Record<string, unknown> = {}): Record<string, unkno
   };
 }
 
-// Frozen legacy reference, copied from the base renderer rather than the new helper.
+// Pre-T1 renderer; also the unchanged T1 fallback for nonstandard inputs.
 function legacyNoteLines(note: Record<string, unknown> | null): string[] {
   const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
   const notePath = text(note?.path);
@@ -125,7 +133,25 @@ function freezeDeep(value: unknown): void {
     expect(buildMissionWorkingNoteBriefLines(note, ["mission-1"])).toEqual(COMPACT_NOTE_LINES);
   });
 
+  it("H1: shortens only the T1 header and preserves every detailed instruction", () => {
+    const note = makeNote();
+    const lines = buildMissionWorkingNoteBriefLines(note, ["mission-1"]);
+    const brief = buildPaperclipRuntimeBrief(makeContext(note));
+    const baseline = joinBaseLines([...PREFIX, ...T1_NOTE_LINES, ...SUFFIX]);
+    expect(lines[0]).toBe(NOTE_HEADER);
+    expect(lines[0].length).toBeLessThan(T1_NOTE_HEADER.length);
+    expect(lines.slice(1)).toEqual(T1_NOTE_LINES.slice(1));
+    expect(brief.replace(NOTE_HEADER, T1_NOTE_HEADER)).toBe(baseline);
+    expect(baseline.length - brief.length).toBe(T1_NOTE_HEADER.length - NOTE_HEADER.length);
+  });
+
   const fallbacks: Array<[string, Record<string, unknown> | null, unknown]> = [
+    ["missing read", makeNote({ instructions: EXPECTED_INSTRUCTIONS.filter((_, i) => i !== 0) }), "mission-1"],
+    ["variant read", makeNote({ instructions: EXPECTED_INSTRUCTIONS.map((line, i) => i === 0 ? line.replace("before acting", "after acting") : line) }), "mission-1"],
+    ["missing update", makeNote({ instructions: EXPECTED_INSTRUCTIONS.filter((_, i) => i !== 1) }), "mission-1"],
+    ["variant update", makeNote({ instructions: EXPECTED_INSTRUCTIONS.map((line, i) => i === 1 ? line.replace("Update it", "Do not update it") : line) }), "mission-1"],
+    ["missing not-deliverable", makeNote({ instructions: EXPECTED_INSTRUCTIONS.filter((_, i) => i !== 7) }), "mission-1"],
+    ["variant not-deliverable", makeNote({ instructions: EXPECTED_INSTRUCTIONS.map((line, i) => i === 7 ? line.replace("Do not treat", "Treat") : line) }), "mission-1"],
     ["custom report", makeNote({ instructions: EXPECTED_INSTRUCTIONS.map((line, i) => i === 6 ? "Report only after operator approval." : line) }), "mission-1"],
     ["custom addition", makeNote({ instructions: [...EXPECTED_INSTRUCTIONS, "Ask before publishing."] }), "mission-1"],
     ["legacy partial list", makeNote({ instructions: EXPECTED_INSTRUCTIONS.slice(0, 3) }), "mission-1"],
@@ -193,6 +219,19 @@ function freezeDeep(value: unknown): void {
       "- Use im-human for new human-facing issue comments and final output; read its bundled SKILL.md and follow company language.",
       "- Workspace: unavailable",
       "- No runtime service assets are listed in this dossier. This is not a Paperclip worker-runtime health signal.",
+    ].join("\n"));
+  });
+
+  it("H2: retains working-note guidance for issue-less mission supervision", () => {
+    const brief = buildPaperclipRuntimeBrief({
+      missionId: "mission-1",
+      paperclipStepInputManifest: { inputs: { missionWorkingNote: makeNote() } },
+    });
+    expect(brief).toBe([
+      PREFIX[3],
+      "- Workspace: unavailable",
+      PREFIX[6],
+      ...COMPACT_NOTE_LINES,
     ].join("\n"));
   });
 
