@@ -1,5 +1,5 @@
 // C08 identity/authority reads. No checkout adoption, card writes or execution admission occurs here.
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { z } from "zod";
 import { conflict } from "../../errors.js";
@@ -98,7 +98,16 @@ export async function lockOwnerHumanRequestAuthority(tx: OwnerHumanTx, input: Ow
   }
   const tool = await readOwnerToolIdentity(tx, input.companyId, input.missionId, observed.id);
   if (oversight && tool) return reject();
-  const runId = tool?.workflowRunId ?? source?.originRunId ?? null;
+  let runId = tool?.workflowRunId ?? source?.originRunId ?? null;
+  if (oversight && !runId) {
+    const [latestFailedRun] = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.missionId, input.missionId),
+      eq(workflowRuns.status, "failed"),
+      isNull(workflowRuns.parentRunId),
+    )).orderBy(desc(workflowRuns.createdAt)).limit(1);
+    runId = latestFailedRun?.id ?? null;
+  }
   let run: typeof workflowRuns.$inferSelect | undefined;
   if (runId) {
     [run] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, runId)).for("update");

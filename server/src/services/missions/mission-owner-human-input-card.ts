@@ -20,6 +20,7 @@ import { z } from "zod";
 import { unprocessable } from "../../errors.js";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 import { operatorDecisionReadService } from "../operator-decisions-read.js";
+import { buildDefaultOwnerHumanDefinition } from "./mission-owner-human-default-definition.js";
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
@@ -193,31 +194,6 @@ function buildDerivedRecoveryPathDefinition(
   };
 }
 
-function buildDefaultDefinition(evidenceRefs: { label: string; href: string }[]): OperatorDecisionDefinition {
-  const option = (id: string, label: string, description: string, fact: string) => ({
-    id, label, description,
-    facts: [{ label: "선택 시", value: clip(fact, 200), status: "known" as const }],
-    evidenceRefs,
-  });
-  return {
-    options: [
-      option("approve", "승인", "요청된 다음 단계를 승인합니다", "오너가 승인받은 다음 단계를 자기 권한으로 진행합니다"),
-      option("hold", "보류", "진행을 보류하고 현재 상태를 유지합니다", "실행은 보류되고 요청은 대기 상태로 남습니다"),
-      option("reject", "반려", "핸드오프 요청을 반려합니다", "요청이 반려되고 사유가 오너에게 전달됩니다"),
-    ],
-    actions: [
-      { id: "approve", label: "승인", outcome: "approve", tone: "primary", requiresSelection: true },
-      { id: "hold", label: "보류", outcome: "hold", tone: "neutral", requiresSelection: true },
-      { id: "reject", label: "반려", outcome: "reject", tone: "danger", requiresSelection: true },
-    ],
-    selection: { min: 1, max: 1 },
-    // [D3] 기본 선택지에 reject 가 포함되므로 사유를 필수로 받는다(스키마가 정의 단위 모드라 전체 required).
-    comment: { mode: "required", label: "결정 사유", placeholder: "승인·보류·반려 사유를 남겨 주세요", maxLength: 2_000 },
-    approvedScope: ["operator_decision.resolve"],
-    forbiddenScope: ["agent_substitute_submission", "auto_execution"],
-  };
-}
-
 /**
  * [D2/D3/D5 순수 빌더] 카드 create 입력을 만든다. 앵커 해석 불가 시 422(mapping_failed).
  * 같은 legacy 결정 이벤트 또는 같은 수명의 불변 입력은 같은 requestHash 를 만든다.
@@ -278,16 +254,19 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     ? buildStructuredDefinition(input.structuredOptions)
     : derivedPaths
       ? buildDerivedRecoveryPathDefinition(derivedPaths, evidenceOptionRefs)
-      : buildDefaultDefinition(evidenceOptionRefs);
+      : buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
   // [요청자 추천] 선택지를 넘기는 요청은 근거와 함께 추천도 제시한다 — 판단 부담만 사람에게 넘기지
   //   않는다. 대응 옵션이 없는 optionId 는 조용히 무시한다(fail-open: 발화 누락 방지 계약 유지).
   //   최종 정의는 입력에 결정적이므로 requestKey 멱등 replay 규약도 그대로다.
   const recommendedId = present(input.recommendedOptionId);
   const recommendationReason = present(input.recommendationReason);
-  const options = recommendedId
+  const requestedRecommendationExists = recommendedId
+    ? definition.options.some((option) => option.id === recommendedId)
+    : false;
+  const options = recommendedId && requestedRecommendationExists
     ? definition.options.map((option) => option.id === recommendedId
       ? { ...option, recommended: true, ...(recommendationReason ? { recommendationReason: clip(recommendationReason, 1_000) } : {}) }
-      : option)
+      : { ...option, recommended: undefined, recommendationReason: undefined })
     : definition.options;
   const recommendedDefinition = { ...definition, options };
   const summaryLines = [
