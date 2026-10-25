@@ -16,6 +16,11 @@ import {
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
 import { startApprovedRevisionRun } from "./workflow/approved-revision-start.js";
 import { resumeRunFromOperatorDecision, TERMINAL_RESUME_OPTION_ID } from "./missions/terminal-resume-from-decision.js";
+import { startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
+import {
+  WORKFLOW_RESTART_FROM_START_OPTION_ID,
+  WORKFLOW_RESTART_FROM_START_SCOPE,
+} from "./missions/workflow-restart-option.js";
 
  type OperatorDecisionResolutionDependencies = {
   read: Pick<ReturnType<typeof operatorDecisionReadService>, "getRequired">;
@@ -149,6 +154,23 @@ export function operatorDecisionResolutionWriteService(
           continuationId,
         },
       });
+      if (result.outcome === "approve"
+        && result.selectedOptionIds.includes(WORKFLOW_RESTART_FROM_START_OPTION_ID)) {
+        if (!updated.definition.approvedScope.includes(WORKFLOW_RESTART_FROM_START_SCOPE)) {
+          throw conflict("workflow_restart_scope_missing");
+        }
+        if (!updated.sourceContext.missionId || !updated.sourceContext.workflowRunId) {
+          throw conflict("workflow_restart_scope_missing");
+        }
+        await startWorkflowRestartFromOperatorDecision(tx as unknown as Db, {
+          companyId: updated.companyId,
+          missionId: updated.sourceContext.missionId,
+          sourceWorkflowRunId: updated.sourceContext.workflowRunId,
+          operatorDecisionId: updated.id,
+          resolvedByUserId,
+          issueId: updated.issueId,
+        });
+      }
       return true;
     });
     const decision = await read.getRequired(id);
