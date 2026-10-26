@@ -1,9 +1,9 @@
+import { calls, database, peerDatabase, drainOwner, drainPeer, evidence, finish,
+  queuedWorld, readIssue, readRun, readWake, started, startQa } from "./heartbeat-queued-ownership-fixture.js";
 import { eq, sql } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
 import { heartbeatService } from "../services/heartbeat.js";
-import { calls, database, peerDatabase, drainOwner, drainPeer, evidence, finish,
-  queuedWorld, readIssue, readRun, readWake, started, startQa } from "./heartbeat-queued-ownership-fixture.js";
 
 // Independent oracle: document O1/O2, SPEC-implementation.md task ownership,
 // and the observed QA -> queued_wakeup_promoted overwrite. The same tests and
