@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
-import { missions, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, not, sql } from "drizzle-orm";
+import { issues, missions, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import type { CadenceVerdict } from "./mission-oversight-cadence.js";
 import { evaluateMissionOversightForMission } from "./mission-oversight-shadow.js";
 
 export type MissionOversightFailureWakeRequestedHandler = (input: {
   mission: { id: string; companyId: string; ownerAgentId: string };
+  issueId: string;
   verdict: Pick<CadenceVerdict, "state" | "reasonCode">;
   failureEntities: NonNullable<CadenceVerdict["failureEntities"]>;
   idempotencyKey: string;
@@ -61,6 +62,17 @@ export function createMissionOversightFailureLane(db: Db, options: FailureLaneOp
               inArray(missions.status, ["active", "planning"])));
           if (epoch !== lifecycle) return;
           if (!mission?.ownerAgentId) continue;
+          const [oversightIssue] = await db.select({ id: issues.id }).from(issues).where(and(
+            eq(issues.companyId, mission.companyId),
+            eq(issues.missionId, mission.id),
+            eq(issues.originKind, "mission_main_executor_oversight"),
+            isNull(issues.hiddenAt),
+            not(inArray(issues.status, ["done", "cancelled"])),
+          )).orderBy(asc(issues.createdAt)).limit(1);
+          if (epoch !== lifecycle) return;
+          // Owner-recovery authority is issue-scoped. Do not emit an issue-less wake
+          // that can start an agent run but can never read or submit its decision.
+          if (!oversightIssue) continue;
           const verdict = await evaluateMissionOversightForMission(db, mission.companyId, mission.id, new Date());
           if (epoch !== lifecycle) return;
           if (verdict?.state !== "FAILURE_OR_RECOVERY_NEEDED" || !verdict.failureEntities?.length) continue;
@@ -71,11 +83,12 @@ export function createMissionOversightFailureLane(db: Db, options: FailureLaneOp
           // Same append-only claim contract as missions/supervision.ts. The partial
           // unique index on (company_id, idempotency_key) arbitrates other processes.
           const claimed = await db.insert(workflowTransitionEvents).values({ companyId: mission.companyId, missionId: mission.id,
-            eventType: WAKE_EVENT, layer: "mission_owner_recovery", idempotencyKey,
-            payload: { schemaVersion: 1, kind: WAKE_EVENT, state: verdict.state, reasonCode: verdict.reasonCode, failureEntities },
+            issueId: oversightIssue.id, eventType: WAKE_EVENT, layer: "mission_owner_recovery", idempotencyKey,
+            payload: { schemaVersion: 1, kind: WAKE_EVENT, issueId: oversightIssue.id,
+              state: verdict.state, reasonCode: verdict.reasonCode, failureEntities },
           }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
           if (epoch !== lifecycle) return;
-          if (claimed.length) await options.onMissionOversightFailureWakeRequested({ mission,
+          if (claimed.length) await options.onMissionOversightFailureWakeRequested({ mission, issueId: oversightIssue.id,
             verdict: { state: verdict.state, reasonCode: verdict.reasonCode }, failureEntities, idempotencyKey });
         } catch (err) {
           complete = false;

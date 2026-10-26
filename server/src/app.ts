@@ -942,17 +942,17 @@ export async function createApp(
         inFlightUnits: inFlightUnitLabels,
       },
     }),
-    onMissionOversightFailureWakeRequested: async ({ mission, verdict, failureEntities, idempotencyKey }) => {
+    onMissionOversightFailureWakeRequested: async ({ mission, issueId, verdict, failureEntities, idempotencyKey }) => {
       await heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment", triggerDetail: "system", reason: "mission_oversight_failure", idempotencyKey,
         payload: {
-          missionId: mission.id, mutation: "mission_oversight_failure", failureEntities,
+          issueId, missionId: mission.id, mutation: "mission_oversight_failure", failureEntities,
           hint: "Mission failure detected: inspect GET /api/missions/{id}/runtime-snapshot and current failures. Take an explicit owner decision (retry/reassign/replan/escalate via the owner-recovery API); do not infer recovery from comments.",
         },
         requestedByActorType: "system",
         requestedByActorId: "mission-oversight-failure-lane",
         contextSnapshot: {
-          missionId: mission.id, source: "mission_oversight_failure",
+          issueId, missionId: mission.id, source: "mission_oversight_failure",
           state: verdict.state, reasonCode: verdict.reasonCode, failureEntities,
         },
       });
