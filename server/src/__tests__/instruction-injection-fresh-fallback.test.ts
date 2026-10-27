@@ -36,7 +36,11 @@ async function fixture(adapter: Adapter) {
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.ATTEMPTS_PATH, JSON.stringify(args) + "\\n");
-if (args.includes("resume")) { console.error("unknown thread"); process.exit(1); }
+if (args.includes("resume")) {
+  console.log(JSON.stringify({type:"thread.started",thread_id:"stale-session"}));
+  console.error("unknown thread");
+  process.exit(1);
+}
 console.log(JSON.stringify({type:"thread.started",thread_id:"codex-fresh"}));
 console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));
 console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
@@ -87,7 +91,11 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "models") { console.log("openai/gpt-4.1-mini"); process.exit(0); }
 fs.appendFileSync(process.env.ATTEMPTS_PATH, JSON.stringify(args) + "\\n");
-if (args.includes("--session")) { console.error("unknown session id"); process.exit(1); }
+if (args.includes("--session")) {
+  console.log(JSON.stringify({type:"step_start",sessionID:"stale-session"}));
+  console.error("unknown session id");
+  process.exit(1);
+}
 console.log(JSON.stringify({type:"text",sessionID:"opencode-fresh",part:{text:"done"}}));
 console.log(JSON.stringify({type:"step_finish",sessionID:"opencode-fresh",part:{reason:"done",cost:0,tokens:{input:1,output:1,reasoning:0,cache:{read:0,write:0}}}}));
 `
@@ -95,7 +103,11 @@ console.log(JSON.stringify({type:"step_finish",sessionID:"opencode-fresh",part:{
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.ATTEMPTS_PATH, JSON.stringify(args) + "\\n");
-if (args.includes("--resume")) { console.error("unknown session"); process.exit(1); }
+if (args.includes("--resume")) {
+  console.log(JSON.stringify({type:"system",subtype:"init",session_id:"stale-session",model:"test"}));
+  console.error("unknown session");
+  process.exit(1);
+}
 console.log(JSON.stringify({type:"system",subtype:"init",session_id:"${adapter}-fresh",model:"test"}));
 console.log(JSON.stringify({type:"assistant",message:{content:[{type:"output_text",text:"done"}]}}));
 console.log(JSON.stringify({type:"result",subtype:"success",session_id:"${adapter}-fresh",result:"done"}));

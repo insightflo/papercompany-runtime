@@ -490,7 +490,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     isGeminiUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
   ) {
     if (instructionInjectionRequiresSameSession(context)) {
-      return toResult(initial, true, true);
+      return {
+        ...toResult(initial, true, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
     }
     await onLog(
       "stdout",

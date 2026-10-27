@@ -49,7 +49,14 @@ export function hashLoadedInstructions(loaded: LoadedInstructionsWithReferences)
 
 export function instructionInjectionRequiresSameSession(context: unknown): boolean {
   if (typeof context !== "object" || context === null || Array.isArray(context)) return false;
-  return asPolicy((context as Record<string, unknown>).paperclipInstructionInjection)?.mode === "compact";
+  const record = context as Record<string, unknown>;
+  const delivery = record.paperclipInstructionInjectionDelivery;
+  if (typeof delivery === "object" && delivery !== null && !Array.isArray(delivery)) {
+    const deliveredMode = (delivery as Record<string, unknown>).mode;
+    if (deliveredMode === "compact") return true;
+    if (deliveredMode === "full") return false;
+  }
+  return asPolicy(record.paperclipInstructionInjection)?.mode === "compact";
 }
 
 function compactInstructionsContent(
@@ -82,6 +89,7 @@ export function applyInstructionInjectionPolicy(
     : {};
   delete record.paperclipInstructionInjectionDelivery;
   const policy = asPolicy(record.paperclipInstructionInjection);
+  if (!policy) return loaded;
   const actualContentHash = hashLoadedInstructions(loaded);
   const effectiveMode = policy?.mode === "compact" && policy.contentHash === actualContentHash
     ? "compact"
@@ -96,7 +104,7 @@ export function applyInstructionInjectionPolicy(
       entryPath: loaded.entryPath,
     };
   }
-  if (effectiveMode !== "compact" || !policy) return loaded;
+  if (effectiveMode !== "compact") return loaded;
   return {
     ...loaded,
     content: compactInstructionsContent(loaded, policy),

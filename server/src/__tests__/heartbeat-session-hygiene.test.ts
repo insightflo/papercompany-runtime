@@ -335,4 +335,52 @@ describeEmbeddedPostgres("heartbeat session hygiene", () => {
 		expect(adapterCalls[0]?.sessionId).toBeNull();
 		expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("2,500,000 tokens");
 	});
+
+	it("derives the current delta from the latest valid same-session usage across empty rows", async () => {
+		const { agentId, companyId, issueId, missionId } =
+			await seedSessionHygieneFixture(db, { adapterType: "codex_local" });
+		const sessionId = "provider-cumulative-session";
+		await db.insert(heartbeatRuns).values([
+			{
+				id: randomUUID(), companyId, agentId, issueId, status: "succeeded", sessionIdAfter: sessionId,
+				contextSnapshot: { missionId, issueId },
+				usageJson: { rawInputTokens: 250, rawCachedInputTokens: 100, rawOutputTokens: 50 },
+				createdAt: new Date("2026-01-01T00:00:00.000Z"),
+			},
+			{
+				id: randomUUID(), companyId, agentId, issueId, status: "failed", sessionIdAfter: sessionId,
+				contextSnapshot: { missionId, issueId }, usageJson: {},
+				createdAt: new Date("2026-01-01T00:01:00.000Z"),
+			},
+		]);
+		await seedLegacySessionState(db, {
+			agentId, companyId, adapterType: "codex_local", missionId, issueId, sessionId,
+		});
+		executeSpy.mockResolvedValue({
+			...successfulAdapterResult(),
+			sessionId,
+			usage: { inputTokens: 260, cachedInputTokens: 110, outputTokens: 55 },
+		});
+
+		const heartbeat = heartbeatService(db);
+		const run = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, missionId, stepId: "step-a", taskId: issueId, workflowStepId: "step-a" },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!run) throw new Error("Expected heartbeat run");
+		const finalized = await waitForRunTerminal(heartbeat, run.id);
+		expect(finalized.status).toBe("succeeded");
+		expect(finalized.usageJson).toMatchObject({
+			inputTokens: 10,
+			cachedInputTokens: 10,
+			outputTokens: 5,
+			rawInputTokens: 260,
+			rawCachedInputTokens: 110,
+			rawOutputTokens: 55,
+			usageSource: "session_delta",
+		});
+	});
 });

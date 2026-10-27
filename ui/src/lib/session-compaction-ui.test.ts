@@ -24,4 +24,11 @@ describe("session compaction UI contract", () => {
       maxRawInputTokens: 300_000,
     });
   });
+
+  it("normalizes non-finite overrides to an explicit disabled threshold", () => {
+    expect(updateSessionTokenThreshold({ maxSessionMessages: 40 }, Number.NaN)).toEqual({
+      maxSessionMessages: 40,
+      maxRawInputTokens: 0,
+    });
+  });
 });

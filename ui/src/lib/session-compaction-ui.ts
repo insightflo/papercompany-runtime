@@ -15,8 +15,9 @@ export function updateSessionTokenThreshold(
   sessionCompaction: Record<string, unknown>,
   value: number,
 ): Record<string, unknown> {
+  const normalizedValue = Number.isFinite(value) ? value : 0;
   return {
     ...sessionCompaction,
-    maxRawInputTokens: Math.max(0, Math.floor(value)),
+    maxRawInputTokens: Math.max(0, Math.floor(normalizedValue)),
   };
 }

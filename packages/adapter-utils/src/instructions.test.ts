@@ -168,6 +168,7 @@ describe("loadInstructionsWithInlinedReferences", () => {
         contentHash: hashLoadedInstructions(loaded),
         entryPath,
       });
+      expect(instructionInjectionRequiresSameSession(context)).toBe(false);
     });
   });
 

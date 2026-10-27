@@ -673,7 +673,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
     if (instructionInjectionRequiresSameSession(context)) {
-      return toResult(initial, true);
+      return {
+        ...toResult(initial, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
     }
     await onLog(
       "stdout",
