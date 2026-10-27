@@ -101,6 +101,7 @@ export async function queueSourceIssueResume(db: Db, input: SourceResumeInput): 
       db: t, run, definition: input.definition, step: input.step,
       stepRunId: input.stepRun.id, stepRunMetadata: input.stepRun.metadata,
       issueId: input.issueId, allowBlockedIssue: input.allowBlockedIssue,
+      requireOwnWake: true,
       ...(oe ? { ownerExecution: { schemaVersion: 1 as const, actionId: oe.actionId,
         expectedAuthorityVersion: input.run.status === "failed" ? run.dispatchAuthorityVersion : oe.expectedAuthorityVersion,
         expectedExecutionGeneration: oe.expectedExecutionGeneration + (input.run.status === "failed" ? 1 : 0) } } : {}),

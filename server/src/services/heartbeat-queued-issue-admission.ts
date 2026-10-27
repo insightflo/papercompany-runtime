@@ -28,11 +28,10 @@ export async function lockQueuedIssueAdmission(tx: FollowupTx, input: {
 
   const wakeReason = readNonEmptyString(request.reason)
     ?? readNonEmptyString(contextSnapshot.wakeReason);
-  const mention = wakeReason === "issue_comment_mentioned";
-  // Only the replaceable assignment notification is superseded. Structured
+  // Only replaceable assignment/status notifications are superseded. Structured
   // continuations (for example plan rework and workflow resume) carry context
   // that a later generic assignment wake cannot reconstruct.
-  if (!mention && wakeReason === "issue_assigned"
+  if ((wakeReason === "issue_assigned" || wakeReason === "issue_status_changed")
     && issue.assigneeAgentId !== request.agentId) {
     // Supersession is not an execution failure: never create a run/failure cascade
     // or alter the replacement assignee's checkout, even if that run is finishing.

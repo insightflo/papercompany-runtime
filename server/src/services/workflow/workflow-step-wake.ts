@@ -40,6 +40,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
   priorFindings?: readonly WorkflowVerdictFinding[];
   /** Optional correlation key; cap-override keys also enable exact queue-conflict propagation. */
   idempotencyKey?: string | null;
+  /** Require this invocation to persist its own wake receipt instead of reusing an accepted wake. */
+  requireOwnWake?: boolean;
   /** [owner admission] owner-linked 실행의 typed 승인 정보 — 생략해도 저장 영수증 맥락에서
    *  동일 검사가 적용된다(인자 생략으로 우회 불가). */
   ownerExecution?: OwnerExecutionAdmission;
@@ -167,7 +169,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
   const hasCallSpecificWakeContract = input.forceFreshSession === true
     || (input.priorFindings?.length ?? 0) > 0
     || (typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0)
-    || input.ownerExecution !== undefined;
+    || input.ownerExecution !== undefined
+    || input.requireOwnWake === true;
   const reusableStepRunId = !hasCallSpecificWakeContract
     && typeof input.stepRunId === "string" && input.stepRunId.length > 0
     ? input.stepRunId
@@ -186,6 +189,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowRunId: input.run.id,
       workflowStepRunId: reusableStepRunId,
       workflowExecutionGeneration: stepAuthority.executionGeneration,
+      agentId: wakeIssue.assigneeAgentId ?? undefined,
     })).length > 0
     : false;
   // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재

@@ -71,6 +71,7 @@ export async function findAcceptedWorkflowResumeWakeForStep(
     workflowRunId: string;
     workflowStepRunId: string;
     workflowExecutionGeneration?: number;
+    agentId?: string;
   },
 ): Promise<AcceptedWorkflowResumeWake[]> {
   const rows = await db
@@ -85,6 +86,7 @@ export async function findAcceptedWorkflowResumeWakeForStep(
       eq(agentWakeupRequests.issueId, input.issueId),
       eq(agentWakeupRequests.workflowRunId, input.workflowRunId),
       eq(agentWakeupRequests.workflowStepRunId, input.workflowStepRunId),
+      input.agentId === undefined ? undefined : eq(agentWakeupRequests.agentId, input.agentId),
       input.workflowExecutionGeneration === undefined
         ? undefined
         : eq(agentWakeupRequests.workflowExecutionGeneration, input.workflowExecutionGeneration),

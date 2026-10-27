@@ -31,6 +31,7 @@ vi.mock("../services/missions/mission-owner-execution-state.js", async (importOr
 
 import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
 import { wakeExistingWorkflowStepIssue } from "../services/workflow/dag-engine.js";
+import { lockQueuedIssueAdmission } from "../services/heartbeat-queued-issue-admission.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -154,12 +155,12 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
       id: assignedIssueId, companyId, missionId, assigneeAgentId: agentId,
       title: "assignment-wake-dedup: Final QA", status: "todo",
     });
-    await db.insert(agentWakeupRequests).values({
+    const [acceptedAssignmentWake] = await db.insert(agentWakeupRequests).values({
       companyId, agentId, issueId: assignedIssueId, missionId, workflowRunId: runId,
       workflowStepRunId: stepRunId, workflowExecutionGeneration: 3,
       source: "assignment", reason: "issue_assigned", requestKind: "create", status: "queued",
       payload: { issueId: assignedIssueId, mutation: "workflow_resume", workflowRunId: runId, workflowStepRunId: stepRunId },
-    });
+    }).returning();
 
     const queued = await wakeExistingWorkflowStepIssue({
       db, run, definition, step, stepRunId, issueId: assignedIssueId,
@@ -168,13 +169,19 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     expect(queued).toBe(true);
     expect(ownerWakeAdmission).toHaveBeenCalledTimes(1);
     expect(heartbeatWakeup).not.toHaveBeenCalled();
+
+    heartbeatWakeup.mockResolvedValue({ id: "required-own-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId, requireOwnWake: true,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, assignedIssueId))).toHaveLength(1);
 
     ownerWakeAdmission.mockResolvedValueOnce(false);
     expect(await wakeExistingWorkflowStepIssue({
       db, run, definition, step, stepRunId, issueId: assignedIssueId,
     })).toBe(false);
-    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
 
     heartbeatWakeup.mockResolvedValue({ id: "fresh-context-wake" });
     expect(await wakeExistingWorkflowStepIssue({
@@ -183,7 +190,7 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
       priorFindings: [{ id: "qa-contract", summary: "Verify the corrected artifact first", layer: "artifact" }],
       idempotencyKey: `qa-recheck:${stepRunId}:3`,
     })).toBe(true);
-    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(2);
     expect(heartbeatWakeup).toHaveBeenLastCalledWith(agentId, expect.objectContaining({
       idempotencyKey: `qa-recheck:${stepRunId}:3`,
       payload: expect.objectContaining({
@@ -197,7 +204,40 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     expect(await wakeExistingWorkflowStepIssue({
       db, run, definition, step, stepRunId, issueId: assignedIssueId,
     })).toBe(true);
-    expect(heartbeatWakeup).toHaveBeenCalledTimes(2);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(3);
+
+    const staleAgentId = randomUUID();
+    await db.insert(agents).values({ id: staleAgentId, companyId, name: "Stale assignee", role: "writer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.update(agentWakeupRequests).set({
+      agentId: staleAgentId, workflowExecutionGeneration: 4,
+    }).where(eq(agentWakeupRequests.id, acceptedAssignmentWake!.id));
+    heartbeatWakeup.mockResolvedValue({ id: "current-assignee-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(4);
+    await db.update(agentWakeupRequests).set({ agentId }).where(eq(agentWakeupRequests.id, acceptedAssignmentWake!.id));
+    await db.delete(agents).where(eq(agents.id, staleAgentId));
+  });
+
+  it("supersedes a stale status notification after issue reassignment", async () => {
+    const replacementId = randomUUID();
+    await db.insert(agents).values({ id: replacementId, companyId, name: "Replacement", role: "writer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    const wake = await insertWake({ source: "automation", reason: "issue_status_changed", status: "queued" });
+    await db.update(issues).set({ assigneeAgentId: replacementId }).where(eq(issues.id, issueId));
+    try {
+      const admission = await db.transaction(tx => lockQueuedIssueAdmission(tx, {
+        request: wake, issueId, contextSnapshot: { wakeReason: "issue_status_changed" },
+      }));
+      expect(admission).toEqual({ kind: "superseded" });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))
+        .toEqual([expect.objectContaining({ status: "completed", runId: null, error: null })]);
+    } finally {
+      await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, issueId));
+      await db.delete(agents).where(eq(agents.id, replacementId));
+    }
   });
 
   it("carries a workflow rework contract into resume wake payload and context", async () => {
