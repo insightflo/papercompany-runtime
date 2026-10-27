@@ -170,7 +170,8 @@ export async function wakeExistingWorkflowStepIssue(input: {
     || (input.priorFindings?.length ?? 0) > 0
     || (typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0)
     || input.ownerExecution !== undefined
-    || input.requireOwnWake === true;
+    || input.requireOwnWake === true
+    || reworkContract !== null;
   const reusableStepRunId = !hasCallSpecificWakeContract
     && typeof input.stepRunId === "string" && input.stepRunId.length > 0
     ? input.stepRunId

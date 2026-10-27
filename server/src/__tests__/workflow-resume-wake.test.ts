@@ -285,6 +285,15 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
       title: "rework-contract: Produce artifact",
       status: "done",
     });
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId, workflowRunId: runId, stepId: step.id, status: "pending", executionGeneration: 1,
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, issueId: reworkIssueId, missionId, workflowRunId: runId,
+      workflowStepRunId: stepRunId, workflowExecutionGeneration: 1,
+      source: "assignment", reason: "issue_assigned", requestKind: "create", status: "queued",
+      payload: { issueId: reworkIssueId, mutation: "workflow_resume", workflowRunId: runId, workflowStepRunId: stepRunId },
+    });
 
     const reworkContract = {
       kind: "workflow_qa_rework",
