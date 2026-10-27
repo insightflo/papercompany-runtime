@@ -56,7 +56,9 @@ export function instructionInjectionRequiresSameSession(context: unknown): boole
     if (deliveredMode === "compact") return true;
     if (deliveredMode === "full") return false;
   }
-  return asPolicy(record.paperclipInstructionInjection)?.mode === "compact";
+  // The delivery marker is staged only after compact instructions are
+  // materialized. Without it, a fresh-session fallback is safe and necessary.
+  return false;
 }
 
 export function clearInstructionInjectionDelivery(context: unknown): void {

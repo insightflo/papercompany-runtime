@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
   applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
   instructionInjectionRequiresSameSession,
   loadInstructionsWithInlinedReferences,
 } from "@paperclipai/adapter-utils/instructions";
@@ -301,6 +302,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stdout",
