@@ -59,6 +59,10 @@ import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
 import { useAdapterModelEfforts } from "../hooks/useAdapterModelEfforts";
 import { useAdapterProviderModels } from "../hooks/useAdapterProviderModels";
 import { buildCommandCodeEffortOptions, shouldResetCommandCodeEffort } from "../lib/commandcode-efforts";
+import {
+  sessionTokenThresholdFieldValue,
+  updateSessionTokenThreshold,
+} from "../lib/session-compaction-ui";
 
 /* ---- Create mode values ---- */
 
@@ -328,11 +332,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
+  const storedSessionCompaction =
+    heartbeat.sessionCompaction ?? heartbeat.sessionRotation ?? runtimeConfig.sessionCompaction;
   // [session rotation] nested heartbeat key — overlay wins, original falls back.
   // Kept whole-object so sibling sessionCompaction keys (maxSessionRuns 등) are never dropped.
   const sessionCompaction = !isCreate
     ? {
-      ...((heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
+      ...(typeof storedSessionCompaction === "object" && storedSessionCompaction !== null && !Array.isArray(storedSessionCompaction)
+        ? storedSessionCompaction as Record<string, unknown>
+        : {}),
       ...((overlay.heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
     }
     : {};
@@ -340,6 +348,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const adapterType = isCreate
     ? props.values.adapterType
     : overlay.adapterType ?? props.agent.adapterType;
+  const sessionTokenDefault = sessionTokenThresholdFieldValue(adapterType, {});
   const isLocal =
     adapterType === "claude_local" ||
     adapterType === "codex_local" ||
@@ -1305,15 +1314,31 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               {adapterType !== "claude_local" && adapterType !== "codex_local" && adapterType !== "hermes_local" && (
                 <Field
                   label="Session rotation limit (tokens)"
-                  hint="Rotate to a fresh session when the last run's raw input reaches this many tokens. 0 = adapter default (2,000,000). Lower it for context-heavy agents, e.g. 300000."
+                  hint="Rotate to a fresh session when the last run's raw input reaches this many tokens. Unset uses the adapter default; 0 disables only the token threshold. Other run, age, and message limits still apply."
                 >
                   <DraftNumberInput
-                    value={Number(sessionCompaction.maxRawInputTokens ?? 0)}
-                    onCommit={(v) => mark("heartbeat", "sessionCompaction", {
-                      ...sessionCompaction,
-                      maxRawInputTokens: Math.max(0, Math.floor(v)),
-                    })}
-                    immediate
+                    value={sessionTokenThresholdFieldValue(adapterType, sessionCompaction)}
+                    onEmpty={() => {
+                      if (!("maxRawInputTokens" in sessionCompaction)) return;
+                      mark(
+                        "heartbeat",
+                        "sessionCompaction",
+                        updateSessionTokenThreshold(
+                          sessionCompaction,
+                          sessionTokenDefault,
+                          sessionTokenDefault,
+                        ),
+                      );
+                    }}
+                    onCommit={(v) => mark(
+                      "heartbeat",
+                      "sessionCompaction",
+                      updateSessionTokenThreshold(
+                        sessionCompaction,
+                        v,
+                        sessionTokenDefault,
+                      ),
+                    )}
                     className={inputClass}
                   />
                 </Field>

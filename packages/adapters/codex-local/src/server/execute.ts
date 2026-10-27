@@ -2,7 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asString,
   asNumber,
@@ -443,6 +448,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(context);
+      instructionsPrefix = "";
+      instructionsChars = 0;
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stdout",
@@ -613,7 +621,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     }
 
-    const resolvedSessionId = attempt.parsed.sessionId ?? runtimeSessionId ?? runtime.sessionId ?? null;
+    const resolvedSessionId = attempt.parsed.sessionId ?? (
+      clearSessionOnMissingSession ? null : runtimeSessionId ?? runtime.sessionId ?? null
+    );
     const resolvedSessionParams = resolvedSessionId
       ? ({
         sessionId: resolvedSessionId,
@@ -666,6 +676,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     (initial.proc.exitCode ?? 0) !== 0 &&
     isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      return {
+        ...toResult(initial, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
+    }
     await onLog(
       "stdout",
       `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,

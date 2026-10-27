@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createDb, agentTaskSessions, heartbeatRuns } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { createDb, agents, agentTaskSessions, heartbeatRuns } from "@paperclipai/db";
 import {
 	afterAll,
 	afterEach,
@@ -249,7 +250,7 @@ describeEmbeddedPostgres("heartbeat session hygiene", () => {
 
 		expect(adapterCalls).toHaveLength(1);
 		expect(adapterCalls[0]?.sessionId).toBeNull();
-		expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("45 messages");
+  expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("session exceeded 40 messages");
 		expect(adapterCalls[0]?.context.paperclipPreviousSessionId).toBe(sessionFile);
 	});
 
@@ -291,5 +292,95 @@ describeEmbeddedPostgres("heartbeat session hygiene", () => {
 		expect(finalized.status).toBe("succeeded");
 		expect(finalized.contextSnapshot?.paperclipSessionRotationReason).toBeUndefined();
 		expect(sessionIdsSeen).toEqual([sessionFile]);
+	});
+
+	it("uses the latest valid cumulative usage from the same session when the newest run has none", async () => {
+		const { agentId, companyId, issueId, missionId } =
+			await seedSessionHygieneFixture(db, { adapterType: "pi_local" });
+		const sessionFile = await writeOversizedSessionFile(5);
+		tempDirs.push(path.dirname(sessionFile));
+		await db.update(agents).set({
+			runtimeConfig: {
+				heartbeat: { sessionCompaction: { maxRawInputTokens: 2_000_000 } },
+			},
+		}).where(eq(agents.id, agentId));
+		await db.insert(heartbeatRuns).values({
+			id: randomUUID(), companyId, agentId, issueId, status: "succeeded",
+			sessionIdAfter: sessionFile,
+			contextSnapshot: { missionId, issueId },
+			usageJson: { rawInputTokens: 2_500_000, rawCachedInputTokens: 0, rawOutputTokens: 10 },
+			createdAt: new Date("2026-01-01T00:00:00.000Z"),
+		});
+		await seedLegacySessionState(db, {
+			agentId, companyId, adapterType: "pi_local", missionId, issueId, sessionId: sessionFile,
+		});
+		const adapterCalls: Array<{ context: Record<string, unknown>; sessionId: string | null }> = [];
+		executeSpy.mockImplementation(async (input: { context: Record<string, unknown>; runtime: { sessionId: string | null } }) => {
+			adapterCalls.push({ context: input.context, sessionId: input.runtime.sessionId });
+			return { ...successfulAdapterResult(), sessionId: "fresh-after-token-cap" };
+		});
+
+		const heartbeat = heartbeatService(db);
+		const run = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, missionId, stepId: "step-a", taskId: issueId, workflowStepId: "step-a" },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!run) throw new Error("Expected heartbeat run");
+		const finalized = await waitForRunTerminal(heartbeat, run.id);
+		expect(finalized.status).toBe("succeeded");
+		expect(adapterCalls).toHaveLength(1);
+		expect(adapterCalls[0]?.sessionId).toBeNull();
+		expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("2,500,000 tokens");
+	});
+
+	it("derives the current delta from the latest valid same-session usage across empty rows", async () => {
+		const { agentId, companyId, issueId, missionId } =
+			await seedSessionHygieneFixture(db, { adapterType: "codex_local" });
+		const sessionId = "provider-cumulative-session";
+		await db.insert(heartbeatRuns).values([
+			{
+				id: randomUUID(), companyId, agentId, issueId, status: "succeeded", sessionIdAfter: sessionId,
+				contextSnapshot: { missionId, issueId },
+				usageJson: { rawInputTokens: 250, rawCachedInputTokens: 100, rawOutputTokens: 50 },
+				createdAt: new Date("2026-01-01T00:00:00.000Z"),
+			},
+			{
+				id: randomUUID(), companyId, agentId, issueId, status: "failed", sessionIdAfter: sessionId,
+				contextSnapshot: { missionId, issueId }, usageJson: {},
+				createdAt: new Date("2026-01-01T00:01:00.000Z"),
+			},
+		]);
+		await seedLegacySessionState(db, {
+			agentId, companyId, adapterType: "codex_local", missionId, issueId, sessionId,
+		});
+		executeSpy.mockResolvedValue({
+			...successfulAdapterResult(),
+			sessionId,
+			usage: { inputTokens: 260, cachedInputTokens: 110, outputTokens: 55 },
+		});
+
+		const heartbeat = heartbeatService(db);
+		const run = await heartbeat.invoke(
+			agentId,
+			"on_demand",
+			{ issueId, missionId, stepId: "step-a", taskId: issueId, workflowStepId: "step-a" },
+			"manual",
+			{ actorId: "test-suite", actorType: "system" },
+		);
+		if (!run) throw new Error("Expected heartbeat run");
+		const finalized = await waitForRunTerminal(heartbeat, run.id);
+		expect(finalized.status).toBe("succeeded");
+		expect(finalized.usageJson).toMatchObject({
+			inputTokens: 10,
+			cachedInputTokens: 10,
+			outputTokens: 5,
+			rawInputTokens: 260,
+			rawCachedInputTokens: 110,
+			rawOutputTokens: 55,
+			usageSource: "session_delta",
+		});
 	});
 });

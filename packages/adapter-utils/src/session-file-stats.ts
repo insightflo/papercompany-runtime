@@ -1,15 +1,17 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
-
-/** 세션 파일 통계를 위한 안전 상한 — 이보다 큰 파일은 읽지 않고 null을 반환한다. */
-const MAX_SESSION_FILE_BYTES = 20 * 1024 * 1024;
+import readline from "node:readline";
 
 /**
  * [session hygiene] pi 계열 어댑터의 sessionId는 세션 JSONL 파일 경로다.
  *   최상위 type==="message" 엔트리 수(≈ 대화 메시지 수)를 센다.
  *   파일이 아니거나 읽을 수 없으면 null (해당 어댑터는 이 트리거에서 제외).
  */
-export async function countSessionFileMessages(sessionId: string | null | undefined): Promise<number | null> {
+export async function countSessionFileMessages(
+  sessionId: string | null | undefined,
+  options: { stopAfter?: number } = {},
+): Promise<number | null> {
   const value = typeof sessionId === "string" ? sessionId.trim() : "";
   if (!value || !path.isAbsolute(value) || !value.endsWith(".jsonl")) return null;
   let stat;
@@ -20,28 +22,36 @@ export async function countSessionFileMessages(sessionId: string | null | undefi
   }
   if (!stat.isFile()) return null;
   if (stat.size === 0) return 0;
-  if (stat.size > MAX_SESSION_FILE_BYTES) return null;
-  let content: string;
+  const stream = fsSync.createReadStream(value, { encoding: "utf8" });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let failed = false;
+  stream.on("error", () => {
+    failed = true;
+    lines.close();
+  });
+  let count = 0;
   try {
-    content = await fs.readFile(value, "utf8");
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const entry: unknown = JSON.parse(trimmed);
+        if (
+          typeof entry === "object" && entry !== null && !Array.isArray(entry)
+          && (entry as { type?: unknown }).type === "message"
+        ) {
+          count += 1;
+          if (options.stopAfter !== undefined && count > options.stopAfter) break;
+        }
+      } catch {
+        // malformed line — 개수에 반영하지 않고 건너뛴다
+      }
+    }
   } catch {
     return null;
+  } finally {
+    lines.close();
+    stream.destroy();
   }
-  let count = 0;
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry: unknown = JSON.parse(trimmed);
-      if (
-        typeof entry === "object" && entry !== null && !Array.isArray(entry)
-        && (entry as { type?: unknown }).type === "message"
-      ) {
-        count += 1;
-      }
-    } catch {
-      // malformed line — 개수에 반영하지 않고 건너뛴다
-    }
-  }
-  return count;
+  return failed ? null : count;
 }

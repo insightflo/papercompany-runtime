@@ -99,7 +99,12 @@ import {
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { workspaceOperationService } from "./workspace-operations.js";
 import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
-import { applyInstructionInjectionLedger } from "./instruction-injection-ledger.js";
+import {
+  confirmInstructionInjectionDelivery,
+  forceFullInstructionInjection,
+  invalidateInstructionInjectionSession,
+  prepareInstructionInjection,
+} from "./instruction-injection-ledger.js";
 
 import { refreshStepInputManifest } from "./wake-context-hygiene.js";
 import {
@@ -3807,13 +3812,46 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getLatestRawUsageForSession(
+    companyId: string,
+    agentId: string,
+    sessionId: string,
+    opts?: { excludeRunId?: string | null },
+  ) {
+    const conditions = [
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, agentId),
+      eq(heartbeatRuns.sessionIdAfter, sessionId),
+      sql`${heartbeatRuns.usageJson} is not null`,
+    ];
+    if (opts?.excludeRunId) {
+      conditions.push(sql`${heartbeatRuns.id} <> ${opts.excludeRunId}`);
+    }
+    const pageSize = 50;
+    for (let offset = 0; ; offset += pageSize) {
+      const rows = await db
+        .select({ usageJson: heartbeatRuns.usageJson })
+        .from(heartbeatRuns)
+        .where(and(...conditions))
+        .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+        .limit(pageSize)
+        .offset(offset);
+      for (const row of rows) {
+        const usage = readRawUsageTotals(row.usageJson);
+        if (usage) return usage;
+      }
+      if (rows.length < pageSize) return null;
+    }
+  }
+
   async function resolveNormalizedUsageForSession(input: {
+    companyId: string;
     agentId: string;
     runId: string;
     sessionId: string | null;
     rawUsage: UsageTotals | null;
   }) {
-    const { agentId, runId, sessionId, rawUsage } = input;
+    const { companyId, agentId, runId, sessionId, rawUsage } = input;
     if (!sessionId || !rawUsage) {
       return {
         normalizedUsage: rawUsage,
@@ -3822,8 +3860,9 @@ export function heartbeatService(db: Db) {
       };
     }
 
-    const previousRun = await getLatestRunForSession(agentId, sessionId, { excludeRunId: runId });
-    const previousRawUsage = readRawUsageTotals(previousRun?.usageJson);
+    const previousRawUsage = await getLatestRawUsageForSession(companyId, agentId, sessionId, {
+      excludeRunId: runId,
+    });
     return {
       normalizedUsage: deriveNormalizedUsageDelta(rawUsage, previousRawUsage),
       previousRawUsage,
@@ -3888,7 +3927,12 @@ export function heartbeatService(db: Db) {
       policy.maxSessionAgeHours > 0
         ? await getOldestRunForSession(agent.id, sessionId)
         : runs[runs.length - 1] ?? latestRun;
-    const latestRawUsage = readRawUsageTotals(latestRun?.usageJson);
+    const latestRawUsage = policy.maxRawInputTokens > 0
+      ? runs
+        .map((run) => readRawUsageTotals(run.usageJson))
+        .find((usage): usage is UsageTotals => usage !== null)
+        ?? await getLatestRawUsageForSession(agent.companyId, agent.id, sessionId)
+      : null;
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -3901,9 +3945,11 @@ export function heartbeatService(db: Db) {
     if (policy.maxSessionMessages > 0) {
       // [session hygiene] 재개 히스토리 상한 — usageJson이 비어 토큰 트리거가 동작하지
       //   않아도 세션 파일의 메시지 수로 무한 증식(hermes-era 136+ 메시지 사례)을 막는다.
-      const sessionMessageCount = await countSessionFileMessages(sessionId);
+      const sessionMessageCount = await countSessionFileMessages(sessionId, {
+        stopAfter: policy.maxSessionMessages,
+      });
       if (sessionMessageCount !== null && sessionMessageCount > policy.maxSessionMessages) {
-        reason = `session reached ${sessionMessageCount} messages (threshold ${policy.maxSessionMessages})`;
+        reason = `session exceeded ${policy.maxSessionMessages} messages`;
       }
     }
     if (!reason && policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {
@@ -6745,14 +6791,17 @@ export function heartbeatService(db: Db) {
       delete context.paperclipSessionRotationReason;
       delete context.paperclipPreviousSessionId;
     }
+    let instructionInjectionPlan = null as Awaited<ReturnType<typeof prepareInstructionInjection>>;
     try {
-      await applyInstructionInjectionLedger({
+      instructionInjectionPlan = await prepareInstructionInjection({
         db,
         context,
         agent,
         issueId,
         adapterConfig: runtimeConfig,
         cwd: executionWorkspace.cwd,
+        runId: run.id,
+        providerSessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
       });
     } catch (err) {
       delete context.paperclipInstructionInjection;
@@ -6967,6 +7016,7 @@ export function heartbeatService(db: Db) {
         hasResumableSession = false;
         context.paperclipSessionRotationReason = "qa_rework_fresh_session";
         if (previousSessionId) context.paperclipPreviousSessionId = previousSessionId;
+        instructionInjectionPlan = forceFullInstructionInjection(context, instructionInjectionPlan);
         refreshStepInputManifest(context, taskKey);
       }
       let contextBudgetPreflight = await evaluateContextBudgetPreflight({
@@ -7015,6 +7065,7 @@ export function heartbeatService(db: Db) {
           lastRunSummaryText: contextBudgetPreflight.reason,
           ...(budgetDecisionLogPointer ? { missionDecisionLogPointer: budgetDecisionLogPointer } : {}),
         };
+        instructionInjectionPlan = forceFullInstructionInjection(context, instructionInjectionPlan);
         refreshStepInputManifest(context, taskKey);
         contextBudgetPreflight = await evaluateContextBudgetPreflight({
           runtimeConfig: agent.runtimeConfig,
@@ -7030,6 +7081,11 @@ export function heartbeatService(db: Db) {
         });
       }
       if (contextBudgetPreflight.blocked) {
+        refreshStepInputManifest(context, taskKey);
+        await db
+          .update(heartbeatRuns)
+          .set({ contextSnapshot: context, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, run.id));
         throw Object.assign(
           new Error(
             contextBudgetPreflight.reason ?? "Context budget preflight blocked adapter execution",
@@ -7092,7 +7148,33 @@ export function heartbeatService(db: Db) {
             lastRunSummaryText: stalenessReasonText,
             ...(stalenessDecisionLogPointer ? { missionDecisionLogPointer: stalenessDecisionLogPointer } : {}),
           };
+          instructionInjectionPlan = forceFullInstructionInjection(context, instructionInjectionPlan);
           refreshStepInputManifest(context, taskKey);
+          contextBudgetPreflight = await evaluateContextBudgetPreflight({
+            runtimeConfig: agent.runtimeConfig,
+            adapterType: agent.adapterType,
+            adapterConfig: runtimeConfig,
+            agent,
+            runId: run.id,
+            context,
+            hasResumableSession,
+            cwd: executionWorkspace.cwd,
+            authTokenPresent:
+              typeof parseObject(resolvedConfig.env).PAPERCLIP_API_KEY === "string" || Boolean(authToken),
+          });
+          if (contextBudgetPreflight.blocked) {
+            refreshStepInputManifest(context, taskKey);
+            await db
+              .update(heartbeatRuns)
+              .set({ contextSnapshot: context, updatedAt: new Date() })
+              .where(eq(heartbeatRuns.id, run.id));
+            throw Object.assign(
+              new Error(
+                contextBudgetPreflight.reason ?? "Context budget preflight blocked adapter execution",
+              ),
+              { code: "context_budget_exceeded" },
+            );
+          }
         }
       }
       const stepInputManifestGuard = await evaluateStepInputManifestGuard({
@@ -7118,6 +7200,14 @@ export function heartbeatService(db: Db) {
           { code: "manifest_broad_scan_blocked" },
         );
       }
+      refreshStepInputManifest(context, taskKey);
+      await db
+        .update(heartbeatRuns)
+        .set({
+          contextSnapshot: context,
+          updatedAt: new Date(),
+        })
+        .where(eq(heartbeatRuns.id, run.id));
       if (missionAgentRuntimeForRun && missionIssueEnvelopePolicy.fullContextInjection) {
         await markMissionRuntimeBootstrapInjected(db, missionAgentRuntimeForRun.runtime.id).catch((err) => {
           logger.warn({ err, missionId, agentId: agent.id }, "failed to mark mission runtime bootstrap injected");
@@ -7154,6 +7244,7 @@ export function heartbeatService(db: Db) {
       //   실행 방지 — 실행 전 내구 intent, 실행 후 CAS applied. skipped_replay 면
       //   code=fenced_effect_replay_skipped 예외로 실패 종결한다. 일시 재시도·fallback
       //   큐잉은 errorCode==='adapter_failed' 조건이므로 이 코드에서 자동 억제된다.
+      let adapterProcessStarted = false;
       const fencedAdapterExecution = await executeFencedEffect(db, {
         companyId: agent.companyId,
         effectKind: HEARTBEAT_ADAPTER_EXECUTE_EFFECT_KIND,
@@ -7195,6 +7286,7 @@ export function heartbeatService(db: Db) {
             onMeta: onAdapterMeta,
             onSessionUpdate: onAdapterSessionUpdate,
             onSpawn: async (meta) => {
+              adapterProcessStarted = true;
               await persistRunProcessMetadata(run.id, meta);
             },
             authToken: authToken ?? undefined,
@@ -7271,8 +7363,38 @@ export function heartbeatService(db: Db) {
         nextSessionState.legacySessionId ??
         earlySessionIdAfter ??
         null;
+      let instructionDeliveryConfirmed = false;
+      try {
+        instructionDeliveryConfirmed = await confirmInstructionInjectionDelivery({
+          db,
+          context,
+          plan: instructionInjectionPlan,
+          providerSessionId: persistedSessionIdAfter,
+          adapterProcessStarted,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, agentId: agent.id, issueId, runId: run.id },
+          "failed to confirm instruction injection delivery",
+        );
+      }
+      if (!instructionDeliveryConfirmed && instructionInjectionPlan && adapterProcessStarted) {
+        try {
+          await invalidateInstructionInjectionSession({ db, plan: instructionInjectionPlan });
+          logger.warn(
+            { agentId: agent.id, issueId, runId: run.id },
+            "instruction injection delivery was not confirmed; next run will use full instructions",
+          );
+        } catch (err) {
+          logger.warn(
+            { err, agentId: agent.id, issueId, runId: run.id },
+            "failed to invalidate unconfirmed instruction injection session",
+          );
+        }
+      }
       const rawUsage = normalizeUsageTotals(adapterResult.usage);
       const sessionUsageResolution = await resolveNormalizedUsageForSession({
+        companyId: agent.companyId,
         agentId: agent.id,
         runId: run.id,
         sessionId: nextSessionState.displayId ?? nextSessionState.legacySessionId,

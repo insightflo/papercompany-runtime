@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -239,6 +244,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
+      instructionsPrefix = "";
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stdout",
@@ -485,6 +492,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     (initial.proc.exitCode ?? 0) !== 0 &&
     isGeminiUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      return {
+        ...toResult(initial, true, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
+    }
     await onLog(
       "stdout",
       `[paperclip] Gemini resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,

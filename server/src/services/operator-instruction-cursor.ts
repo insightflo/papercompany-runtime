@@ -29,7 +29,7 @@ export async function assembleIssueCommentContext(
     .orderBy(asc(issueComments.createdAt), asc(issueComments.id)).limit(10);
   pending.reverse();
   context.paperclipOperatorInstructionsUnconsumed = pending.map((comment) => ({
-    id: comment.id, body: capWakeRecentCommentBody(comment.body), createdAt: comment.createdAt.toISOString(),
+    id: comment.id, body: comment.body, createdAt: comment.createdAt.toISOString(),
   }));
   return pending[0]?.id ?? null;
 }

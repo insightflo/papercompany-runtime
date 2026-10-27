@@ -7,7 +7,12 @@ import {
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -114,6 +119,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
+      instructionsText = "";
+      commandNotes.length = 0;
       const reason = err instanceof Error ? err.message : String(err);
       commandNotes.push(`Instructions file ${resolvedInstructionsFilePath} could not be read; continuing without it.`);
       await onLog("stdout", `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`);
@@ -300,6 +308,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     initialOutcome.isFailure &&
     isCommandCodeUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      return toResult(initial.proc, initial.parsed, initialOutcome, true);
+    }
     await onLog("stdout", `[paperclip] Command Code session "${resumeId}" is unavailable; retrying with a fresh run.\n`);
     const retry = await runAttempt("");
     const retryOutcome = classifyOutcome(retry.parsed, retry.proc.exitCode);

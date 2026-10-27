@@ -30,6 +30,16 @@ describe("countSessionFileMessages", () => {
     expect(await countSessionFileMessages(file)).toBe(3);
   });
 
+  it("stops as soon as the caller's message threshold is exceeded", async () => {
+    const file = await writeSessionFile([
+      { type: "message", id: "m1" },
+      { type: "message", id: "m2" },
+      { type: "message", id: "m3" },
+      { type: "message", id: "m4" },
+    ]);
+    expect(await countSessionFileMessages(file, { stopAfter: 2 })).toBe(3);
+  });
+
   it("ignores malformed lines instead of failing", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-session-stats-"));
     tempDirs.push(dir);
@@ -57,5 +67,22 @@ describe("countSessionFileMessages", () => {
     expect(await countSessionFileMessages("ses_abc123")).toBeNull();
     expect(await countSessionFileMessages("/tmp/does-not-exist-session.jsonl")).toBeNull();
     expect(await countSessionFileMessages("")).toBeNull();
+  });
+
+  it("streams session files larger than 20 MB instead of skipping the message cap", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-session-stats-"));
+    tempDirs.push(dir);
+    const file = path.join(dir, "large-session.jsonl");
+    const filler = `${JSON.stringify({ type: "note", body: "x".repeat(1_000) })}\n`;
+    const handle = await fs.open(file, "w");
+    try {
+      await handle.write(`${JSON.stringify({ type: "message", id: "first" })}\n`);
+      for (let index = 0; index < 21_000; index += 1) await handle.write(filler);
+      await handle.write(`${JSON.stringify({ type: "message", id: "last" })}\n`);
+    } finally {
+      await handle.close();
+    }
+    expect((await fs.stat(file)).size).toBeGreaterThan(20 * 1024 * 1024);
+    expect(await countSessionFileMessages(file)).toBe(2);
   });
 });

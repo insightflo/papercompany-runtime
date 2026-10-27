@@ -90,6 +90,17 @@ describe("agent fit evaluator rules", () => {
     expect(verdict.verdict).toBe("na");
   });
 
+  it("does not recommend raising an explicitly disabled token threshold", () => {
+    const verdict = recommendSessionThreshold({
+      adapterType: "commandcode_local", threshold: 0,
+      floorTok: 500_000, p50Tok: 900_000, p90Tok: 1_800_000,
+      runs: 50, sessions: 50,
+    });
+    expect(verdict.verdict).toBe("na");
+    expect(verdict.suggestedTokens).toBeNull();
+    expect(verdict.reason).toContain("disabled");
+  });
+
   it("model tier: simple repetitive profile → down; low success + normal context → up", () => {
     expect(recommendModelTier({ runs: 733, okPct: 99, avgTok: 34_000, avgMin: 0.3, costSharePct: 2 }).verdict).toBe("down");
     expect(recommendModelTier({ runs: 24, okPct: 62, avgTok: 200_000, avgMin: 16.6, costSharePct: 0 }).verdict).toBe("up");

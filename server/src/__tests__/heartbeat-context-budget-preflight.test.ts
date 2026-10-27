@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -11,6 +11,7 @@ import {
   createDb,
   ensurePostgresDatabase,
   agents,
+  agentInstructionInjections,
   agentRuntimeState,
   agentWakeupRequests,
   activityLog,
@@ -29,6 +30,7 @@ import {
   issueDocuments,
   issueWorkProducts,
   issues,
+  issueExecutionCards,
   missionPlanArtifacts,
   missions,
   missionSessions,
@@ -45,6 +47,11 @@ import {
   heartbeatRunFinalizations,
   heartbeatRunFinalizationSteps,
 } from "@paperclipai/db";
+import {
+  applyInstructionInjectionPolicy,
+  hashLoadedInstructions,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 
 const executeSpy = vi.fn();
 const mockedAdapterOptions = vi.hoisted(() => ({ supportsLocalAgentJwt: false }));
@@ -60,6 +67,8 @@ vi.mock("../adapters/index.js", () => ({
 }));
 
 import { classifyHeartbeatRunFailure, heartbeatService } from "../services/heartbeat.ts";
+import { buildWorkflowIssueExecutionCard } from "../services/issue-execution-cards/builder.ts";
+import { hashStructuredValue } from "../services/issue-execution-cards/hash.ts";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.ts";
 import { secretService } from "../services/secrets.ts";
 
@@ -487,6 +496,8 @@ describe("heartbeat context budget preflight", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(workspaceRuntimeServices);
     await db.delete(issueWorkProducts);
+    await db.delete(agentInstructionInjections);
+    await db.delete(issueExecutionCards);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
@@ -527,6 +538,130 @@ describe("heartbeat context budget preflight", () => {
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
   });
+
+  async function seedInstructionRotationFixture(input: {
+    maxEstimatedChars: number;
+    staleFile: boolean;
+  }) {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const previousRunId = randomUUID();
+    const sessionId = `session-${randomUUID()}`;
+    const taskKey = `issue:${issueId}`;
+    const workspace = path.join(dataDir, `instruction-rotation-${randomUUID()}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const instructionsPath = path.join(workspace, "AGENTS.md");
+    const viewedPath = path.join(workspace, "viewed.txt");
+    fs.writeFileSync(instructionsPath, "FULL_INSTRUCTION_BODY_".repeat(3_000));
+    fs.writeFileSync(viewedPath, "before");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Instruction Rotation",
+      issuePrefix: `IR${companyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Instruction Rotation Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {
+        cwd: workspace,
+        instructionsFilePath: instructionsPath,
+        promptTemplate: "Continue the issue.",
+      },
+      runtimeConfig: {
+        heartbeat: {
+          contextBudgetPreflight: { maxEstimatedChars: input.maxEstimatedChars },
+          fileViewStalenessRotation: { enabled: true },
+        },
+      },
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      identifier: `IR-${issueId.slice(0, 6)}`,
+      title: "Preserve full instructions across rotation",
+      status: "todo",
+      assigneeAgentId: agentId,
+    });
+    const card = buildWorkflowIssueExecutionCard({
+      title: "Preserve full instructions across rotation",
+      description: "Complete the assigned work.\n[ARTIFACT]: <absolute path>",
+      companyId,
+      issueId,
+      workflowDefinitionId: randomUUID(),
+      workflowRunId: randomUUID(),
+      step: { id: "work", dependencies: [], graphWorkProductRequired: true },
+      isQaStep: false,
+    });
+    await db.insert(issueExecutionCards).values({
+      companyId,
+      issueId,
+      contentHash: hashStructuredValue(card),
+      cardJson: card,
+    });
+    await db.insert(heartbeatRuns).values({
+      id: previousRunId,
+      companyId,
+      agentId,
+      issueId,
+      status: "succeeded",
+      invocationSource: "on_demand",
+      sessionIdAfter: sessionId,
+      contextSnapshot: {
+        taskKey,
+        paperclipWorkspace: { cwd: workspace },
+        paperclipFileViews: [{
+          relativePath: "viewed.txt",
+          contentHash: createHash("sha256").update("before").digest("hex"),
+          exists: true,
+        }],
+      },
+      startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      finishedAt: new Date("2026-01-01T00:01:00.000Z"),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:01:00.000Z"),
+    });
+    await db.insert(agentTaskSessions).values({
+      companyId,
+      agentId,
+      adapterType: "codex_local",
+      taskKey,
+      sessionParamsJson: { sessionId, cwd: workspace },
+      sessionDisplayId: sessionId,
+      lastRunId: previousRunId,
+    });
+    const loaded = await loadInstructionsWithInlinedReferences(instructionsPath);
+    const contentHash = hashLoadedInstructions(loaded);
+    await db.insert(agentInstructionInjections).values({
+      companyId,
+      issueId,
+      agentId,
+      adapterType: "codex_local",
+      instructionsPath,
+      contentHash,
+      injectionCount: 1,
+      lastInjectionJson: {
+        entryPath: loaded.entryPath,
+        includedPaths: loaded.includedPaths,
+        deferredPaths: loaded.deferredPaths,
+        warnings: loaded.warnings,
+        contentHash,
+        providerSessionId: sessionId,
+        deliveryToken: "seed-delivery",
+        mode: "full",
+        deliveredAt: "2026-01-01T00:01:00.000Z",
+      },
+    });
+    if (input.staleFile) fs.writeFileSync(viewedPath, "after");
+    return { agentId, issueId, taskKey };
+  }
 
   it("injects the current control-plane API URL into heartbeat adapter context", async () => {
     const previousPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
@@ -4587,6 +4722,85 @@ describe("heartbeat context budget preflight", () => {
     expect(finalized.wakeupRequestId).toBeTruthy();
     const wakeup = await waitForWakeupStatus(db, finalized.wakeupRequestId!, "failed");
     expect(wakeup?.status).toBe("failed");
+  });
+
+  it("restores full instructions before a context-budget session rotation and does not consume the ledger", async () => {
+    const fixture = await seedInstructionRotationFixture({ maxEstimatedChars: 1, staleFile: false });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "assignment",
+      { taskKey: fixture.taskKey, issueId: fixture.issueId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("failed");
+    expect(finalized.errorCode).toBe("context_budget_exceeded");
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(finalized.contextSnapshot?.paperclipSessionRotationReason).toBe("context_budget_preflight");
+    expect(finalized.contextSnapshot?.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    const [ledger] = await db.select().from(agentInstructionInjections);
+    expect(ledger?.injectionCount).toBe(1);
+    expect(ledger?.lastInjectionJson).toMatchObject({ deliveryToken: "seed-delivery" });
+  });
+
+  it("reruns the context budget with full instructions after file-view staleness rotation", async () => {
+    const fixture = await seedInstructionRotationFixture({ maxEstimatedChars: 20_000, staleFile: true });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "assignment",
+      { taskKey: fixture.taskKey, issueId: fixture.issueId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("failed");
+    expect(finalized.errorCode).toBe("context_budget_exceeded");
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(finalized.contextSnapshot?.paperclipSessionRotationReason).toBe("file_view_stale");
+    expect(finalized.contextSnapshot?.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    const [ledger] = await db.select().from(agentInstructionInjections);
+    expect(ledger?.injectionCount).toBe(1);
+    expect(ledger?.lastInjectionJson).toMatchObject({ deliveryToken: "seed-delivery" });
+  });
+
+  it("delivers and commits full instructions to the fresh session after file-view rotation", async () => {
+    const fixture = await seedInstructionRotationFixture({ maxEstimatedChars: 100_000, staleFile: true });
+    let invocationContext: Record<string, unknown> | null = null;
+    executeSpy.mockImplementationOnce(async ({ config, context, onSpawn }) => {
+      invocationContext = structuredClone(context) as Record<string, unknown>;
+      const loaded = await loadInstructionsWithInlinedReferences(String(config.instructionsFilePath));
+      applyInstructionInjectionPolicy(loaded, context);
+      await onSpawn({ pid: 12345, startedAt: new Date().toISOString() });
+      return {
+        ...successfulAdapterResult(),
+        sessionId: "fresh-after-staleness",
+        sessionDisplayId: "fresh-after-staleness",
+        sessionParams: { sessionId: "fresh-after-staleness", cwd: config.cwd },
+      };
+    });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(
+      fixture.agentId,
+      "assignment",
+      { taskKey: fixture.taskKey, issueId: fixture.issueId },
+      "system",
+      { actorType: "system", actorId: "test-suite" },
+    );
+    const finalized = await waitForRunTerminal(heartbeat, run!.id);
+    expect(finalized.status).toBe("succeeded");
+    expect(invocationContext?.paperclipSessionRotationReason).toBe("file_view_stale");
+    expect(invocationContext?.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    expect(finalized.contextSnapshot?.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    const [ledger] = await db.select().from(agentInstructionInjections);
+    expect(ledger?.injectionCount).toBe(1);
+    expect(ledger?.lastInjectionJson).toMatchObject({
+      providerSessionId: "fresh-after-staleness",
+      mode: "full",
+    });
+    expect(ledger?.lastInjectionJson.deliveryToken).not.toBe("seed-delivery");
   });
 
   it("blocks explicit broad-scan prompts when the manifest forbids them", async () => {

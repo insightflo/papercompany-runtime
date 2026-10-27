@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asString,
   asNumber,
@@ -392,6 +397,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
       instructionsReadFailed = true;
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
@@ -775,6 +781,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     initialFailed &&
     isPiUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      const result = toResult(initial, sessionPath, true);
+      await emitTimingLog();
+      return result;
+    }
     await onLog(
       "stdout",
       `[paperclip] Pi session "${runtimeSessionId}" is unavailable; retrying with a fresh session.\n`,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -13,6 +14,7 @@ export type LoadedInstructionsWithReferences = {
 type InstructionInjectionPolicy = {
   mode?: "full" | "compact";
   contentHash?: string;
+  deliveryToken?: string;
 };
 
 type LoadOptions = {
@@ -33,7 +35,35 @@ function asPolicy(value: unknown): InstructionInjectionPolicy | null {
   const record = value as Record<string, unknown>;
   const mode = record.mode === "compact" || record.mode === "full" ? record.mode : undefined;
   const contentHash = typeof record.contentHash === "string" ? record.contentHash.trim() : undefined;
-  return mode ? { mode, contentHash } : null;
+  const deliveryToken = typeof record.deliveryToken === "string" ? record.deliveryToken.trim() : undefined;
+  return mode ? { mode, contentHash, deliveryToken } : null;
+}
+
+export function hashLoadedInstructions(loaded: LoadedInstructionsWithReferences): string {
+  return createHash("sha256").update(JSON.stringify({
+    content: loaded.content,
+    deferredPaths: loaded.deferredPaths,
+    includedPaths: loaded.includedPaths,
+  })).digest("hex");
+}
+
+export function instructionInjectionRequiresSameSession(context: unknown): boolean {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return false;
+  const record = context as Record<string, unknown>;
+  const delivery = record.paperclipInstructionInjectionDelivery;
+  if (typeof delivery === "object" && delivery !== null && !Array.isArray(delivery)) {
+    const deliveredMode = (delivery as Record<string, unknown>).mode;
+    if (deliveredMode === "compact") return true;
+    if (deliveredMode === "full") return false;
+  }
+  // The delivery marker is staged only after compact instructions are
+  // materialized. Without it, a fresh-session fallback is safe and necessary.
+  return false;
+}
+
+export function clearInstructionInjectionDelivery(context: unknown): void {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return;
+  delete (context as Record<string, unknown>).paperclipInstructionInjectionDelivery;
 }
 
 function compactInstructionsContent(
@@ -57,6 +87,12 @@ function compactInstructionsContent(
   ].filter((line): line is string => line !== null).join("\n");
 }
 
+/**
+ * Applies the planned instruction mode and mutates context with the prepared
+ * delivery marker consumed by the server after the adapter process starts.
+ * Callers must clear that marker if later materialization fails and execution
+ * continues without the prepared instructions.
+ */
 export function applyInstructionInjectionPolicy(
   loaded: LoadedInstructionsWithReferences,
   context: unknown,
@@ -64,8 +100,24 @@ export function applyInstructionInjectionPolicy(
   const record = typeof context === "object" && context !== null && !Array.isArray(context)
     ? context as Record<string, unknown>
     : {};
+  clearInstructionInjectionDelivery(record);
   const policy = asPolicy(record.paperclipInstructionInjection);
-  if (policy?.mode !== "compact") return loaded;
+  if (!policy) return loaded;
+  const actualContentHash = hashLoadedInstructions(loaded);
+  const effectiveMode = policy.mode === "compact" && policy.contentHash === actualContentHash
+    ? "compact"
+    : "full";
+  if (policy.deliveryToken) {
+    record.paperclipInstructionInjectionDelivery = {
+      version: 1,
+      state: "prepared",
+      deliveryToken: policy.deliveryToken,
+      mode: effectiveMode,
+      contentHash: actualContentHash,
+      entryPath: loaded.entryPath,
+    };
+  }
+  if (effectiveMode !== "compact") return loaded;
   return {
     ...loaded,
     content: compactInstructionsContent(loaded, policy),

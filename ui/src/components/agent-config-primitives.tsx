@@ -364,12 +364,14 @@ export function DraftTextarea({
 export function DraftNumberInput({
   value,
   onCommit,
+  onEmpty,
   immediate,
   className,
   ...props
 }: {
   value: number;
   onCommit: (v: number) => void;
+  onEmpty?: () => void;
   immediate?: boolean;
   className?: string;
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "className" | "type">) {
@@ -383,9 +385,17 @@ export function DraftNumberInput({
       value={draft}
       onChange={(e) => {
         setDraft(e.target.value);
-        if (immediate) onCommit(Number(e.target.value) || 0);
+        if (immediate) {
+          if (e.target.value.trim() === "" && onEmpty) onEmpty();
+          else onCommit(Number(e.target.value) || 0);
+        }
       }}
       onBlur={() => {
+        if (draft.trim() === "" && onEmpty) {
+          onEmpty();
+          setDraft(String(value));
+          return;
+        }
         const num = Number(draft) || 0;
         if (num !== value) onCommit(num);
       }}

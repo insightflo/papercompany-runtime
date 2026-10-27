@@ -88,6 +88,20 @@ describeDb("operator instruction cursor: adapter-boundary consumption, not model
     expect(deliveries[1].context.paperclipOperatorInstructionsUnconsumed).toEqual([next]);
   });
 
+  it("preserves a long operator instruction while capping its recent-comment copy", async () => {
+    const body = `authoritative instruction: ${"x".repeat(1_200)}`;
+    const instruction = await comment(body);
+    await invoke();
+
+    expect(deliveries[0].context.paperclipOperatorInstructionsUnconsumed).toEqual([instruction]);
+    expect(deliveries[0].context.paperclipIssueRecentComments).toEqual([
+      expect.objectContaining({
+        id: instruction.id,
+        body: expect.stringMatching(/\.\.\. \[truncated\]$/),
+      }),
+    ]);
+  });
+
   it("excludes agent comments and older-than-24h user comments with a null cursor", async () => {
     await comment("agent reply", 1_000, null);
     await comment("old instruction", 25 * 60 * 60 * 1_000);
