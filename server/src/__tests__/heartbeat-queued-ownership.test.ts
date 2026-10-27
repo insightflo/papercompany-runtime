@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
 import { heartbeatService } from "../services/heartbeat.js";
+import { lockQueuedIssueAdmission } from "../services/heartbeat-queued-issue-admission.js";
 
 // Independent oracle: document O1/O2, SPEC-implementation.md task ownership,
 // and the observed QA -> queued_wakeup_promoted overwrite. The same tests and
@@ -124,3 +125,23 @@ it("preserves initial mention admission while another agent owns the issue", asy
   });
   await evidence("initial_mention_exception", w);
 }, 30_000);
+
+it.each(["mission_owner_plan_rework_requested", "workflow_step_runnable"])(
+  "preserves the %s continuation after reassignment",
+  async reason => {
+    const w = await queuedWorld();
+    await database().update(issues).set({ assigneeAgentId: w.qa.id }).where(eq(issues.id, w.issueId));
+    await database().update(agentWakeupRequests).set({ reason })
+      .where(eq(agentWakeupRequests.id, w.request.id));
+    const request = await readWake(w.request.id);
+    const admission = await database().transaction(tx => lockQueuedIssueAdmission(tx, {
+      request,
+      issueId: w.issueId,
+      contextSnapshot: { issueId: w.issueId, wakeReason: reason },
+    }));
+    expect(admission).toMatchObject({ kind: "ready", issue: { id: w.issueId } });
+    expect(await readWake(w.request.id)).toMatchObject({ status: "queued", finishedAt: null });
+    finish(w.ownerRunId);
+  },
+  30_000,
+);

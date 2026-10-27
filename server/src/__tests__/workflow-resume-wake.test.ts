@@ -3,7 +3,7 @@
 // [목적] findExistingWorkflowResumeWake 좁힘(RES-476) 검증.
 //   - 과거 run 성공으로 status='completed' 가 된 stale wake 는 "이미 처리중" 에서 제외.
 //   - in-flight(queued/coalesced/deferred_issue_execution) + runId null 또는 live run(queued/running) 만 인정.
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
@@ -14,6 +14,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 
 const heartbeatWakeup = vi.fn();
+const ownerWakeAdmission = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
@@ -21,6 +22,11 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
     ...actual,
     heartbeatService: () => ({ wakeup: heartbeatWakeup }),
   };
+});
+
+vi.mock("../services/missions/mission-owner-execution-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/missions/mission-owner-execution-state.js")>();
+  return { ...actual, admitOwnerLinkedStepWake: ownerWakeAdmission };
 });
 
 import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
@@ -65,6 +71,11 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     heartbeatWakeup.mockReset();
     await db.delete(agentWakeupRequests);
     await db.delete(heartbeatRuns);
+  });
+
+  beforeEach(() => {
+    ownerWakeAdmission.mockReset();
+    ownerWakeAdmission.mockResolvedValue(true);
   });
 
   afterAll(async () => {
@@ -155,8 +166,15 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     });
 
     expect(queued).toBe(true);
+    expect(ownerWakeAdmission).toHaveBeenCalledTimes(1);
     expect(heartbeatWakeup).not.toHaveBeenCalled();
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, assignedIssueId))).toHaveLength(1);
+
+    ownerWakeAdmission.mockResolvedValueOnce(false);
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(false);
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
 
     heartbeatWakeup.mockResolvedValue({ id: "fresh-context-wake" });
     expect(await wakeExistingWorkflowStepIssue({

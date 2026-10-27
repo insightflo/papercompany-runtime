@@ -2,6 +2,7 @@ import { and, eq, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import type { FollowupTx } from "./heartbeat-followup-promotion.js";
 import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
+import { readNonEmptyString } from "./heartbeat-run-context.js";
 
 type Issue = typeof issues.$inferSelect;
 type Wake = typeof agentWakeupRequests.$inferSelect;
@@ -25,9 +26,13 @@ export async function lockQueuedIssueAdmission(tx: FollowupTx, input: {
     return exists ? { kind: "waiting" } : { kind: "ready", issue: null };
   }
 
-  const mention = request.reason === "issue_comment_mentioned"
-    || contextSnapshot.wakeReason === "issue_comment_mentioned";
-  if (!mention && (request.source === "assignment" || request.reason === "issue_assigned")
+  const wakeReason = readNonEmptyString(request.reason)
+    ?? readNonEmptyString(contextSnapshot.wakeReason);
+  const mention = wakeReason === "issue_comment_mentioned";
+  // Only the replaceable assignment notification is superseded. Structured
+  // continuations (for example plan rework and workflow resume) carry context
+  // that a later generic assignment wake cannot reconstruct.
+  if (!mention && wakeReason === "issue_assigned"
     && issue.assigneeAgentId !== request.agentId) {
     // Supersession is not an execution failure: never create a run/failure cascade
     // or alter the replacement assignee's checkout, even if that run is finishing.
