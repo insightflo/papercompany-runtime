@@ -59,6 +59,11 @@ export function instructionInjectionRequiresSameSession(context: unknown): boole
   return asPolicy(record.paperclipInstructionInjection)?.mode === "compact";
 }
 
+export function clearInstructionInjectionDelivery(context: unknown): void {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return;
+  delete (context as Record<string, unknown>).paperclipInstructionInjectionDelivery;
+}
+
 function compactInstructionsContent(
   loaded: LoadedInstructionsWithReferences,
   policy: InstructionInjectionPolicy,
@@ -80,6 +85,12 @@ function compactInstructionsContent(
   ].filter((line): line is string => line !== null).join("\n");
 }
 
+/**
+ * Applies the planned instruction mode and mutates context with the prepared
+ * delivery marker consumed by the server after the adapter process starts.
+ * Callers must clear that marker if later materialization fails and execution
+ * continues without the prepared instructions.
+ */
 export function applyInstructionInjectionPolicy(
   loaded: LoadedInstructionsWithReferences,
   context: unknown,
@@ -87,14 +98,14 @@ export function applyInstructionInjectionPolicy(
   const record = typeof context === "object" && context !== null && !Array.isArray(context)
     ? context as Record<string, unknown>
     : {};
-  delete record.paperclipInstructionInjectionDelivery;
+  clearInstructionInjectionDelivery(record);
   const policy = asPolicy(record.paperclipInstructionInjection);
   if (!policy) return loaded;
   const actualContentHash = hashLoadedInstructions(loaded);
-  const effectiveMode = policy?.mode === "compact" && policy.contentHash === actualContentHash
+  const effectiveMode = policy.mode === "compact" && policy.contentHash === actualContentHash
     ? "compact"
     : "full";
-  if (policy?.deliveryToken) {
+  if (policy.deliveryToken) {
     record.paperclipInstructionInjectionDelivery = {
       version: 1,
       state: "prepared",

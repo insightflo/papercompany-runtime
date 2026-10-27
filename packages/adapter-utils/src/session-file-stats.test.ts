@@ -30,6 +30,16 @@ describe("countSessionFileMessages", () => {
     expect(await countSessionFileMessages(file)).toBe(3);
   });
 
+  it("stops as soon as the caller's message threshold is exceeded", async () => {
+    const file = await writeSessionFile([
+      { type: "message", id: "m1" },
+      { type: "message", id: "m2" },
+      { type: "message", id: "m3" },
+      { type: "message", id: "m4" },
+    ]);
+    expect(await countSessionFileMessages(file, { stopAfter: 2 })).toBe(3);
+  });
+
   it("ignores malformed lines instead of failing", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-session-stats-"));
     tempDirs.push(dir);

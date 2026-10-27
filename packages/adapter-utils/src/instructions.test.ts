@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
   hashLoadedInstructions,
   instructionInjectionRequiresSameSession,
   loadInstructionsWithInlinedReferences,
@@ -170,6 +171,18 @@ describe("loadInstructionsWithInlinedReferences", () => {
       });
       expect(instructionInjectionRequiresSameSession(context)).toBe(false);
     });
+  });
+
+  it("clears prepared delivery evidence when later materialization fails", () => {
+    const context = {
+      paperclipInstructionInjectionDelivery: {
+        version: 1,
+        state: "prepared",
+        deliveryToken: "delivery-failed",
+      },
+    };
+    clearInstructionInjectionDelivery(context);
+    expect(context).not.toHaveProperty("paperclipInstructionInjectionDelivery");
   });
 
   it("strips a leading YAML frontmatter block from the entry instructions", async () => {
