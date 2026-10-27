@@ -929,9 +929,7 @@ export async function createApp(
         inArray(issues.status, ["backlog", "todo", "in_progress", "blocked", "in_review"]),
         sql`${issues.hiddenAt} is null`,
       )).orderBy(asc(issues.createdAt)).limit(1);
-      if (!oversightIssue) {
-        throw new Error(`Cannot dispatch periodic mission review without an active oversight issue: ${mission.id}`);
-      }
+      if (!oversightIssue) return null;
       return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
         triggerDetail: "system",

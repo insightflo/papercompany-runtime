@@ -31,7 +31,7 @@ vi.mock("../services/missions/mission-owner-execution-state.js", async (importOr
 
 import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
 import { wakeExistingWorkflowStepIssue } from "../services/workflow/dag-engine.js";
-import { lockQueuedIssueAdmission } from "../services/heartbeat-queued-issue-admission.js";
+import { lockQueuedIssueAdmission, queuedIssueExecutionIsBusy } from "../services/heartbeat-queued-issue-admission.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -237,6 +237,22 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     } finally {
       await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, issueId));
       await db.delete(agents).where(eq(agents.id, replacementId));
+    }
+  });
+
+  it("does not treat terminal lock residue as live issue ownership", async () => {
+    const run = await db.insert(heartbeatRuns).values({
+      companyId, agentId, issueId, status: "completed", invocationSource: "automation",
+    }).returning().then(rows => rows[0]!);
+    await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
+    try {
+      expect(await db.transaction(async tx => {
+        const issue = await tx.select().from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]!);
+        return queuedIssueExecutionIsBusy(tx, issue);
+      })).toBe(false);
+    } finally {
+      await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, issueId));
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
     }
   });
 

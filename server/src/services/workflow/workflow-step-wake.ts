@@ -190,6 +190,7 @@ export async function wakeExistingWorkflowStepIssue(input: {
       workflowStepRunId: reusableStepRunId,
       workflowExecutionGeneration: stepAuthority.executionGeneration,
       agentId: wakeIssue.assigneeAgentId ?? undefined,
+      resumeCompatibleOnly: true,
     })).length > 0
     : false;
   // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재

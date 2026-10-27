@@ -72,6 +72,7 @@ export async function findAcceptedWorkflowResumeWakeForStep(
     workflowStepRunId: string;
     workflowExecutionGeneration?: number;
     agentId?: string;
+    resumeCompatibleOnly?: boolean;
   },
 ): Promise<AcceptedWorkflowResumeWake[]> {
   const rows = await db
@@ -87,6 +88,12 @@ export async function findAcceptedWorkflowResumeWakeForStep(
       eq(agentWakeupRequests.workflowRunId, input.workflowRunId),
       eq(agentWakeupRequests.workflowStepRunId, input.workflowStepRunId),
       input.agentId === undefined ? undefined : eq(agentWakeupRequests.agentId, input.agentId),
+      input.resumeCompatibleOnly === true
+        ? or(
+          eq(agentWakeupRequests.requestKind, "workflow_resume"),
+          and(eq(agentWakeupRequests.requestKind, "create"), eq(agentWakeupRequests.reason, "issue_assigned")),
+        )
+        : undefined,
       input.workflowExecutionGeneration === undefined
         ? undefined
         : eq(agentWakeupRequests.workflowExecutionGeneration, input.workflowExecutionGeneration),

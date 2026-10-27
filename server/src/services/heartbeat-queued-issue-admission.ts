@@ -1,5 +1,5 @@
 import { and, eq, or, sql } from "drizzle-orm";
-import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
 import type { FollowupTx } from "./heartbeat-followup-promotion.js";
 import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
@@ -46,13 +46,15 @@ export async function lockQueuedIssueAdmission(tx: FollowupTx, input: {
 
 /** Caller retains the issue lock through insertion/checkout. Never clear another run's ownership. */
 export async function queuedIssueExecutionIsBusy(tx: FollowupTx, issue: Issue): Promise<boolean> {
-  if (issue.executionRunId || issue.checkoutRunId) return true;
-  // Match initial admission's legacy linkage too: mention/legacy runs may have no
-  // issue lock. Lifecycle-active finalization still owns its execution until settled.
-  const inFlight = await lifecycleInFlightClause(tx as unknown as Db);
+  // Match both current lock links and initial admission's legacy linkage against
+  // lifecycle-active runs. Terminal/dangling lock residue is not live ownership.
+  const inFlight = await lifecycleInFlightClause(tx as unknown as Parameters<typeof lifecycleInFlightClause>[0]);
   const [run] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, issue.companyId), inFlight,
-    or(eq(heartbeatRuns.issueId, issue.id),
+    or(
+      issue.executionRunId ? eq(heartbeatRuns.id, issue.executionRunId) : undefined,
+      issue.checkoutRunId ? eq(heartbeatRuns.id, issue.checkoutRunId) : undefined,
+      eq(heartbeatRuns.issueId, issue.id),
       sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`),
   )).limit(1);
   return Boolean(run);
