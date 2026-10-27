@@ -101,6 +101,7 @@ const PREFIX = [
 const SUFFIX = [
   "- File views: 1 available (wake_comment)",
   "- Broad scans: disallowed (allowed mission search scopes: mission). Use missionSearch instead of pathless rg/find.",
+  "- Runtime reads (exact allowlist for the mission/workflow facts above): mission state GET /api/missions/mission-1/runtime-snapshot, mission decisions GET /api/missions/mission-1/decision-log, workflow state, steps, and workProducts GET /api/workflow-runs/run-1/detail. Never call GET /api/missions/mission-1/plan, GET /api/missions/mission-1/planning-context, GET /api/missions/mission-1/decisions. Planning context is already in this brief. A 404 is not a recovery signal; do not retry with a guessed sibling path.",
   "Issue execution card:",
   "- Work product: required=true; outputDir=/out/report",
   "- Verdict: required=true; ledger=workflow_validation_verdict; allowed=PASS, REQUEST_CHANGES",
@@ -111,6 +112,13 @@ const SUFFIX = [
   "- Available tools: publish — use them only when the task needs them; they are not mandatory.",
   "- Agent instructions injection: compact (instructions-1).",
 ];
+function suffixForMission(missionId: unknown): string[] {
+  const normalizedMissionId = typeof missionId === "string" && missionId.trim() ? missionId.trim() : null;
+  const runtimeReadLine = normalizedMissionId
+    ? `- Runtime reads (exact allowlist for the mission/workflow facts above): mission state GET /api/missions/${normalizedMissionId}/runtime-snapshot, mission decisions GET /api/missions/${normalizedMissionId}/decision-log, workflow state, steps, and workProducts GET /api/workflow-runs/run-1/detail. Never call GET /api/missions/${normalizedMissionId}/plan, GET /api/missions/${normalizedMissionId}/planning-context, GET /api/missions/${normalizedMissionId}/decisions. Planning context is already in this brief. A 404 is not a recovery signal; do not retry with a guessed sibling path.`
+    : "- Runtime reads (exact allowlist for the mission/workflow facts above): workflow state, steps, and workProducts GET /api/workflow-runs/run-1/detail. Planning context is already in this brief. A 404 is not a recovery signal; do not retry with a guessed sibling path.";
+  return SUFFIX.map((line) => line.startsWith("- Runtime reads (") ? runtimeReadLine : line);
+}
 const joinBaseLines = (lines: string[]) => lines.map((line) => line.trim()).filter(Boolean).join("\n");
 
 function freezeDeep(value: unknown): void {
@@ -143,6 +151,33 @@ function freezeDeep(value: unknown): void {
     expect(lines.slice(1)).toEqual(T1_NOTE_LINES.slice(1));
     expect(brief.replace(NOTE_HEADER, T1_NOTE_HEADER)).toBe(baseline);
     expect(baseline.length - brief.length).toBe(T1_NOTE_HEADER.length - NOTE_HEADER.length);
+  });
+
+  it("R1: supplies only exact supported read routes and never infers a missing mission scope", () => {
+    const context = makeContext(makeNote());
+    context.issueId = "issue-1";
+    const brief = buildPaperclipRuntimeBrief(context);
+    expect(brief).toContain("GET /api/missions/mission-1/runtime-snapshot");
+    expect(brief).toContain("GET /api/missions/mission-1/decision-log");
+    expect(brief).toContain("GET /api/workflow-runs/run-1/detail");
+    expect(brief).toContain("Never call GET /api/missions/mission-1/plan");
+    expect(brief).toContain("GET /api/missions/mission-1/planning-context");
+    expect(brief).toContain("GET /api/missions/mission-1/decisions");
+    expect(brief).toContain("GET /api/issues/issue-1/workflow/context");
+    for (const unsupported of [
+      "GET /api/missions/mission-1/decision-reports",
+      "/planning-dossier",
+      "GET /workflow/verdict",
+      "/validations",
+      "/validation-ledger",
+    ]) expect(brief).not.toContain(unsupported);
+
+    const withoutMission = makeContext(makeNote());
+    withoutMission.missionId = undefined;
+    const workflowOnlyBrief = buildPaperclipRuntimeBrief(withoutMission);
+    expect(workflowOnlyBrief).not.toContain("mission state GET");
+    expect(workflowOnlyBrief).not.toContain("mission decisions GET");
+    expect(workflowOnlyBrief).toContain("GET /api/workflow-runs/run-1/detail");
   });
 
   const fallbacks: Array<[string, Record<string, unknown> | null, unknown]> = [
@@ -180,7 +215,7 @@ function freezeDeep(value: unknown): void {
     const context = makeContext(note);
     context.missionId = missionId;
     expect(buildMissionWorkingNoteBriefLines(note, [missionId])).toEqual(legacyNoteLines(note));
-    expect(buildPaperclipRuntimeBrief(context)).toBe(joinBaseLines([...PREFIX, ...legacyNoteLines(note), ...SUFFIX]));
+    expect(buildPaperclipRuntimeBrief(context)).toBe(joinBaseLines([...PREFIX, ...legacyNoteLines(note), ...suffixForMission(missionId)]));
   });
 
   it("P2: requires agreement of all supplied structured scopes, without inferring from paths", () => {
@@ -232,6 +267,7 @@ function freezeDeep(value: unknown): void {
       "- Workspace: unavailable",
       PREFIX[6],
       ...COMPACT_NOTE_LINES,
+      "- Runtime reads (exact allowlist for the mission/workflow facts above): mission state GET /api/missions/mission-1/runtime-snapshot, mission decisions GET /api/missions/mission-1/decision-log. Never call GET /api/missions/mission-1/plan, GET /api/missions/mission-1/planning-context, GET /api/missions/mission-1/decisions. Planning context is already in this brief. A 404 is not a recovery signal; do not retry with a guessed sibling path.",
     ].join("\n"));
   });
 

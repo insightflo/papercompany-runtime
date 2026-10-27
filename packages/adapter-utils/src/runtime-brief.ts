@@ -2,7 +2,7 @@ import { joinPromptSections } from "./prompt-utils.js";
 import { summarizeMarkdownHandoff } from "./runtime-brief-handoff.js";
 import { renderMissionRevisionContext } from "./mission-revision-brief.js";
 import { readRunToolContract } from "./run-tool-contract.js";
-import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
+import { buildIssueExecutionCardBriefLines, buildRuntimeReadBriefLine } from "./runtime-brief-card-section.js";
 import { buildWorkflowReworkContractBriefLines, buildWorkflowReworkTaskHeader } from "./runtime-brief-rework-section.js";
 import { buildQaCapAcceptanceBriefLines } from "./runtime-brief-qa-cap-section.js";
 import { buildMissionWorkingNoteBriefLines } from "./runtime-brief-working-note.js";
@@ -753,6 +753,11 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       cardHash: asString(context.paperclipIssueExecutionCardHash),
     })
     : [];
+  const runtimeReadLine = buildRuntimeReadBriefLine({
+    missionId: asString(context.missionId),
+    issueId,
+    card: context.paperclipIssueExecutionCard,
+  });
   const instructionInjectionLine = asString(instructionInjection?.mode)
     ? `- Agent instructions injection: ${asString(instructionInjection?.mode)}${asString(instructionInjection?.contentHash) ? ` (${asString(instructionInjection?.contentHash)})` : ""}.`
     : null;
@@ -817,6 +822,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
+    runtimeReadLine,
     ...issueExecutionCardLines,
     instructionInjectionLine,
     handoffSummary,

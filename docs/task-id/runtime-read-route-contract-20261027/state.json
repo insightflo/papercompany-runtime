@@ -1,0 +1,26 @@
+{
+  "task": "runtime-read-route-contract-20261027",
+  "tier": "L",
+  "phase": "complete",
+  "round": { "adversary": 1, "review": 3 },
+  "spawns": 0,
+  "claims": [
+    {
+      "claim": "The runtime brief supplies exact supported mission decision, mission state, and workflow detail read routes without changing write, completion, authority, or recovery behavior.",
+      "status": "verified",
+      "evidence": "The strict common brief names the three supported reads and the four observed forbidden alternatives from structured IDs. Focused 58, serial regression 86, root/server TypeScript, build, and diff check passed."
+    },
+    {
+      "claim": "A fresh bounded mission completes without guessed read-route 404 responses or manual wake, resume, re-complete, or database mutation.",
+      "status": "verified",
+      "evidence": "Different-case three-role mission f63b23e3-b336-4166-bfdd-0c20bbf82f0d completed at 2026-10-27T02:28:31.420Z and workflow 0bac1d08-5881-4de1-84d3-68c5f205ded8 completed at 02:26:38.275Z. The observed read-route exception was one supported documents/plan missing-resource 404 before the plan existed; no guessed sibling read route was observed. No manual wake, resume, re-complete, or database mutation was used."
+    },
+    {
+      "claim": "An already accepted typed workflow-resume wake prevents a second admission for the same workflow step execution generation, while an advanced generation remains eligible for an authorized retry.",
+      "status": "verified",
+      "evidence": "In workflow 0bac1d08-5881-4de1-84d3-68c5f205ded8, all three step runs completed at generation 0 with exactly one accepted/completed issue_assigned wake each; no workflow_step_runnable duplicate was created. The mission and workflow both completed. The advanced-generation allowance remains covered by the focused regression. Related tests passed 68/68; root/server TypeScript, server build, and diff check passed."
+    }
+  ],
+  "bundle": "/Users/kwak/Projects/ai/papercompany/papercompany-artifacts/doc/plans/2026-10-25-runtime-efficiency-tasks.md",
+  "next": "No required implementation or local verification remains. Commit, push, PR, merge, and deployment remain outside the approved scope."
+}

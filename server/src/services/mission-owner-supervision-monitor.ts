@@ -1,4 +1,5 @@
-import type { Db } from "@paperclipai/db";
+import { missions, type Db } from "@paperclipai/db";
+import { asc, inArray } from "drizzle-orm";
 import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
@@ -55,7 +56,7 @@ export function createMissionOwnerSupervisionMonitor(
     if (running) return;
     running = true;
     try {
-      const result = await missionService(db, {
+      const service = missionService(db, {
         onOwnerActionCreated: options.onOwnerActionCreated,
         onOwnerDecisionRetrySourceIssueApplied: options.onOwnerDecisionRetrySourceIssueApplied,
         onStaleSourceIssueWakeupRequested: options.onStaleSourceIssueWakeupRequested,
@@ -66,13 +67,47 @@ export function createMissionOwnerSupervisionMonitor(
         onMissionTerminalRunCloseoutWakeRequested: options.onMissionTerminalRunCloseoutWakeRequested,
         onOwnerDecisionDispatchStalledWakeRequested: options.onOwnerDecisionDispatchStalledWakeRequested,
         onMissionOwnerPeriodicReviewWakeRequested: options.onMissionOwnerPeriodicReviewWakeRequested,
-      }).runActiveMissionOwnerSupervision({
+      });
+
+      const sweepOptions = {
         staleAfterMinutes,
         applySafeActions,
         applyOwnerDecisionActions: true,
         dispatchOwnerDecisionWakeups: true,
         dispatchStaleSourceIssueWakeups: false,
-      });
+      };
+      let result: Awaited<ReturnType<typeof service.runActiveMissionOwnerSupervision>>;
+      try {
+        // Preserve the established single aggregate sweep on the normal path.
+        result = await service.runActiveMissionOwnerSupervision(sweepOptions);
+      } catch (err) {
+        // A safety conflict in one mission remains visible, then the fallback
+        // isolates candidates so unrelated missions can still close out.
+        logger.warn({ err }, "Mission owner supervision monitor aggregate sweep failed; retrying by mission");
+        const candidates = await db
+          .select({ id: missions.id })
+          .from(missions)
+          .where(inArray(missions.status, applySafeActions
+            ? ["active", "planning", "completed"]
+            : ["active", "planning"]))
+          .orderBy(asc(missions.createdAt), asc(missions.id));
+        const missionIds: string[] = [];
+        const supervisedMissions: typeof result.missions = [];
+        for (const candidate of candidates) {
+          try {
+            const missionResult = await service.runActiveMissionOwnerSupervision({
+              ...sweepOptions,
+              missionIds: [candidate.id],
+            });
+            missionIds.push(...missionResult.missionIds);
+            supervisedMissions.push(...missionResult.missions);
+          } catch (missionErr) {
+            logger.warn({ err: missionErr, missionId: candidate.id }, "Mission owner supervision monitor mission sweep failed");
+          }
+        }
+        result = { missionIds, missions: supervisedMissions };
+      }
+
       const findingsCount = result.missions.reduce((total, mission) => total + mission.findings.length, 0);
       const commentedCount = result.missions.filter((mission) => mission.commented).length;
       const appliedActionsCount = result.missions.reduce((total, mission) => total + mission.appliedActions.length, 0);

@@ -6,7 +6,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -125,6 +125,45 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     const result = await findExistingWorkflowResumeWake(db, { companyId, agentId, issueId });
     expect(result?.id).toBe(wake.id);
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, liveRun.id));
+  });
+
+  it("reuses an accepted assignment wake only for the same workflow step generation", async () => {
+    const workflowId = randomUUID(), runId = randomUUID(), stepRunId = randomUUID(), assignedIssueId = randomUUID();
+    const step = { id: "qa-final", name: "Final QA", agentId, dependencies: [] };
+    const [definition] = await db.insert(workflowDefinitions).values({
+      id: workflowId, companyId, name: "assignment-wake-dedup", stepsJson: [step],
+    }).returning();
+    const [run] = await db.insert(workflowRuns).values({
+      id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running",
+    }).returning();
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId, workflowRunId: runId, stepId: step.id, status: "pending", executionGeneration: 3,
+    });
+    await db.insert(issues).values({
+      id: assignedIssueId, companyId, missionId, assigneeAgentId: agentId,
+      title: "assignment-wake-dedup: Final QA", status: "todo",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, issueId: assignedIssueId, missionId, workflowRunId: runId,
+      workflowStepRunId: stepRunId, workflowExecutionGeneration: 3,
+      source: "assignment", reason: "issue_assigned", requestKind: "create", status: "queued",
+      payload: { issueId: assignedIssueId, mutation: "workflow_resume", workflowRunId: runId, workflowStepRunId: stepRunId },
+    });
+
+    const queued = await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    });
+
+    expect(queued).toBe(true);
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, assignedIssueId))).toHaveLength(1);
+
+    await db.update(workflowStepRuns).set({ executionGeneration: 4 }).where(eq(workflowStepRuns.id, stepRunId));
+    heartbeatWakeup.mockResolvedValue({ id: "new-generation-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
   });
 
   it("carries a workflow rework contract into resume wake payload and context", async () => {

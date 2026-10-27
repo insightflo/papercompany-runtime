@@ -132,3 +132,30 @@ export function buildIssueExecutionCardBriefLines(input: {
 
   return lines;
 }
+
+export function buildRuntimeReadBriefLine(input: {
+  readonly missionId?: string | null;
+  readonly issueId?: string | null;
+  readonly card: unknown;
+}): string | null {
+  const missionId = asString(input.missionId);
+  const issueId = asString(input.issueId);
+  const workflow = asRecord(asRecord(input.card)?.workflow);
+  const runId = asString(workflow?.runId);
+  const readRoutes = [
+    missionId ? `mission state GET /api/missions/${missionId}/runtime-snapshot` : null,
+    missionId ? `mission decisions GET /api/missions/${missionId}/decision-log` : null,
+    runId ? `workflow state, steps, and workProducts GET /api/workflow-runs/${runId}/detail` : null,
+  ].filter((route): route is string => route !== null);
+  if (readRoutes.length === 0) return null;
+  const forbiddenRoutes = [
+    missionId ? `GET /api/missions/${missionId}/plan` : null,
+    missionId ? `GET /api/missions/${missionId}/planning-context` : null,
+    missionId ? `GET /api/missions/${missionId}/decisions` : null,
+    issueId ? `GET /api/issues/${issueId}/workflow/context` : null,
+  ].filter((route): route is string => route !== null);
+  const forbiddenLine = forbiddenRoutes.length > 0
+    ? ` Never call ${joinList(forbiddenRoutes)}.`
+    : "";
+  return `- Runtime reads (exact allowlist for the mission/workflow facts above): ${joinList(readRoutes)}.${forbiddenLine} Planning context is already in this brief. A 404 is not a recovery signal; do not retry with a guessed sibling path.`;
+}

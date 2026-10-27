@@ -152,7 +152,9 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     return issue;
   }
 
-  async function seedAssignedWorkflowIssue() {
+  async function seedAssignedWorkflowIssue(input: {
+    requestKind?: "workflow_step_runnable" | "workflow_resume";
+  } = {}) {
     const issue = await seedWorkflowIssue({ stepId: "produce-report", title: "Produce report" });
     const agentId = randomUUID();
     const runId = randomUUID();
@@ -172,6 +174,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       permissions: {},
     });
     const wakeId = randomUUID();
+    const requestKind = input.requestKind ?? "workflow_step_runnable";
     const attemptProof = {
       schemaVersion: 1 as const,
       companyId: issue.companyId,
@@ -192,8 +195,8 @@ describeEmbeddedPostgres("workflow agent API service", () => {
       agentId,
       source: "assignment",
       triggerDetail: "system",
-      reason: "workflow_step_runnable",
-      requestKind: "workflow_step_runnable",
+      reason: requestKind,
+      requestKind,
       issueId: issue.id,
       missionId: null,
       workflowRunId: stepRun.workflowRunId,
@@ -224,7 +227,7 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     });
     await db.update(issues).set({ assigneeAgentId: agentId, checkoutRunId: runId }).where(eq(issues.id, issue.id));
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, issue.id));
-    return { issue: updatedIssue, agentId, runId };
+    return { issue: updatedIssue, agentId, runId, wakeId, workflowRunId: stepRun.workflowRunId };
   }
 
   async function seedMissionOwnerUnblockIssue(sourceIssue: typeof issues.$inferSelect) {
@@ -892,6 +895,33 @@ describeEmbeddedPostgres("workflow agent API service", () => {
     });
     const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, issue.id));
     expect(rows[rows.length - 1]?.details).toMatchObject({ type: "preview_url", url: publicUrl });
+  });
+
+  it("reconciles the workflow after completing its live validation-recheck heartbeat", async () => {
+    const { issue, agentId, runId, wakeId, workflowRunId } = await seedAssignedWorkflowIssue({
+      requestKind: "workflow_resume",
+    });
+
+    const response = await request(createApp(db, {
+      type: "agent",
+      source: "agent_jwt",
+      companyId: issue.companyId,
+      agentId,
+      runId,
+    }))
+      .post(`/api/issues/${issue.id}/workflow/complete`)
+      .send({ comment: "Validation recheck passed." });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const [heartbeat] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    const [step] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.issueId, issue.id));
+    const [workflowRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, workflowRunId));
+    expect(heartbeat).toMatchObject({ status: "succeeded" });
+    expect(heartbeat?.finishedAt).not.toBeNull();
+    expect(wake).toMatchObject({ status: "completed" });
+    expect(step).toMatchObject({ status: "completed" });
+    expect(workflowRun).toMatchObject({ status: "completed" });
   });
 
   it("allows a checked-out mission owner unblock run to register recovered source artifacts", async () => {

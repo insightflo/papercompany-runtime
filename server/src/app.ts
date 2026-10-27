@@ -2,8 +2,8 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { agents, type Db } from "@paperclipai/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { agents, issues, type Db } from "@paperclipai/db";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { PublicSocialAuthProvider } from "./auth/social-providers.js";
 import type { StorageService } from "./storage/types.js";
@@ -921,27 +921,41 @@ export async function createApp(
         dispatchStatus,
       },
     }),
-    onMissionOwnerPeriodicReviewWakeRequested: ({ mission, openOwnerActionIds, inFlightUnitLabels, idempotencyKey }) => heartbeat.wakeup(mission.ownerAgentId, {
-      source: "assignment",
-      triggerDetail: "system",
-      reason: "mission_owner_periodic_review",
-      idempotencyKey,
-      payload: {
-        missionId: mission.id,
-        mutation: "mission_owner_periodic_review",
-        openOwnerActionIds,
-        inFlightUnits: inFlightUnitLabels,
-        hint: "Periodic mission review: inspect the mission (GET /api/missions/{id} + runtime-snapshot + issues), verify in-flight work is progressing, apply owner decisions where needed (retry/reassign/replan/escalate via owner-recovery API), and close out (complete oversight/cancel) when the mission is done.",
-      },
-      requestedByActorType: "system",
-      requestedByActorId: "mission-owner-supervision-monitor",
-      contextSnapshot: {
-        missionId: mission.id,
-        source: "mission_owner_periodic_review",
-        openOwnerActionIds,
-        inFlightUnits: inFlightUnitLabels,
-      },
-    }),
+    onMissionOwnerPeriodicReviewWakeRequested: async ({ mission, openOwnerActionIds, inFlightUnitLabels, idempotencyKey }) => {
+      const [oversightIssue] = await db.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.companyId, mission.companyId),
+        eq(issues.missionId, mission.id),
+        eq(issues.originKind, "mission_main_executor_oversight"),
+        inArray(issues.status, ["backlog", "todo", "in_progress", "blocked"]),
+        sql`${issues.hiddenAt} is null`,
+      )).orderBy(asc(issues.createdAt)).limit(1);
+      if (!oversightIssue) {
+        throw new Error(`Cannot dispatch periodic mission review without an active oversight issue: ${mission.id}`);
+      }
+      return heartbeat.wakeup(mission.ownerAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "mission_owner_periodic_review",
+        idempotencyKey,
+        payload: {
+          issueId: oversightIssue.id,
+          missionId: mission.id,
+          mutation: "mission_owner_periodic_review",
+          openOwnerActionIds,
+          inFlightUnits: inFlightUnitLabels,
+          hint: "Periodic mission review: inspect the mission (GET /api/missions/{id} + runtime-snapshot + issues), verify in-flight work is progressing, apply owner decisions where needed (retry/reassign/replan/escalate via owner-recovery API), and close out (complete oversight/cancel) when the mission is done.",
+        },
+        requestedByActorType: "system",
+        requestedByActorId: "mission-owner-supervision-monitor",
+        contextSnapshot: {
+          issueId: oversightIssue.id,
+          missionId: mission.id,
+          source: "mission_owner_periodic_review",
+          openOwnerActionIds,
+          inFlightUnits: inFlightUnitLabels,
+        },
+      });
+    },
     onMissionOversightFailureWakeRequested: async ({ mission, issueId, verdict, failureEntities, idempotencyKey }) => {
       await heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment", triggerDetail: "system", reason: "mission_oversight_failure", idempotencyKey,

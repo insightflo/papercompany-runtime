@@ -6,6 +6,7 @@ import type { WorkflowStep } from "./dag-engine.js";
 import type { PersistedWorkflowStep } from "./execution-steps.js";
 import { heartbeatService } from "../heartbeat.js";
 import { queueIssueAssignmentWakeup } from "../issue-assignment-wakeup.js";
+import { findAcceptedWorkflowResumeWakeForStep } from "../workflow-resume-wake.js";
 import { admitOwnerLinkedStepWake, type OwnerExecutionAdmission } from "../missions/mission-owner-execution-state.js";
 import { logActivity } from "../activity-log.js";
 import { isCapOverrideWakeKey } from "./cap-override-wakeup-conflict.js";
@@ -165,6 +166,19 @@ export async function wakeExistingWorkflowStepIssue(input: {
   if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
     workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
     ownerExecution: input.ownerExecution ?? null }))) return false;
+  const [stepAuthority] = input.stepRunId
+    ? await input.db.select({ executionGeneration: workflowStepRuns.executionGeneration })
+      .from(workflowStepRuns)
+      .where(and(eq(workflowStepRuns.id, input.stepRunId), eq(workflowStepRuns.workflowRunId, input.run.id)))
+      .limit(1)
+    : [];
+  if (input.stepRunId && stepAuthority && (await findAcceptedWorkflowResumeWakeForStep(input.db, {
+    companyId: input.run.companyId,
+    issueId: issue.id,
+    workflowRunId: input.run.id,
+    workflowStepRunId: input.stepRunId,
+    workflowExecutionGeneration: stepAuthority.executionGeneration,
+  })).length > 0) return true;
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
     issue: wakeIssue,
