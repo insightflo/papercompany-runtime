@@ -70,6 +70,9 @@ export async function findAcceptedWorkflowResumeWakeForStep(
     issueId: string;
     workflowRunId: string;
     workflowStepRunId: string;
+    workflowExecutionGeneration?: number;
+    agentId?: string;
+    resumeCompatibleOnly?: boolean;
   },
 ): Promise<AcceptedWorkflowResumeWake[]> {
   const rows = await db
@@ -84,6 +87,16 @@ export async function findAcceptedWorkflowResumeWakeForStep(
       eq(agentWakeupRequests.issueId, input.issueId),
       eq(agentWakeupRequests.workflowRunId, input.workflowRunId),
       eq(agentWakeupRequests.workflowStepRunId, input.workflowStepRunId),
+      input.agentId === undefined ? undefined : eq(agentWakeupRequests.agentId, input.agentId),
+      input.resumeCompatibleOnly === true
+        ? or(
+          eq(agentWakeupRequests.requestKind, "workflow_resume"),
+          and(eq(agentWakeupRequests.requestKind, "create"), eq(agentWakeupRequests.reason, "issue_assigned")),
+        )
+        : undefined,
+      input.workflowExecutionGeneration === undefined
+        ? undefined
+        : eq(agentWakeupRequests.workflowExecutionGeneration, input.workflowExecutionGeneration),
       inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]),
     ));
   const direct = rows.filter((row) => row.status !== "coalesced");

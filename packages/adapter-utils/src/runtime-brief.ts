@@ -2,9 +2,10 @@ import { joinPromptSections } from "./prompt-utils.js";
 import { summarizeMarkdownHandoff } from "./runtime-brief-handoff.js";
 import { renderMissionRevisionContext } from "./mission-revision-brief.js";
 import { readRunToolContract } from "./run-tool-contract.js";
-import { buildIssueExecutionCardBriefLines } from "./runtime-brief-card-section.js";
+import { buildIssueExecutionCardBriefLines, buildRuntimeReadBriefLine } from "./runtime-brief-card-section.js";
 import { buildWorkflowReworkContractBriefLines, buildWorkflowReworkTaskHeader } from "./runtime-brief-rework-section.js";
 import { buildQaCapAcceptanceBriefLines } from "./runtime-brief-qa-cap-section.js";
+import { buildMissionWorkingNoteBriefLines } from "./runtime-brief-working-note.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -727,23 +728,10 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     missionPlan?.available === true && Number(missionPlan.ruleRefCount ?? 0) > 0
       ? `- Mission rules: ${Number(missionPlan.ruleRefCount ?? 0)} refs${missionPlanRuleNames.length > 0 ? ` — ${missionPlanRuleNames.join(", ")}` : ""}${missionPlanRuleModes.length > 0 ? ` (${missionPlanRuleModes.join(", ")})` : ""}`
       : null;
-  const missionWorkingNotePath = asString(missionWorkingNote?.path);
-  const missionWorkingNoteInstructionLines = Array.isArray(missionWorkingNote?.instructions)
-    ? missionWorkingNote.instructions.filter((line): line is string => typeof line === "string" && line.trim().length > 0)
-    : [];
-  const missionWorkingNoteMissionId = asString(missionWorkingNote?.missionId);
-  // [SKILL.state] working note 지침을 brief 에 렌더링해 에이전트 프롬프트에 실제로 도달하게 한다.
-  // + 결정 보고 API 포인터(결정 로그 소비/생산 완결).
-  const missionWorkingNoteLines: string[] =
-    missionWorkingNote?.available === true && missionWorkingNotePath
-      ? [
-          `- Mission working note: ${missionWorkingNotePath} (shared scratch context; read before acting, update mission status/evidence/decisions/next steps, not a final workProduct).`,
-          ...missionWorkingNoteInstructionLines.map((line) => `- ${line}`),
-          missionWorkingNoteMissionId
-            ? `- Mission decision log: report mission-level decisions via POST /api/missions/${missionWorkingNoteMissionId}/decision-reports with updates [{id, summary, status, supersedes}]; statuses confirmed/under_review/retired.`
-            : null,
-        ].filter((line): line is string => line !== null)
-      : [];
+  const missionWorkingNoteLines = buildMissionWorkingNoteBriefLines(missionWorkingNote, [
+    context.missionId,
+    missionOwnerPlanningContext?.available === true ? missionOwnerPlanningContext.missionId : null,
+  ]);
   const missionOwnerPlanningContextLine = buildMissionOwnerPlanningProtocol(missionOwnerPlanningContext);
 
   const guardrailLine =
@@ -765,6 +753,11 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
       cardHash: asString(context.paperclipIssueExecutionCardHash),
     })
     : [];
+  const runtimeReadLine = buildRuntimeReadBriefLine({
+    missionId: asString(context.missionId),
+    issueId,
+    card: context.paperclipIssueExecutionCard,
+  });
   const instructionInjectionLine = asString(instructionInjection?.mode)
     ? `- Agent instructions injection: ${asString(instructionInjection?.mode)}${asString(instructionInjection?.contentHash) ? ` (${asString(instructionInjection?.contentHash)})` : ""}.`
     : null;
@@ -829,6 +822,7 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     hermesChatLine,
     fileViewsLine,
     guardrailLine,
+    runtimeReadLine,
     ...issueExecutionCardLines,
     instructionInjectionLine,
     handoffSummary,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { agents, companies, createDb, missions, workflowDefinitions, workflowRuns, workflowStepRuns,
+import { agents, companies, createDb, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns,
   workflowTransitionEvents } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import * as shadow from "../services/mission-oversight-shadow.js";
@@ -26,12 +26,15 @@ describe("mission oversight failure lane (isolated PostgreSQL)", () => {
     const [company] = await db.insert(companies).values({ name: "Failure lane", issuePrefix: `F${randomUUID()}` }).returning();
     const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Owner" }).returning();
     const [mission] = await db.insert(missions).values({ companyId: company.id, ownerAgentId: agent.id, title: "Failure lane", status }).returning();
+    const [oversightIssue] = await db.insert(issues).values({ companyId: company.id, missionId: mission.id,
+      assigneeAgentId: agent.id, title: "[OVERSIGHT] Failure lane", status: "in_progress",
+      originKind: "mission_main_executor_oversight" }).returning();
     const [definition] = await db.insert(workflowDefinitions).values({ companyId: company.id, name: "Build",
       stepsJson: [{ id: "build", type: "agent", name: "Build" }] }).returning();
     const [run] = await db.insert(workflowRuns).values({ companyId: company.id, missionId: mission.id, workflowId: definition.id,
       status: "running", triggeredBy: "test" }).returning();
     const [step] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: "build", status: stepStatus }).returning();
-    return { company, agent, mission, run, step };
+    return { company, agent, mission, oversightIssue, run, step };
   }
   type World = Awaited<ReturnType<typeof world>>;
   async function event(f: World, toStatus = "failed", eventType = "workflow_step_status_transition", createdAt = new Date()) {
@@ -62,15 +65,31 @@ describe("mission oversight failure lane (isolated PostgreSQL)", () => {
     await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1), { timeout: 5000 });
     expect(Date.now() - startedAt).toBeLessThan(30_000);
     expect(wake.mock.calls[0][0]).toMatchObject({ mission: { id: f.mission.id, companyId: f.company.id, ownerAgentId: f.agent.id },
+      issueId: f.oversightIssue.id,
       verdict: { state: "FAILURE_OR_RECOVERY_NEEDED", reasonCode: "failure_event_present" },
       failureEntities: [{ kind: "step", id: f.step.id, status: "failed", version: f.step.statusTransitionVersion }],
       idempotencyKey: expect.stringMatching(new RegExp(`^mission-oversight-failure:${f.mission.id}:[a-f0-9]{16}$`)) });
     expect(await markers(f)).toMatchObject([{ layer: "mission_owner_recovery", payload: {
-      schemaVersion: 1, kind: "mission_oversight_failure_wake", state: "FAILURE_OR_RECOVERY_NEEDED",
+      schemaVersion: 1, kind: "mission_oversight_failure_wake", issueId: f.oversightIssue.id,
+      state: "FAILURE_OR_RECOVERY_NEEDED",
       failureEntities: [{ kind: "step", id: f.step.id, status: "failed" }] } }]);
     fast.stop();
     await event(f); await vi.advanceTimersByTimeAsync(100);
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds recovery to the canonical oversight issue even after that issue was reassigned", async () => {
+    const f = await world();
+    const [qa] = await db.insert(agents).values({ companyId: f.company.id, name: "QA" }).returning();
+    await db.update(issues).set({ assigneeAgentId: qa.id, status: "in_progress" })
+      .where(eq(issues.id, f.oversightIssue.id));
+    const { lane: fast, wake } = await lane();
+    await event(f); await fast.run();
+    expect(wake).toHaveBeenCalledWith(expect.objectContaining({
+      mission: expect.objectContaining({ ownerAgentId: f.agent.id }),
+      issueId: f.oversightIssue.id,
+    }));
+    expect(await markers(f)).toMatchObject([{ issueId: f.oversightIssue.id }]);
   });
 
   it("same failureEntities coalesce: repeated ticks do not re-wake", async () => {

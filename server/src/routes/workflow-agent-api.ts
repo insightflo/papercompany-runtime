@@ -38,6 +38,7 @@ import {
   type WorkflowApiDelegation,
 } from "../services/workflow/agent-api.js";
 import { registerWorkflowArtifactWithStorage } from "../services/workflow/registered-artifact-storage.js";
+import { workflowService } from "../services/workflow/engine.js";
 import { registerOwnerRecoveryAgentRoutes } from "./owner-recovery-agent-routes.js";
 
 function routeParam(value: string | string[] | undefined, name: string): string {
@@ -257,6 +258,9 @@ export function workflowAgentApiRoutes(db: Db) {
       status: "done",
       linkedRunIds: delegation ? [issue.checkoutRunId, issue.executionRunId] : [issue.checkoutRunId, issue.executionRunId, actor.runId],
     });
+    // Completion sync may defer while the validation-recheck heartbeat is live.
+    // Recompute only after that heartbeat is terminal so the run can converge.
+    await workflowService.syncRunStatusForIssue(db, updated.id, "workflow_agent_api");
     if (actor.runId) {
       await heartbeatService(db).reportRunActivity(actor.runId)
         .catch((err) => logger.warn({ err, runId: actor.runId }, "failed to clear detached run warning after workflow API completion"));

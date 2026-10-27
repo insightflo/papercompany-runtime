@@ -3,10 +3,10 @@
 // [목적] findExistingWorkflowResumeWake 좁힘(RES-476) 검증.
 //   - 과거 run 성공으로 status='completed' 가 된 stale wake 는 "이미 처리중" 에서 제외.
 //   - in-flight(queued/coalesced/deferred_issue_execution) + runId null 또는 live run(queued/running) 만 인정.
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -14,6 +14,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 
 const heartbeatWakeup = vi.fn();
+const ownerWakeAdmission = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
@@ -23,8 +24,14 @@ vi.mock("../services/heartbeat.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../services/missions/mission-owner-execution-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/missions/mission-owner-execution-state.js")>();
+  return { ...actual, admitOwnerLinkedStepWake: ownerWakeAdmission };
+});
+
 import { findExistingWorkflowResumeWake } from "../services/workflow-resume-wake.js";
 import { wakeExistingWorkflowStepIssue } from "../services/workflow/dag-engine.js";
+import { lockQueuedIssueAdmission, queuedIssueExecutionIsBusy } from "../services/heartbeat-queued-issue-admission.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -65,6 +72,11 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     heartbeatWakeup.mockReset();
     await db.delete(agentWakeupRequests);
     await db.delete(heartbeatRuns);
+  });
+
+  beforeEach(() => {
+    ownerWakeAdmission.mockReset();
+    ownerWakeAdmission.mockResolvedValue(true);
   });
 
   afterAll(async () => {
@@ -127,6 +139,123 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, liveRun.id));
   });
 
+  it("reuses an accepted assignment wake only for the same workflow step generation", async () => {
+    const workflowId = randomUUID(), runId = randomUUID(), stepRunId = randomUUID(), assignedIssueId = randomUUID();
+    const step = { id: "qa-final", name: "Final QA", agentId, dependencies: [] };
+    const [definition] = await db.insert(workflowDefinitions).values({
+      id: workflowId, companyId, name: "assignment-wake-dedup", stepsJson: [step],
+    }).returning();
+    const [run] = await db.insert(workflowRuns).values({
+      id: runId, workflowId, companyId, missionId, triggeredBy: "system", status: "running",
+    }).returning();
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId, workflowRunId: runId, stepId: step.id, status: "pending", executionGeneration: 3,
+    });
+    await db.insert(issues).values({
+      id: assignedIssueId, companyId, missionId, assigneeAgentId: agentId,
+      title: "assignment-wake-dedup: Final QA", status: "todo",
+    });
+    const [acceptedAssignmentWake] = await db.insert(agentWakeupRequests).values({
+      companyId, agentId, issueId: assignedIssueId, missionId, workflowRunId: runId,
+      workflowStepRunId: stepRunId, workflowExecutionGeneration: 3,
+      source: "assignment", reason: "issue_assigned", requestKind: "create", status: "queued",
+      payload: { issueId: assignedIssueId, mutation: "workflow_resume", workflowRunId: runId, workflowStepRunId: stepRunId },
+    }).returning();
+
+    const queued = await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    });
+
+    expect(queued).toBe(true);
+    expect(ownerWakeAdmission).toHaveBeenCalledTimes(1);
+    expect(heartbeatWakeup).not.toHaveBeenCalled();
+
+    heartbeatWakeup.mockResolvedValue({ id: "required-own-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId, requireOwnWake: true,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, assignedIssueId))).toHaveLength(1);
+
+    ownerWakeAdmission.mockResolvedValueOnce(false);
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(false);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+
+    heartbeatWakeup.mockResolvedValue({ id: "fresh-context-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+      forceFreshSession: true,
+      priorFindings: [{ id: "qa-contract", summary: "Verify the corrected artifact first", layer: "artifact" }],
+      idempotencyKey: `qa-recheck:${stepRunId}:3`,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(2);
+    expect(heartbeatWakeup).toHaveBeenLastCalledWith(agentId, expect.objectContaining({
+      idempotencyKey: `qa-recheck:${stepRunId}:3`,
+      payload: expect.objectContaining({
+        forceFreshSession: true,
+        priorQaFindings: [expect.objectContaining({ id: "qa-contract" })],
+      }),
+    }));
+
+    await db.update(workflowStepRuns).set({ executionGeneration: 4 }).where(eq(workflowStepRuns.id, stepRunId));
+    heartbeatWakeup.mockResolvedValue({ id: "new-generation-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(3);
+
+    const staleAgentId = randomUUID();
+    await db.insert(agents).values({ id: staleAgentId, companyId, name: "Stale assignee", role: "writer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    await db.update(agentWakeupRequests).set({
+      agentId: staleAgentId, workflowExecutionGeneration: 4,
+    }).where(eq(agentWakeupRequests.id, acceptedAssignmentWake!.id));
+    heartbeatWakeup.mockResolvedValue({ id: "current-assignee-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(4);
+    await db.update(agentWakeupRequests).set({ agentId }).where(eq(agentWakeupRequests.id, acceptedAssignmentWake!.id));
+    await db.delete(agents).where(eq(agents.id, staleAgentId));
+  });
+
+  it("supersedes a stale status notification after issue reassignment", async () => {
+    const replacementId = randomUUID();
+    await db.insert(agents).values({ id: replacementId, companyId, name: "Replacement", role: "writer",
+      status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    const wake = await insertWake({ source: "automation", reason: "issue_status_changed", status: "queued" });
+    await db.update(issues).set({ assigneeAgentId: replacementId }).where(eq(issues.id, issueId));
+    try {
+      const admission = await db.transaction(tx => lockQueuedIssueAdmission(tx, {
+        request: wake, issueId, contextSnapshot: { wakeReason: "issue_status_changed" },
+      }));
+      expect(admission).toEqual({ kind: "superseded" });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))
+        .toEqual([expect.objectContaining({ status: "completed", runId: null, error: null })]);
+    } finally {
+      await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, issueId));
+      await db.delete(agents).where(eq(agents.id, replacementId));
+    }
+  });
+
+  it("does not treat terminal lock residue as live issue ownership", async () => {
+    const run = await db.insert(heartbeatRuns).values({
+      companyId, agentId, issueId, status: "completed", invocationSource: "automation",
+    }).returning().then(rows => rows[0]!);
+    await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
+    try {
+      expect(await db.transaction(async tx => {
+        const issue = await tx.select().from(issues).where(eq(issues.id, issueId)).then(rows => rows[0]!);
+        return queuedIssueExecutionIsBusy(tx, issue);
+      })).toBe(false);
+    } finally {
+      await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, issueId));
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    }
+  });
+
   it("carries a workflow rework contract into resume wake payload and context", async () => {
     heartbeatWakeup.mockResolvedValue({ id: "queued-rework-contract" });
     const workflowId = randomUUID();
@@ -155,6 +284,15 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
       assigneeAgentId: agentId,
       title: "rework-contract: Produce artifact",
       status: "done",
+    });
+    await db.insert(workflowStepRuns).values({
+      id: stepRunId, workflowRunId: runId, stepId: step.id, status: "pending", executionGeneration: 1,
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, issueId: reworkIssueId, missionId, workflowRunId: runId,
+      workflowStepRunId: stepRunId, workflowExecutionGeneration: 1,
+      source: "assignment", reason: "issue_assigned", requestKind: "create", status: "queued",
+      payload: { issueId: reworkIssueId, mutation: "workflow_resume", workflowRunId: runId, workflowStepRunId: stepRunId },
     });
 
     const reworkContract = {
