@@ -196,6 +196,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     } catch (err) {
       clearInstructionInjectionDelivery(ctx.context);
+      instructionsPrefix = "";
       await onLog("stderr", `[paperclip] Failed to read instructions file ${resolvedInstructionsFilePath}: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }

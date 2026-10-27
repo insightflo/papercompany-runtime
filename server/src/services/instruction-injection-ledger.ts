@@ -165,6 +165,38 @@ export function forceFullInstructionInjection(
   return fullPlan;
 }
 
+export async function invalidateInstructionInjectionSession(input: {
+  db: Db;
+  plan: InstructionInjectionPlan | null;
+}): Promise<void> {
+  const { plan } = input;
+  if (!plan) return;
+  const where = and(
+    eq(agentInstructionInjections.companyId, plan.companyId),
+    eq(agentInstructionInjections.issueId, plan.issueId),
+    eq(agentInstructionInjections.agentId, plan.agentId),
+    eq(agentInstructionInjections.adapterType, plan.adapterType),
+    eq(agentInstructionInjections.instructionsPath, plan.instructionsPath),
+  );
+  const existing = await input.db
+    .select({ lastInjectionJson: agentInstructionInjections.lastInjectionJson })
+    .from(agentInstructionInjections)
+    .where(where)
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!existing) return;
+  const now = new Date();
+  const invalidatedLastInjectionJson = { ...existing.lastInjectionJson };
+  delete invalidatedLastInjectionJson.providerSessionId;
+  await input.db
+    .update(agentInstructionInjections)
+    .set({
+      lastInjectionJson: invalidatedLastInjectionJson,
+      updatedAt: now,
+    })
+    .where(where);
+}
+
 export async function confirmInstructionInjectionDelivery(input: {
   db: Db;
   context: Record<string, unknown>;

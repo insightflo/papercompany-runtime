@@ -120,6 +120,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     } catch (err) {
       clearInstructionInjectionDelivery(ctx.context);
+      instructionsText = "";
+      commandNotes.length = 0;
       const reason = err instanceof Error ? err.message : String(err);
       commandNotes.push(`Instructions file ${resolvedInstructionsFilePath} could not be read; continuing without it.`);
       await onLog("stdout", `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`);

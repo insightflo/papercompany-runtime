@@ -19,6 +19,7 @@ import {
 import {
   confirmInstructionInjectionDelivery,
   forceFullInstructionInjection,
+  invalidateInstructionInjectionSession,
   prepareInstructionInjection,
 } from "../services/instruction-injection-ledger.js";
 import { buildWorkflowIssueExecutionCard } from "../services/issue-execution-cards/builder.js";
@@ -225,5 +226,53 @@ describeEmbeddedPostgres("instruction injection ledger", () => {
     const [row] = await db.select().from(agentInstructionInjections);
     expect(row?.injectionCount).toBe(1);
     expect(row?.lastInjectionJson).toMatchObject({ providerSessionId: "session-2", mode: "full" });
+  });
+
+  it("forces full instructions after compact delivery is not confirmed", async () => {
+    const seeded = await seedIssueWithCard();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ledger-instructions-"));
+    tempDirs.push(dir);
+    await fs.writeFile(path.join(dir, "AGENTS.md"), "Important operating manual.", "utf8");
+
+    const firstContext: Record<string, unknown> = {};
+    const firstPlan = await prepareAndMarkDelivered({
+      seeded, dir, context: firstContext, runId: "run-1", providerSessionId: "session-1",
+    });
+    await confirmInstructionInjectionDelivery({
+      db, context: firstContext, plan: firstPlan, providerSessionId: "session-1", adapterProcessStarted: true,
+    });
+
+    const unconfirmedContext: Record<string, unknown> = {};
+    const unconfirmedPlan = await prepareInstructionInjection({
+      db,
+      context: unconfirmedContext,
+      agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
+      issueId: seeded.issueId,
+      adapterConfig: { instructionsFilePath: "AGENTS.md" },
+      cwd: dir,
+      runId: "run-2",
+      providerSessionId: "session-1",
+    });
+    expect(unconfirmedPlan?.mode).toBe("compact");
+    expect(await confirmInstructionInjectionDelivery({
+      db,
+      context: unconfirmedContext,
+      plan: unconfirmedPlan,
+      providerSessionId: "session-1",
+      adapterProcessStarted: true,
+    })).toBe(false);
+    await invalidateInstructionInjectionSession({ db, plan: unconfirmedPlan });
+
+    const recoveryPlan = await prepareInstructionInjection({
+      db,
+      context: {},
+      agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
+      issueId: seeded.issueId,
+      adapterConfig: { instructionsFilePath: "AGENTS.md" },
+      cwd: dir,
+      runId: "run-3",
+      providerSessionId: "session-1",
+    });
+    expect(recoveryPlan?.mode).toBe("full");
   });
 });

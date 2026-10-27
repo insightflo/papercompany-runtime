@@ -102,6 +102,7 @@ import { evaluateContextBudgetPreflight } from "./context-budget-preflight.js";
 import {
   confirmInstructionInjectionDelivery,
   forceFullInstructionInjection,
+  invalidateInstructionInjectionSession,
   prepareInstructionInjection,
 } from "./instruction-injection-ledger.js";
 
@@ -7362,25 +7363,34 @@ export function heartbeatService(db: Db) {
         nextSessionState.legacySessionId ??
         earlySessionIdAfter ??
         null;
+      let instructionDeliveryConfirmed = false;
       try {
-        const confirmed = await confirmInstructionInjectionDelivery({
+        instructionDeliveryConfirmed = await confirmInstructionInjectionDelivery({
           db,
           context,
           plan: instructionInjectionPlan,
           providerSessionId: persistedSessionIdAfter,
           adapterProcessStarted,
         });
-        if (!confirmed && instructionInjectionPlan && adapterProcessStarted) {
-          logger.warn(
-            { agentId: agent.id, issueId, runId: run.id },
-            "instruction injection delivery was not confirmed",
-          );
-        }
       } catch (err) {
         logger.warn(
           { err, agentId: agent.id, issueId, runId: run.id },
           "failed to confirm instruction injection delivery",
         );
+      }
+      if (!instructionDeliveryConfirmed && instructionInjectionPlan && adapterProcessStarted) {
+        try {
+          await invalidateInstructionInjectionSession({ db, plan: instructionInjectionPlan });
+          logger.warn(
+            { agentId: agent.id, issueId, runId: run.id },
+            "instruction injection delivery was not confirmed; next run will use full instructions",
+          );
+        } catch (err) {
+          logger.warn(
+            { err, agentId: agent.id, issueId, runId: run.id },
+            "failed to invalidate unconfirmed instruction injection session",
+          );
+        }
       }
       const rawUsage = normalizeUsageTotals(adapterResult.usage);
       const sessionUsageResolution = await resolveNormalizedUsageForSession({
