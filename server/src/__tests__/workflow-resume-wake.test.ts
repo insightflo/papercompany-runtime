@@ -158,12 +158,28 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     expect(heartbeatWakeup).not.toHaveBeenCalled();
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, assignedIssueId))).toHaveLength(1);
 
+    heartbeatWakeup.mockResolvedValue({ id: "fresh-context-wake" });
+    expect(await wakeExistingWorkflowStepIssue({
+      db, run, definition, step, stepRunId, issueId: assignedIssueId,
+      forceFreshSession: true,
+      priorFindings: [{ id: "qa-contract", summary: "Verify the corrected artifact first", layer: "artifact" }],
+      idempotencyKey: `qa-recheck:${stepRunId}:3`,
+    })).toBe(true);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+    expect(heartbeatWakeup).toHaveBeenLastCalledWith(agentId, expect.objectContaining({
+      idempotencyKey: `qa-recheck:${stepRunId}:3`,
+      payload: expect.objectContaining({
+        forceFreshSession: true,
+        priorQaFindings: [expect.objectContaining({ id: "qa-contract" })],
+      }),
+    }));
+
     await db.update(workflowStepRuns).set({ executionGeneration: 4 }).where(eq(workflowStepRuns.id, stepRunId));
     heartbeatWakeup.mockResolvedValue({ id: "new-generation-wake" });
     expect(await wakeExistingWorkflowStepIssue({
       db, run, definition, step, stepRunId, issueId: assignedIssueId,
     })).toBe(true);
-    expect(heartbeatWakeup).toHaveBeenCalledTimes(1);
+    expect(heartbeatWakeup).toHaveBeenCalledTimes(2);
   });
 
   it("carries a workflow rework contract into resume wake payload and context", async () => {

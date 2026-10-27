@@ -926,7 +926,7 @@ export async function createApp(
         eq(issues.companyId, mission.companyId),
         eq(issues.missionId, mission.id),
         eq(issues.originKind, "mission_main_executor_oversight"),
-        inArray(issues.status, ["backlog", "todo", "in_progress", "blocked"]),
+        inArray(issues.status, ["backlog", "todo", "in_progress", "blocked", "in_review"]),
         sql`${issues.hiddenAt} is null`,
       )).orderBy(asc(issues.createdAt)).limit(1);
       if (!oversightIssue) {

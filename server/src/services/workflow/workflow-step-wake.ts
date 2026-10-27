@@ -161,24 +161,31 @@ export async function wakeExistingWorkflowStepIssue(input: {
     ? { paperclipQaCapAcceptanceContract: qaCapAcceptanceContract }
     : {};
 
-  // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재
-  //   intent/권한버전/세대를 재확인한다(무연결 run은 무변화 통과). 검사와 wake 사이에 다른 await 없음.
-  if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
-    workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
-    ownerExecution: input.ownerExecution ?? null }))) return false;
-  const [stepAuthority] = input.stepRunId
+  // Plain scheduler retries can reuse an accepted wake for this exact generation. Calls carrying
+  // fresh context, an explicit key, or an owner-recovery receipt must enqueue their own durable
+  // wake so that their payload and receipt are not silently lost.
+  const hasCallSpecificWakeContract = input.forceFreshSession === true
+    || (input.priorFindings?.length ?? 0) > 0
+    || (typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0)
+    || input.ownerExecution !== undefined;
+  const [stepAuthority] = !hasCallSpecificWakeContract && input.stepRunId
     ? await input.db.select({ executionGeneration: workflowStepRuns.executionGeneration })
       .from(workflowStepRuns)
       .where(and(eq(workflowStepRuns.id, input.stepRunId), eq(workflowStepRuns.workflowRunId, input.run.id)))
       .limit(1)
     : [];
-  if (input.stepRunId && stepAuthority && (await findAcceptedWorkflowResumeWakeForStep(input.db, {
+  if (!hasCallSpecificWakeContract && input.stepRunId && stepAuthority && (await findAcceptedWorkflowResumeWakeForStep(input.db, {
     companyId: input.run.companyId,
     issueId: issue.id,
     workflowRunId: input.run.id,
     workflowStepRunId: input.stepRunId,
     workflowExecutionGeneration: stepAuthority.executionGeneration,
   })).length > 0) return true;
+  // [owner admission] 실제 durable wake 직전, 저장된 owner-execute 연결 영수증에서 현재
+  //   intent/권한버전/세대를 재확인한다(무연결 run은 무변화 통과). 검사와 wake 사이에 다른 await 없음.
+  if (!(await admitOwnerLinkedStepWake(input.db, { companyId: input.run.companyId,
+    workflowRunId: input.run.id, stepRunId: input.stepRunId ?? null,
+    ownerExecution: input.ownerExecution ?? null }))) return false;
   await queueIssueAssignmentWakeup({
     heartbeat: heartbeatService(input.db),
     issue: wakeIssue,
