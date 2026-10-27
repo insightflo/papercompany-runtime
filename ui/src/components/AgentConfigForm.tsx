@@ -332,11 +332,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
+  const storedSessionCompaction =
+    heartbeat.sessionCompaction ?? heartbeat.sessionRotation ?? runtimeConfig.sessionCompaction;
   // [session rotation] nested heartbeat key — overlay wins, original falls back.
   // Kept whole-object so sibling sessionCompaction keys (maxSessionRuns 등) are never dropped.
   const sessionCompaction = !isCreate
     ? {
-      ...((heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
+      ...(typeof storedSessionCompaction === "object" && storedSessionCompaction !== null && !Array.isArray(storedSessionCompaction)
+        ? storedSessionCompaction as Record<string, unknown>
+        : {}),
       ...((overlay.heartbeat.sessionCompaction as Record<string, unknown> | undefined) ?? {}),
     }
     : {};
@@ -1316,9 +1320,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     onCommit={(v) => mark(
                       "heartbeat",
                       "sessionCompaction",
-                      updateSessionTokenThreshold(sessionCompaction, v),
+                      updateSessionTokenThreshold(
+                        sessionCompaction,
+                        v,
+                        sessionTokenThresholdFieldValue(adapterType, {}),
+                      ),
                     )}
-                    immediate
                     className={inputClass}
                   />
                 </Field>

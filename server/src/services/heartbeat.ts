@@ -3812,11 +3812,13 @@ export function heartbeatService(db: Db) {
   }
 
   async function getLatestRawUsageForSession(
+    companyId: string,
     agentId: string,
     sessionId: string,
     opts?: { excludeRunId?: string | null },
   ) {
     const conditions = [
+      eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, agentId),
       eq(heartbeatRuns.sessionIdAfter, sessionId),
       sql`${heartbeatRuns.usageJson} is not null`,
@@ -3842,12 +3844,13 @@ export function heartbeatService(db: Db) {
   }
 
   async function resolveNormalizedUsageForSession(input: {
+    companyId: string;
     agentId: string;
     runId: string;
     sessionId: string | null;
     rawUsage: UsageTotals | null;
   }) {
-    const { agentId, runId, sessionId, rawUsage } = input;
+    const { companyId, agentId, runId, sessionId, rawUsage } = input;
     if (!sessionId || !rawUsage) {
       return {
         normalizedUsage: rawUsage,
@@ -3856,7 +3859,7 @@ export function heartbeatService(db: Db) {
       };
     }
 
-    const previousRawUsage = await getLatestRawUsageForSession(agentId, sessionId, {
+    const previousRawUsage = await getLatestRawUsageForSession(companyId, agentId, sessionId, {
       excludeRunId: runId,
     });
     return {
@@ -3924,7 +3927,10 @@ export function heartbeatService(db: Db) {
         ? await getOldestRunForSession(agent.id, sessionId)
         : runs[runs.length - 1] ?? latestRun;
     const latestRawUsage = policy.maxRawInputTokens > 0
-      ? await getLatestRawUsageForSession(agent.id, sessionId)
+      ? runs
+        .map((run) => readRawUsageTotals(run.usageJson))
+        .find((usage): usage is UsageTotals => usage !== null)
+        ?? await getLatestRawUsageForSession(agent.companyId, agent.id, sessionId)
       : null;
     const sessionAgeHours =
       latestRun && oldestRun
@@ -3938,7 +3944,9 @@ export function heartbeatService(db: Db) {
     if (policy.maxSessionMessages > 0) {
       // [session hygiene] 재개 히스토리 상한 — usageJson이 비어 토큰 트리거가 동작하지
       //   않아도 세션 파일의 메시지 수로 무한 증식(hermes-era 136+ 메시지 사례)을 막는다.
-      const sessionMessageCount = await countSessionFileMessages(sessionId);
+      const sessionMessageCount = await countSessionFileMessages(sessionId, {
+        stopAfter: policy.maxSessionMessages,
+      });
       if (sessionMessageCount !== null && sessionMessageCount > policy.maxSessionMessages) {
         reason = `session reached ${sessionMessageCount} messages (threshold ${policy.maxSessionMessages})`;
       }
@@ -7355,13 +7363,19 @@ export function heartbeatService(db: Db) {
         earlySessionIdAfter ??
         null;
       try {
-        await confirmInstructionInjectionDelivery({
+        const confirmed = await confirmInstructionInjectionDelivery({
           db,
           context,
           plan: instructionInjectionPlan,
           providerSessionId: persistedSessionIdAfter,
           adapterProcessStarted,
         });
+        if (!confirmed && instructionInjectionPlan && adapterProcessStarted) {
+          logger.warn(
+            { agentId: agent.id, issueId, runId: run.id },
+            "instruction injection delivery was not confirmed",
+          );
+        }
       } catch (err) {
         logger.warn(
           { err, agentId: agent.id, issueId, runId: run.id },
@@ -7370,6 +7384,7 @@ export function heartbeatService(db: Db) {
       }
       const rawUsage = normalizeUsageTotals(adapterResult.usage);
       const sessionUsageResolution = await resolveNormalizedUsageForSession({
+        companyId: agent.companyId,
         agentId: agent.id,
         runId: run.id,
         sessionId: nextSessionState.displayId ?? nextSessionState.legacySessionId,

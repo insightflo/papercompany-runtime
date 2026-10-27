@@ -250,7 +250,7 @@ describeEmbeddedPostgres("heartbeat session hygiene", () => {
 
 		expect(adapterCalls).toHaveLength(1);
 		expect(adapterCalls[0]?.sessionId).toBeNull();
-		expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("45 messages");
+		expect(adapterCalls[0]?.context.paperclipSessionRotationReason).toContain("41 messages (threshold 40)");
 		expect(adapterCalls[0]?.context.paperclipPreviousSessionId).toBe(sessionFile);
 	});
 

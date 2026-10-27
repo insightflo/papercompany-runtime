@@ -18,6 +18,18 @@ describe("session compaction UI contract", () => {
     });
   });
 
+  it("reads numeric string overrides through the runtime policy parser", () => {
+    expect(sessionTokenThresholdFieldValue("pi_local", { maxRawInputTokens: "300000" })).toBe(300_000);
+  });
+
+  it("restores the unset state when the adapter default is selected", () => {
+    expect(updateSessionTokenThreshold(
+      { maxSessionMessages: 40, maxRawInputTokens: 0 },
+      2_000_000,
+      2_000_000,
+    )).toEqual({ maxSessionMessages: 40 });
+  });
+
   it("rounds positive overrides down without dropping sibling settings", () => {
     expect(updateSessionTokenThreshold({ enabled: true }, 300_000.9)).toEqual({
       enabled: true,
