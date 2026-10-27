@@ -183,6 +183,7 @@ describe("loadInstructionsWithInlinedReferences", () => {
     };
     clearInstructionInjectionDelivery(context);
     expect(context).not.toHaveProperty("paperclipInstructionInjectionDelivery");
+    expect(instructionInjectionRequiresSameSession(context)).toBe(false);
   });
 
   it("strips a leading YAML frontmatter block from the entry instructions", async () => {

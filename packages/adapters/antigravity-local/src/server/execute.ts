@@ -8,7 +8,11 @@ import {
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -191,6 +195,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stderr", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
       await onLog("stderr", `[paperclip] Failed to read instructions file ${resolvedInstructionsFilePath}: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }

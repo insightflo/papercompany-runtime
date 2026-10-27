@@ -9,6 +9,7 @@ import {
 } from "@paperclipai/adapter-utils";
 import {
   applyInstructionInjectionPolicy,
+  clearInstructionInjectionDelivery,
   instructionInjectionRequiresSameSession,
   loadInstructionsWithInlinedReferences,
 } from "@paperclipai/adapter-utils/instructions";
@@ -118,6 +119,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await onLog("stdout", `[paperclip] Warning: ${warning}\n`);
       }
     } catch (err) {
+      clearInstructionInjectionDelivery(ctx.context);
       const reason = err instanceof Error ? err.message : String(err);
       commandNotes.push(`Instructions file ${resolvedInstructionsFilePath} could not be read; continuing without it.`);
       await onLog("stdout", `[paperclip] Warning: could not read agent instructions file "${resolvedInstructionsFilePath}": ${reason}\n`);
