@@ -245,6 +245,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     } catch (err) {
       clearInstructionInjectionDelivery(ctx.context);
+      instructionsPrefix = "";
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stdout",
