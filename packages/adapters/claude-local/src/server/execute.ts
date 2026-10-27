@@ -534,6 +534,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     } catch (err) {
       clearInstructionInjectionDelivery(context);
+      const injectedNoteIndex = commandNotes.findIndex((note) => note.startsWith("Injected agent instructions"));
+      if (injectedNoteIndex >= 0) commandNotes.splice(injectedNoteIndex, 1);
+      commandNotes.push(`Instructions file ${resolvedInstructionsFilePath} could not be read; continuing without it.`);
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stderr",

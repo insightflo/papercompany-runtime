@@ -393,6 +393,7 @@ export function DraftNumberInput({
       onBlur={() => {
         if (draft.trim() === "" && onEmpty) {
           onEmpty();
+          setDraft(String(value));
           return;
         }
         const num = Number(draft) || 0;

@@ -3949,7 +3949,7 @@ export function heartbeatService(db: Db) {
         stopAfter: policy.maxSessionMessages,
       });
       if (sessionMessageCount !== null && sessionMessageCount > policy.maxSessionMessages) {
-        reason = `session reached ${sessionMessageCount} messages (threshold ${policy.maxSessionMessages})`;
+        reason = `session exceeded ${policy.maxSessionMessages} messages`;
       }
     }
     if (!reason && policy.maxSessionRuns > 0 && runs.length > policy.maxSessionRuns) {

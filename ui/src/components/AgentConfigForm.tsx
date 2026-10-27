@@ -348,6 +348,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const adapterType = isCreate
     ? props.values.adapterType
     : overlay.adapterType ?? props.agent.adapterType;
+  const sessionTokenDefault = sessionTokenThresholdFieldValue(adapterType, {});
   const isLocal =
     adapterType === "claude_local" ||
     adapterType === "codex_local" ||
@@ -1317,22 +1318,25 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 >
                   <DraftNumberInput
                     value={sessionTokenThresholdFieldValue(adapterType, sessionCompaction)}
-                    onEmpty={() => mark(
-                      "heartbeat",
-                      "sessionCompaction",
-                      updateSessionTokenThreshold(
-                        sessionCompaction,
-                        sessionTokenThresholdFieldValue(adapterType, {}),
-                        sessionTokenThresholdFieldValue(adapterType, {}),
-                      ),
-                    )}
+                    onEmpty={() => {
+                      if (!("maxRawInputTokens" in sessionCompaction)) return;
+                      mark(
+                        "heartbeat",
+                        "sessionCompaction",
+                        updateSessionTokenThreshold(
+                          sessionCompaction,
+                          sessionTokenDefault,
+                          sessionTokenDefault,
+                        ),
+                      );
+                    }}
                     onCommit={(v) => mark(
                       "heartbeat",
                       "sessionCompaction",
                       updateSessionTokenThreshold(
                         sessionCompaction,
                         v,
-                        sessionTokenThresholdFieldValue(adapterType, {}),
+                        sessionTokenDefault,
                       ),
                     )}
                     className={inputClass}
