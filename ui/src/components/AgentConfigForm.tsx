@@ -1317,6 +1317,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 >
                   <DraftNumberInput
                     value={sessionTokenThresholdFieldValue(adapterType, sessionCompaction)}
+                    onEmpty={() => mark(
+                      "heartbeat",
+                      "sessionCompaction",
+                      updateSessionTokenThreshold(
+                        sessionCompaction,
+                        sessionTokenThresholdFieldValue(adapterType, {}),
+                        sessionTokenThresholdFieldValue(adapterType, {}),
+                      ),
+                    )}
                     onCommit={(v) => mark(
                       "heartbeat",
                       "sessionCompaction",
