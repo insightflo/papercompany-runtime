@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
-
-/** 세션 파일 통계를 위한 안전 상한 — 이보다 큰 파일은 읽지 않고 null을 반환한다. */
-const MAX_SESSION_FILE_BYTES = 20 * 1024 * 1024;
+import readline from "node:readline";
 
 /**
  * [session hygiene] pi 계열 어댑터의 sessionId는 세션 JSONL 파일 경로다.
@@ -20,28 +19,30 @@ export async function countSessionFileMessages(sessionId: string | null | undefi
   }
   if (!stat.isFile()) return null;
   if (stat.size === 0) return 0;
-  if (stat.size > MAX_SESSION_FILE_BYTES) return null;
-  let content: string;
+  const stream = fsSync.createReadStream(value, { encoding: "utf8" });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let count = 0;
   try {
-    content = await fs.readFile(value, "utf8");
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const entry: unknown = JSON.parse(trimmed);
+        if (
+          typeof entry === "object" && entry !== null && !Array.isArray(entry)
+          && (entry as { type?: unknown }).type === "message"
+        ) {
+          count += 1;
+        }
+      } catch {
+        // malformed line — 개수에 반영하지 않고 건너뛴다
+      }
+    }
   } catch {
     return null;
-  }
-  let count = 0;
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry: unknown = JSON.parse(trimmed);
-      if (
-        typeof entry === "object" && entry !== null && !Array.isArray(entry)
-        && (entry as { type?: unknown }).type === "message"
-      ) {
-        count += 1;
-      }
-    } catch {
-      // malformed line — 개수에 반영하지 않고 건너뛴다
-    }
+  } finally {
+    lines.close();
+    stream.destroy();
   }
   return count;
 }

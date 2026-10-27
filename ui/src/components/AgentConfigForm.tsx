@@ -59,6 +59,10 @@ import { isAdapterTypeEnabled } from "./agent-config-adapter-types";
 import { useAdapterModelEfforts } from "../hooks/useAdapterModelEfforts";
 import { useAdapterProviderModels } from "../hooks/useAdapterProviderModels";
 import { buildCommandCodeEffortOptions, shouldResetCommandCodeEffort } from "../lib/commandcode-efforts";
+import {
+  sessionTokenThresholdFieldValue,
+  updateSessionTokenThreshold,
+} from "../lib/session-compaction-ui";
 
 /* ---- Create mode values ---- */
 
@@ -1305,14 +1309,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               {adapterType !== "claude_local" && adapterType !== "codex_local" && adapterType !== "hermes_local" && (
                 <Field
                   label="Session rotation limit (tokens)"
-                  hint="Rotate to a fresh session when the last run's raw input reaches this many tokens. 0 = adapter default (2,000,000). Lower it for context-heavy agents, e.g. 300000."
+                  hint="Rotate to a fresh session when the last run's raw input reaches this many tokens. Unset uses the adapter default; 0 disables only the token threshold. Other run, age, and message limits still apply."
                 >
                   <DraftNumberInput
-                    value={Number(sessionCompaction.maxRawInputTokens ?? 0)}
-                    onCommit={(v) => mark("heartbeat", "sessionCompaction", {
-                      ...sessionCompaction,
-                      maxRawInputTokens: Math.max(0, Math.floor(v)),
-                    })}
+                    value={sessionTokenThresholdFieldValue(adapterType, sessionCompaction)}
+                    onCommit={(v) => mark(
+                      "heartbeat",
+                      "sessionCompaction",
+                      updateSessionTokenThreshold(sessionCompaction, v),
+                    )}
                     immediate
                     className={inputClass}
                   />

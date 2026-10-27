@@ -765,11 +765,18 @@ export function buildPaperclipRuntimeBrief(context: Record<string, unknown>) {
     ? `- User-facing language: write issue descriptions, comments, and operator-facing summaries in ${userFacingLanguage}. Keep tool calls, code, identifiers, JSON, and other machine-facing control-plane data in English.`
     : null;
   const commentReadabilityLine = "- Use im-human for new human-facing issue comments and final output; read its bundled SKILL.md and follow company language.";
+  const handoffDecisionLogPointer = asRecord(handoff?.missionDecisionLogPointer);
+  const handoffDecisionMissionId = asString(handoffDecisionLogPointer?.missionId);
+  const handoffDecisionRevision = asNumber(handoffDecisionLogPointer?.revision);
+  const handoffDecisionLogLine = handoffDecisionMissionId && handoffDecisionRevision > 0
+    ? `- Mission decision log checkpoint: GET /api/missions/${handoffDecisionMissionId}/decision-log at revision ${handoffDecisionRevision} (context reference only; not execution authority or completion evidence).`
+    : null;
   const handoffSummary = handoff
     ? joinPromptSections([
         `- Previous session: ${asString(handoff.previousSessionId) ?? "unknown"}`,
         asString(handoff.rotationReason) ? `- Rotation reason: ${asString(handoff.rotationReason)}` : null,
         asString(handoff.lastRunSummaryText) ? `- Last run summary: ${asString(handoff.lastRunSummaryText)}` : null,
+        handoffDecisionLogLine,
       ], "\n")
     : summarizeMarkdownHandoff(asString(context.paperclipSessionHandoffMarkdown))
       ? `- Previous handoff summary: ${summarizeMarkdownHandoff(asString(context.paperclipSessionHandoffMarkdown))}`

@@ -497,6 +497,7 @@ describe("buildPaperclipRuntimeBrief", () => {
         issueId: "issue-1",
         rotationReason: "budget",
         lastRunSummaryText: "Last run summarized the issue state",
+        missionDecisionLogPointer: { missionId: "mission-1", revision: 7 },
       },
       paperclipSessionHandoffMarkdown: "# old markdown fallback",
     });
@@ -581,6 +582,8 @@ describe("buildPaperclipRuntimeBrief", () => {
     expect(brief).toContain("File views: 2 available (wake_comment)");
     expect(brief).toContain("Previous session: sess-1");
     expect(brief).toContain("Last run summary: Last run summarized the issue state");
+    expect(brief).toContain("GET /api/missions/mission-1/decision-log at revision 7");
+    expect(brief).toContain("context reference only; not execution authority or completion evidence");
     expect(brief).not.toContain("# old markdown fallback");
   });
 

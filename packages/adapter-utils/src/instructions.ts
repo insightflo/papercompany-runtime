@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -13,6 +14,7 @@ export type LoadedInstructionsWithReferences = {
 type InstructionInjectionPolicy = {
   mode?: "full" | "compact";
   contentHash?: string;
+  deliveryToken?: string;
 };
 
 type LoadOptions = {
@@ -33,7 +35,21 @@ function asPolicy(value: unknown): InstructionInjectionPolicy | null {
   const record = value as Record<string, unknown>;
   const mode = record.mode === "compact" || record.mode === "full" ? record.mode : undefined;
   const contentHash = typeof record.contentHash === "string" ? record.contentHash.trim() : undefined;
-  return mode ? { mode, contentHash } : null;
+  const deliveryToken = typeof record.deliveryToken === "string" ? record.deliveryToken.trim() : undefined;
+  return mode ? { mode, contentHash, deliveryToken } : null;
+}
+
+export function hashLoadedInstructions(loaded: LoadedInstructionsWithReferences): string {
+  return createHash("sha256").update(JSON.stringify({
+    content: loaded.content,
+    deferredPaths: loaded.deferredPaths,
+    includedPaths: loaded.includedPaths,
+  })).digest("hex");
+}
+
+export function instructionInjectionRequiresSameSession(context: unknown): boolean {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return false;
+  return asPolicy((context as Record<string, unknown>).paperclipInstructionInjection)?.mode === "compact";
 }
 
 function compactInstructionsContent(
@@ -64,8 +80,23 @@ export function applyInstructionInjectionPolicy(
   const record = typeof context === "object" && context !== null && !Array.isArray(context)
     ? context as Record<string, unknown>
     : {};
+  delete record.paperclipInstructionInjectionDelivery;
   const policy = asPolicy(record.paperclipInstructionInjection);
-  if (policy?.mode !== "compact") return loaded;
+  const actualContentHash = hashLoadedInstructions(loaded);
+  const effectiveMode = policy?.mode === "compact" && policy.contentHash === actualContentHash
+    ? "compact"
+    : "full";
+  if (policy?.deliveryToken) {
+    record.paperclipInstructionInjectionDelivery = {
+      version: 1,
+      state: "prepared",
+      deliveryToken: policy.deliveryToken,
+      mode: effectiveMode,
+      contentHash: actualContentHash,
+      entryPath: loaded.entryPath,
+    };
+  }
+  if (effectiveMode !== "compact" || !policy) return loaded;
   return {
     ...loaded,
     content: compactInstructionsContent(loaded, policy),

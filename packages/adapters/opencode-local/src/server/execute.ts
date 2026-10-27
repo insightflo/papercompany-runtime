@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, inferOpenAiCompatibleBiller, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asString,
   asNumber,
@@ -536,6 +540,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     initialFailed &&
     isOpenCodeUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      return toResult(initial, true);
+    }
     await onLog(
       "stdout",
       `[paperclip] OpenCode session "${sessionId}" is unavailable; retrying with a fresh session.\n`,

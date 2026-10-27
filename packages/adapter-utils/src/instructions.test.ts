@@ -2,7 +2,12 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "./instructions.js";
+import {
+  applyInstructionInjectionPolicy,
+  hashLoadedInstructions,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "./instructions.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(path.join(tmpdir(), "papercompany-instructions-"));
@@ -113,17 +118,56 @@ describe("loadInstructionsWithInlinedReferences", () => {
       await writeFile(entryPath, "FULL UNIQUE INSTRUCTIONS BODY", "utf8");
 
       const loaded = await loadInstructionsWithInlinedReferences(entryPath);
-      const compacted = applyInstructionInjectionPolicy(loaded, {
+      const contentHash = hashLoadedInstructions(loaded);
+      const context: Record<string, unknown> = {
         paperclipInstructionInjection: {
           mode: "compact",
-          contentHash: "abc123",
+          contentHash,
+          deliveryToken: "delivery-1",
         },
-      });
+      };
+      const compacted = applyInstructionInjectionPolicy(loaded, context);
 
       expect(compacted.content).toContain("Agent Instructions Reference");
       expect(compacted.content).toContain(entryPath);
-      expect(compacted.content).toContain("abc123");
+      expect(compacted.content).toContain(contentHash);
       expect(compacted.content).not.toContain("FULL UNIQUE INSTRUCTIONS BODY");
+      expect(instructionInjectionRequiresSameSession(context)).toBe(true);
+      expect(context.paperclipInstructionInjectionDelivery).toEqual({
+        version: 1,
+        state: "prepared",
+        deliveryToken: "delivery-1",
+        mode: "compact",
+        contentHash,
+        entryPath,
+      });
+    });
+  });
+
+  it("falls back to full instructions when the planned hash no longer matches", async () => {
+    await withTempDir(async (dir) => {
+      const entryPath = path.join(dir, "AGENTS.md");
+      await writeFile(entryPath, "CURRENT INSTRUCTIONS BODY", "utf8");
+
+      const loaded = await loadInstructionsWithInlinedReferences(entryPath);
+      const context: Record<string, unknown> = {
+        paperclipInstructionInjection: {
+          mode: "compact",
+          contentHash: "stale-hash",
+          deliveryToken: "delivery-2",
+        },
+      };
+      const applied = applyInstructionInjectionPolicy(loaded, context);
+
+      expect(applied.content).toBe("CURRENT INSTRUCTIONS BODY");
+      expect(context.paperclipInstructionInjectionDelivery).toEqual({
+        version: 1,
+        state: "prepared",
+        deliveryToken: "delivery-2",
+        mode: "full",
+        contentHash: hashLoadedInstructions(loaded),
+        entryPath,
+      });
     });
   });
 

@@ -1,9 +1,12 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentInstructionInjections, issueExecutionCards } from "@paperclipai/db";
-import { loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
-import { hashStructuredValue } from "./issue-execution-cards/hash.js";
+import {
+  hashLoadedInstructions,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import { parseObject } from "../adapters/utils.js";
 
 function readNonEmptyString(value: unknown): string | null {
@@ -47,14 +50,47 @@ async function issueHasExecutionCard(input: {
   return row !== null;
 }
 
-export async function applyInstructionInjectionLedger(input: {
+export type InstructionInjectionPlan = {
+  companyId: string;
+  issueId: string;
+  agentId: string;
+  adapterType: string;
+  instructionsPath: string;
+  entryPath: string;
+  includedPaths: string[];
+  deferredPaths: string[];
+  warnings: string[];
+  contentHash: string;
+  deliveryToken: string;
+  mode: "full" | "compact";
+  plannedProviderSessionId: string | null;
+};
+
+function writePlanToContext(
+  context: Record<string, unknown>,
+  plan: InstructionInjectionPlan,
+) {
+  delete context.paperclipInstructionInjectionDelivery;
+  context.paperclipInstructionInjection = {
+    mode: plan.mode,
+    entryPath: plan.entryPath,
+    contentHash: plan.contentHash,
+    includedPaths: plan.includedPaths,
+    deferredPaths: plan.deferredPaths,
+    deliveryToken: plan.deliveryToken,
+  };
+}
+
+export async function prepareInstructionInjection(input: {
   db: Db;
   context: Record<string, unknown>;
   agent: { id: string; companyId: string; adapterType: string };
   issueId: string | null;
   adapterConfig: Record<string, unknown>;
   cwd: string;
-}) {
+  runId: string;
+  providerSessionId: string | null;
+}): Promise<InstructionInjectionPlan | null> {
   // [주의 — P0c] issueId가 null인 run(sidebar/Telegram 자유대화, timer)은 이 벡터(AGENTS.md
   //   reference 파일, issue+execution-card 스코프)를 받지 않는다. Hermes Ops liaison의 필수
   //   safety/monitoring 규칙은 vector-1(HERMES_OPERATIONS_LIAISON_BRIEF, -q prompt로 무조건 전달)
@@ -84,11 +120,7 @@ export async function applyInstructionInjectionLedger(input: {
     includedPaths: loaded.includedPaths,
     deferredPaths: loaded.deferredPaths,
     warnings: loaded.warnings,
-    contentHash: hashStructuredValue({
-      content: loaded.content,
-      includedPaths: loaded.includedPaths,
-      deferredPaths: loaded.deferredPaths,
-    }),
+    contentHash: hashLoadedInstructions(loaded),
   };
   const previous = await input.db
     .select()
@@ -102,19 +134,98 @@ export async function applyInstructionInjectionLedger(input: {
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  const compact = !wakeRotatesSession(input.context) && previous?.contentHash === injectionJson.contentHash;
+  const previousJson = parseObject(previous?.lastInjectionJson);
+  const providerSessionId = readNonEmptyString(input.providerSessionId);
+  const compact = !wakeRotatesSession(input.context)
+    && providerSessionId !== null
+    && previous?.contentHash === injectionJson.contentHash
+    && readNonEmptyString(previousJson.providerSessionId) === providerSessionId;
+  const plan: InstructionInjectionPlan = {
+    companyId: input.agent.companyId,
+    issueId: input.issueId,
+    agentId: input.agent.id,
+    adapterType: input.agent.adapterType,
+    instructionsPath,
+    ...injectionJson,
+    deliveryToken: `${input.runId}:${randomUUID()}`,
+    mode: compact ? "compact" : "full",
+    plannedProviderSessionId: providerSessionId,
+  };
+  writePlanToContext(input.context, plan);
+  return plan;
+}
+
+export function forceFullInstructionInjection(
+  context: Record<string, unknown>,
+  plan: InstructionInjectionPlan | null,
+): InstructionInjectionPlan | null {
+  if (!plan) return null;
+  const fullPlan = plan.mode === "full" ? plan : { ...plan, mode: "full" as const };
+  writePlanToContext(context, fullPlan);
+  return fullPlan;
+}
+
+export async function confirmInstructionInjectionDelivery(input: {
+  db: Db;
+  context: Record<string, unknown>;
+  plan: InstructionInjectionPlan | null;
+  providerSessionId: string | null;
+  adapterProcessStarted: boolean;
+}): Promise<boolean> {
+  const { plan } = input;
+  const providerSessionId = readNonEmptyString(input.providerSessionId);
+  if (!plan || !input.adapterProcessStarted || !providerSessionId) return false;
+  if (plan.mode === "compact" && providerSessionId !== plan.plannedProviderSessionId) return false;
+
+  const delivery = parseObject(input.context.paperclipInstructionInjectionDelivery);
+  if (
+    delivery.version !== 1
+    || delivery.state !== "prepared"
+    || delivery.deliveryToken !== plan.deliveryToken
+    || delivery.mode !== plan.mode
+    || delivery.contentHash !== plan.contentHash
+    || delivery.entryPath !== plan.entryPath
+  ) return false;
+
+  const existing = await input.db
+    .select()
+    .from(agentInstructionInjections)
+    .where(and(
+      eq(agentInstructionInjections.companyId, plan.companyId),
+      eq(agentInstructionInjections.issueId, plan.issueId),
+      eq(agentInstructionInjections.agentId, plan.agentId),
+      eq(agentInstructionInjections.adapterType, plan.adapterType),
+      eq(agentInstructionInjections.instructionsPath, plan.instructionsPath),
+    ))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (readNonEmptyString(parseObject(existing?.lastInjectionJson).deliveryToken) === plan.deliveryToken) {
+    return true;
+  }
+
   const now = new Date();
+  const lastInjectionJson = {
+    entryPath: plan.entryPath,
+    includedPaths: plan.includedPaths,
+    deferredPaths: plan.deferredPaths,
+    warnings: plan.warnings,
+    contentHash: plan.contentHash,
+    providerSessionId,
+    deliveryToken: plan.deliveryToken,
+    mode: plan.mode,
+    deliveredAt: now.toISOString(),
+  };
   await input.db
     .insert(agentInstructionInjections)
     .values({
-      companyId: input.agent.companyId,
-      issueId: input.issueId,
-      agentId: input.agent.id,
-      adapterType: input.agent.adapterType,
-      instructionsPath,
-      contentHash: injectionJson.contentHash,
+      companyId: plan.companyId,
+      issueId: plan.issueId,
+      agentId: plan.agentId,
+      adapterType: plan.adapterType,
+      instructionsPath: plan.instructionsPath,
+      contentHash: plan.contentHash,
       injectionCount: 1,
-      lastInjectionJson: injectionJson,
+      lastInjectionJson,
       updatedAt: now,
     })
     .onConflictDoUpdate({
@@ -126,21 +237,13 @@ export async function applyInstructionInjectionLedger(input: {
         agentInstructionInjections.instructionsPath,
       ],
       set: {
-        contentHash: injectionJson.contentHash,
-        injectionCount: compact
+        contentHash: plan.contentHash,
+        injectionCount: plan.mode === "compact"
           ? sql`${agentInstructionInjections.injectionCount} + 1`
           : 1,
-        lastInjectionJson: injectionJson,
+        lastInjectionJson,
         updatedAt: now,
       },
     });
-
-  input.context.paperclipInstructionInjection = {
-    mode: compact ? "compact" : "full",
-    entryPath: loaded.entryPath,
-    contentHash: injectionJson.contentHash,
-    includedPaths: loaded.includedPaths,
-    deferredPaths: loaded.deferredPaths,
-  };
-  return parseObject(input.context.paperclipInstructionInjection);
+  return true;
 }

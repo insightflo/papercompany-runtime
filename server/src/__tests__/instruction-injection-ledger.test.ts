@@ -12,7 +12,15 @@ import {
   issueExecutionCards,
   issues,
 } from "@paperclipai/db";
-import { applyInstructionInjectionLedger } from "../services/instruction-injection-ledger.js";
+import {
+  applyInstructionInjectionPolicy,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
+import {
+  confirmInstructionInjectionDelivery,
+  forceFullInstructionInjection,
+  prepareInstructionInjection,
+} from "../services/instruction-injection-ledger.js";
 import { buildWorkflowIssueExecutionCard } from "../services/issue-execution-cards/builder.js";
 import { hashStructuredValue } from "../services/issue-execution-cards/hash.js";
 import {
@@ -93,83 +101,129 @@ describeEmbeddedPostgres("instruction injection ledger", () => {
     return { companyId, agentId, issueId };
   }
 
-  it("uses full instructions first and compact instructions on the same hash later", async () => {
+  async function prepareAndMarkDelivered(input: {
+    seeded: Awaited<ReturnType<typeof seedIssueWithCard>>;
+    dir: string;
+    context: Record<string, unknown>;
+    runId: string;
+    providerSessionId: string | null;
+  }) {
+    const plan = await prepareInstructionInjection({
+      db,
+      context: input.context,
+      agent: { id: input.seeded.agentId, companyId: input.seeded.companyId, adapterType: "codex_local" },
+      issueId: input.seeded.issueId,
+      adapterConfig: { instructionsFilePath: "AGENTS.md" },
+      cwd: input.dir,
+      runId: input.runId,
+      providerSessionId: input.providerSessionId,
+    });
+    const loaded = await loadInstructionsWithInlinedReferences(path.join(input.dir, "AGENTS.md"));
+    applyInstructionInjectionPolicy(loaded, input.context);
+    return plan;
+  }
+
+  it("commits only after delivery and compacts only for the same provider session", async () => {
     const seeded = await seedIssueWithCard();
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ledger-instructions-"));
     tempDirs.push(dir);
     await fs.writeFile(path.join(dir, "AGENTS.md"), "Important operating manual.", "utf8");
 
     const firstContext: Record<string, unknown> = {};
-    await applyInstructionInjectionLedger({
-      db,
-      context: firstContext,
-      agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
-      issueId: seeded.issueId,
-      adapterConfig: { instructionsFilePath: "AGENTS.md" },
-      cwd: dir,
+    const firstPlan = await prepareAndMarkDelivered({
+      seeded, dir, context: firstContext, runId: "run-1", providerSessionId: "session-1",
     });
-    const secondContext: Record<string, unknown> = {};
-    await applyInstructionInjectionLedger({
-      db,
-      context: secondContext,
-      agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
-      issueId: seeded.issueId,
-      adapterConfig: { instructionsFilePath: "AGENTS.md" },
-      cwd: dir,
-    });
-
     expect(firstContext.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    expect(await db.select().from(agentInstructionInjections)).toHaveLength(0);
+    expect(await confirmInstructionInjectionDelivery({
+      db, context: firstContext, plan: firstPlan, providerSessionId: "session-1", adapterProcessStarted: true,
+    })).toBe(true);
+
+    const secondContext: Record<string, unknown> = {};
+    const secondPlan = await prepareAndMarkDelivered({
+      seeded, dir, context: secondContext, runId: "run-2", providerSessionId: "session-1",
+    });
     expect(secondContext.paperclipInstructionInjection).toMatchObject({ mode: "compact" });
+    expect(await confirmInstructionInjectionDelivery({
+      db, context: secondContext, plan: secondPlan, providerSessionId: "session-1", adapterProcessStarted: true,
+    })).toBe(true);
+
     const [row] = await db
       .select()
       .from(agentInstructionInjections)
       .where(eq(agentInstructionInjections.issueId, seeded.issueId));
     expect(row?.injectionCount).toBe(2);
+    expect(row?.lastInjectionJson).toMatchObject({ providerSessionId: "session-1", mode: "compact" });
+
+    const newSessionContext: Record<string, unknown> = {};
+    await prepareAndMarkDelivered({
+      seeded, dir, context: newSessionContext, runId: "run-3", providerSessionId: "session-2",
+    });
+    expect(newSessionContext.paperclipInstructionInjection).toMatchObject({ mode: "full" });
   });
 
-  it("re-injects full instructions when the wake rotates the session", async () => {
+  it("does not mutate the ledger without matching preparation evidence and a started process", async () => {
     const seeded = await seedIssueWithCard();
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ledger-instructions-"));
     tempDirs.push(dir);
     await fs.writeFile(path.join(dir, "AGENTS.md"), "Important operating manual.", "utf8");
-    const baseInput = (context: Record<string, unknown>) => ({
+    const context: Record<string, unknown> = {};
+    const plan = await prepareInstructionInjection({
       db,
       context,
       agent: { id: seeded.agentId, companyId: seeded.companyId, adapterType: "codex_local" },
       issueId: seeded.issueId,
       adapterConfig: { instructionsFilePath: "AGENTS.md" },
       cwd: dir,
+      runId: "run-no-delivery",
+      providerSessionId: "session-1",
+    });
+    expect(await confirmInstructionInjectionDelivery({
+      db, context, plan, providerSessionId: "session-1", adapterProcessStarted: true,
+    })).toBe(false);
+    context.paperclipInstructionInjectionDelivery = {
+      version: 1, state: "prepared", deliveryToken: "wrong", mode: "full",
+      contentHash: plan?.contentHash, entryPath: plan?.entryPath,
+    };
+    expect(await confirmInstructionInjectionDelivery({
+      db, context, plan, providerSessionId: "session-1", adapterProcessStarted: true,
+    })).toBe(false);
+    expect(await confirmInstructionInjectionDelivery({
+      db, context, plan, providerSessionId: "session-1", adapterProcessStarted: false,
+    })).toBe(false);
+    expect(await db.select().from(agentInstructionInjections)).toHaveLength(0);
+  });
+
+  it("forces a provisional compact plan back to full after a late rotation", async () => {
+    const seeded = await seedIssueWithCard();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ledger-instructions-"));
+    tempDirs.push(dir);
+    await fs.writeFile(path.join(dir, "AGENTS.md"), "Important operating manual.", "utf8");
+
+    const firstContext: Record<string, unknown> = {};
+    const firstPlan = await prepareAndMarkDelivered({
+      seeded, dir, context: firstContext, runId: "run-1", providerSessionId: "session-1",
+    });
+    await confirmInstructionInjectionDelivery({
+      db, context: firstContext, plan: firstPlan, providerSessionId: "session-1", adapterProcessStarted: true,
     });
 
-    // First wake on the issue injects full.
-    const firstContext: Record<string, unknown> = {};
-    await applyInstructionInjectionLedger(baseInput(firstContext));
-    expect(firstContext.paperclipInstructionInjection).toMatchObject({ mode: "full" });
+    const rotatedContext: Record<string, unknown> = {};
+    const provisional = await prepareAndMarkDelivered({
+      seeded, dir, context: rotatedContext, runId: "run-2", providerSessionId: "session-1",
+    });
+    expect(provisional?.mode).toBe("compact");
+    const forced = forceFullInstructionInjection(rotatedContext, provisional);
+    expect(forced?.mode).toBe("full");
+    expect(rotatedContext.paperclipInstructionInjection).toMatchObject({ mode: "full" });
 
-    // A session-rotating wake must re-inject full even on an unchanged hash.
-    const reworkRotation: Record<string, unknown> = {
-      paperclipWorkflowReworkContract: { kind: "workflow_qa_rework", producerStepId: "produce" },
-    };
-    await applyInstructionInjectionLedger(baseInput(reworkRotation));
-    expect(reworkRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
-
-    const freshSessionRotation: Record<string, unknown> = { forceFreshSession: true };
-    await applyInstructionInjectionLedger(baseInput(freshSessionRotation));
-    expect(freshSessionRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
-
-    const compactionRotation: Record<string, unknown> = { paperclipSessionRotationReason: "session_compaction" };
-    await applyInstructionInjectionLedger(baseInput(compactionRotation));
-    expect(compactionRotation.paperclipInstructionInjection).toMatchObject({ mode: "full" });
-
-    // After the rotated session is bootstrapped, the next resumed wake compacts again.
-    const resumedContext: Record<string, unknown> = {};
-    await applyInstructionInjectionLedger(baseInput(resumedContext));
-    expect(resumedContext.paperclipInstructionInjection).toMatchObject({ mode: "compact" });
-    const [row] = await db
-      .select()
-      .from(agentInstructionInjections)
-      .where(eq(agentInstructionInjections.issueId, seeded.issueId));
-    // rotation resets to 1, then the resumed compact wake increments to 2.
-    expect(row?.injectionCount).toBe(2);
+    const loaded = await loadInstructionsWithInlinedReferences(path.join(dir, "AGENTS.md"));
+    applyInstructionInjectionPolicy(loaded, rotatedContext);
+    expect(await confirmInstructionInjectionDelivery({
+      db, context: rotatedContext, plan: forced, providerSessionId: "session-2", adapterProcessStarted: true,
+    })).toBe(true);
+    const [row] = await db.select().from(agentInstructionInjections);
+    expect(row?.injectionCount).toBe(1);
+    expect(row?.lastInjectionJson).toMatchObject({ providerSessionId: "session-2", mode: "full" });
   });
 });

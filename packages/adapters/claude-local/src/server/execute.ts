@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
   asString,
@@ -775,9 +779,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         };
       })();
 
-    const resolvedSessionId =
-      parsedStream.sessionId ??
-      (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
+    const sessionUnavailable = Boolean(opts.clearSessionOnMissingSession && isClaudeUnknownSessionError(parsed));
+    const resolvedSessionId = sessionUnavailable
+      ? null
+      : parsedStream.sessionId ??
+        (asString(parsed.session_id, opts.fallbackSessionId ?? "") || opts.fallbackSessionId);
     const resolvedSessionParams = resolvedSessionId
       ? ({
         sessionId: resolvedSessionId,
@@ -841,6 +847,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       initial.parsed &&
       isClaudeUnknownSessionError(initial.parsed)
     ) {
+      if (instructionInjectionRequiresSameSession(context)) {
+        return toAdapterResult(initial, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+      }
       await onLog(
         "stdout",
         `[paperclip] Claude resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,

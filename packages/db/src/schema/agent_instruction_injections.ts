@@ -18,6 +18,10 @@ export type AgentInstructionInjectionJson = {
   deferredPaths: string[];
   warnings: string[];
   contentHash: string;
+  providerSessionId?: string;
+  deliveryToken?: string;
+  mode?: "full" | "compact";
+  deliveredAt?: string;
 };
 
 export const agentInstructionInjections = pgTable(

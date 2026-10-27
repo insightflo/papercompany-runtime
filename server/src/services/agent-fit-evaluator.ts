@@ -99,6 +99,13 @@ export function recommendSessionThreshold(input: {
     };
   }
   const t = input.threshold;
+  if (t <= 0) {
+    return {
+      verdict: "na",
+      reason: "The raw-input token threshold is explicitly disabled (0); no threshold change is recommended.",
+      suggestedTokens: null,
+    };
+  }
   const rotationRatio = input.sessions / Math.max(input.runs, 1);
   // [2026-08-31 수정 — Sherlock 2.8M 오폭 사례] 유일한 정당한 상향 트리거는 스래시뿐:
   //   새 세션 바닥값(부트스트랩 하한)이 임계에 근접하면 매런 회전으로 연속성이 없다.

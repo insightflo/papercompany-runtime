@@ -5,7 +5,7 @@ const header = "Unconsumed operator instructions (highest priority — apply bef
 
 describe("unconsumed operator instructions runtime brief", () => {
   it("adds timestamped instructions independently of recent comments without re-truncation", () => {
-    const body = "x".repeat(600);
+    const body = "x".repeat(1_200);
     const brief = buildPaperclipRuntimeBrief({
       paperclipOperatorInstructionsUnconsumed: [{ id: "one", createdAt: "2026-09-26T08:00:00.000Z", body }],
       paperclipIssueRecentComments: [{ id: "two", authorType: "agent", body: "recent reply" }],

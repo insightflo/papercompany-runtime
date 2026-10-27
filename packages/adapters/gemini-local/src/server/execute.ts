@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPaperclipRuntimeBrief, joinPromptSections, renderTemplate, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { applyInstructionInjectionPolicy, loadInstructionsWithInlinedReferences } from "@paperclipai/adapter-utils/instructions";
+import {
+  applyInstructionInjectionPolicy,
+  instructionInjectionRequiresSameSession,
+  loadInstructionsWithInlinedReferences,
+} from "@paperclipai/adapter-utils/instructions";
 import {
   asBoolean,
   asNumber,
@@ -485,6 +489,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     (initial.proc.exitCode ?? 0) !== 0 &&
     isGeminiUnknownSessionError(initial.proc.stdout, initial.proc.stderr)
   ) {
+    if (instructionInjectionRequiresSameSession(context)) {
+      return toResult(initial, true, true);
+    }
     await onLog(
       "stdout",
       `[paperclip] Gemini resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
