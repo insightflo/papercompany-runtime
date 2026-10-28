@@ -360,10 +360,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
             c.conname AS constraint_name,
             srcn.nspname AS source_schema,
             src.relname AS source_table,
-            array_agg(sa.attname ORDER BY array_position(c.conkey, sa.attnum)) AS source_columns,
+            array_agg(sa.attname ORDER BY key_pair.ordinality) AS source_columns,
             tgtn.nspname AS target_schema,
             tgt.relname AS target_table,
-            array_agg(ta.attname ORDER BY array_position(c.confkey, ta.attnum)) AS target_columns,
+            array_agg(ta.attname ORDER BY key_pair.ordinality) AS target_columns,
             CASE c.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule,
             CASE c.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule
           FROM pg_constraint c
@@ -371,8 +371,10 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           JOIN pg_namespace srcn ON srcn.oid = src.relnamespace
           JOIN pg_class tgt ON tgt.oid = c.confrelid
           JOIN pg_namespace tgtn ON tgtn.oid = tgt.relnamespace
-          JOIN pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = ANY(c.conkey)
-          JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = ANY(c.confkey)
+          JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY
+            AS key_pair(source_attnum, target_attnum, ordinality) ON true
+          JOIN pg_attribute sa ON sa.attrelid = src.oid AND sa.attnum = key_pair.source_attnum
+          JOIN pg_attribute ta ON ta.attrelid = tgt.oid AND ta.attnum = key_pair.target_attnum
           WHERE c.contype = 'f' AND (
             srcn.nspname = 'public'
             OR (${includeMigrationJournal}::boolean AND srcn.nspname = ${DRIZZLE_SCHEMA})
@@ -385,17 +387,11 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
             && includedTableNames.has(tableKey(fk.target_schema, fk.target_table)),
         );
 
-        if (fks.length > 0) {
-          emit("-- Foreign keys");
-          for (const fk of fks) {
-            const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
-            const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
-            emitStatement(
-              `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule};`,
-            );
-          }
-          emit("");
-        }
+        const foreignKeyStatements = fks.map((fk) => {
+          const srcCols = fk.source_columns.map((c) => `"${c}"`).join(", ");
+          const tgtCols = fk.target_columns.map((c) => `"${c}"`).join(", ");
+          return `ALTER TABLE ${quoteQualifiedName(fk.source_schema, fk.source_table)} ADD CONSTRAINT "${fk.constraint_name}" FOREIGN KEY (${srcCols}) REFERENCES ${quoteQualifiedName(fk.target_schema, fk.target_table)} (${tgtCols}) ON UPDATE ${fk.update_rule} ON DELETE ${fk.delete_rule};`;
+        });
 
         // Unique constraints
         const allUniqueConstraints = await sql<{
@@ -452,6 +448,13 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
           for (const idx of indexes) {
             emitStatement(`${idx.indexdef};`);
           }
+          emit("");
+        }
+
+        // Referenced unique constraints and indexes must exist before foreign keys are added.
+        if (foreignKeyStatements.length > 0) {
+          emit("-- Foreign keys");
+          for (const statement of foreignKeyStatements) emitStatement(statement);
           emit("");
         }
 
