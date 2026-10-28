@@ -37,6 +37,7 @@ import {
   isGeminiUnknownSessionError,
   parseGeminiJsonl,
 } from "./parse.js";
+import { runGeminiRetryAttempt } from "./retry-start-result.js";
 import { firstNonEmptyLine } from "./utils.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -505,8 +506,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stdout",
       `[paperclip] Gemini resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
     );
-    const retry = await runAttempt(null);
-    return toResult(retry, true, true);
+    const retry = await runGeminiRetryAttempt(initial, () => runAttempt(null));
+    if (retry.startBlocked) {
+      return {
+        ...toResult(retry.attempt, true, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
+    }
+    return toResult(retry.attempt, true, true);
   }
 
   return toResult(initial);
