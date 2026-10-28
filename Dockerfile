@@ -1,4 +1,4 @@
-FROM node:lts-trixie-slim AS base
+FROM node:24.22.1-trixie-slim AS base
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git \
   && rm -rf /var/lib/apt/lists/*
