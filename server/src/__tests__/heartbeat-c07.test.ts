@@ -51,7 +51,7 @@ describeDb("heartbeat C07 log and no-progress preservation", () => {
   afterAll(async () => { await db?.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
   async function seedC07Fixture(adapterConfig: Record<string, unknown> = {}) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
-    await db.insert(companies).values({ id: companyId, name: "Run Stability", issuePrefix: "RST" + companyId.replace(/-/g, "").slice(0, 4).toUpperCase(), requireBoardApprovalForNewAgents: false });
+    await db.insert(companies).values({ id: companyId, name: "Run Stability", issuePrefix: "RST" + companyId.replace(/-/g, "").toUpperCase(), requireBoardApprovalForNewAgents: false });
     await db.insert(agents).values({ id: agentId, companyId, name: "Run Stability Agent", role: "engineer", status: "active", adapterType: "opencode_local", adapterConfig, runtimeConfig: {}, permissions: {} });
     await db.insert(issues).values({ id: issueId, companyId, identifier: "RST-" + companyId.slice(0, 4).toUpperCase(), title: "Run stability issue", status: "todo", assigneeAgentId: agentId });
     const heartbeat = heartbeatService(db), scope = and(eq(issues.id, issueId), eq(issues.companyId, companyId));

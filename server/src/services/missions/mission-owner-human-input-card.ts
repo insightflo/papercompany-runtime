@@ -21,6 +21,10 @@ import { unprocessable } from "../../errors.js";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 import { operatorDecisionReadService } from "../operator-decisions-read.js";
 import { buildDefaultOwnerHumanDefinition } from "./mission-owner-human-default-definition.js";
+import {
+  WORKFLOW_RESTART_FROM_START_OPTION_ID,
+  WORKFLOW_RESTART_FROM_START_SCOPE,
+} from "./workflow-restart-option.js";
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
@@ -49,8 +53,8 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly ownerActionIssueStatus: string;
   /** 미션 오너 에이전트 — 카드 requestedByAgentId(resolve 웨이크 수신자). */
   readonly requestedByAgentId: string;
-  /** 발신 주체 — 시스템 경로(terminal supervise 등)는 "system". system+escalate 는
-   *  nextAction 의 복구 경로 열거에서 선택지를 파생한다(오너 에이전트 제출은 기본 3옵션 유지). */
+  /** 발신 주체 — 시스템 경로(terminal supervise 등)는 "system". 실행 선택지는
+   *  structuredOptions로만 전달하며 nextAction 자연어에서 파생하지 않는다. */
   readonly actorType?: "agent" | "system";
   readonly reason?: string;
   readonly nextAction?: string;
@@ -103,93 +107,12 @@ function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefin
     actions: [{ id: "submit", label: "선택 제출", outcome: "submit", tone: "primary", requiresSelection: true }],
     selection: { min: 1, max: 1 },
     comment: { mode: "optional", label: "결정 사유", placeholder: "선택 이유나 오너에게 전달할 지시를 남겨 주세요", maxLength: 2_000 },
-    approvedScope: ["operator_decision.resolve"],
-    forbiddenScope: ["agent_substitute_submission", "auto_execution"],
-  };
-}
-
-const DERIVED_PATH_OPTION_MIN = 2;
-const DERIVED_PATH_OPTION_MAX = 6;
-const DERIVED_PATH_LABEL_MAX = 160;
-
-// [일반 파생 규칙] escalate nextAction 이 사람에게 복구 경로 후보를 열거하면(괄호 열거 "(a, b, c,
-//   or d)" 또는 한글 "…a, b, c 중 …") 그 항목들을 그대로 선택지로 만든다 — 시스템 에스컬레이션의
-//   "재시도/재계획/재할당/취소 중 선택" 요청에 approve/hold/reject 는 질문에 답하지 못한다.
-//   특정 문구 하드코딩 없이 nextAction 텍스트에서 파생하며, 열거를 해석할 수 없으면 null(기본 선택지).
-export function deriveRecoveryPathOptionsFromNextAction(nextAction: string | undefined): { id: string; label: string }[] | null {
-  const text = present(nextAction);
-  if (!text) return null;
-  const candidates: string[] = [];
-  for (const group of text.matchAll(/\(([^()]{3,400})\)/g)) {
-    if (group[1]?.includes(",")) candidates.push(group[1]);
-  }
-  for (const group of text.matchAll(/([^()\n.!?]{3,240})\s*중/g)) {
-    if (group[1]?.includes(",")) candidates.push(group[1]);
-  }
-  for (const candidate of candidates) {
-    const items = candidate
-      .split(/,|,|\s+or\s+/i)
-      .map((item) => item.trim().replace(/[.;]+$/, "").trim())
-      .filter((item) => item.length >= 1 && item.length <= DERIVED_PATH_LABEL_MAX);
-    if (items.length < DERIVED_PATH_OPTION_MIN || items.length > DERIVED_PATH_OPTION_MAX) continue;
-    const usedIds = new Set<string>();
-    const options: { id: string; label: string }[] = [];
-    for (const [index, item] of items.entries()) {
-      const slug = item
-        .normalize("NFKD")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 60);
-      let id = /^[a-z0-9]/.test(slug) ? slug : `path-${index + 1}`;
-      while (usedIds.has(id)) id = `${id}-x`;
-      usedIds.add(id);
-      options.push({ id, label: item });
-    }
-    if (options.length === items.length) return options;
-  }
-  return null;
-}
-
-// [선택지별 결과 설명] 표준 복구 동사에는 그 선택이 무엇으로 이어지는지 명시한다 — 사람이
-//   선택지를 볼 때 결과를 몰라도 고르게 두지 않는다(2026-10-19 사용자 지적). 동사 매칭은
-//   일반 규칙(한/영 키워드)이고 미매칭은 기존 안내 문구 유지(fail-open).
-const RECOVERY_PATH_CONSEQUENCES: { match: RegExp; consequence: string }[] = [
-  { match: /replan|계획\s*변경|계획\s*재|재기획/, consequence: "기존 계획을 폐기하고 새 계획으로 다시 시작합니다. 기존 산출물은 보존되지만 이후 실행은 새 계획에 따라 다시 진행됩니다." },
-  { match: /revised|수정\s*후\s*재시도|입력\s*수정/, consequence: "같은 계획 아래 입력을 수정해 실행을 다시 시도합니다. 수정할 입력값은 오너가 결정·전달합니다." },
-  { match: /different.{0,12}(source|live)|다른\s*(소스|출처)/, consequence: "현재 소스를 버리고 다른 소스에서 수집부터 다시 시작합니다." },
-  { match: /explicit.{0,12}target|recovery\s*target|대상\s*(지정|기록)/, consequence: "닿힌 재시도 대상 대신 유효한 대상을 지정해 복구를 이어갑니다." },
-  { match: /reassign|담당자\s*변경|재할당/, consequence: "다른 담당자에게 작업을 넘겨 진행합니다." },
-  { match: /cancel|취소/, consequence: "이 복구를 중단합니다. 미션은 미완료 방향으로 정리될 수 있습니다." },
-  { match: /wait|보류|대기/, consequence: "지금은 행동하지 않고 다음 상황을 다시 관찰합니다." },
-  { match: /retry|재시도/, consequence: "같은 조건으로 실행을 다시 시도합니다." },
-];
-
-function recoveryPathConsequence(label: string): string | null {
-  for (const entry of RECOVERY_PATH_CONSEQUENCES) {
-    if (entry.match.test(label)) return entry.consequence;
-  }
-  return null;
-}
-
-function buildDerivedRecoveryPathDefinition(
-  paths: { id: string; label: string }[],
-  evidenceRefs: { label: string; href: string }[],
-): OperatorDecisionDefinition {
-  const options = paths.map((path) => ({
-    id: path.id,
-    label: path.label,
-    description: recoveryPathConsequence(path.label)
-      ?? "에스컬레이션이 제시한 복구 경로 후보입니다. 선택하면 이 방향이 미션 오너에게 전달됩니다.",
-    facts: [],
-    evidenceRefs,
-  }));
-  return {
-    options,
-    actions: [{ id: "submit", label: "선택 제출", outcome: "submit", tone: "primary", requiresSelection: true }],
-    selection: { min: 1, max: 1 },
-    comment: { mode: "optional", label: "결정 사유", placeholder: "선택 이유나 오너에게 전달할 지시를 남겨 주세요", maxLength: 2_000 },
-    approvedScope: ["operator_decision.resolve"],
+    approvedScope: [
+      "operator_decision.resolve",
+      ...(options.some((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID)
+        ? [WORKFLOW_RESTART_FROM_START_SCOPE]
+        : []),
+    ],
     forbiddenScope: ["agent_substitute_submission", "auto_execution"],
   };
 }
@@ -244,17 +167,11 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     });
   }
   const evidenceOptionRefs = evidence.map((ref) => ({ label: ref.label, href: ref.href }));
-  // [선택지 파생 순서] 구조화 options(생산자 직접 지정) > system escalate nextAction 의 복구 경로
-  //   열거 > 기본 approve/hold/reject. 오너 에이전트 제출(actorType 없음/agent)은 항상 기본값이라
-  //   기존 제출 경로 동작이 바뀌지 않는다.
-  const derivedPaths = input.actorType === "system" && input.decision === "escalate"
-    ? deriveRecoveryPathOptionsFromNextAction(input.nextAction)
-    : null;
+  // 실행 선택지는 생산자가 구조화해 전달한 options만 사용한다. nextAction은 표시·검토 문구이며
+  // operation/target 권한으로 파싱하지 않는다.
   const definition = input.structuredOptions !== undefined
     ? buildStructuredDefinition(input.structuredOptions)
-    : derivedPaths
-      ? buildDerivedRecoveryPathDefinition(derivedPaths, evidenceOptionRefs)
-      : buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
+    : buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
   // [요청자 추천] 선택지를 넘기는 요청은 근거와 함께 추천도 제시한다 — 판단 부담만 사람에게 넘기지
   //   않는다. 대응 옵션이 없는 optionId 는 조용히 무시한다(fail-open: 발화 누락 방지 계약 유지).
   //   최종 정의는 입력에 결정적이므로 requestKey 멱등 replay 규약도 그대로다.

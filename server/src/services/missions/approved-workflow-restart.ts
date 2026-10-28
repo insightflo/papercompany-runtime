@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { activityLog, issues, workflowRuns, type Db } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { workflowService } from "../workflow/engine.js";
@@ -18,9 +18,23 @@ export async function startWorkflowRestartFromOperatorDecision(db: Db, input: {
     eq(workflowRuns.companyId, input.companyId),
     eq(workflowRuns.missionId, input.missionId),
     isNull(workflowRuns.parentRunId),
-  )).limit(1);
+  )).limit(1).for("update");
   if (!source || source.status !== "failed") {
     throw conflict("workflow_restart_source_not_failed");
+  }
+  const [activeReplacement] = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+    eq(workflowRuns.companyId, input.companyId),
+    eq(workflowRuns.missionId, input.missionId),
+    eq(workflowRuns.workflowId, source.workflowId),
+    isNull(workflowRuns.parentRunId),
+    ne(workflowRuns.id, source.id),
+    or(
+      inArray(workflowRuns.status, ["pending", "running"]),
+      sql`${workflowRuns.metadata}->'operatorDecisionRestart'->>'sourceWorkflowRunId' = ${source.id}`,
+    ),
+  )).limit(1);
+  if (activeReplacement) {
+    throw conflict("workflow_restart_active_replacement_exists", { workflowRunId: activeReplacement.id });
   }
 
   if (input.issueId) {

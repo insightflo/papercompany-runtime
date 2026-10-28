@@ -1,6 +1,6 @@
 import { and, eq, getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companies, issueComments, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
+import { activityLog, companies, issueComments, missions, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -15,7 +15,12 @@ import {
 } from "./operator-decision-currentness.js";
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
 import { startApprovedRevisionRun } from "./workflow/approved-revision-start.js";
-import { resumeRunFromOperatorDecision, TERMINAL_RESUME_OPTION_ID } from "./missions/terminal-resume-from-decision.js";
+import { resumeRunFromOperatorDecisionInsideSerialization, TERMINAL_RESUME_OPTION_ID } from "./missions/terminal-resume-from-decision.js";
+import {
+  withResumeSerialization,
+  type ResumeMutationTransaction,
+  type ResumeSerializationContext,
+} from "./workflow/resume/serialization.js";
 import { startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
@@ -91,6 +96,17 @@ export function operatorDecisionResolutionWriteService(
     // [T5] Quality 연결 결정은 전용 경로로만: 실제 컬럼 연결(qualityActionId) 기준.
     await guardQualityWrite(db, { companyId: before.companyId, subject: "decision", subjectId: id, operation: "resolve" });
     const result = validateOperatorDecisionResult(before.definition, rawInput);
+    const directResumeSelected = result.outcome === "submit"
+      && result.selectedOptionIds.includes(TERMINAL_RESUME_OPTION_ID);
+    const directRestartSelected = (result.outcome === "approve" || result.outcome === "submit")
+      && result.selectedOptionIds.includes(WORKFLOW_RESTART_FROM_START_OPTION_ID);
+    const directCommandSelected = directResumeSelected || directRestartSelected;
+    if (directResumeSelected && (!before.sourceContext.missionId || !before.sourceContext.workflowRunId)) {
+      throw conflict("resume_scope_missing");
+    }
+    if (directRestartSelected && (!before.sourceContext.missionId || !before.sourceContext.workflowRunId)) {
+      throw conflict("workflow_restart_scope_missing");
+    }
     if (before.status === "pending" && !before.definition.humanReview) {
       throw unprocessable(
         "판단 주제, 근거 원본 위치, 해석, 영향과 다음 단계가 없어 결정할 수 없습니다. 요청자에게 정보 보완을 요구해 주세요.",
@@ -98,7 +114,10 @@ export function operatorDecisionResolutionWriteService(
       );
     }
 
-    const applied = await db.transaction(async (tx) => {
+    const resolveInsideTransaction = async (
+      tx: ResumeMutationTransaction,
+      resumeContext?: ResumeSerializationContext,
+    ) => {
       const now = new Date();
       if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before);
       const updated = await tx.update(operatorDecisions).set({
@@ -125,7 +144,7 @@ export function operatorDecisionResolutionWriteService(
           updated.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
       }
       let continuationId: string | null = null;
-      if (updated.continuationMode === "issue_current_assignee") {
+      if (updated.continuationMode === "issue_current_assignee" && !directCommandSelected) {
         continuationId = await tx.insert(operatorDecisionContinuations).values({
           companyId: updated.companyId,
           operatorDecisionId: id,
@@ -154,8 +173,7 @@ export function operatorDecisionResolutionWriteService(
           continuationId,
         },
       });
-      if (result.outcome === "approve"
-        && result.selectedOptionIds.includes(WORKFLOW_RESTART_FROM_START_OPTION_ID)) {
+      if (directRestartSelected) {
         if (!updated.definition.approvedScope.includes(WORKFLOW_RESTART_FROM_START_SCOPE)) {
           throw conflict("workflow_restart_scope_missing");
         }
@@ -171,8 +189,36 @@ export function operatorDecisionResolutionWriteService(
           issueId: updated.issueId,
         });
       }
+      if (directResumeSelected) {
+        if (!resumeContext || !updated.sourceContext.missionId || !updated.sourceContext.workflowRunId) {
+          throw conflict("resume_scope_missing");
+        }
+        await resumeRunFromOperatorDecisionInsideSerialization(resumeContext, {
+          operatorDecisionId: id,
+          resolvedByUserId,
+          companyId: updated.companyId,
+          missionId: updated.sourceContext.missionId,
+          workflowRunId: updated.sourceContext.workflowRunId,
+        });
+      }
       return true;
-    });
+    };
+    const applied = directResumeSelected
+      ? await withResumeSerialization(db, {
+        companyId: before.companyId,
+        missionId: before.sourceContext.missionId!,
+        runId: before.sourceContext.workflowRunId!,
+      }, (context) => resolveInsideTransaction(context.tx, context))
+      : directRestartSelected
+        ? await db.transaction(async (tx) => {
+          const [lockedMission] = await tx.select({ id: missions.id }).from(missions).where(and(
+            eq(missions.id, before.sourceContext.missionId!),
+            eq(missions.companyId, before.companyId),
+          )).for("update");
+          if (!lockedMission) throw conflict("workflow_restart_scope_missing");
+          return resolveInsideTransaction(tx);
+        })
+        : await db.transaction((tx) => resolveInsideTransaction(tx));
     const decision = await read.getRequired(id);
     // [delivery bridge] applied(첫 적용)에만 코멘트를 남긴다 — replay 는 이미 코멘트가 존재한다.
     //   이슈가 삭제된 경우 decision.issueId 는 FK(set null) 로 비어 자연 스킵된다.
@@ -184,21 +230,13 @@ export function operatorDecisionResolutionWriteService(
         selectedOptions: resolveSelectedOptions(decision.definition, result.selectedOptionIds),
       });
     }
-    if (applied && result.outcome === "approve" && decision.sourceContext.missionId) {
+    // 직접 복구 명령은 같은 resolve에서 이미 정확한 대상 실행을 만들거나 재개했다.
+    // 일반 승인 후처리까지 실행하면 별도 revision run이 중복 시작될 수 있다.
+    if (applied && !directCommandSelected && result.outcome === "approve" && decision.sourceContext.missionId) {
       const missionId = decision.sourceContext.missionId;
       void startApprovedRevisionRun(db, { companyId: decision.companyId, missionId })
         .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId },
           "approved revision start after decision resolve failed"));
-    }
-    if (applied && result.outcome === "submit"
-      && result.selectedOptionIds.includes(TERMINAL_RESUME_OPTION_ID)
-      && decision.sourceContext.missionId && decision.sourceContext.workflowRunId) {
-      const missionId = decision.sourceContext.missionId;
-      const workflowRunId = decision.sourceContext.workflowRunId;
-      void resumeRunFromOperatorDecision(db, { operatorDecisionId: id, resolvedByUserId,
-        companyId: decision.companyId, missionId, workflowRunId })
-        .catch((err) => logger.warn({ err, operatorDecisionId: id, missionId, workflowRunId },
-          "operator-decision resume after decision resolve failed"));
     }
     return { decision, applied, continuation: decision.continuation };
   }

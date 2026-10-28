@@ -32,8 +32,11 @@ import {
 } from "./terminal-mission-workflow-continuation.js";
 import { resumableRunSignalForRun, resumePreviewEligibleForRun } from "./resume-signals.js";
 export { reviewedResumePolicyFullyResolves } from "./resume-signals.js";
-import { deriveRecoveryPathOptionsFromNextAction } from "./mission-owner-human-input-card.js";
-import { TERMINAL_RESUME_OPTION_DESCRIPTION, TERMINAL_RESUME_OPTION_ID, TERMINAL_RESUME_OPTION_LABEL } from "./terminal-resume-from-decision.js";
+import {
+  terminalCardStructuredOptions,
+  terminalRestartPathAvailable,
+} from "./terminal-recovery-card-options.js";
+export { terminalCardStructuredOptions } from "./terminal-recovery-card-options.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
@@ -63,18 +66,24 @@ export function terminalResumeGuidanceText(available: boolean, language: "ko" | 
   return language === "ko" ? TERMINAL_RESUME_GUIDANCE_KO : TERMINAL_RESUME_GUIDANCE_EN;
 }
 
-/** 실패 실행 중 하나라도 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 재개 옵션이 실제로 작동함).
+/** 카드에 실제로 묶인 실패 실행이 재개 대상인지 고른다. 다른 실패 실행의 적격성으로 이 카드의
+ *  resume 옵션을 열면 resolve 시 binding 불일치로 전체 결정이 롤백되므로 fail-closed 한다. */
+export function terminalResumeCandidateRunId(workflowRunId: string | null,
+  failedRuns: readonly TerminalMissionFailedRun[]): string | null {
+  if (!workflowRunId) return null;
+  return failedRuns.some((run) => run.id === workflowRunId && TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
+    ? workflowRunId
+    : null;
+}
+
+/** 카드에 묶인 실패 실행을 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 옵션이 실제로 작동함).
  *  [재개 약속 정직화 2026-10-23] 정책 등록만으로 재개를 약속하면 프리뷰가 거절하는 경로를 카드가
  *  약속하게 된다(dsh-purge 사례) — 정책 resolve 사전필터 후 실제 프리뷰로 확정한다. */
 async function terminalResumePathAvailable(db: Db, companyId: string, missionId: string,
-  failedRunIds: readonly string[]): Promise<boolean> {
-  for (const runId of failedRunIds) {
-    const signal = await resumableRunSignalForRun(db, companyId, runId);
-    if (signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId })) {
-      return true;
-    }
-  }
-  return false;
+  runId: string | null): Promise<boolean> {
+  if (!runId) return false;
+  const signal = await resumableRunSignalForRun(db, companyId, runId);
+  return Boolean(signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId }));
 }
 
 export type TerminalMissionOwnerActionIssue = {
@@ -258,22 +267,9 @@ type TerminalHumanInputCardContext = {
   workflowRunId: string | null;
   /** [승인=재개 2026-10-23] 재개 정책이 온전히 resolve 되는 실패 실행이 있으면 재개 옵션을 카드에 추가한다. */
   resumeAvailable: boolean;
+  /** 실패 실행에서 중복 없는 새 최상위 실행을 만들 수 있을 때만 restart 옵션을 추가한다. */
+  restartAvailable: boolean;
 };
-
-/** [승인=재개] 재개 가능시 카드 선택지 구성 — 재개 옵션 첫 번째+추천, 나머지는 nextAction 파생. */
-export function terminalCardStructuredOptions(resumeAvailable: boolean,
-  nextAction: string): { structuredOptions: { id: string; label: string; description?: string }[];
-  recommendedOptionId: string; recommendationReason: string } | null {
-  if (!resumeAvailable) return null;
-  return {
-    structuredOptions: [
-      { id: TERMINAL_RESUME_OPTION_ID, label: TERMINAL_RESUME_OPTION_LABEL, description: TERMINAL_RESUME_OPTION_DESCRIPTION },
-      ...(deriveRecoveryPathOptionsFromNextAction(nextAction) ?? []),
-    ],
-    recommendedOptionId: TERMINAL_RESUME_OPTION_ID,
-    recommendationReason: "실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다.",
-  };
-}
 
 // [fail-loud] 시스템 경로는 제출 응답이 없으므로 카드 매핑/생성 실패를 activity+로그 로 남긴다.
 async function recordTerminalHumanInputCardFailure(
@@ -343,7 +339,7 @@ export async function ensureTerminalHumanInputDecisionCard(
       workflowRunId: context.workflowRunId,
       actorType: "system",
       // [승인=재개 2026-10-23] 재개가 실제로 작동할 때만 “이 실행 이어서 진행(재개)” 선택지를 추가한다.
-      ...(terminalCardStructuredOptions(context.resumeAvailable, context.nextAction) ?? {}),
+      ...terminalCardStructuredOptions(context.resumeAvailable, context.restartAvailable),
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {
@@ -378,8 +374,12 @@ export async function emitTerminalMissionHumanOperatorReport(
     workflowRunId: input.workflowRunId,
     failedRuns: terminalFailedRuns,
   });
+  const resumeCandidateRunId = terminalResumeCandidateRunId(input.workflowRunId, terminalFailedRuns);
   const resumePathAvailable = await terminalResumePathAvailable(db, input.expectedCompanyId,
-    input.expectedMissionId, terminalFailedRuns.map((run) => run.id));
+    input.expectedMissionId, resumeCandidateRunId);
+  const restartPathAvailable = await terminalRestartPathAvailable(
+    db, input.expectedCompanyId, input.expectedMissionId, input.workflowRunId,
+  );
   const body = buildTerminalMissionHumanOperatorComment({
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,
@@ -420,7 +420,11 @@ export async function emitTerminalMissionHumanOperatorReport(
     let verifiedRunId: string | null = null;
     if (input.workflowRunId) {
       const [runRow] = await tx.select({ id: workflowRuns.id }).from(workflowRuns)
-        .where(and(eq(workflowRuns.id, input.workflowRunId), eq(workflowRuns.companyId, input.expectedCompanyId)))
+        .where(and(
+          eq(workflowRuns.id, input.workflowRunId),
+          eq(workflowRuns.companyId, input.expectedCompanyId),
+          eq(workflowRuns.missionId, input.expectedMissionId),
+        ))
         .limit(1);
       verifiedRunId = runRow?.id ?? null;
     }
@@ -454,6 +458,7 @@ export async function emitTerminalMissionHumanOperatorReport(
       evidence: evidenceText,
       workflowRunId: verifiedRunId,
       resumeAvailable: resumePathAvailable,
+      restartAvailable: restartPathAvailable,
     };
 
     // atomic claim: 동시/재시도 중 정확히 한 번만 통과(design section 9 unique-index 패턴).

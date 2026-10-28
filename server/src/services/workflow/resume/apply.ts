@@ -16,25 +16,13 @@ import {
 import { assembleResumePreview, type ResumePreviewResult, type ResumeSnapshotSigner } from "./preview.js";
 import { readResumeRequest, type ResumeRequestView } from "./request-store.js";
 import { resetForResume } from "./reset.js";
-import type { ResumeMutationTransaction, ResumeRunRow } from "./serialization.js";
+import type { ResumeMutationTransaction, ResumeRunRow, ResumeSerializationContext } from "./serialization.js";
 import { withResumeSerialization } from "./serialization.js";
 import { hashSnapshotState, verifySnapshot } from "./snapshot.js";
 
-/**
- * [파일 목적] Task6a real atomic apply — preview(검증·적격성) + mutation core(잠금·reset) +
- *   durable 요청 row 를 하나의 트랜잭션으로 묶는 프로덕션 서비스.
- * [불변식]
- *   - auth 는 lookup/replay 보다 먼저다(none→401, non-board→403, board 회사 접근은 routes/authz.ts
- *     assertCompanyAccess 와 동일 조건). actor 는 반드시 실제 인증된 Request 에서 온다 — client body
- *     에서 오지 않는다. raw body 는 strict resumeRequestSchema 로만 검증·해시한다(토큰/사유 포함).
- *   - replay 는 잠금 하에서 company+run+idempotencyKey 로만 판정하고, 토큰 만료/미션 종료 이전에
- *     그리고 이후에도 동작한다. 본문 불일치는 idempotency_conflict.
- *   - reset/권한 전이는 공식 resetForResume 만 사용한다. 이 서비스는 실행 레코드/큐/이슈를 만들지
- *     않고, 요청은 pending_delivery 로 남는다(dispatcher 마운트는 이후 슬라이스다 — 이 서비스는
- *     아직 POST 로 노출되면 안 된다: 공용 dispatcher lock/result fence 가 상위에서 완성되기 전까지).
- *   - 감사는 logActivity(커밋 전 이벤트 발행)가 아니라 같은 트랜잭션의 직접 activityLog INSERT 다.
- *     토큰/사유 원문/메타데이터는 감사에 절대 넣지 않는다(사유는 해시만, 원문은 승인된 requestBody 에).
- */
+/** Resume 원자 코어: 인증 후 mission→run→steps 잠금 아래 preview, 요청, reset, run/mission,
+ * 감사까지 함께 커밋한다. replay는 company+run+idempotencyKey로 판정하고 실행 레코드는 만들지 않는다.
+ * 감사에는 토큰·사유 원문·메타데이터를 넣지 않는다. */
 
 export type ResumeApplySigner = ResumeSnapshotSigner;
 
@@ -84,29 +72,39 @@ export type OperatorDecisionResumeAuthorization = {
   resolvedByUserId: string;
 };
 
-/**
- * [승인=재개 2026-10-23] 사람이 종말 카드에서 “이 실행 이어서 진행(재개)”를 선택한 resolve 가
- *   재개 요청의 권한 원본이 된다. 보드 actor 를 만들지 않고 명시적 권한 종류로 적용 코어를 호출한다:
- *   서버가 미리보기(서명·자격·게이트 검증)를 조립해 스냅샷 토큰을 얻고, 같은 원자 경로로 적용한다.
- *   미리보기가 막히면 conflict 로 fail-closed — 자격 없는 재개는 결정 승인으로도 불가능하다.
- *   idempotencyKey 는 결정 id 로 고정해 이중 발사를 replay 처리한다.
- */
+/** 운영자 결정 ID를 권한·멱등 키로 사용하며 preview가 부적격이면 fail-closed 한다. */
 export async function applyResumeForOperatorDecision(
   db: Db,
   input: { companyId: string; missionId: string; workflowRunId: string; startStepId: string; reason: string;
     idempotencyKey: string; authorization: OperatorDecisionResumeAuthorization },
   signer: ResumeApplySigner,
 ): Promise<ResumeRequestView> {
+  return withResumeSerialization(
+    db,
+    { companyId: input.companyId, missionId: input.missionId, runId: input.workflowRunId },
+    (context) => applyResumeForOperatorDecisionInsideSerialization(context, input, signer),
+  );
+}
+
+/** 이미 mission→run→steps 잠금을 획득한 결정 resolve 트랜잭션에서 resume를 함께 적용한다.
+ *  이 함수는 새 트랜잭션을 열지 않으며, 호출자가 실패를 삼키면 안 된다. */
+export async function applyResumeForOperatorDecisionInsideSerialization(
+  context: ResumeSerializationContext,
+  input: { companyId: string; missionId: string; workflowRunId: string; startStepId: string; reason: string;
+    idempotencyKey: string; authorization: OperatorDecisionResumeAuthorization },
+  signer: ResumeApplySigner,
+): Promise<ResumeRequestView> {
+  const { tx } = context;
   // replay 우선: 이미 적용된 요청이면 조립 없이 그대로 돌려준다(토큰은 호출마다 달라지므로 선검사).
-  const existing = await db.select({ id: workflowResumeRequests.id }).from(workflowResumeRequests)
+  const existing = await tx.select({ id: workflowResumeRequests.id }).from(workflowResumeRequests)
     .where(and(eq(workflowResumeRequests.companyId, input.companyId),
       eq(workflowResumeRequests.workflowRunId, input.workflowRunId),
       eq(workflowResumeRequests.idempotencyKey, input.idempotencyKey)))
     .limit(1);
   if (existing.length > 0) {
-    return readResumeRequest(db, { companyId: input.companyId, missionId: input.missionId, requestId: existing[0]!.id });
+    return readResumeRequest(tx, { companyId: input.companyId, missionId: input.missionId, requestId: existing[0]!.id });
   }
-  const fresh = await assembleResumePreview(db, {
+  const fresh = await assembleResumePreview(tx, {
     companyId: input.companyId, missionId: input.missionId,
     workflowRunId: input.workflowRunId, startStepId: input.startStepId,
   }, signer);
@@ -119,7 +117,7 @@ export async function applyResumeForOperatorDecision(
     startStepId: input.startStepId, snapshotToken: fresh.preview.token,
     idempotencyKey: input.idempotencyKey, reason: input.reason,
   };
-  return applyVerifiedResumeBody(db, body, {
+  return applyInsideLock(context, body, hashStructuredValue(body), {
     actorType: "system", actorId: "system:operator-decision-resume",
     details: { operatorDecisionId: input.authorization.operatorDecisionId,
       resolvedByUserId: input.authorization.resolvedByUserId },
