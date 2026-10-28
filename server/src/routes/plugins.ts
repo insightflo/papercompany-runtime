@@ -1141,6 +1141,11 @@ export function pluginRoutes(
           parameters ?? {},
           runContext,
         );
+        if (result.deferredBeforeStart) {
+          if (receiptId !== null) await releaseToolExecutionReceipt(db, receiptId);
+          res.status(503).json({ deferredBeforeStart: result.deferredBeforeStart });
+          return;
+        }
         // [tool result hygiene] 같은 run에서 같은 도구가 같은 에러를 반복하면 본문을 1줄 요약으로
         //   축소해 에이전트 세션 히스토리 누적을 막는다(첫 발생은 전문 유지). 스텝 증거 경로와 무관.
         await emitExecuted(200, result as unknown as Record<string, unknown>, {
@@ -1170,6 +1175,11 @@ export function pluginRoutes(
         parameters,
         stepEnv,
       });
+      if (coreResult.deferredBeforeStart) {
+        if (receiptId !== null) await releaseToolExecutionReceipt(db, receiptId);
+        res.status(503).json({ deferredBeforeStart: coreResult.deferredBeforeStart });
+        return;
+      }
       // 409 artifact_tool_step_call_in_progress: nothing executed (another call holds the step).
       // Release this request's claim so a same-key retry can execute once the step is free.
       if (coreResult.status === 409 && coreResult.body.error === "artifact_tool_step_call_in_progress" && receiptId !== null) {
