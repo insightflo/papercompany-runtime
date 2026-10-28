@@ -15,12 +15,20 @@ const ids = () => ({
 });
 
 function dbWithSource(source: Record<string, unknown>) {
-  const limit = vi.fn().mockResolvedValue([source]);
+  const forUpdate = vi.fn().mockResolvedValue([source]);
+  const sourceLimit = vi.fn(() => ({ for: forUpdate }));
+  const replacementLimit = vi.fn().mockResolvedValue([]);
   const updateWhere = vi.fn().mockResolvedValue([]);
   const updateSet = vi.fn(() => ({ where: updateWhere }));
   const insertValues = vi.fn().mockResolvedValue([]);
   const db = {
-    select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit })) })) })),
+    select: vi.fn()
+      .mockImplementationOnce(() => ({ from: vi.fn(() => ({
+        where: vi.fn(() => ({ limit: sourceLimit })),
+      })) }))
+      .mockImplementationOnce(() => ({ from: vi.fn(() => ({
+        where: vi.fn(() => ({ limit: replacementLimit })),
+      })) })),
     update: vi.fn(() => ({ set: updateSet })),
     insert: vi.fn(() => ({ values: insertValues })),
   } as unknown as Db;
