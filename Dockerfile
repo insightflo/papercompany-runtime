@@ -1,6 +1,7 @@
 FROM node:24.22.1-trixie-slim AS base
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && apt-get install -y --no-install-recommends ca-certificates curl git locales \
+  && localedef -i en_US -f UTF-8 en_US.UTF-8 \
   && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 
