@@ -49,6 +49,9 @@
   "pnpm": {
     "overrides": {
       "express@5.2.1>body-parser": "2.4.0"
+    },
+    "patchedDependencies": {
+      "postgres@3.4.8": "patches/postgres@3.4.8.patch"
     }
   }
 }
