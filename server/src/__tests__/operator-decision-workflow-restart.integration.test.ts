@@ -75,5 +75,23 @@ describe("operator decision restart transaction (PostgreSQL)", () => {
     } });
     const [oversight] = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId));
     expect(oversight.status).not.toBe("blocked");
+
+    const duplicate = await write.create(companyId, {
+      schemaVersion: 1, requestKey: `restart-duplicate:${sourceRunId}`, priority: "high",
+      interactionType: "single_select", title: "Restart again?", description: "",
+      sourceType: "workflow_restart_request_v1", sourceId: sourceRunId,
+      sourceContext: { missionId, workflowId, workflowRunId: sourceRunId, artifactRefs: [] },
+      definition, issueId, continuationMode: "none",
+    }, { type: "user", id: "board-user" });
+    await expect(write.resolve(duplicate.decision.id, {
+      actionId: "approve", selectedOptionIds: [WORKFLOW_RESTART_FROM_START_OPTION_ID], comment: "again",
+    }, "board-user")).rejects.toMatchObject({
+      status: 409, message: "workflow_restart_active_replacement_exists",
+    });
+    const [duplicateStored] = await db.select({ status: operatorDecisions.status })
+      .from(operatorDecisions).where(eq(operatorDecisions.id, duplicate.decision.id));
+    expect(duplicateStored.status).toBe("pending");
+    expect(await db.select().from(workflowRuns).where(and(
+      eq(workflowRuns.missionId, missionId), ne(workflowRuns.id, sourceRunId)))).toHaveLength(1);
   });
 });
