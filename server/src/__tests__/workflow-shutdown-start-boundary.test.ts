@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDb, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { createDb, toolDefinitions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import {
   cleanupFrozenTables,
   createFrozenRun,
@@ -19,6 +19,8 @@ import {
   setWorkflowToolStepExecutor,
   type WorkflowToolStepExecutionRequest,
 } from "../services/workflow/dag-engine.js";
+import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
+import { executeRemoteWorkflowTool } from "../services/workflow/remote-tool-executor.js";
 
 describe("workflow shutdown start boundary", () => {
   let fixture: Extract<ExecutionDefinitionFixture, { supported: true }>;
@@ -118,6 +120,52 @@ describe("workflow shutdown start boundary", () => {
     expect(current!.metadata.toolQueue).toMatchObject({ status: "settled" });
   });
 
+  it("returns a remote adapter deferral before reading status, body, or artifact fields", async () => {
+    const control = deferred({ ...requestForRemote(), workflowRunId: "run-remote" }, 4).deferredBeforeStart;
+    const adapterResult = {
+      deferredBeforeStart: control,
+      get status(): never { throw new Error("deferred status must not be read"); },
+      get body(): never { throw new Error("deferred body must not be read"); },
+    };
+    const result = await executeRemoteWorkflowTool({
+      db: {} as Db,
+      companyId: "company-remote",
+      toolId: "tool-remote",
+      toolName: "remote-tool",
+      parameters: {},
+      requestId: control.requestId,
+      adapterType: "http",
+      adapterConfig: {},
+      remoteDeps: {
+        resolveSecretValue: vi.fn(),
+        executeHttp: vi.fn().mockResolvedValue(adapterResult),
+      },
+    });
+
+    expect(result).toBe(adapterResult);
+  });
+
+  it("preserves a remote deferral through the core wrapper", async () => {
+    const owner = await seedCompanyOnly(fixture.sql, `SC${randomUUID().replace(/-/gu, "").slice(0, 6).toUpperCase()}`);
+    await db.insert(toolDefinitions).values({ companyId: owner.companyId, name: "remote-tool", adapterType: "http" });
+    const control = deferred(requestForRemote(), 5).deferredBeforeStart;
+
+    const result = await executeCoreWorkflowTool({
+      db,
+      companyId: owner.companyId,
+      toolName: "remote-tool",
+      parameters: {},
+      requestId: control.requestId,
+      remoteDeps: {
+        resolveSecretValue: vi.fn(),
+        executeHttp: vi.fn().mockResolvedValue({ status: 503, body: {}, deferredBeforeStart: control }),
+      },
+    });
+
+    expect(result.deferredBeforeStart).toBe(control);
+    expect(result.status).toBe(503);
+  });
+
   it.each(["cancelled_run", "new_generation", "new_owner"] as const)(
     "does not revive a deferred claim after the %s race",
     async (race) => {
@@ -147,3 +195,16 @@ describe("workflow shutdown start boundary", () => {
     },
   );
 });
+
+function requestForRemote(): WorkflowToolStepExecutionRequest {
+  return {
+    companyId: "company-remote",
+    workflowRunId: "run-remote",
+    workflowId: "workflow-remote",
+    stepId: "step-remote",
+    stepRunId: "attempt-remote",
+    toolName: "remote-tool",
+    args: {},
+    requestId: "request-remote",
+  };
+}

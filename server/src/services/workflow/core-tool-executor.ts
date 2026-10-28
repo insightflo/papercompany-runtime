@@ -148,6 +148,7 @@ export async function executeCoreWorkflowTool(input: {
     toolId: tool.id, toolName: input.toolName, parameters: input.parameters, requestId: input.requestId,
     workflowRunId: input.workflowRunId, stepId: input.stepId, adapterType: tool.adapterType,
     adapterConfig: tool.adapterConfig, remoteDeps: input.remoteDeps });
+  if (remoteResult?.deferredBeforeStart) return remoteResult;
   if (remoteResult) return remoteResult;
   if (tool.adapterType !== "builtin") return { status: 501,
     body: { error: `Core workflow tool "${input.toolName}" uses unsupported adapter type "${tool.adapterType}"` } };
