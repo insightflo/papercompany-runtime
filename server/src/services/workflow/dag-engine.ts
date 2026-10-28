@@ -287,6 +287,8 @@ export type WorkflowToolStepExecutionRequest = {
   toolName: string;
   args: unknown;
   requestId: string;
+  /** Current claimed generation for exact deferred-start scope matching. */
+  executionGeneration: number;
   agentId?: string;
   agentName?: string;
 };
@@ -2754,6 +2756,7 @@ export async function processQueuedWorkflowToolStepRuns(
         toolName,
         args,
         requestId,
+        executionGeneration: claimedStepRun.executionGeneration,
         agentId: (typeof step.agentId === "string" && step.agentId.trim())
           ? step.agentId.trim()
           : (typeof step.assigneeAgentId === "string" ? step.assigneeAgentId.trim() : undefined),

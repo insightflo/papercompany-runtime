@@ -16,6 +16,7 @@ import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type { ToolTestOutcome } from "@paperclipai/shared";
 import type { PluginToolDispatcher } from "../plugin-tool-dispatcher.js";
+import type { ToolExecutionResult } from "../plugin-tool-registry.js";
 import { secretService } from "../secrets.js";
 import {
   executeCoreWorkflowTool,
@@ -96,9 +97,17 @@ function toOutcome(result: CoreWorkflowToolExecutionResult): ToolTestOutcome {
 }
 
 /** Convert a plugin dispatcher ToolExecutionResult into a bounded test outcome. */
-function pluginResultToOutcome(execution: {
-  result: { content?: string; data?: unknown; error?: string };
-}): ToolTestOutcome {
+function pluginResultToOutcome(
+  execution: Pick<ToolExecutionResult, "result" | "deferredBeforeStart">,
+): ToolTestOutcome {
+  if (execution.deferredBeforeStart) {
+    return {
+      ok: false,
+      status: "error",
+      httpStatus: 503,
+      error: execution.deferredBeforeStart.reasonCode,
+    };
+  }
   const { result } = execution;
   const ok = !result.error;
   return {

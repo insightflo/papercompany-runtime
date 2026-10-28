@@ -19,6 +19,7 @@
  * @see PLUGIN_SPEC.md §13.10 — `executeTool`
  */
 
+import { randomUUID } from "node:crypto";
 import type {
   PaperclipPluginManifestV1,
   PluginToolDeclaration,
@@ -26,7 +27,12 @@ import type {
 import type { ToolRunContext, ToolResult, ExecuteToolParams } from "@paperclipai/plugin-sdk";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { logger } from "../middleware/logger.js";
-import type { DeferredBeforeStart } from "./runtime-execution-lifecycle.js";
+import {
+  runtimeExecutionLifecycle,
+  type DeferredBeforeStart,
+  type RuntimeExecutionIdentity,
+  type RuntimeExecutionLifecycle,
+} from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -88,7 +94,7 @@ export interface ToolExecutionResult {
   toolName: string;
   /** The result returned by the plugin's tool handler. */
   result: ToolResult;
-  /** Reserved control result; producers remain disabled until consumers are ready. */
+  /** Structured control result when shutdown wins before the worker RPC starts. */
   deferredBeforeStart?: DeferredBeforeStart;
 }
 
@@ -184,6 +190,7 @@ export interface PluginToolRegistry {
     namespacedName: string,
     parameters: unknown,
     runContext: ToolRunContext,
+    executionIdentity?: RuntimeExecutionIdentity,
   ): Promise<ToolExecutionResult>;
 
   /**
@@ -229,6 +236,7 @@ export interface PluginToolRegistry {
  */
 export function createPluginToolRegistry(
   workerManager?: PluginWorkerManager,
+  runtimeLifecycle: RuntimeExecutionLifecycle = runtimeExecutionLifecycle,
 ): PluginToolRegistry {
   const log = logger.child({ service: "plugin-tool-registry" });
 
@@ -376,6 +384,7 @@ export function createPluginToolRegistry(
       namespacedName: string,
       parameters: unknown,
       runContext: ToolRunContext,
+      executionIdentity?: RuntimeExecutionIdentity,
     ): Promise<ToolExecutionResult> {
       // 1. Resolve the namespaced name
       const parsed = parseName(namespacedName);
@@ -425,7 +434,21 @@ export function createPluginToolRegistry(
         runContext,
       };
 
-      const result = await workerManager.call(dbId, "executeTool", rpcParams);
+      const requestId = randomUUID();
+      const runtimeScope = runtimeLifecycle.createScope(executionIdentity ?? {
+        requestId,
+        executionId: runContext.runId,
+        attemptId: requestId,
+        executionGeneration: 0,
+      });
+      const decision = runtimeScope.start(() => workerManager.call(dbId, "executeTool", rpcParams));
+      if (decision.kind === "deferred_before_start") {
+        return { pluginId, toolName, result: {}, deferredBeforeStart: decision.deferred };
+      }
+      if (decision.kind === "additional_start_blocked") {
+        throw new Error("runtime_additional_start_blocked");
+      }
+      const result = await decision.value;
 
       log.debug(
         {

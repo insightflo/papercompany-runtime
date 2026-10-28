@@ -12,6 +12,7 @@ const request: WorkflowToolStepExecutionRequest = {
   toolName: "publish",
   args: { value: 7 },
   requestId: "request-1",
+  executionGeneration: 3,
   agentId: "agent-1",
   agentName: "Publisher",
 };
