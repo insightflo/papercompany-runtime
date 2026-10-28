@@ -31,6 +31,7 @@ import {
   sanitizeCommandCodeExtraArgs,
 } from "./env.js";
 import { classifyOutcome, resolveErrorMessage, type Outcome } from "./outcome.js";
+import { runCommandCodeRetryAttempt } from "./retry-start-result.js";
 
 const DEFAULT_HEARTBEAT_PROMPT =
   "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work. Follow the Paperclip heartbeat procedure exactly. For assignments, use GET /api/agents/me/inbox-lite first. Fall back only to the company issues endpoint filtered by assigneeAgentId with statuses todo,in_progress,blocked. Do not improvise alternate issue query parameters such as status=open, assigneeId, or agentId. If no assignments are returned, exit the heartbeat.";
@@ -312,10 +313,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return toResult(initial.proc, initial.parsed, initialOutcome, true);
     }
     await onLog("stdout", `[paperclip] Command Code session "${resumeId}" is unavailable; retrying with a fresh run.\n`);
-    const retry = await runAttempt("");
-    const retryOutcome = classifyOutcome(retry.parsed, retry.proc.exitCode);
-    const retryHasSession = Boolean(retry.parsed.sessionId);
-    return toResult(retry.proc, retry.parsed, retryOutcome, !retryHasSession);
+    const retry = await runCommandCodeRetryAttempt(
+      { proc: initial.proc, parsed: initial.parsed, outcome: initialOutcome },
+      async () => {
+        const attempt = await runAttempt("");
+        return {
+          proc: attempt.proc,
+          parsed: attempt.parsed,
+          outcome: classifyOutcome(attempt.parsed, attempt.proc.exitCode),
+        };
+      },
+    );
+    if (retry.startBlocked) {
+      return toResult(retry.attempt.proc, retry.attempt.parsed, retry.attempt.outcome, true);
+    }
+    const retryHasSession = Boolean(retry.attempt.parsed.sessionId);
+    return toResult(retry.attempt.proc, retry.attempt.parsed, retry.attempt.outcome, !retryHasSession);
   }
 
   return toResult(initial.proc, initial.parsed, initialOutcome, false);
