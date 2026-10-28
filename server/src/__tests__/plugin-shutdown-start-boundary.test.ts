@@ -5,6 +5,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { errorHandler } from "../middleware/index.js";
 import { pluginRoutes } from "../routes/plugins.js";
 import { createPluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import { createPluginToolRegistry } from "../services/plugin-tool-registry.js";
+import { createRuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(), getByKey: vi.fn(), listInstalled: vi.fn(), listByStatus: vi.fn(),
@@ -34,6 +36,16 @@ function deferredResult() {
     pluginId: "fixture.plugin", toolName: "publish", deferredBeforeStart,
     get result(): never { throw new Error("deferred result must not be read"); },
   };
+}
+
+function registeredRegistry(call: ReturnType<typeof vi.fn>) {
+  const lifecycle = createRuntimeExecutionLifecycle();
+  const registry = createPluginToolRegistry({ isRunning: vi.fn(() => true), call } as never, lifecycle);
+  registry.registerPlugin("fixture.plugin", { tools: [{
+    name: "publish", displayName: "Publish", description: "Publish fixture",
+    parametersSchema: { type: "object" },
+  }] } as never, "plugin-db-1");
+  return { lifecycle, registry };
 }
 
 describe("plugin shutdown start boundary", () => {
@@ -80,6 +92,33 @@ describe("plugin shutdown start boundary", () => {
     dispatcher.getRegistry().executeTool = vi.fn().mockResolvedValue(deferredResult());
 
     await expect(dispatcher.executeTool(TOOL, {}, runContext)).resolves.toMatchObject({ deferredBeforeStart });
+  });
+
+  it("blocks the actual plugin worker RPC when shutdown wins before start", async () => {
+    const call = vi.fn();
+    const { lifecycle, registry } = registeredRegistry(call);
+    lifecycle.beginShutdown("SIGTERM");
+
+    const result = await registry.executeTool(TOOL, {}, runContext as never);
+
+    expect(call).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      pluginId: "fixture.plugin", toolName: "publish",
+      deferredBeforeStart: { reasonCode: "runtime_shutting_down", externalStarted: false },
+    });
+  });
+
+  it("preserves a plugin result that started before shutdown", async () => {
+    let finish!: (value: { content: string }) => void;
+    const call = vi.fn(() => new Promise<{ content: string }>((resolve) => { finish = resolve; }));
+    const { lifecycle, registry } = registeredRegistry(call);
+    const pending = registry.executeTool(TOOL, {}, runContext as never);
+    expect(call).toHaveBeenCalledTimes(1);
+
+    lifecycle.beginShutdown("SIGTERM");
+    finish({ content: "published" });
+
+    await expect(pending).resolves.toMatchObject({ result: { content: "published" } });
   });
 
   it("plugin route releases the idempotency claim and never records a deferred success", async () => {
