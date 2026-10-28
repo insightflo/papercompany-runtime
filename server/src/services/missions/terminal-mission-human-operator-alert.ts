@@ -66,18 +66,24 @@ export function terminalResumeGuidanceText(available: boolean, language: "ko" | 
   return language === "ko" ? TERMINAL_RESUME_GUIDANCE_KO : TERMINAL_RESUME_GUIDANCE_EN;
 }
 
-/** 실패 실행 중 하나라도 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 재개 옵션이 실제로 작동함).
+/** 카드에 실제로 묶인 실패 실행이 재개 대상인지 고른다. 다른 실패 실행의 적격성으로 이 카드의
+ *  resume 옵션을 열면 resolve 시 binding 불일치로 전체 결정이 롤백되므로 fail-closed 한다. */
+export function terminalResumeCandidateRunId(workflowRunId: string | null,
+  failedRuns: readonly TerminalMissionFailedRun[]): string | null {
+  if (!workflowRunId) return null;
+  return failedRuns.some((run) => run.id === workflowRunId && TERMINAL_FAILURE_RUN_STATUSES.has(run.status))
+    ? workflowRunId
+    : null;
+}
+
+/** 카드에 묶인 실패 실행을 실제 프리뷰가 적격 판정하는가(보드 재개 버튼·카드 옵션이 실제로 작동함).
  *  [재개 약속 정직화 2026-10-23] 정책 등록만으로 재개를 약속하면 프리뷰가 거절하는 경로를 카드가
  *  약속하게 된다(dsh-purge 사례) — 정책 resolve 사전필터 후 실제 프리뷰로 확정한다. */
 async function terminalResumePathAvailable(db: Db, companyId: string, missionId: string,
-  failedRunIds: readonly string[]): Promise<boolean> {
-  for (const runId of failedRunIds) {
-    const signal = await resumableRunSignalForRun(db, companyId, runId);
-    if (signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId })) {
-      return true;
-    }
-  }
-  return false;
+  runId: string | null): Promise<boolean> {
+  if (!runId) return false;
+  const signal = await resumableRunSignalForRun(db, companyId, runId);
+  return Boolean(signal && await resumePreviewEligibleForRun(db, { companyId, missionId, workflowRunId: runId }));
 }
 
 export type TerminalMissionOwnerActionIssue = {
@@ -368,8 +374,9 @@ export async function emitTerminalMissionHumanOperatorReport(
     workflowRunId: input.workflowRunId,
     failedRuns: terminalFailedRuns,
   });
+  const resumeCandidateRunId = terminalResumeCandidateRunId(input.workflowRunId, terminalFailedRuns);
   const resumePathAvailable = await terminalResumePathAvailable(db, input.expectedCompanyId,
-    input.expectedMissionId, terminalFailedRuns.map((run) => run.id));
+    input.expectedMissionId, resumeCandidateRunId);
   const restartPathAvailable = await terminalRestartPathAvailable(
     db, input.expectedCompanyId, input.expectedMissionId, input.workflowRunId,
   );
