@@ -34,6 +34,7 @@ import {
   DEFAULT_OPERATOR_INTERRUPT_POLL_MS,
   startOperatorInterruptPolling,
 } from "./operator-interrupt.js";
+import { runPiRetryAttempt } from "./retry-start-result.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -798,8 +799,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         throw err;
       }
     }
-    const retry = await runAttempt(newSessionPath);
-    const result = toResult(retry, newSessionPath);
+    const retry = await runPiRetryAttempt(initial, () => runAttempt(newSessionPath));
+    const result = retry.startBlocked
+      ? toResult(retry.attempt, sessionPath, true)
+      : toResult(retry.attempt, newSessionPath);
     await emitTimingLog();
     return result;
   }
