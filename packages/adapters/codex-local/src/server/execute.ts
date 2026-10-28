@@ -26,6 +26,7 @@ import {
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
+import { runCodexRetryAttempt } from "./retry-start-result.js";
 import { pathExists, prepareManagedCodexHome, resolveManagedCodexHomeDir } from "./codex-home.js";
 import { sanitizeCodexLogLine, sanitizeCodexLogStream } from "../redaction.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
@@ -689,8 +690,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stdout",
       `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
     );
-    const retry = await runAttempt(null);
-    return toResult(retry, true);
+    const retry = await runCodexRetryAttempt(initial, () => runAttempt(null));
+    if (retry.startBlocked) {
+      return {
+        ...toResult(retry.attempt, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
+    }
+    return toResult(retry.attempt, true);
   }
 
   return toResult(initial);
