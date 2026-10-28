@@ -33,6 +33,7 @@ import {
   isClaudeUnknownSessionError,
 } from "./parse.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
+import { runClaudeRetryAttempt } from "./retry-start-result.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -842,7 +843,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Claude API overloaded (status ${readApiErrorStatus(attempt.parsed ?? ({} as Record<string, unknown>))}); retry ${overloadAttempt + 1}/${maxOverloadRetries} after ~${Math.round(waitMs / 1000)}s with the same session (no new issue).\n`,
       );
       await sleep(waitMs);
-      attempt = await runAttempt(sessionId ?? null);
+      const retry = await runClaudeRetryAttempt(attempt, () => runAttempt(sessionId ?? null));
+      attempt = retry.attempt;
+      if (retry.startBlocked) break;
     }
     const initial = attempt;
     if (
@@ -859,8 +862,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Claude resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
       );
-      const retry = await runAttempt(null);
-      return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
+      const retry = await runClaudeRetryAttempt(initial, () => runAttempt(null));
+      return toAdapterResult(retry.attempt, { fallbackSessionId: null, clearSessionOnMissingSession: true });
     }
 
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
