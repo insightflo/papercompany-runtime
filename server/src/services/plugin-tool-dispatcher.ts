@@ -436,6 +436,11 @@ export function createPluginToolDispatcher(
         runContext,
       );
 
+      if (result.deferredBeforeStart) {
+        log.debug({ tool: namespacedName, pluginId: result.pluginId }, "tool execution deferred before start");
+        return result;
+      }
+
       log.debug(
         {
           tool: namespacedName,
