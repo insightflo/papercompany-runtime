@@ -15,7 +15,7 @@ import { QaArtifactRejectionError, toolDeploymentHashes, verifyQaArtifact } from
 import type { ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
-import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
+import { agentToolGrants, agents, toolDefinitions, workflowStepRuns } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./remote-tool-executor.js";
 import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
@@ -29,7 +29,7 @@ import { missionOwnerExecuteSchema } from "@paperclipai/shared/validators/missio
 import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
 import { secretService } from "../secrets.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
-import type { DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
+import { runtimeExecutionLifecycle, type DeferredBeforeStart, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
 const execFile = promisify(execFileCallback);
@@ -58,6 +58,7 @@ export async function executeCoreWorkflowTool(input: {
   db: Db; companyId: string; agentId?: string | null; agentName?: string | null; issueId?: string | null;
   toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null;
   stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
   /** Authenticated server route only; never taken from tool parameters. */
   heartbeatRunId?: string;
   /** Attribution context only; never an additional execution authorization gate. */
@@ -229,19 +230,45 @@ export async function executeCoreWorkflowTool(input: {
         return !!pinned && !!observed?.sha256 && observed.sha256 === pinned.sha256 && observed.byteSize === pinned.byteSize;
       }));
     await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
+    const workflowRunId = input.workflowRunId?.trim();
+    const stepRunId = input.stepRunId?.trim();
+    const stepId = input.stepId?.trim();
+    const workflowIdentity = workflowRunId && stepRunId && stepId;
+    const runtimeAttempt = workflowIdentity
+      ? await input.db.select({ executionGeneration: workflowStepRuns.executionGeneration }).from(workflowStepRuns).where(and(
+        eq(workflowStepRuns.id, stepRunId), eq(workflowStepRuns.workflowRunId, workflowRunId),
+        eq(workflowStepRuns.stepId, stepId), eq(workflowStepRuns.lastDispatchRequestId, input.requestId),
+      )).limit(1).then(([attempt]) => attempt) : null;
+    if (workflowIdentity && !runtimeAttempt) throw new Error("workflow_tool_attempt_stale");
+    const runtimeScope = runtimeAttempt && (input.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
+      requestId: input.requestId, executionId: workflowRunId!, attemptId: stepRunId!,
+      executionGeneration: runtimeAttempt.executionGeneration,
+    });
+    const launch = async <T>(start: () => T): Promise<Awaited<T> | { deferredBeforeStart: DeferredBeforeStart }> => {
+      const initiate = () => runtimeScope?.start(start) ?? { kind: "started" as const, value: start(), externalStarted: true as const };
+      const decision = dispatch ? (await dispatch.launch(initiate)).result : initiate();
+      if (decision.kind === "deferred_before_start") return { deferredBeforeStart: decision.deferred };
+      if (decision.kind === "additional_start_blocked") throw new Error("runtime_additional_start_blocked");
+      return await decision.value;
+    };
     // Fence owner-execute-linked attempts right before the real child process launch;
     // unrelated tools pass through with existing behavior.
-    const invocation = () => withCurrentOwnerToolAttempt<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode?: number }>(
+    const invocation = () => withCurrentOwnerToolAttempt<
+      { stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode?: number } | { deferredBeforeStart: DeferredBeforeStart }
+    >(
       { db: input.db, companyId: input.companyId, requestId: input.requestId,
         workflowRunId: input.workflowRunId ?? null, stepRunId: input.stepRunId ?? null },
       () => policy
       ? executeLocalToolWithProgress({ db: input.db, scope: { companyId: input.companyId, toolId: tool.id,
           requestId: input.requestId, adapterType: "builtin", workflowRunId: input.workflowRunId, stepId: input.stepId },
         progressEvidenceContext: input.progressEvidenceContext, agentId, stepRunId: input.stepRunId,
-        policy, executable, args: allArgs, cwd, env, launch: dispatch?.launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1 })
-      : prepared.inputBytes ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1, timeoutMs })
-      : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }));
-    const result = await (dispatch && !policy ? (await dispatch.launch(invocation)).result : invocation());
+        policy, executable, args: allArgs, cwd, env, launch, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1 })
+      : launch(() => prepared.inputBytes
+        ? executeQaByteTool({ executable, args: allArgs, cwd, env, inputBytes: prepared.inputBytes, qaResult: !!(qaRequest || consumerRoot), acceptQaExit1, timeoutMs })
+        : execFile(executable, allArgs, { cwd, env, maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs })));
+    const result = await invocation();
+    if ("deferredBeforeStart" in result) return { status: 503, deferredBeforeStart: result.deferredBeforeStart,
+      body: { error: result.deferredBeforeStart.reasonCode, tool: input.toolName, source: "core" } };
     await recordToolCallProvenance(input.db, invocationProvenance, "returned");
     const { stdout, stderr } = result;
     if (qaRequest && deployment) {

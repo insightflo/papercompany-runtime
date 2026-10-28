@@ -8,6 +8,7 @@ import { ToolProgressError } from "../tools/progress-policy.js";
 import { createToolProgressStore, type ProgressEvidenceContext } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
 import type { ProgressScope } from "../tools/progress-scope.js";
+import type { DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
 
 const MAX_BUFFER = 10 * 1024 * 1024;
 const protocolError = () => new ToolProgressError(500, "tool_progress_protocol_error");
@@ -38,13 +39,15 @@ export async function executeLocalToolWithProgress(input: {
   db: Db; scope: ProgressScope; policy: ToolProgressPolicy;
   progressEvidenceContext?: ProgressEvidenceContext; agentId?: string | null; stepRunId?: string | null;
   executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
-  launch?: <T>(start: () => T) => Promise<{ result: T }>;
+  launch?: <T>(start: () => T) => Promise<Awaited<T> | { deferredBeforeStart: DeferredBeforeStart }>;
   inputBytes?: Buffer; qaResult?: boolean; acceptQaExit1?: boolean;
-}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }> {
+}): Promise<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number } | { deferredBeforeStart: DeferredBeforeStart }> {
   const store = createToolProgressStore(input.db);
   const heartbeat = await store.start(input.scope, input.policy);
   let cleanup: (() => Promise<void>) | undefined;
-  return withToolProgress<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number }>({ store, heartbeat, succeeded: value => value.exitCode === 0, cleanup: async () => { await cleanup?.(); },
+  return withToolProgress<{ stdout: string; stderr: string; qaResultBytes?: Buffer; exitCode: number } | { deferredBeforeStart: DeferredBeforeStart }>({
+    store, heartbeat, succeeded: value => "deferredBeforeStart" in value || value.exitCode === 0,
+    cleanup: async () => { await cleanup?.(); },
     operation: async (signal) => {
       const start = async () => {
       signal.throwIfAborted();
@@ -133,7 +136,7 @@ export async function executeLocalToolWithProgress(input: {
       }
       return { stdout, stderr, qaResultBytes, exitCode: code! };
       };
-      return input.launch ? (await input.launch(start)).result : start();
+      return input.launch ? input.launch(start) : start();
     },
   });
 }
