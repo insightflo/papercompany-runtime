@@ -1,0 +1,38 @@
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde..21567c32 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -252,6 +252,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    if (!socket) {
++      // A close can race a scheduled write. Reject pending work instead of
++      // throwing outside its promise and terminating the host process.
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      error(Errors.connection('CONNECTION_CLOSED', options, socket))
++      return false
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+index 1b1cccde..21567c32 100644
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -252,6 +252,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function nextWrite(fn) {
++    if (!socket) {
++      // A close can race a scheduled write. Reject pending work instead of
++      // throwing outside its promise and terminating the host process.
++      nextWriteTimer !== null && clearImmediate(nextWriteTimer)
++      chunk = nextWriteTimer = null
++      error(Errors.connection('CONNECTION_CLOSED', options, socket))
++      return false
++    }
+     const x = socket.write(chunk, fn)
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
