@@ -11,6 +11,8 @@ import { materializeProviderSkills, resolveProviderSkillsDir } from "./skills.js
 import { sanitizeInheritedPaperclipEnv } from "./paperclip-env.js";
 import { createChildProcessOutput } from "./child-process-output.js";
 
+export * from "./child-process-start-boundary.js";
+
 export {
   type BuildPaperclipEnvOptions,
   buildPaperclipEnv,
