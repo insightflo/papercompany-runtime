@@ -40,6 +40,7 @@ import {
 import { pluginRegistryService } from "./plugin-registry.js";
 import { isCoreIntegratedPluginKey } from "./core-integrated-plugins.js";
 import { logger } from "../middleware/logger.js";
+import type { RuntimeExecutionIdentity } from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -143,6 +144,7 @@ export interface PluginToolDispatcher {
     namespacedName: string,
     parameters: unknown,
     runContext: ToolRunContext,
+    executionIdentity?: RuntimeExecutionIdentity,
   ): Promise<ToolExecutionResult>;
 
   /**
@@ -420,6 +422,7 @@ export function createPluginToolDispatcher(
       namespacedName: string,
       parameters: unknown,
       runContext: ToolRunContext,
+      executionIdentity?: RuntimeExecutionIdentity,
     ): Promise<ToolExecutionResult> {
       log.debug(
         {
@@ -434,6 +437,7 @@ export function createPluginToolDispatcher(
         namespacedName,
         parameters,
         runContext,
+        executionIdentity,
       );
 
       if (result.deferredBeforeStart) {

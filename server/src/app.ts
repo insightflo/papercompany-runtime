@@ -218,6 +218,12 @@ export function createAppWorkflowToolStepExecutor(input: {
           companyId: request.companyId,
           projectId: "",
         },
+        {
+          requestId: request.requestId,
+          executionId: request.workflowRunId,
+          attemptId: request.stepRunId,
+          executionGeneration: request.executionGeneration,
+        },
       );
       if (execution.deferredBeforeStart) {
         return { deferredBeforeStart: execution.deferredBeforeStart };

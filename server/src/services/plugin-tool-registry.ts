@@ -30,6 +30,7 @@ import { logger } from "../middleware/logger.js";
 import {
   runtimeExecutionLifecycle,
   type DeferredBeforeStart,
+  type RuntimeExecutionIdentity,
   type RuntimeExecutionLifecycle,
 } from "./runtime-execution-lifecycle.js";
 
@@ -93,7 +94,7 @@ export interface ToolExecutionResult {
   toolName: string;
   /** The result returned by the plugin's tool handler. */
   result: ToolResult;
-  /** Reserved control result; producers remain disabled until consumers are ready. */
+  /** Structured control result when shutdown wins before the worker RPC starts. */
   deferredBeforeStart?: DeferredBeforeStart;
 }
 
@@ -189,6 +190,7 @@ export interface PluginToolRegistry {
     namespacedName: string,
     parameters: unknown,
     runContext: ToolRunContext,
+    executionIdentity?: RuntimeExecutionIdentity,
   ): Promise<ToolExecutionResult>;
 
   /**
@@ -382,6 +384,7 @@ export function createPluginToolRegistry(
       namespacedName: string,
       parameters: unknown,
       runContext: ToolRunContext,
+      executionIdentity?: RuntimeExecutionIdentity,
     ): Promise<ToolExecutionResult> {
       // 1. Resolve the namespaced name
       const parsed = parseName(namespacedName);
@@ -432,7 +435,7 @@ export function createPluginToolRegistry(
       };
 
       const requestId = randomUUID();
-      const runtimeScope = runtimeLifecycle.createScope({
+      const runtimeScope = runtimeLifecycle.createScope(executionIdentity ?? {
         requestId,
         executionId: runContext.runId,
         attemptId: requestId,
