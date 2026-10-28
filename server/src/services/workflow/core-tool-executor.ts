@@ -29,6 +29,7 @@ import { missionOwnerExecuteSchema } from "@paperclipai/shared/validators/missio
 import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
 import { secretService } from "../secrets.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
+import type { DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
 const execFile = promisify(execFileCallback);
@@ -36,6 +37,7 @@ export type CoreWorkflowToolExecutionResult = {
   status: 200 | 403 | 404 | 409 | 422 | 500 | 501 | 503;
   artifactPath?: string;
   toolArtifactReceipt?: ToolArtifactReceipt;
+  deferredBeforeStart?: DeferredBeforeStart;
   body: { content?: string; data?: unknown; stderr?: string; tool?: string; source?: "core"; error?: string; invocationProvenance?: ToolCallProvenance | null };
 };
 export async function checkCoreWorkflowToolsAvailable(db: Db, input: { companyId: string; toolNames: string[] }): Promise<

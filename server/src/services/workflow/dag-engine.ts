@@ -61,6 +61,7 @@ import { wakeExistingWorkflowStepIssue, resolveWorkflowStepAssigneeAgentId } fro
 import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
 import { finalizeWorkflowRunState } from "./workflow-run-finalization.js";
 import { acceptWorkflowToolResult } from "./workflow-tool-result-acceptance.js";
+import type { DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
 export { wakeExistingWorkflowStepIssue };
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
@@ -293,6 +294,7 @@ export type WorkflowToolStepExecutionRequest = {
 export type WorkflowToolStepExecutionResult = {
   accepted?: boolean;
   duplicate?: boolean;
+  deferredBeforeStart?: DeferredBeforeStart;
 };
 
 export type WorkflowToolStepExecutor = (
