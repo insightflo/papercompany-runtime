@@ -139,91 +139,14 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.humanReview!.recommendedNextStep).toBe(spec({ decision: "escalate" }).nextAction);
   });
 
-  // ---------- system escalate: nextAction 열거에서 복구 경로 옵션 파생(일반 규칙) ----------
-
   const SYSTEM_ESCALATE_NEXT_ACTION_EN = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
-  const SYSTEM_ESCALATE_NEXT_ACTION_KO = "운영자가 입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 복구 방법을 선택해 주세요. 자동 재개 경로는 소진됐습니다.";
-
-  it("derives the enumerated recovery paths as options for system escalate", () => {
+  it("never turns nextAction prose into executable options", () => {
     const card = buildMissionOwnerHumanInputDecisionCard(spec({
       decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
-    }));
-    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
-    expect(card.definition.options.map((option) => option.id)).toEqual([
-      "retry-with-revised-input", "replan", "reassign", "cancel",
-    ]);
-    expect(card.definition.options.map((option) => option.label)).toEqual([
-      "retry with revised input", "replan", "reassign", "cancel",
-    ]);
-    expect(card.definition.actions).toHaveLength(1);
-    expect(card.definition.actions[0]).toMatchObject({ id: "submit", outcome: "submit", tone: "primary", requiresSelection: true });
-    expect(card.definition.selection).toEqual({ min: 1, max: 1 });
-    expect(card.definition.comment.mode).toBe("optional");
-    expect(card.definition.humanReview!.recommendedNextStep).toBe(SYSTEM_ESCALATE_NEXT_ACTION_EN);
-  });
-
-  it("derives the same recovery paths from the Korean system escalate nextAction", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
-    }));
-    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
-    expect(card.definition.options.map((option) => option.label)).toEqual([
-      "운영자가 입력 수정 후 재시도", "계획 변경", "담당자 변경", "취소",
-    ]);
-  });
-
-  // ---------- 파생 선택지별 결과(영향) 설명 — 표준 복구 동사 매칭, 미매칭은 기존 안내 ----------
-
-  it("fills per-option consequences for standard recovery verbs (EN)", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
-    }));
-    const byId = new Map(card.definition.options.map((option) => [option.id, option.description ?? ""]));
-    expect(byId.get("retry-with-revised-input")).toContain("입력을 수정해");
-    expect(byId.get("replan")).toContain("기존 계획을 폐기");
-    expect(byId.get("reassign")).toContain("다른 담당자");
-    expect(byId.get("cancel")).toContain("복구를 중단");
-  });
-
-  it("fills per-option consequences for standard recovery verbs (KO)", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_KO,
-    }));
-    const labels = new Map(card.definition.options.map((option) => [option.label, option.description ?? ""]));
-    expect(labels.get("계획 변경")).toContain("기존 계획을 폐기");
-    expect(labels.get("취소")).toContain("복구를 중단");
-  });
-
-  it("keeps the generic guidance for unmatched path labels", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system",
-      nextAction: "Pick one (defrost the moonrock, repaint the observatory, or cancel).",
-    }));
-    expect(card.definition.options.length).toBeGreaterThan(1);
-    const byId = new Map(card.definition.options.map((option) => [option.id, option.description]));
-    expect(byId.get("cancel")).toContain("복구를 중단");
-    for (const [id, description] of byId) {
-      if (id !== "cancel") expect(description).toContain("복구 경로 후보");
-    }
-  });
-
-  it("keeps the default approve/hold/reject for agent submissions even with an enumerated nextAction", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
     }));
     expect(card.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
     expect(card.definition.comment.mode).toBe("required");
-  });
-
-  it("keeps the default options for system request_input and system escalate without an enumeration", () => {
-    const requestInput = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "request_input", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
-    }));
-    expect(requestInput.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
-    const noEnumeration = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: "운영자 승인 후 다음 단계를 진행해 주세요",
-    }));
-    expect(noEnumeration.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
+    expect(card.definition.humanReview!.recommendedNextStep).toBe(SYSTEM_ESCALATE_NEXT_ACTION_EN);
   });
 
   // ---------- 요청자 추천(recommended) 주입 — 선택지와 함께 추천+사유 제시 ----------
@@ -257,16 +180,6 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.options.find((option) => option.id === "beta")?.recommended).toBeUndefined();
   });
 
-  it("marks the recommendation on a derived recovery-path option for system escalate", () => {
-    const card = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
-      recommendedOptionId: "replan",
-      recommendationReason: "재시도 대상이 죽어 있어 재계획만 실행 가능 경로입니다",
-    }));
-    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
-    expect(card.definition.options.find((option) => option.id === "replan")?.recommended).toBe(true);
-  });
-
   it("ignores an unknown recommended option id (fail-open) and keeps cards without a recommendation unchanged", () => {
     const unknown = buildMissionOwnerHumanInputDecisionCard(spec({ recommendedOptionId: "not-an-option", recommendationReason: "무시되어야 하는 사유" }));
     expect(() => createOperatorDecisionSchema.parse(unknown)).not.toThrow();
@@ -275,10 +188,6 @@ describe("mission owner human input decision card builder", () => {
     const plain = buildMissionOwnerHumanInputDecisionCard(spec());
     expect(() => createOperatorDecisionSchema.parse(plain)).not.toThrow();
     expect(plain.definition.options.every((option) => option.recommended !== true)).toBe(true);
-    const derived = buildMissionOwnerHumanInputDecisionCard(spec({
-      decision: "escalate", actorType: "system", nextAction: SYSTEM_ESCALATE_NEXT_ACTION_EN,
-    }));
-    expect(derived.definition.options.every((option) => option.recommended !== true)).toBe(true);
   });
 
   it("allows at most one recommended option and requires the reason to ride the recommended option", () => {
