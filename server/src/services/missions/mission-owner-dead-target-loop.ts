@@ -11,9 +11,20 @@
 //   tool recovery no_op 처리). 카드 생성: mission-owner-human-input-card.ts(moi1:{eventId} 멱등).
 // [수정시 주의] 마커/claim 키는 (company, owner-action, 결정종류, 대상) 조합으로만 구성 — 특정
 //   이슈 하드코딩 금지. 살아있는 대상 재시도·owner 수동 결정 자유·감시 주기는 이 모듈이 바꾸지 않는다.
-import { and, eq, sql } from "drizzle-orm";
-import { operatorDecisions, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import {
+  operatorDecisions,
+  workflowRuns,
+  workflowStepRuns,
+  workflowTransitionEvents,
+  type Db,
+} from "@paperclipai/db";
 import { createMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
+import {
+  WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
+  WORKFLOW_RESTART_FROM_START_OPTION_ID,
+  WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
+} from "./workflow-restart-option.js";
 
 export const OWNER_DECISION_NOT_APPLIED_EVENT = "mission_owner_decision_not_applied";
 export const OWNER_DEAD_TARGET_ESCALATION_EVENT = "mission_owner_dead_target_escalation";
@@ -99,9 +110,56 @@ export async function countOwnerDecisionNotApplied(db: Db, input: {
   return row?.count ?? 0;
 }
 
-// 사람 카드의 "다음 행동" — system escalate nextAction 의 복구 경로 열거에서 선택지가 파생된다
-//   (deriveRecoveryPathOptionsFromNextAction). approve/hold/reject 는 "어떻게 진행할지" 질문에 답하지 못한다.
+// 표시용 다음 행동. 실행 선택지는 아래의 구조화 binding 조회 결과에서만 만든다.
 const DEAD_TARGET_NEXT_ACTION_EN = "Select a recovery path for the unusable retry target (replan the mission, retry a different live source, record an explicit recovery target, or cancel this recovery)";
+
+async function resolveDeadTargetCardBinding(db: Db, input: {
+  companyId: string; missionId: string; sourceIssueId: string | null;
+}) {
+  const missing = {
+    workflowRunId: null,
+    structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요",
+      description: "종결된 원천을 다시 실행하지 않습니다. 새 구조화 복구 대상을 지정해야 합니다." }],
+    recommendedOptionId: "missing-recovery-target",
+    recommendationReason: "현재 선택에는 실행 가능한 구조화 대상이 없습니다.",
+  };
+  if (!input.sourceIssueId) return missing;
+  const [source] = await db.select({ id: workflowRuns.id, workflowId: workflowRuns.workflowId })
+    .from(workflowStepRuns)
+    .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId))
+    .where(and(
+      eq(workflowStepRuns.issueId, input.sourceIssueId),
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.missionId, input.missionId),
+      eq(workflowRuns.status, "failed"),
+      isNull(workflowRuns.parentRunId),
+    ))
+    .orderBy(desc(workflowRuns.createdAt))
+    .limit(1);
+  if (!source) return missing;
+  const [activeReplacement] = await db.select({ id: workflowRuns.id }).from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.missionId, input.missionId),
+      eq(workflowRuns.workflowId, source.workflowId),
+      isNull(workflowRuns.parentRunId),
+      ne(workflowRuns.id, source.id),
+      or(
+        inArray(workflowRuns.status, ["pending", "running"]),
+        sql`${workflowRuns.metadata}->'operatorDecisionRestart'->>'sourceWorkflowRunId' = ${source.id}`,
+      ),
+    ))
+    .limit(1);
+  if (activeReplacement) return missing;
+  return {
+    workflowRunId: source.id,
+    structuredOptions: [{ id: WORKFLOW_RESTART_FROM_START_OPTION_ID,
+      label: WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
+      description: WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION }],
+    recommendedOptionId: WORKFLOW_RESTART_FROM_START_OPTION_ID,
+    recommendationReason: "종결된 원천을 다시 열지 않고 같은 미션의 새 최상위 실행을 시작합니다.",
+  };
+}
 
 /**
  * [죽은 대상 에스컬레이션 카드 1회 보증] 조합별 claim-once 이벤트(mission_owner_dead_target_escalation)를
@@ -181,6 +239,11 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
     claimed = [{ id: existing.id }];
   }
   try {
+    const binding = await resolveDeadTargetCardBinding(db, {
+      companyId: input.companyId,
+      missionId: input.missionId,
+      sourceIssueId: input.sourceIssueId,
+    });
     await createMissionOwnerHumanInputDecisionCard(db, {
       companyId: input.companyId,
       missionId: input.missionId,
@@ -196,12 +259,10 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
       issueTitle: anchor.title,
       issueIdentifier: anchor.identifier,
       sourceIssueId: input.sourceIssueId,
-      // [추천 주입] 차단 시점 내부 진단은 같은 죽은 대상 재시도의 무한 no-op 순환을 지적하며
-      //   request_replan 권고를 남긴다(supervision addRecommendation) — 카드 파생 선택지의
-      //   "replan the mission" 항목에 추천+사유(진단 문구)로 반영한다. nextAction 파생 slug 가
-      //   바뀌 이 옵션이 없으면 카드 빌더가 무시한다(fail-open).
-      recommendedOptionId: "replan-the-mission",
-      recommendationReason: input.reason.slice(0, 1_000),
+      workflowRunId: binding.workflowRunId,
+      structuredOptions: binding.structuredOptions,
+      recommendedOptionId: binding.recommendedOptionId,
+      recommendationReason: binding.recommendationReason,
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {
