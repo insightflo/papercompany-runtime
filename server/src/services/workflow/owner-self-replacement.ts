@@ -1,17 +1,18 @@
 // server/src/services/workflow/owner-self-replacement.ts
 //
 // [목적] 미션 오너 에이전트가 자기 미션의 실패한 런에 대해 교정 메타데이터로
-//   workflow replacement 를 사람 승인 없이 제안+승인(approved)까지 한 트랜잭션으로 기록한다.
+//   workflow replacement 승인과 신규 런 입장을 한 트랜잭션으로 기록한다.
 // [권한] 기존 owner-recovery 결정 API(authorizeOwnerRecoveryApi)와 동일 체인 — 미션 오너 일치 +
 //   owner-action(unblock) 이슈 + 동일 heartbeat identity + 체크아웃. 보드 경로는 그대로 사람 전용.
 // [검증] 스코프·정의·스태일니스 검증은 보드 경로의 lockReplacementScope /
 //   lockReplacementDefinition / replacementDefinitionHash / normalizeWorkflowRunInputs /
 //   reserved-metadata 거부를 그대로 재사용한다(우회 금지).
-// [입장] 신규 런 생성·admission 은 기존 admitReplacement 경로만 사용한다. 이 서비스는
-//   approval( approved )과 targetRunId 를 반환하고 오너가 replacementIntent 로 런을 트리거한다.
+// [입장] 신규 런 생성·admission 은 기존 admitReplacement 검증 코어만 사용한다.
+//   API 성공은 승인뿐 아니라 targetRunId 런과 복구 권한 원장이 함께 커밋됐음을 뜻한다.
 import { and, eq, sql } from "drizzle-orm";
 import { approvals, activityLog, heartbeatRuns, type Db } from "@paperclipai/db";
-import { replacementApprovalPayloadSchema, ownerSelfReplacementSchema, type OwnerSelfReplacement } from "@paperclipai/shared/validators/workflow-replacement";
+import { replacementApprovalPayloadSchema, ownerSelfReplacementSchema, type OwnerSelfReplacement,
+  type ReplacementApprovalPayload } from "@paperclipai/shared/validators/workflow-replacement";
 import { conflict, forbidden } from "../../errors.js";
 import { hashStructuredValue } from "../issue-execution-cards/hash.js";
 import { lockReplacementScope, lockReplacementDefinition } from "./replacement-scope.js";
@@ -20,12 +21,31 @@ import { normalizeWorkflowRunInputs } from "./run-input-normalization.js";
 import type { OwnerRecoveryApiActor } from "../missions/mission-owner-recovery-agent-api.js";
 import { authorizeOwnerRecoveryWindow } from "../missions/owner-recovery-window-auth.js";
 import { consumeOwnerHumanResponse } from "../missions/owner-human-response.js";
+import { admitReplacementInTransaction } from "./replacement-admission.js";
 
 export type OwnerSelfReplacementResult = {
   readonly approval: typeof approvals.$inferSelect;
   readonly targetRunId: string;
   readonly replay: boolean;
 };
+
+function admissionInput(payload: ReplacementApprovalPayload, approvalId: string) {
+  return {
+    companyId: payload.companyId,
+    workflowId: payload.workflowId,
+    missionId: payload.missionId,
+    triggeredBy: "agent",
+    metadata: payload.metadata,
+    replacementIntent: {
+      schemaVersion: 1 as const,
+      sourceRunId: payload.sourceRunId,
+      expectedSourceAuthorityVersion: payload.sourceAuthorityVersion,
+      decisionEventId: payload.decisionEventId,
+      approvalId,
+      idempotencyKey: payload.idempotencyKey,
+    },
+  };
+}
 
 // owner-recovery 결정 API 의 비-결정 인가 체인(미션 오너·이슈 종류·소스 이슈·heartbeat
 // identity·체크아웃)은 owner-recovery-window-auth.ts 로 추출됐다 — 결정·자가교체·mission_owner_execute
@@ -40,6 +60,8 @@ export async function ownerSelfReplacement(db: Db, input: {
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
     const { issue } = await authorizeOwnerRecoveryWindow(t, input.issueId, input.actor, "replacement");
+    const triggerActor = { type: "agent" as const, agentId: input.actor.agentId!,
+      companyId: issue.companyId, runId: input.actor.runId! };
     // 멱등 replay 는 스코프 잠금 앞에서 판정한다 — 이미 기록된 자가 승인 행 자체가 증거다.
     // ( admission 이 이미 소비된 뒤의 재요청도 scope 잠금 없이 동일 승인을 반환한다. )
     const [existing] = await tx.select().from(approvals).where(and(eq(approvals.companyId, issue.companyId),
@@ -49,7 +71,9 @@ export async function ownerSelfReplacement(db: Db, input: {
       const parsed = replacementApprovalPayloadSchema.safeParse(existing.payload);
       if (existing.status === "approved" && parsed.success && parsed.data.ownerAgentSelfApproval === true
         && parsed.data.sourceRunId === body.sourceRunId && parsed.data.decisionEventId === body.decisionEventId) {
-        return { approval: existing, targetRunId: parsed.data.targetRunId, replay: true };
+        const next = admissionInput(parsed.data, existing.id);
+        const admitted = await admitReplacementInTransaction(t, next, triggerActor);
+        return { approval: existing, targetRunId: admitted.run.id, replay: true };
       }
       throw conflict("replacement_idempotency_key_reuse");
     }
@@ -84,6 +108,8 @@ export async function ownerSelfReplacement(db: Db, input: {
       details: { sourceRunId: scope.run.id, targetRunId, decisionEventId: scope.owner.eventId,
         requesterAgentId: scope.mission.ownerAgentId, payloadHash: hashStructuredValue(payload),
         reason: body.reason ?? null } });
-    return { approval, targetRunId, replay: false };
+    const next = admissionInput(payload, approval.id);
+    const admitted = await admitReplacementInTransaction(t, next, triggerActor);
+    return { approval, targetRunId: admitted.run.id, replay: false };
   });
 }
