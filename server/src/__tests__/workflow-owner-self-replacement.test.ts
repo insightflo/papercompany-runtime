@@ -76,7 +76,7 @@ async function seedScenario() {
 }
 
 describe("owner self-approved replacement (isolated PostgreSQL)", () => {
-  it("owner agent records an approved replacement in one transaction and admits it via the existing path", async () => {
+  it("atomically records approval and admits the replacement run", async () => {
     const s = await seedScenario();
     const result = await ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor,
       request: s.request({ metadata: { url: "https://example.com/feed" }, reason: "missing url scheme" }) });
@@ -94,12 +94,8 @@ describe("owner self-approved replacement (isolated PostgreSQL)", () => {
     // 자가 승인 경로는 보드의 proposed 단계를 남기지 않는다.
     expect(await db.select().from(activityLog).where(and(eq(activityLog.companyId, s.companyId),
       eq(activityLog.action, "workflow.replacement_proposed")))).toHaveLength(0);
-    // 기존 admission 경로: 오너 에이전트가 승인된 교정 메타데이터를 실어 replacementIntent 로
-    // 신규 런 생성(입력 해시 일치 검증 통과, replay 1회).
-    const admitted = await admitReplacement(db, s.admissionInput(result.approval.id, "owner-self-1",
-      { url: "https://example.com/feed" }), s.triggerActor);
-    expect(admitted.replay).toBe(false);
-    expect(admitted.run.id).toBe(result.targetRunId);
+    const [target] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, result.targetRunId));
+    expect(target).toMatchObject({ id: result.targetRunId, missionId: s.missionId, status: "pending" });
     const [authority] = await db.select().from(workflowRecoveryAuthorities)
       .where(eq(workflowRecoveryAuthorities.companyId, s.companyId));
     expect(authority).toMatchObject({ replacementRunId: result.targetRunId, status: "consumed",
@@ -132,6 +128,9 @@ describe("owner self-approved replacement (isolated PostgreSQL)", () => {
       .send(s.request({ idempotencyKey: "route-1" }));
     expect(ok.status).toBe(201);
     expect(ok.body).toMatchObject({ status: "approved", replay: false, approvalId: expect.any(String), targetRunId: expect.any(String) });
+    expect(await db.select().from(workflowRuns).where(eq(workflowRuns.id, ok.body.targetRunId))).toHaveLength(1);
+    expect(await db.select().from(workflowRecoveryAuthorities)
+      .where(eq(workflowRecoveryAuthorities.replacementRunId, ok.body.targetRunId))).toHaveLength(1);
     // 스키마 위반(400), 타 company 키(403), 보드 사용자(403 — 사람 경로 유지).
     expect((await request(app(agentActor)).post(`/api/issues/${s.recoveryIssueId}/owner-recovery/replacement`)
       .send({ sourceRunId: "not-a-uuid", decisionEventId: s.decisionEventId, idempotencyKey: "route-2" })).status).toBe(400);
@@ -192,16 +191,32 @@ describe("owner self-approved replacement (isolated PostgreSQL)", () => {
     expect(second.targetRunId).toBe(first.targetRunId);
     expect(await db.select().from(approvals).where(and(eq(approvals.companyId, s.companyId),
       eq(approvals.type, "workflow_replacement")))).toHaveLength(1);
+    expect(await db.select().from(workflowRuns).where(eq(workflowRuns.id, first.targetRunId))).toHaveLength(1);
     // 같은 키로 다른 요청(다른 소스 런)은 재사용 거부.
     await expect(ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor,
       request: s.request({ sourceRunId: randomUUID() }) })).rejects.toThrow("replacement_idempotency_key_reuse");
     // 보드가 이미 쓴 키도 오너 자가 승인이 가져올 수 없다.
+    const b = await seedScenario();
     const boardKey = "board-owned-key";
     const board = { type: "board", source: "local_implicit", userId: "local-board", isInstanceAdmin: true } as const;
-    await proposeReplacement(db, s.companyId, board, { sourceRunId: s.run.id, decisionEventId: s.decisionEventId,
+    await proposeReplacement(db, b.companyId, board, { sourceRunId: b.run.id, decisionEventId: b.decisionEventId,
       idempotencyKey: boardKey, metadata: {}, externalEffects: "operator_reconciled" });
-    await expect(ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor,
-      request: s.request({ idempotencyKey: boardKey }) })).rejects.toThrow("replacement_idempotency_key_reuse");
+    await expect(ownerSelfReplacement(db, { issueId: b.recoveryIssueId, actor: b.actor,
+      request: b.request({ idempotencyKey: boardKey }) })).rejects.toThrow("replacement_idempotency_key_reuse");
+  });
+
+  it("materializes a replacement from a legacy approval-only replay", async () => {
+    const s = await seedScenario();
+    const first = await ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor, request: s.request() });
+    await db.delete(workflowRecoveryAuthorities)
+      .where(eq(workflowRecoveryAuthorities.replacementRunId, first.targetRunId));
+    await db.delete(workflowRuns).where(eq(workflowRuns.id, first.targetRunId));
+
+    const healed = await ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor, request: s.request() });
+    expect(healed).toMatchObject({ replay: true, targetRunId: first.targetRunId });
+    expect(await db.select().from(workflowRuns).where(eq(workflowRuns.id, first.targetRunId))).toHaveLength(1);
+    expect(await db.select().from(workflowRecoveryAuthorities)
+      .where(eq(workflowRecoveryAuthorities.replacementRunId, first.targetRunId))).toHaveLength(1);
   });
 
   it("admission still requires the mission owner for a self-approved replacement", async () => {
@@ -209,6 +224,6 @@ describe("owner self-approved replacement (isolated PostgreSQL)", () => {
     const result = await ownerSelfReplacement(db, { issueId: s.recoveryIssueId, actor: s.actor, request: s.request() });
     const otherAgent = { type: "agent" as const, agentId: randomUUID(), companyId: s.companyId };
     await expect(admitReplacement(db, s.admissionInput(result.approval.id), otherAgent))
-      .rejects.toThrow("replacement_operator_approval_required");
+      .rejects.toThrow("replacement_authority_consumed");
   });
 });

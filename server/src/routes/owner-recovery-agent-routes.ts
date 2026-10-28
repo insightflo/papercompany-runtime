@@ -74,8 +74,8 @@ export function registerOwnerRecoveryAgentRoutes(router: Router, deps: OwnerReco
     });
   });
 
-  // 오너 에이전트 자기 미션 실패 런의 교정 메타데이터 replacement — 제안+승인을 한 번에 기록한다.
-  // 인가는 owner-recovery 결정 라우트와 동일 체인(미션 오너 + heartbeat identity + 체크아웃).
+  // 오너 에이전트 자기 미션 실패 런의 교정 메타데이터 replacement — 승인과 신규 런 입장을
+  // 한 트랜잭션으로 기록한다. 인가는 owner-recovery 결정 라우트와 동일 체인이다.
   router.post("/issues/:id/owner-recovery/replacement", hermesOpsMutationGuard("owner_recovery.replacement.self_approve"), validate(ownerSelfReplacementSchema), async (req, res) => {
     const issue = await loadIssue(db, routeParam(req.params.id, "id"));
     assertCompanyAccess(req, issue.companyId);

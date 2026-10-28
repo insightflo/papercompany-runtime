@@ -19,63 +19,68 @@ export async function assertAgentReplacementRequired(db: Db, input: CreateWorkfl
   if (prior && !input.replacementIntent) throw conflict("replacement_authority_required");
 }
 
-// Shared REST/plugin boundary. Caller transport/triggeredBy never changes request meaning.
-export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
+// Shared admission core. Callers that already own the recovery transaction use this
+// directly so approval and replacement-run materialization cannot be split by a crash.
+export async function admitReplacementInTransaction(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   const intent = replacementIntentSchema.parse(input.replacementIntent);
   if (!replacementRequesterEligible(actor, input.companyId)) throw forbidden("replacement_requester_required");
   const requester = actor!;
+  const [observed] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, intent.sourceRunId), eq(workflowRuns.companyId, input.companyId)));
+  if (!observed?.missionId || observed.missionId !== input.missionId || observed.workflowId !== input.workflowId) throw conflict("replacement_scope_mismatch");
+  await db.select().from(missions).where(eq(missions.id, observed.missionId)).for("update");
+  const [source] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, observed.id)).for("update");
+  if (source.status === "cancelled") throw conflict("replacement_source_cancelled");
+  const requestHashFor = (metadata: Record<string, unknown>) => hashStructuredValue({ intent, companyId: input.companyId,
+    missionId: input.missionId, workflowId: input.workflowId, metadata, requester: requester.agentId });
+  const [used] = await db.select().from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.workflowRunId, source.id),
+    eq(workflowRecoveryAuthorities.targetAuthorityVersion, intent.expectedSourceAuthorityVersion)));
+  if (used) {
+    const contract = replacementApprovalPayloadSchema.safeParse(Object.fromEntries(Object.entries(used.replacementContract ?? {}).filter(([k]) => k !== "approver")));
+    const metadata = contract.success ? normalizeWorkflowRunInputs(contract.data.inputContract, input.metadata) : input.metadata ?? {};
+    if (used.recoveryKind !== "replacement_from_start_v1" || used.requestHash !== requestHashFor(metadata) || !used.replacementRunId) throw conflict("replacement_authority_consumed");
+    const [target] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, used.replacementRunId));
+    if (!target) throw conflict("replacement_target_missing");
+    return { run: target, replay: true };
+  }
+  const scope = await lockReplacementScope(db, input.companyId, source.id, intent.decisionEventId);
+  const [approval] = await db.select().from(approvals).where(and(eq(approvals.id, intent.approvalId), eq(approvals.companyId, input.companyId))).for("update");
+  if (!approval || approval.type !== "workflow_replacement" || approval.status !== "approved") throw conflict("replacement_operator_approval_required");
+  const parsed = replacementApprovalPayloadSchema.safeParse(approval.payload);
+  if (!parsed.success) throw conflict("replacement_approval_invalid");
+  // Operator approval 또는 오너 에이전트 자가 승인만 입장 가능. 자가 승인은 payload 마커와
+  // 입장 요청자(= payload 에 기록된 미션 오너) 일치일 때만 사람 승인(decidedByUserId)을 대신한다.
+  const ownerSelfApproved = parsed.data.ownerAgentSelfApproval === true
+    && parsed.data.requesterAgentId === requester.agentId && parsed.data.requesterAgentId === scope.mission.ownerAgentId;
+  if (!ownerSelfApproved && (!approval.decidedByUserId || approval.decidedByUserId.startsWith("agent:"))) throw conflict("replacement_operator_approval_required");
+  const p = parsed.data;
+  const definition = await lockReplacementDefinition(db, input.companyId, source.workflowId);
+  const metadata = normalizeWorkflowRunInputs(p.inputContract, input.metadata);
+  const requestHash = requestHashFor(metadata);
+  if (p.sourceRunId !== source.id || p.companyId !== input.companyId || p.missionId !== input.missionId || p.workflowId !== input.workflowId
+    || p.sourceAuthorityVersion !== source.dispatchAuthorityVersion || p.sourceAuthorityVersion !== intent.expectedSourceAuthorityVersion
+    || p.terminalDecisionId !== scope.terminal.id || p.decisionEventId !== intent.decisionEventId || p.idempotencyKey !== intent.idempotencyKey
+    || p.requesterAgentId !== requester.agentId || p.requesterAgentId !== scope.mission.ownerAgentId
+    || p.stepRunId !== scope.step.id || p.requestGeneration !== scope.step.executionGeneration
+    || p.inputHash !== hashStructuredValue(metadata) || p.inputHash !== hashStructuredValue(p.metadata)
+    || p.definitionHash !== await replacementDefinitionHash(db, definition, scope.mission.id, p.targetRunId)) throw conflict("replacement_approval_scope_mismatch");
+  const authorityId = crypto.randomUUID();
+  const run = await createWorkflowRunWithDefinition(db, { ...input, metadata: { ...p.metadata, replacementAuthorityId: authorityId } }, p.targetRunId);
+  const [frozen] = await db.select().from(workflowRunDefinitions).where(eq(workflowRunDefinitions.workflowRunId, run.id));
+  if (frozen.definitionHash !== p.definitionHash) throw conflict("replacement_definition_changed");
+  await db.insert(workflowRecoveryAuthorities).values({ id: authorityId, companyId: input.companyId, workflowRunId: source.id,
+    targetAuthorityVersion: source.dispatchAuthorityVersion, resultingAuthorityVersion: source.dispatchAuthorityVersion,
+    targetDecisionId: scope.terminal.id, recoveryKind: "replacement_from_start_v1", requestReference: intent.idempotencyKey,
+    requestedBy: requester.agentId, ownerDecisionEventId: intent.decisionEventId, operatorApprovalId: approval.id,
+    replacementRunId: run.id, requestHash, replacementContract: { ...p, approver: approval.decidedByUserId }, status: "consumed", consumedAt: new Date() });
+  await db.insert(activityLog).values({ companyId: input.companyId, actorType: "agent", actorId: requester.agentId!,
+    action: "workflow.replacement_admitted", entityType: "workflow_run", entityId: run.id,
+    details: { authorityId, sourceRunId: source.id, approvalId: approval.id, requestHash, definitionHash: p.definitionHash } });
+  return { run, replay: false };
+}
+
+// Shared REST/plugin boundary. Caller transport/triggeredBy never changes request meaning.
+export async function admitReplacement(db: Db, input: CreateWorkflowRunInput, actor?: TriggerActor) {
   return db.transaction(async (tx) => {
-    const t = tx as unknown as Db;
-    const [observed] = await tx.select().from(workflowRuns).where(and(eq(workflowRuns.id, intent.sourceRunId), eq(workflowRuns.companyId, input.companyId)));
-    if (!observed?.missionId || observed.missionId !== input.missionId || observed.workflowId !== input.workflowId) throw conflict("replacement_scope_mismatch");
-    await tx.select().from(missions).where(eq(missions.id, observed.missionId)).for("update");
-    const [source] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, observed.id)).for("update");
-    if (source.status === "cancelled") throw conflict("replacement_source_cancelled");
-    const requestHashFor = (metadata: Record<string, unknown>) => hashStructuredValue({ intent, companyId: input.companyId,
-      missionId: input.missionId, workflowId: input.workflowId, metadata, requester: requester.agentId });
-    const [used] = await tx.select().from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.workflowRunId, source.id),
-      eq(workflowRecoveryAuthorities.targetAuthorityVersion, intent.expectedSourceAuthorityVersion)));
-    if (used) {
-      const contract = replacementApprovalPayloadSchema.safeParse(Object.fromEntries(Object.entries(used.replacementContract ?? {}).filter(([k]) => k !== "approver")));
-      const metadata = contract.success ? normalizeWorkflowRunInputs(contract.data.inputContract, input.metadata) : input.metadata ?? {};
-      if (used.recoveryKind !== "replacement_from_start_v1" || used.requestHash !== requestHashFor(metadata) || !used.replacementRunId) throw conflict("replacement_authority_consumed");
-      const [target] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, used.replacementRunId));
-      if (!target) throw conflict("replacement_target_missing");
-      return { run: target, replay: true };
-    }
-    const scope = await lockReplacementScope(t, input.companyId, source.id, intent.decisionEventId);
-    const [approval] = await tx.select().from(approvals).where(and(eq(approvals.id, intent.approvalId), eq(approvals.companyId, input.companyId))).for("update");
-    if (!approval || approval.type !== "workflow_replacement" || approval.status !== "approved") throw conflict("replacement_operator_approval_required");
-    const parsed = replacementApprovalPayloadSchema.safeParse(approval.payload);
-    if (!parsed.success) throw conflict("replacement_approval_invalid");
-    // Operator approval 또는 오너 에이전트 자가 승인만 입장 가능. 자가 승인은 payload 마커와
-    // 입장 요청자(= payload 에 기록된 미션 오너) 일치일 때만 사람 승인(decidedByUserId)을 대신한다.
-    const ownerSelfApproved = parsed.data.ownerAgentSelfApproval === true
-      && parsed.data.requesterAgentId === requester.agentId && parsed.data.requesterAgentId === scope.mission.ownerAgentId;
-    if (!ownerSelfApproved && (!approval.decidedByUserId || approval.decidedByUserId.startsWith("agent:"))) throw conflict("replacement_operator_approval_required");
-    const p = parsed.data;
-    const definition = await lockReplacementDefinition(t, input.companyId, source.workflowId);
-    const metadata = normalizeWorkflowRunInputs(p.inputContract, input.metadata);
-    const requestHash = requestHashFor(metadata);
-    if (p.sourceRunId !== source.id || p.companyId !== input.companyId || p.missionId !== input.missionId || p.workflowId !== input.workflowId
-      || p.sourceAuthorityVersion !== source.dispatchAuthorityVersion || p.sourceAuthorityVersion !== intent.expectedSourceAuthorityVersion
-      || p.terminalDecisionId !== scope.terminal.id || p.decisionEventId !== intent.decisionEventId || p.idempotencyKey !== intent.idempotencyKey
-      || p.requesterAgentId !== requester.agentId || p.requesterAgentId !== scope.mission.ownerAgentId
-      || p.stepRunId !== scope.step.id || p.requestGeneration !== scope.step.executionGeneration
-      || p.inputHash !== hashStructuredValue(metadata) || p.inputHash !== hashStructuredValue(p.metadata)
-      || p.definitionHash !== await replacementDefinitionHash(tx, definition, scope.mission.id, p.targetRunId)) throw conflict("replacement_approval_scope_mismatch");
-    const authorityId = crypto.randomUUID();
-    const run = await createWorkflowRunWithDefinition(t, { ...input, metadata: { ...p.metadata, replacementAuthorityId: authorityId } }, p.targetRunId);
-    const [frozen] = await tx.select().from(workflowRunDefinitions).where(eq(workflowRunDefinitions.workflowRunId, run.id));
-    if (frozen.definitionHash !== p.definitionHash) throw conflict("replacement_definition_changed");
-    await tx.insert(workflowRecoveryAuthorities).values({ id: authorityId, companyId: input.companyId, workflowRunId: source.id,
-      targetAuthorityVersion: source.dispatchAuthorityVersion, resultingAuthorityVersion: source.dispatchAuthorityVersion,
-      targetDecisionId: scope.terminal.id, recoveryKind: "replacement_from_start_v1", requestReference: intent.idempotencyKey,
-      requestedBy: requester.agentId, ownerDecisionEventId: intent.decisionEventId, operatorApprovalId: approval.id,
-      replacementRunId: run.id, requestHash, replacementContract: { ...p, approver: approval.decidedByUserId }, status: "consumed", consumedAt: new Date() });
-    await tx.insert(activityLog).values({ companyId: input.companyId, actorType: "agent", actorId: requester.agentId!,
-      action: "workflow.replacement_admitted", entityType: "workflow_run", entityId: run.id,
-      details: { authorityId, sourceRunId: source.id, approvalId: approval.id, requestHash, definitionHash: p.definitionHash } });
-    return { run, replay: false };
+    return admitReplacementInTransaction(tx as unknown as Db, input, actor);
   });
 }
