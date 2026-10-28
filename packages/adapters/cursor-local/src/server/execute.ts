@@ -30,6 +30,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "../index.js";
 import { parseCursorJsonl, isCursorUnknownSessionError } from "./parse.js";
+import { runCursorRetryAttempt } from "./retry-start-result.js";
 import { normalizeCursorStreamLine } from "../shared/stream.js";
 import { hasCursorTrustBypassArg } from "../shared/trust.js";
 
@@ -587,8 +588,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stdout",
       `[paperclip] Cursor resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
     );
-    const retry = await runAttempt(null);
-    return toResult(retry, true);
+    const retry = await runCursorRetryAttempt(initial, () => runAttempt(null));
+    if (retry.startBlocked) {
+      return {
+        ...toResult(retry.attempt, true),
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        clearSession: true,
+      };
+    }
+    return toResult(retry.attempt, true);
   }
 
   return toResult(initial);
