@@ -30,6 +30,7 @@ import {
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "./parse.js";
 import { ensureOpenCodeModelConfiguredAndAvailable } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
+import { runOpenCodeRetryAttempt } from "./retry-start-result.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -533,7 +534,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `[paperclip] OpenCode provider overloaded; retry ${overloadAttempt + 1}/${maxOverloadRetries} after ~${Math.round(waitMs / 1000)}s with the same session (no new issue).\n`,
     );
     await sleep(waitMs);
-    initial = await runAttempt(sessionId);
+    const retry = await runOpenCodeRetryAttempt(initial, () => runAttempt(sessionId));
+    initial = retry.attempt;
+    if (retry.startBlocked) break;
   }
 
   const initialFailed =
@@ -556,8 +559,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       "stdout",
       `[paperclip] OpenCode session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
     );
-    const retry = await runAttempt(null);
-    return toResult(retry, true);
+    const retry = await runOpenCodeRetryAttempt(initial, () => runAttempt(null));
+    return toResult(retry.attempt, true);
   }
 
   return toResult(initial);
