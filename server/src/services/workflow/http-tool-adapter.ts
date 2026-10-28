@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
-import type { Db } from "@paperclipai/db";
+import { workflowStepRuns, type Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import type { CoreWorkflowToolExecutionResult } from "./core-tool-executor.js";
 import { consumeHttpToolResponse, nonEmptyString, readObject, redactSecret, resolveResponseContract, result } from "./http-tool-response.js";
 import { fixedHttpTimeout, progressCallbackBase, progressTokenHash, readToolProgressPolicy, ToolProgressError } from "../tools/progress-policy.js";
 import { createToolProgressStore } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
 import { httpDispatcher, undiciFetch } from "./http-tool-dispatcher.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
 export { redactSecret, persistArtifact } from "./http-tool-response.js";
 
 export type HttpWorkflowToolExecutionInput = {
@@ -19,6 +21,7 @@ export type HttpWorkflowToolExecutionDeps = {
   fetchImpl?: typeof fetch;
   resolveSecretValue: (companyId: string, secretId: string, version: number | "latest") => Promise<string>;
   progress?: { db: Db; toolId: string; workflowRunId?: string | null; stepId?: string | null; callbackBaseUrl?: string };
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
 };
 function resolveHeaderAuth(auth: unknown): { headerName: string; secretId: string; version: number | "latest" } | null {
   const cfg = readObject(auth);
@@ -79,15 +82,29 @@ export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionIn
       [auth.headerName]: headerValue, "X-Papercompany-Request-Id": input.requestId };
     // Serialize/validate transport input before creating a durable execution record.
     const body = JSON.stringify(input.parameters ?? {});
+    const execution = deps.progress?.workflowRunId && deps.progress.stepId
+      ? await deps.progress.db.select({ id: workflowStepRuns.id, generation: workflowStepRuns.executionGeneration })
+        .from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, deps.progress.workflowRunId),
+          eq(workflowStepRuns.stepId, deps.progress.stepId), eq(workflowStepRuns.lastDispatchRequestId, input.requestId)))
+        .limit(1).then(([attempt]) => attempt) : null;
+    const runtimeScope = execution && (deps.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
+      requestId: input.requestId, executionId: deps.progress!.workflowRunId!, attemptId: execution.id,
+      executionGeneration: execution.generation,
+    });
     const operation = async (signal: AbortSignal) => {
       signal.throwIfAborted();
       const init = { method: "POST", headers, body, signal, dispatcher, ...(policy ? { redirect: "error" as const } : {}) };
-      const res = deps.fetchImpl
-        ? await deps.fetchImpl(url, init as RequestInit)
+      const start = () => deps.fetchImpl
+        ? deps.fetchImpl(url, init as RequestInit)
         // undici's Response type differs from the global one, but
         // consumeHttpToolResponse only reads status/ok/text()/json(), so the
         // structural cast is safe at runtime.
-        : await undiciFetch(url, init) as unknown as Response;
+        : undiciFetch(url, init) as unknown as Promise<Response>;
+      const decision = runtimeScope?.start(start) ?? { kind: "started" as const, value: start() };
+      if (decision.kind === "deferred_before_start") return { status: 503 as const, deferredBeforeStart: decision.deferred,
+        body: { tool: toolName, source: "core" as const, error: decision.deferred.reasonCode } };
+      if (decision.kind === "additional_start_blocked") throw new Error("runtime_additional_start_blocked");
+      const res = await decision.value;
       signal.throwIfAborted();
       const response = await consumeHttpToolResponse(res, input, responseContract, [headerValue, token], signal);
       if (response.body.error) response.body.error = redactSecret(redactSecret(response.body.error, token), headerValue);
@@ -103,7 +120,8 @@ export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionIn
     headers["X-Papercompany-Execution-Id"] = heartbeat.id;
     headers["X-Papercompany-Progress-Url"] = `${callbackBase}/api/companies/${input.companyId}/tool-executions/${heartbeat.id}/progress`;
     headers["X-Papercompany-Progress-Token"] = token;
-    return await withToolProgress({ store, heartbeat, operation, succeeded: (value) => value.status === 200 });
+    return await withToolProgress({ store, heartbeat, operation,
+      succeeded: (value) => value.status === 200 || Boolean(value.deferredBeforeStart) });
   } catch (error) {
     if (error instanceof ToolProgressError && error.status === 422) return invalid(error.reason);
     const timeout = error instanceof ToolProgressError && error.reason === "tool_http_timeout" ||

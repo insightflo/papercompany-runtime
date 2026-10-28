@@ -1,8 +1,11 @@
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { workflowStepRuns, type Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import type { CoreWorkflowToolExecutionResult } from "./core-tool-executor.js";
 import { persistArtifact, redactSecret } from "./http-tool-adapter.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
 
 const MIN_TIMEOUT_MS = 1;
 const MAX_TIMEOUT_MS = 300_000;
@@ -27,6 +30,8 @@ export type McpWorkflowToolExecutionDeps = {
     secretId: string,
     version: number | "latest",
   ) => Promise<string>;
+  progress?: { db: Db; workflowRunId?: string | null; stepId?: string | null };
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
 };
 
 function readObject(value: unknown): Record<string, unknown> {
@@ -145,10 +150,24 @@ export async function executeMcpWorkflowTool(
     ...(deps.fetchImpl ? { fetch: deps.fetchImpl } : {}),
   });
   const client = new Client({ name: "papercompany-runtime", version: "1.0.0" });
+  const execution = deps.progress?.workflowRunId && deps.progress.stepId
+    ? await deps.progress.db.select({ id: workflowStepRuns.id, generation: workflowStepRuns.executionGeneration })
+      .from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, deps.progress.workflowRunId),
+        eq(workflowStepRuns.stepId, deps.progress.stepId), eq(workflowStepRuns.lastDispatchRequestId, input.requestId)))
+      .limit(1).then(([attempt]) => attempt) : null;
+  const runtimeScope = execution && (deps.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
+    requestId: input.requestId, executionId: deps.progress!.workflowRunId!, attemptId: execution.id,
+    executionGeneration: execution.generation,
+  });
 
   let toolResult: { content?: unknown; structuredContent?: unknown; isError?: boolean };
   try {
-    await client.connect(transport, { timeout: timeoutMs });
+    const start = () => client.connect(transport, { timeout: timeoutMs });
+    const decision = runtimeScope?.start(start) ?? { kind: "started" as const, value: start() };
+    if (decision.kind === "deferred_before_start") return { status: 503, deferredBeforeStart: decision.deferred,
+      body: { tool: toolName, source: "core", error: decision.deferred.reasonCode } };
+    if (decision.kind === "additional_start_blocked") throw new Error("runtime_additional_start_blocked");
+    await decision.value;
     toolResult = await client.callTool(
       { name: remoteToolName, arguments: readObject(input.parameters) },
       undefined,

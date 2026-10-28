@@ -21,6 +21,8 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import { executeRemoteWorkflowTool } from "../services/workflow/remote-tool-executor.js";
+import { executeHttpWorkflowTool } from "../services/workflow/http-tool-adapter.js";
+import { executeMcpWorkflowTool } from "../services/workflow/mcp-tool-adapter.js";
 import { createRuntimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 
 describe("workflow shutdown start boundary", () => {
@@ -166,6 +168,47 @@ describe("workflow shutdown start boundary", () => {
 
     expect(result.deferredBeforeStart).toBe(control);
     expect(result.status).toBe(503);
+  });
+
+  it.each(["http", "mcp"] as const)("defers %s after preparation but before the first network call", async (kind) => {
+    const seeded = await seedQueuedRun(false);
+    const lifecycle = createRuntimeExecutionLifecycle();
+    const fetchImpl = vi.fn();
+    const resolveSecretValue = vi.fn(async () => {
+      lifecycle.beginShutdown("SIGTERM");
+      return "fixture-secret";
+    });
+    const progress = { db, toolId: "unused", workflowRunId: seeded.runId, stepId: "publish" };
+    const common = { companyId: seeded.owner.companyId, toolName: "remote-tool", parameters: {}, requestId: seeded.requestId };
+    const result = kind === "http"
+      ? await executeHttpWorkflowTool({ ...common, adapterConfig: { url: "https://example.test/tool", method: "POST",
+        auth: { type: "header", headerName: "Authorization", secretId: "secret", version: "latest" },
+        response: { resultField: "result" } } }, { fetchImpl: fetchImpl as never, resolveSecretValue, progress, runtimeLifecycle: lifecycle })
+      : await executeMcpWorkflowTool({ ...common, adapterConfig: { url: "https://example.test/mcp", toolName: "remote",
+        auth: { type: "header", headerName: "Authorization", secretId: "secret", version: "latest" } } },
+        { fetchImpl: fetchImpl as never, resolveSecretValue, progress, runtimeLifecycle: lifecycle });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.deferredBeforeStart).toMatchObject({ requestId: seeded.requestId, executionId: seeded.runId,
+      attemptId: seeded.queued.id, executionGeneration: seeded.queued.executionGeneration, externalStarted: false });
+  });
+
+  it("keeps an HTTP result when shutdown starts after network initiation", async () => {
+    const seeded = await seedQueuedRun(false);
+    const base = createRuntimeExecutionLifecycle();
+    const scopeAfterStart: RuntimeExecutionLifecycle = { ...base, createScope(identity) {
+      const scope = base.createScope(identity);
+      return { ...scope, start(start) { const decision = scope.start(start); base.beginShutdown("SIGTERM"); return decision; } };
+    } };
+    const result = await executeHttpWorkflowTool({ companyId: seeded.owner.companyId, toolName: "remote-tool",
+      parameters: {}, requestId: seeded.requestId, adapterConfig: { url: "https://example.test/tool", method: "POST",
+        auth: { type: "header", headerName: "Authorization", secretId: "secret", version: "latest" },
+        response: { resultField: "result" } } }, { fetchImpl: vi.fn(async () => new Response(JSON.stringify({ result: { ok: true } }),
+        { status: 200, headers: { "content-type": "application/json" } })) as never, resolveSecretValue: async () => "secret",
+      progress: { db, toolId: "unused", workflowRunId: seeded.runId, stepId: "publish" }, runtimeLifecycle: scopeAfterStart });
+
+    expect(result).toMatchObject({ status: 200, body: { data: { ok: true } } });
+    expect(result.deferredBeforeStart).toBeUndefined();
   });
 
   it.each([
