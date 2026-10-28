@@ -405,8 +405,8 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
       comment: { mode: string };
       humanReview?: unknown;
     };
-    // 시스템 escalate nextAction 의 복구 경로 열거가 그대로 선택지가 된다(사람이 누를 승인 버튼).
-    expect(definition.options.map((option) => option.id)).toEqual(["retry-with-revised-input", "replan", "reassign", "cancel"]);
+    // 검증된 run binding이 없는 fixture는 자연어 복구 경로를 만들지 않고 외부 입력을 요구한다.
+    expect(definition.options.map((option) => option.id)).toEqual(["missing-recovery-target"]);
     expect(definition.actions.map((action) => action.id)).toEqual(["submit"]);
     expect(definition.comment.mode).toBe("optional");
     expect(definition.humanReview).toBeTruthy();

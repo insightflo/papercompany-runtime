@@ -234,16 +234,19 @@ describe("terminal resume guidance (reviewed resume policy surfacing)", () => {
 
 // [승인=재개 2026-10-23] 재개 옵션 구성 — 재개 가능할 때만 첫 옵션+추천으로 추가.
 describe("terminalCardStructuredOptions (resume option on the terminal card)", () => {
-  const nextAction = "Human operator must choose a recovery path (retry with revised input, replan, reassign, or cancel). Automatic continuation is exhausted.";
-  it("returns null when resume is not available", () => {
-    expect(terminalCardStructuredOptions(false, nextAction)).toBeNull();
+  it("returns an explicit external-input block when no direct command is eligible", () => {
+    expect(terminalCardStructuredOptions(false, false)).toMatchObject({
+      structuredOptions: [{ id: "missing-recovery-target" }],
+      recommendedOptionId: "missing-recovery-target",
+    });
   });
-  it("prepends the resume option with recommendation and keeps derived recovery paths", () => {
-    const options = terminalCardStructuredOptions(true, nextAction)!;
+  it("offers only verified direct commands and never derives commands from prose", () => {
+    const options = terminalCardStructuredOptions(true, true);
     expect(options.structuredOptions[0]).toMatchObject({ id: "resume-this-run" });
     expect(options.structuredOptions[0]!.label).toContain("이 실행 이어서 진행");
-    expect(options.structuredOptions.length).toBeGreaterThan(1);
+    expect(options.structuredOptions.map((o) => o.id)).toEqual([
+      "resume-this-run", "restart-workflow-from-start",
+    ]);
     expect(options.recommendedOptionId).toBe("resume-this-run");
-    expect(options.structuredOptions.slice(1).map((o) => o.id)).toContain("replan");
   });
 });
