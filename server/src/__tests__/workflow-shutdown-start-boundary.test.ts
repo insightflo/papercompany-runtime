@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDb, toolDefinitions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
+import { createDb, toolDefinitions, toolExecutionHeartbeats, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import {
   cleanupFrozenTables,
   createFrozenRun,
@@ -21,6 +21,7 @@ import {
 } from "../services/workflow/dag-engine.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import { executeRemoteWorkflowTool } from "../services/workflow/remote-tool-executor.js";
+import { createRuntimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 
 describe("workflow shutdown start boundary", () => {
   let fixture: Extract<ExecutionDefinitionFixture, { supported: true }>;
@@ -35,6 +36,7 @@ describe("workflow shutdown start boundary", () => {
 
   afterEach(async () => {
     setWorkflowToolStepExecutor(null);
+    await db.delete(toolExecutionHeartbeats);
     await cleanupFrozenTables(db);
   });
 
@@ -59,7 +61,7 @@ describe("workflow shutdown start boundary", () => {
     await markRunStatus(db, run.id, "running");
     const requestId = `${run.id}:publish:${Date.now()}`;
     const queued = await seedQueuedToolStepRun(db, { runId: run.id, stepId: "publish", requestId });
-    return { runId: run.id, requestId, queued };
+    return { owner, runId: run.id, requestId, queued };
   }
 
   function deferred(request: WorkflowToolStepExecutionRequest, generation: number) {
@@ -164,6 +166,37 @@ describe("workflow shutdown start boundary", () => {
 
     expect(result.deferredBeforeStart).toBe(control);
     expect(result.status).toBe(503);
+  });
+
+  it.each([
+    { mode: "shutdown before spawn", command: "/definitely-not-started", expectedStatus: 503, progress: true },
+    { mode: "shutdown after spawn", command: "/usr/bin/true", expectedStatus: 200, progress: false },
+    { mode: "real spawn failure", command: "/definitely-missing-runtime-tool", expectedStatus: 500, progress: false },
+  ] as const)("keeps local progress lifecycle distinct for $mode", async ({ mode, command, expectedStatus, progress: usesProgress }) => {
+    const seeded = await seedQueuedRun(false);
+    await db.insert(toolDefinitions).values({ companyId: seeded.owner.companyId, name: "publish", adapterType: "builtin",
+      adapterConfig: { command, ...(usesProgress ? { progress: { version: 1, idleTimeoutMs: 5_000, maxDurationMs: 15_000,
+        stages: [{ key: "work", unit: "items" }] } } : {}) } });
+    const base = createRuntimeExecutionLifecycle();
+    let lifecycle: RuntimeExecutionLifecycle = base;
+    if (mode === "shutdown before spawn") base.beginShutdown("SIGTERM");
+    if (mode === "shutdown after spawn") lifecycle = {
+      createScope(identity) {
+        const scope = base.createScope(identity);
+        return { ...scope, start(start) { const decision = scope.start(start); base.beginShutdown("SIGTERM"); return decision; } };
+      },
+      beginShutdown: base.beginShutdown,
+      shutdownState: base.shutdownState,
+    };
+
+    const result = await executeCoreWorkflowTool({ db, companyId: seeded.owner.companyId, toolName: "publish", parameters: {},
+      requestId: seeded.requestId, workflowRunId: seeded.runId, stepRunId: seeded.queued.id, stepId: "publish", runtimeLifecycle: lifecycle });
+    const [progressRow] = await db.select().from(toolExecutionHeartbeats)
+      .where(eq(toolExecutionHeartbeats.requestId, seeded.requestId));
+
+    expect(result.status).toBe(expectedStatus);
+    expect(Boolean(result.deferredBeforeStart)).toBe(mode === "shutdown before spawn");
+    expect(progressRow?.state).toBe(mode === "shutdown before spawn" ? "succeeded" : undefined);
   });
 
   it.each(["cancelled_run", "new_generation", "new_owner"] as const)(
