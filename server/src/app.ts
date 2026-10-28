@@ -67,7 +67,7 @@ import { executionWorkspaceService, issueService } from "./services/index.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
-import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
+import { createPluginToolDispatcher, type PluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
@@ -92,7 +92,7 @@ import { createChannelRegistry } from "./channel/index.js";
 import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
-import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker } from "./services/workflow/dag-engine.js";
+import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker, type WorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { checkCoreWorkflowToolsAvailable, executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "./services/workflow/core-tool-executor.js";
 import { resolveWorkflowSchedulerOwnership } from "./services/workflow/scheduler-ownership.js";
@@ -194,6 +194,105 @@ function transformAliasResponse(alias: ApiAliasSurface, body: unknown): unknown 
         ["linkedIssue", "linkedWorkItem"],
       ]);
   }
+}
+
+export function createAppWorkflowToolStepExecutor(input: {
+  db: Db;
+  toolDispatcher: Pick<PluginToolDispatcher, "getTool" | "executeTool">;
+  executeCoreTool?: typeof executeCoreWorkflowTool;
+  completeToolStep?: typeof completeWorkflowToolStepFromResult;
+  resolveStepEnv?: typeof resolveWorkflowRunStepEnv;
+}): WorkflowToolStepExecutor {
+  const executeCoreTool = input.executeCoreTool ?? executeCoreWorkflowTool;
+  const completeToolStep = input.completeToolStep ?? completeWorkflowToolStepFromResult;
+  const resolveStepEnv = input.resolveStepEnv ?? resolveWorkflowRunStepEnv;
+
+  return async (request) => {
+    if (input.toolDispatcher.getTool(request.toolName)) {
+      const execution = await input.toolDispatcher.executeTool(
+        request.toolName,
+        request.args ?? {},
+        {
+          agentId: "workflow-tool-step",
+          runId: request.workflowRunId,
+          companyId: request.companyId,
+          projectId: "",
+        },
+      );
+      if (execution.deferredBeforeStart) {
+        return { deferredBeforeStart: execution.deferredBeforeStart };
+      }
+      const result = execution.result;
+      const stdout = result.content ?? (() => {
+        try {
+          return JSON.stringify(result.data ?? {});
+        } catch {
+          return "";
+        }
+      })();
+      await completeToolStep(input.db, {
+        companyId: request.companyId,
+        stepRunId: request.stepRunId,
+        requestId: request.requestId,
+        workflowRunId: request.workflowRunId,
+        stepId: request.stepId,
+        toolName: request.toolName,
+        success: !result.error,
+        stdout,
+        data: result.data,
+        stderr: result.error ?? "",
+        exitCode: result.error ? 1 : 0,
+        error: result.error,
+      });
+      return { accepted: true };
+    }
+
+    const coreResult = await executeCoreTool({
+      db: input.db,
+      companyId: request.companyId,
+      agentId: request.agentId,
+      agentName: request.agentName,
+      toolName: request.toolName,
+      parameters: request.args ?? {},
+      requestId: request.requestId,
+      workflowRunId: request.workflowRunId,
+      stepRunId: request.stepRunId,
+      stepId: request.stepId,
+      stepEnv: await resolveStepEnv(input.db, {
+        companyId: request.companyId,
+        workflowRunId: request.workflowRunId,
+        stepId: request.stepId,
+      }),
+    });
+    if (coreResult.deferredBeforeStart) {
+      return { deferredBeforeStart: coreResult.deferredBeforeStart };
+    }
+    const stdout = coreResult.body.content ?? (() => {
+      try {
+        return JSON.stringify(coreResult.body.data ?? {});
+      } catch {
+        return "";
+      }
+    })();
+    const success = coreResult.status === 200;
+    await completeToolStep(input.db, {
+      companyId: request.companyId,
+      stepRunId: request.stepRunId,
+      requestId: request.requestId,
+      workflowRunId: request.workflowRunId,
+      stepId: request.stepId,
+      toolName: request.toolName,
+      success,
+      stdout,
+      data: coreResult.body.data,
+      artifactPath: coreResult.artifactPath,
+      toolArtifactReceipt: coreResult.toolArtifactReceipt,
+      stderr: coreResult.body.stderr ?? "",
+      exitCode: success ? 0 : 1,
+      error: success ? undefined : coreResult.body.error,
+    });
+    return { accepted: true };
+  };
 }
 
 export async function createApp(
@@ -461,86 +560,7 @@ export async function createApp(
     return checkCoreWorkflowToolsAvailable(db, { companyId, toolNames: nonPluginToolNames });
   });
 
-  setWorkflowToolStepExecutor(async (request) => {
-    const registeredPluginTool = toolDispatcher.getTool(request.toolName);
-    if (registeredPluginTool) {
-      const execution = await toolDispatcher.executeTool(
-        request.toolName,
-        request.args ?? {},
-        {
-          agentId: "workflow-tool-step",
-          runId: request.workflowRunId,
-          companyId: request.companyId,
-          projectId: "",
-        },
-      );
-      const result = execution.result;
-      const stdout = result.content ?? (() => {
-        try {
-          return JSON.stringify(result.data ?? {});
-        } catch {
-          return "";
-        }
-      })();
-      await completeWorkflowToolStepFromResult(db, {
-        companyId: request.companyId,
-        stepRunId: request.stepRunId,
-        requestId: request.requestId,
-        workflowRunId: request.workflowRunId,
-        stepId: request.stepId,
-        toolName: request.toolName,
-        success: !result.error,
-        stdout,
-        data: result.data,
-        stderr: result.error ?? "",
-        exitCode: result.error ? 1 : 0,
-        error: result.error,
-      });
-      return { accepted: true };
-    }
-
-    const coreResult = await executeCoreWorkflowTool({
-      db,
-      companyId: request.companyId,
-      agentId: request.agentId,
-      agentName: request.agentName,
-      toolName: request.toolName,
-      parameters: request.args ?? {},
-      requestId: request.requestId,
-      workflowRunId: request.workflowRunId,
-      stepRunId: request.stepRunId,
-      stepId: request.stepId,
-      stepEnv: await resolveWorkflowRunStepEnv(db, {
-        companyId: request.companyId,
-        workflowRunId: request.workflowRunId,
-        stepId: request.stepId,
-      }),
-    });
-    const stdout = coreResult.body.content ?? (() => {
-      try {
-        return JSON.stringify(coreResult.body.data ?? {});
-      } catch {
-        return "";
-      }
-    })();
-    const success = coreResult.status === 200;
-    await completeWorkflowToolStepFromResult(db, {
-      companyId: request.companyId,
-      stepRunId: request.stepRunId,
-      requestId: request.requestId,
-      workflowRunId: request.workflowRunId,
-      stepId: request.stepId,
-      toolName: request.toolName,
-      success,
-      stdout,
-      data: coreResult.body.data,
-      artifactPath: coreResult.artifactPath, toolArtifactReceipt: coreResult.toolArtifactReceipt,
-      stderr: coreResult.body.stderr ?? "",
-      exitCode: success ? 0 : 1,
-      error: success ? undefined : coreResult.body.error,
-    });
-    return { accepted: true };
-  });
+  setWorkflowToolStepExecutor(createAppWorkflowToolStepExecutor({ db, toolDispatcher }));
   const jobCoordinator = createPluginJobCoordinator({
     db,
     lifecycle,
