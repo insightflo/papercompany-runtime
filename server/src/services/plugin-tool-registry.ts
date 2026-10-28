@@ -26,6 +26,7 @@ import type {
 import type { ToolRunContext, ToolResult, ExecuteToolParams } from "@paperclipai/plugin-sdk";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { logger } from "../middleware/logger.js";
+import type { DeferredBeforeStart } from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,6 +88,8 @@ export interface ToolExecutionResult {
   toolName: string;
   /** The result returned by the plugin's tool handler. */
   result: ToolResult;
+  /** Reserved control result; producers remain disabled until consumers are ready. */
+  deferredBeforeStart?: DeferredBeforeStart;
 }
 
 // ---------------------------------------------------------------------------
