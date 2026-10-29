@@ -16,6 +16,7 @@ import { logger } from "../../middleware/logger.js";
 import { HttpError } from "../../errors.js";
 import { createOrReplayQaSourceDefectCard } from "./qa-source-defect-card-replay.js";
 import { buildHistoricalQaSourceDefectCard } from "./qa-source-defect-card-historical.js";
+import { buildHistoricalV3Candidates, buildHistoricalV3InputVariants, buildHistoricalV3RequestKey } from "./qa-source-defect-card-historical-v3.js";
 
 export const QA_SOURCE_DEFECT_CARD_SOURCE_TYPE = "workflow_qa_rejection";
 // 카드 definition 문구가 바뀌면 이 값을 올린다 — 문구가 requestHash에 포함되어 같은 키 재요청 conflict를 막는 유일한 안전장치.
@@ -53,8 +54,7 @@ export interface QaSourceDefectCardQaRef {
   readonly qaIssueId: string | null;
 }
 
-/** 두 생성 지점의 동일 generation은 동일 hash여야 한다; 경로 구분 정보를 포함하지 않는다.
- *  [fixture 재생성용 export] 테스트가 동결 payload(payloads.json)를 현재 빌더 출력으로 갱신할 때 쓴다. */
+/** 두 생성 지점의 동일 generation은 동일 hash여야 한다; 경로 구분 정보를 포함하지 않는다. */
 export function buildCardCreateInput(input: {
   readonly language: SystemLanguage;
   readonly workflowRunId: string;
@@ -242,12 +242,7 @@ export type EnsureQaSourceDefectCardResult =
   | { readonly outcome: "replayed"; readonly decisionId: string }
   | { readonly outcome: "conflict"; readonly message: string }
   | { readonly outcome: "failed"; readonly message: string };
-/**
- * [멱등 생성 + 중복 방지] requestKey 로 replay 처리되고(동일 requestHash → replayed), 같은
- *   (workflowRun, producer) 의 이전 iteration 카드가 아직 pending 이면 cancel 로 대체한다 —
- *   운영자는 항상 해당 조건의 최신 카드 1장만 본다(2026-08-25 GAZ 3중 복제 사고 대응).
- *   hash 충돌(다른 generation 콘텐츠 — 희귀)은 conflict 로 반환. 실패는 failed 로 반환한다.
- */
+/** One company-scoped decision per producer generation; conflicts do not clean up other cards. */
 export async function ensureQaSourceDefectOwnerCard(input: {
   readonly db: Db;
   readonly companyId: string;
@@ -267,7 +262,6 @@ export async function ensureQaSourceDefectOwnerCard(input: {
   if (`qa-source-defect:v${QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION}:${sourceId}`.length > QA_SOURCE_DEFECT_CARD_HASH_REPLACEMENT_REQUEST_KEY_LIMIT
     && sourceId !== sourceId.normalize("NFC")) return { outcome: "failed",
     message: "QA source identity changes under NFC normalization in hash replacement path; rejected before supersede or write" };
-  // Both creation paths use the same cause-preserving recurrence diagnostics.
   const promotion = await resolveRecurrencePromotion(input);
   let language: SystemLanguage = "en";
   try {
@@ -276,10 +270,23 @@ export async function ensureQaSourceDefectOwnerCard(input: {
     logger.warn({ err, companyId: input.companyId }, "QA source defect card language lookup failed; using English");
   }
   try {
+    const historicalInput = {
+      workflowRunId: input.workflowRunId,
+      producerStepId: input.producerStepId,
+      iteration: input.iteration,
+      maxIterations: input.maxIterations,
+      findings: promotion.findings,
+      qaRefs: input.qaRefs,
+      missionId: input.missionId,
+      linkIssueId: input.linkIssueId,
+    };
+    const historicalVariants = buildHistoricalV3InputVariants(historicalInput, promotion.recurringFindingIds);
     const result = await createOrReplayQaSourceDefectCard({
       db: input.db, companyId: input.companyId, language,
       legacyRequestKey: `qa-source-defect:${sourceId}`, sourcePrefix: `${`${input.workflowRunId}:${input.producerStepId}:`.replace(/[\\%_]/g, "\\$&")}%`,
-      buildHistorical: () => buildHistoricalQaSourceDefectCard({ ...input, findings: promotion.findings, promotedFindingIds: promotion.promotedFindingIds }),
+      v3RequestKey: buildHistoricalV3RequestKey(input),
+      buildHistorical: () => historicalVariants.map((variant) => buildHistoricalQaSourceDefectCard(variant)),
+      buildHistoricalV3: () => buildHistoricalV3Candidates(historicalInput, promotion.recurringFindingIds),
       build: (displayLanguage) => buildCardCreateInput({
         ...input, language: displayLanguage,
         findings: promotion.findings, promotedFindingIds: promotion.promotedFindingIds,
@@ -293,16 +300,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
     return { outcome: "failed", message };
   }
 }
-/** 정리 판정에 필요한 최소 stepRun 구조(구조적 호환). */
-interface CleanupStepRun {
-  readonly stepId: string;
-  readonly status: string;
-  readonly iterationIndex?: number | null;
-}
-
-/**
- * Loads prior findings for diagnostic recurrence only; lookup failure preserves current findings.
- */
+/** Loads prior structured findings for diagnostics; lookup failure preserves current findings. */
 async function resolveRecurrencePromotion(input: {
   readonly db: Db;
   readonly companyId: string;
