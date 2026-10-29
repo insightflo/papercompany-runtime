@@ -50,6 +50,7 @@ import {
 } from "./effect-envelope.js";
 import { readExplicitValidationVerdict } from "./validation-verdict.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
+import { assessAutomaticCompletionEvidence } from "./workflow/automatic-completion-evidence.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
@@ -8743,65 +8744,48 @@ export function heartbeatService(db: Db) {
       }
 
       if (shouldAutoCaptureMissionChildOutput || shouldAutoCompleteSuccessfulIssue) {
-        // [2026-09-11 run08a86baf incident] 폴링성 실행(새 산출물·검증 기록 없음)의 자동 완료 차단.
-        // 워크플로 단계 이슈는 산출물/버딕트 등록이 완료 계약이므로, 이번 실행이 아무 기록도
-        // 남기지 않았다면 done 전환이 아니라 명시적 완료 안내만 남긴다(상태 불변).
-        if (shouldAutoCompleteSuccessfulIssue && !shouldAutoCaptureMissionChildOutput) {
-          const linkedStepRun = await tx
-            .select({ id: workflowStepRuns.id })
-            .from(workflowStepRuns)
-            .where(eq(workflowStepRuns.issueId, issue.id))
-            .limit(1)
-            .then((rows) => rows[0] ?? null);
-          if (linkedStepRun) {
-            const runCompletionEvidence = await tx
-              .select({ id: issueWorkProducts.id, createdByRunId: issueWorkProducts.createdByRunId })
-              .from(issueWorkProducts)
-              .where(and(
-                eq(issueWorkProducts.companyId, issue.companyId),
-                eq(issueWorkProducts.issueId, issue.id),
-              ))
-              .limit(2)
-              .then((rows) => rows);
-            const hasAnyProduct = runCompletionEvidence.length > 0;
-            const thisRunRegistered = runCompletionEvidence.some(
-              (row) => row.createdByRunId === run.id,
-            );
-            // 후속 무변화 실행 차단: 이슈에 산출물이 있어 완료 계약이 성립했는데 이번 실행이
-            // 새로 등록한 것이 없다면(폴링성 실행) 자동 완료하지 않는다. 산출물이 아직 없는
-            // 첫 완료는 기존 자동 완료 동작을 그대로 유지한다.
-            if (hasAnyProduct && !thisRunRegistered) {
-              await tx.insert(issueComments).values({
-                companyId: issue.companyId,
-                issueId: issue.id,
-                authorAgentId: run.agentId,
-                body: runText(run, "업무 자동 완료를 보류했습니다. 실행은 성공으로 종료됐지만 이번 실행의 등록 산출물이나 검증 기록이 없습니다. 다음 행동: 작업 흐름 계약에 맞게 산출물을 등록하고 workflow/complete를 호출해 주세요. 실행 성공만으로 업무 완료가 확인되지는 않습니다.", "Automatic completion is on hold. The run succeeded, but this run has no registered work product or validation record. Next action: register artifacts under the workflow contract and call workflow/complete. Run success alone does not confirm issue completion."),
-              });
-              await tx.insert(activityLog).values({
-                companyId: issue.companyId,
-                actorType: "system",
-                actorId: "heartbeat",
-                action: "issue.auto_complete_deferred_no_evidence",
-                entityType: "issue",
-                entityId: issue.id,
-                agentId: run.agentId,
-                runId: run.id,
-                details: {
-                  reason: "successful_run_without_completion_evidence",
-                  previousStatus: issue.status,
-                  nextStatus: issue.status,
-                },
-              });
-              // [slice-4 MISMATCH A] The defer used to stop here, leaving the issue holding a
-              //   terminal run's execution locks with no re-dispatch — a silent failure. Apply the
-              //   shared structured outcome: clear the lock fields, write the structured
-              //   issue.completion_evidence_missing activity, queue the bounded post-tx follow-up.
+        if (shouldAutoCompleteSuccessfulIssue
+          && issue.originKind === "workflow_execution"
+          && !shouldAutoCaptureMissionChildOutput) {
+          const evidence = await assessAutomaticCompletionEvidence({
+            db: tx,
+            issue,
+            heartbeat: run,
+            validationLedger: workflowValidationCompletionLedger,
+          });
+          if (evidence.status !== "eligible") {
+            await tx.insert(issueComments).values({
+              companyId: issue.companyId,
+              issueId: issue.id,
+              authorAgentId: run.agentId,
+              body: runText(run, "업무 자동 완료를 보류했습니다. 현재 실행에 연결된 공식 산출물이나 유효한 검수 판정이 확인되지 않았습니다. 다음 행동: 작업 흐름 계약에 따라 산출물을 등록하거나 workflow/complete를 호출해 주세요.", "Automatic completion is on hold. No current official artifact or valid verification verdict is linked to this run. Next action: register evidence under the workflow contract or call workflow/complete."),
+            });
+            await tx.insert(activityLog).values({
+              companyId: issue.companyId,
+              actorType: "system",
+              actorId: "heartbeat",
+              action: "issue.auto_complete_deferred_no_evidence",
+              entityType: "issue",
+              entityId: issue.id,
+              agentId: run.agentId,
+              runId: run.id,
+              details: {
+                reason: "successful_run_without_current_completion_evidence",
+                evidenceStatus: evidence.status,
+                previousStatus: issue.status,
+                nextStatus: issue.status,
+              },
+            });
+            const lockOwnedByAnotherRun = [issue.checkoutRunId, issue.executionRunId]
+              .some(ownerRunId => ownerRunId !== null && ownerRunId !== run.id);
+            if (!lockOwnedByAnotherRun) {
               await applyMissingCompletionEvidenceOutcome({
                 requiredAction: MISSING_EVIDENCE_REQUIRED_ACTION,
+                requiredEvidence: ["current_workflow_artifact_or_qa_verdict"],
               });
-              queuePostTransactionWorkflowIssueSync(issue.id);
-              return { promotedRun: null };
             }
+            queuePostTransactionWorkflowIssueSync(issue.id);
+            return { promotedRun: null };
           }
         }
         // [Task6c-C] resume run settlement fence: acting run 의 기록 링크(stepRunId, generation)

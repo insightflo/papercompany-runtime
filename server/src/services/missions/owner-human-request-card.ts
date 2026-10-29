@@ -10,6 +10,7 @@ import type { OperatorDecisionActor } from "../operator-decision-create.js";
 import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
 import { stripOperatorDecisionServerContext } from "../operator-decision-server-context.js";
 import { buildMissionOwnerHumanInputDecisionCard, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "./mission-owner-human-input-card.js";
+import { buildHistoricalDefaultOwnerHumanInputVariant } from "./mission-owner-human-default-definition.js";
 import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
 import { readOwnerHumanCurrent, type OwnerHumanCurrentRecord } from "./owner-human-request-state.js";
 import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, ownerHumanLifetimeSchema,
@@ -32,6 +33,10 @@ export function isOwnerHumanLifetimeCard(input: CreateOperatorDecisionInput): bo
 }
 
 function assertCard(card: Card, input: CreateOperatorDecisionInput, authorAgentId: string) {
+  if (!cardMatchesInput(card, input, authorAgentId)) fail();
+}
+
+function cardMatchesInput(card: Card, input: CreateOperatorDecisionInput, authorAgentId: string): boolean {
   const expected = validateAndHashOperatorDecisionCreate(input);
   const actual = {
     schemaVersion: card.schemaVersion, requestKey: card.requestKey, priority: card.priority,
@@ -40,9 +45,9 @@ function assertCard(card: Card, input: CreateOperatorDecisionInput, authorAgentI
     sourceContext: stripOperatorDecisionServerContext(card.sourceContext),
     definition: card.definition, issueId: card.issueId, continuationMode: card.continuationMode,
   };
-  if (card.requestHash !== expected.requestHash || !sameOwnerHumanValue(actual, expected.input)
-    || card.requestedByAgentId !== authorAgentId || card.requestedByUserId !== null
-    || card.qualityActionId !== null || card.qualityBinding !== null) fail();
+  return card.requestHash === expected.requestHash && sameOwnerHumanValue(actual, expected.input)
+    && card.requestedByAgentId === authorAgentId && card.requestedByUserId === null
+    && card.qualityActionId === null && card.qualityBinding === null;
 }
 
 // A renewed lifetime retains the issuing heartbeat's original anchor. Acquire the complete
@@ -104,7 +109,7 @@ export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
   const expected = validateAndHashOperatorDecisionCreate(buildMissionOwnerHumanInputDecisionCard({
     ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
   })).input;
-  if (!sameOwnerHumanValue(input, expected)) return fail();
+  const historical = buildHistoricalDefaultOwnerHumanInputVariant(expected);
   const [link] = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, companyId),
     eq(workflowTransitionEvents.idempotencyKey, linkKey(lifetime.lifetimeId)))).for("update");
@@ -125,8 +130,16 @@ export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
     // A real create always commits its link. Never adopt an unbound row by its key/hash alone.
     return fail();
   }
-  if (card) assertCard(card, expected, lifetime.authorAgentId);
-  return { current, input: expected, card: card ?? null };
+  const storedInput = card
+    ? [expected, historical].find((candidate) => candidate !== null
+      && cardMatchesInput(card, candidate, lifetime.authorAgentId))
+    : null;
+  if (card && !storedInput) return fail();
+  if (!card && !sameOwnerHumanValue(input, expected)) return fail();
+  const selected = storedInput ?? expected;
+  if (card && !sameOwnerHumanValue(input, expected) && !sameOwnerHumanValue(input, selected)) return fail();
+  if (card) assertCard(card, selected, lifetime.authorAgentId);
+  return { current, input: selected, card: card ?? null };
 }
 
 export async function connectOwnerHumanRequestCard(tx: OwnerHumanTx, guard: Guard | null, cardId: string) {

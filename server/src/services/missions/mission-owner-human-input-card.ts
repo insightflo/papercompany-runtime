@@ -1,14 +1,7 @@
 // server/src/services/missions/mission-owner-human-input-card.ts
-//
-// [목적] mission owner 결정 API의 사람 핸드오프 결정(request_input/escalate)을 operator decision
-//   card 로 브리지한다(계획 2026-10-17-human-decision-escalation-contract Stage 1).
-// [계약] D2 legacy requestKey=moi1:{decisionEventId}, C08 수명은 moi2:{lifetimeId}. sourceId 는
-//   원 결정 이벤트다(sourceContext 에 decisionEventId 를 넣지 않는다). D3 기본 approve/hold/reject 선택지(reject
-//   포함이라 comment required)+humanReview 패킷 필수 매핑, D5 스냅샷 앵커=owner-action 이슈
-//   issueId+issueStatus, workflowRunId 는 실제 workflowRuns 행이 확인된 id 만 호출부가 전달한다.
-// [fail-closed] 판단 근거(앵커)를 해석할 수 없으면 카드 입력을 만들지 않고 422 로 제출을 거부해
-//   오너가 증거와 함께 재제출하게 한다. 카드 생성 자체의 실패는 호출부(agent api)의 post-commit
-//   5xx 계약(D4)을 따른다.
+// Bridges structured mission-owner requests into operator cards. moi1 binds an event and moi2 a saved lifetime.
+// Only callers that verified a workflowRuns row may set workflowRunId; unresolved anchors fail with 422.
+// Card writes remain post-commit and retain the caller's existing 5xx contract.
 import type { Db } from "@paperclipai/db";
 import { operatorDecisions } from "@paperclipai/db";
 import type {
@@ -20,7 +13,10 @@ import { z } from "zod";
 import { unprocessable } from "../../errors.js";
 import { operatorDecisionWriteService } from "../operator-decisions-write.js";
 import { operatorDecisionReadService } from "../operator-decisions-read.js";
-import { buildDefaultOwnerHumanDefinition } from "./mission-owner-human-default-definition.js";
+import { buildDefaultOwnerHumanDefinition, buildHistoricalDefaultOwnerHumanInputVariant } from "./mission-owner-human-default-definition.js";
+import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
+import { stripOperatorDecisionServerContext } from "../operator-decision-server-context.js";
+import { sameOwnerHumanValue } from "./owner-human-request-contract.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_SCOPE,
@@ -29,13 +25,11 @@ import {
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
 
-// [D2] 결정 이벤트 1건 = 카드 1건 — 멱등 키 규약.
 export function buildHumanInputDecisionCardRequestKey(decisionEventId: string): string {
   return `moi1:${decisionEventId}`;
 }
 
-// [D3] payload 구조화 options 가 있으면 우선 사용한다. 생산자가 아직 없는 선택적 입력이라
-//   형식 위반 시 조용히 기본 선택지로 떨어뜨리지 않고 422 로 거부한다(fail-closed).
+// Invalid structured options fail with 422; prose is never parsed into choices.
 const structuredOptionSchema = z.object({
   id: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
   label: z.string().trim().min(1).max(160),
@@ -117,11 +111,7 @@ function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefin
   };
 }
 
-/**
- * [D2/D3/D5 순수 빌더] 카드 create 입력을 만든다. 앵커 해석 불가 시 422(mapping_failed).
- * 같은 legacy 결정 이벤트 또는 같은 수명의 불변 입력은 같은 requestHash 를 만든다.
- * C08 수명 입력은 create 트랜잭션에서 저장된 원문과 현재 권위를 다시 대조한다.
- */
+/** Build a validated card request; natural-language fields never select an operation. */
 export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHumanInputCardSpec): CreateOperatorDecisionInput {
   if (!present(input.decisionEventId)) mappingFailure("결정 이벤트 식별자 없음");
   if (!present(input.missionId)) mappingFailure("미션 식별자 없음");
@@ -172,9 +162,7 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   const definition = input.structuredOptions !== undefined
     ? buildStructuredDefinition(input.structuredOptions)
     : buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
-  // [요청자 추천] 선택지를 넘기는 요청은 근거와 함께 추천도 제시한다 — 판단 부담만 사람에게 넘기지
-  //   않는다. 대응 옵션이 없는 optionId 는 조용히 무시한다(fail-open: 발화 누락 방지 계약 유지).
-  //   최종 정의는 입력에 결정적이므로 requestKey 멱등 replay 규약도 그대로다.
+  // Only an explicitly requested option can receive the nonbinding recommendation marker.
   const recommendedId = present(input.recommendedOptionId);
   const recommendationReason = present(input.recommendationReason);
   const requestedRecommendationExists = recommendedId
@@ -246,36 +234,50 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   };
 }
 
-/**
- * [D4] 카드 생성은 자체 트랜잭션(write.create)에서 실행되므로 결정 ledger 트랜잭션 밖(post-commit)에서
- *   호출해야 한다. replay(동일 companyId+requestKey+requestHash)면 기존 카드를 반환한다.
- *
- * [중복 병합 2026-10-18] 생성 직전 같은 (companyId, missionId, 앵커 issueId, decision 종류)의 pending
- *   카드가 있으면 새 생성 대신 기존 카드를 최신화(updatedAt=now, sourceContext.missionOwnerHumanInput.
- *   repeatCount 증가)하고 기존 카드를 반환한다 — 같은 건이 계류 중인데 시차를 두고 카드가 반복
- *   쌓이는 라이브 문제(2026-10-18 operator inbox) 대응. 병합은 카드 생성·표시 계층만의 동작이며
- *   발화·감사 이벤트·원장 기록은 억제하지 않는다(호출부는 매 이벤트마다 그대로 기록한다).
- *   안전 방향 설계: decision 종류가 다르거나(제목이 결정 종류별로 결정적이라 제목 동등성으로 대조)
- *   앵커 이슈가 다르거나, 기존이 pending 이 아니면(resolved/cancelled), 대조 쿼리가 실패하면
- *   전부 신규 생성(fail-open) — 잘못된 중복판정으로 띄워야 할 카드를 발화 못 시키는 일은 없다.
- *   같은 eventId 멱등 replay 는 기존 requestKey 규약을 그대로 따른다(갱신 없이 기존 카드 반환).
- */
+/** Merge an equivalent pending request, replay an exact terminal legacy card, or create normally. */
 export async function createMissionOwnerHumanInputDecisionCard(db: Db, spec: MissionOwnerHumanInputCardSpec) {
   const cardInput = buildMissionOwnerHumanInputDecisionCard(spec);
   const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
   if (merged) return merged;
+  const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
+  if (historicalReplay) return historicalReplay;
   return operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
 }
 
-// [중복 병합] 병합 대조 키 전체가 일치하는 pending 카드 1건(여러 장이면 최신)을 찾는다. 제목은
-//   buildMissionOwnerHumanInputDecisionCard 가 decision 종류별로 결정적으로 만들므로 동등성
-//   비교가 곧 종류 비교다(제목 형식이 바뀌면 매칭이 실패해 신규 생성되는 fail-open 방향).
+async function replayHistoricalDefaultHumanInputCard(db: Db, spec: MissionOwnerHumanInputCardSpec,
+  cardInput: CreateOperatorDecisionInput) {
+  const historical = buildHistoricalDefaultOwnerHumanInputVariant(cardInput);
+  if (!historical || !historical.requestKey.startsWith("moi1:")) return null;
+  const expected = validateAndHashOperatorDecisionCreate(historical);
+  const [card] = await db.select().from(operatorDecisions).where(and(
+    eq(operatorDecisions.companyId, spec.companyId), eq(operatorDecisions.requestKey, historical.requestKey),
+  )).limit(1);
+  if (!card) return null;
+  let stored: CreateOperatorDecisionInput;
+  try {
+    stored = validateAndHashOperatorDecisionCreate({
+      schemaVersion: card.schemaVersion, requestKey: card.requestKey, priority: card.priority,
+      interactionType: card.interactionType, title: card.title, description: card.description,
+      sourceType: card.sourceType, sourceId: card.sourceId,
+      sourceContext: stripOperatorDecisionServerContext(card.sourceContext), definition: card.definition,
+      issueId: card.issueId, continuationMode: card.continuationMode,
+    }).input;
+  } catch {
+    return null;
+  }
+  if (card.requestHash !== expected.requestHash || !sameOwnerHumanValue(stored, expected.input)
+    || card.requestedByAgentId !== spec.requestedByAgentId || card.requestedByUserId !== null
+    || card.qualityActionId !== null || card.qualityBinding !== null) return null;
+  return operatorDecisionWriteService(db).create(spec.companyId, historical, {
+    type: "agent", id: spec.requestedByAgentId,
+  });
+}
+
 async function tryMergePendingHumanInputCard(
   db: Db,
   spec: MissionOwnerHumanInputCardSpec,
   cardInput: CreateOperatorDecisionInput,
 ) {
-  // Lifetime cards carry their own current binding and must replay through the verified writer.
   if (cardInput.requestKey.startsWith("moi2:")) return null;
   try {
     const [existing] = await db.select({
@@ -291,14 +293,12 @@ async function tryMergePendingHumanInputCard(
       sql`${operatorDecisions.sourceContext}->>'missionId' = ${spec.missionId}`,
     )).orderBy(desc(operatorDecisions.createdAt)).limit(1);
     if (!existing) return null;
-    // 같은 eventId 멱등 replay — 기존 requestKey 규약 그대로 갱신 없이 반환한다.
     if (existing.requestKey === cardInput.requestKey) {
       return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
     }
     const previous = existing.sourceContext?.missionOwnerHumanInput?.repeatCount;
     const repeatCount = (typeof previous === "number" && Number.isFinite(previous) && previous >= 0 ? previous : 0) + 1;
     const now = new Date();
-    // CAS on pending — 대조 후 결·취소로 바뀌었으면 병합하지 않고 신규 생성으로 돌아간다.
     const [updated] = await db.update(operatorDecisions).set({
       updatedAt: now,
       sourceContext: {
@@ -315,7 +315,6 @@ async function tryMergePendingHumanInputCard(
     if (!updated) return null;
     return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
   } catch {
-    // fail-open — 대조/갱신에 실패하면 최악이 현행과 동일한 중복 생성이다(발화 누락은 없다).
     return null;
   }
 }
