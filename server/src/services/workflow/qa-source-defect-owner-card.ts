@@ -285,7 +285,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
       db: input.db, companyId: input.companyId, language,
       legacyRequestKey: `qa-source-defect:${sourceId}`, sourcePrefix: `${`${input.workflowRunId}:${input.producerStepId}:`.replace(/[\\%_]/g, "\\$&")}%`,
       v3RequestKey: buildHistoricalV3RequestKey(input),
-      buildHistorical: () => historicalVariants.map((variant) => buildHistoricalQaSourceDefectCard(variant)),
+      buildHistorical: () => [...historicalVariants.map((variant) => buildHistoricalQaSourceDefectCard(variant)), ...buildHistoricalV3Candidates(historicalInput, promotion.recurringFindingIds)],
       buildHistoricalV3: () => buildHistoricalV3Candidates(historicalInput, promotion.recurringFindingIds),
       build: (displayLanguage) => buildCardCreateInput({
         ...input, language: displayLanguage,

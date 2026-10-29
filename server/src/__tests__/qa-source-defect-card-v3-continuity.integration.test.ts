@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  activityLog, companies, createDb, operatorDecisionContinuations, operatorDecisions,
+  activityLog, agentWakeupRequests, companies, createDb, operatorDecisionContinuations, operatorDecisions,
 } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
 import { eq } from "drizzle-orm";
@@ -21,6 +21,15 @@ type FrozenFixture = { kind: string; input: FrozenInput; payload: CreateOperator
 const fixtures = JSON.parse(readFileSync(new URL("./fixtures/qa-card-history/payloads.json", import.meta.url), "utf8")) as FrozenFixture[];
 const fixture = (kind: string) => fixtures.find((row) => row.kind === kind)!;
 const source = fixture("iteration0");
+const mixedRecurringFindings = [
+  { id: "a", summary: "Output missing", layer: "artifact" as const },
+  { id: "s", summary: "Source data missing", layer: "source_data" as const },
+];
+// Fixed hashes from the baseline 208ceb36 v3 builder with only the artifact finding promoted.
+const mixedRecurringHashes = {
+  en: "be81ca67cb8223411b959f4c2896cf71c3b62c171fa15bbb15626d91b68703ef",
+  ko: "30bb85a2777196e8541fcfe831ba520acdbad6a5fe4badab4dc66fb7b40bfc57",
+};
 const system = { type: "user", id: "system" } as const;
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -65,6 +74,7 @@ describeDb("QA source defect v3 history continuity with real shared writer", () 
   const audits = (companyId: string) => db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
   const continuations = (companyId: string) => db.select().from(operatorDecisionContinuations)
     .where(eq(operatorDecisionContinuations.companyId, companyId));
+  const wakes = (companyId: string) => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
 
   async function seedV3(companyId: string, payload: CreateOperatorDecisionInput) {
     return (await operatorDecisionWriteService(db).create(companyId, payload, system)).decision;
@@ -137,6 +147,40 @@ describeDb("QA source defect v3 history continuity with real shared writer", () 
     expect(input.findings[0]!.layer).toBe("artifact");
     expect(candidate.requestKey).toBe("qa-source-defect:v3:11111111-1111-4111-8111-111111111111:produce:0");
     expect(validateAndHashOperatorDecisionCreate(candidate).requestHash).toBe("0842a9dbb89c8265e28f741ee641599ba032e776880a022e430e338de3037729");
+  });
+
+  it.each(["en", "ko"] as const)("replays pinned baseline-208 mixed recurrence v3 payload in %s unchanged in every state", async (language) => {
+    const recurring = mixedRecurringFindings.map(({ id }) => id);
+    const fixedInput = { ...inputFor("iteration0"), findings: mixedRecurringFindings };
+    const pinned = candidateFor(fixedInput, language, recurring, true)!;
+    expect(validateAndHashOperatorDecisionCreate(pinned).requestHash).toBe(mixedRecurringHashes[language]);
+    expect(pinned.definition.options[0]!.facts[0]!.value).toContain(language === "en" ? "1 recurring finding" : "재발 1건");
+    const evidence = pinned.definition.humanReview!.evidence[0]!.description;
+    expect(evidence.match(/\[source_data\*\]/gu) ?? []).toHaveLength(1);
+    expect(evidence).toContain("[source_data*] (a) Output missing");
+    expect(evidence).toContain("[source_data] (s) Source data missing");
+
+    for (const status of ["pending", "resolved", "cancelled"] as const) {
+      const seed = await seedQaSourceDefectScenario(db, mixedRecurringFindings, { priorFindings: mixedRecurringFindings });
+      await db.update(companies).set({ defaultLanguage: language }).where(eq(companies.id, seed.companyId));
+      const input = { companyId: seed.companyId, missionId: seed.missionId, workflowRunId: seed.runId,
+        producerStepId: "produce", iteration: 0, maxIterations: 2, findings: mixedRecurringFindings,
+        qaRefs: [{ qaStepId: "qa-validate", qaIssueId: seed.qaIssueId }], linkIssueId: seed.oversightIssueId };
+      const original = await seedV3(seed.companyId, candidateFor(input, language, recurring, true)!);
+      const write = operatorDecisionWriteService(db);
+      if (status === "resolved") await write.resolve(original.id,
+        { actionId: "submit", selectedOptionIds: ["maintenance_issue"], comment: "keep result" }, "human");
+      if (status === "cancelled") await write.cancel(original.id, { type: "user", id: "human" }, "human_cancelled");
+      const before = { rows: await rows(seed.companyId), audits: await audits(seed.companyId),
+        continuations: await continuations(seed.companyId), wakes: await wakes(seed.companyId) };
+      const ensureInput = { db, ...input };
+      expect(await ensureQaSourceDefectOwnerCard(ensureInput)).toEqual({ outcome: "replayed", decisionId: original.id });
+      expect(await ensureQaSourceDefectOwnerCard(ensureInput)).toEqual({ outcome: "replayed", decisionId: original.id });
+      expect(await rows(seed.companyId)).toEqual(before.rows);
+      expect(await audits(seed.companyId)).toEqual(before.audits);
+      expect(await continuations(seed.companyId)).toEqual(before.continuations);
+      expect(await wakes(seed.companyId)).toEqual(before.wakes);
+    }
   });
 
   it("replays a promoted artifact decision from official prior findings without creating a v4 decision", async () => {

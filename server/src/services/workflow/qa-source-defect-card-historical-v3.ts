@@ -246,7 +246,8 @@ export function buildHistoricalV3InputVariants(
   recurringFindingIds: readonly string[],
 ) {
   const recurring = new Set(recurringFindingIds);
-  const matched = new Set(input.findings.filter((finding) => recurring.has(finding.id)).map((finding) => finding.id));
+  const matched = new Set(input.findings.filter((finding) => finding.layer !== "source_data" && recurring.has(finding.id))
+    .map((finding) => finding.id));
   const candidates: Array<HistoricalQaSourceDefectCardIdentityInput & { promotedFindingIds: readonly string[] }> = [
     { ...input, promotedFindingIds: [] },
   ];
