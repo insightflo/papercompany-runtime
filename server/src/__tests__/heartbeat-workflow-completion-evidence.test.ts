@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import {
   activityLog,
   companies,
+  heartbeatRuns,
   issueExecutionCards,
   issueWorkProducts,
   issues,
@@ -122,6 +123,44 @@ it("allows an official current-attempt artifact to complete the workflow issue",
   expect((await f.readRun(runId!)).status).toBe("succeeded");
   expect(issue!.status).toBe("done");
   expect((await f.readStep()).status).toBe("completed");
+});
+
+it("preserves a foreign owner when an older successful run has eligible evidence", async () => {
+  const f = await workflowIssue();
+  let ownerRunId: string | null = null;
+  const [runId] = await finishRun(f, async currentRunId => {
+    await f.register(currentRunId);
+    const [owner] = await database().insert(heartbeatRuns).values({
+      companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, status: "running",
+    }).returning({ id: heartbeatRuns.id });
+    ownerRunId = owner!.id;
+    await database().update(issues).set({
+      checkoutRunId: owner!.id,
+      executionRunId: owner!.id,
+      executionAgentNameKey: "foreign-owner",
+      executionLockedAt: new Date(),
+    }).where(eq(issues.id, f.issueId));
+  });
+  const [issue] = await database().select().from(issues).where(eq(issues.id, f.issueId));
+  const products = await database().select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, f.issueId));
+  expect(runId).not.toBe(ownerRunId);
+  expect((await f.readRun(runId!)).status).toBe("succeeded");
+  expect(products).toHaveLength(1);
+  expect(products[0]).toMatchObject({ createdByRunId: runId, status: "active" });
+  expect(issue!).toMatchObject({
+    status: "in_progress",
+    completedAt: null,
+    checkoutRunId: ownerRunId,
+    executionRunId: ownerRunId,
+    executionAgentNameKey: "foreign-owner",
+  });
+  expect(issue!.executionLockedAt).not.toBeNull();
+  expect((await f.readStep()).status).toBe("running");
+  const autoCompletions = await database().select({ id: activityLog.id }).from(activityLog).where(and(
+    eq(activityLog.companyId, f.companyId), eq(activityLog.entityId, f.issueId),
+    eq(activityLog.action, "issue.run_succeeded_auto_completed"),
+  ));
+  expect(autoCompletions).toHaveLength(0);
 });
 
 it("allows a current official QA verdict with no QA-owned artifact", async () => {

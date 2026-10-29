@@ -8062,7 +8062,7 @@ export function heartbeatService(db: Db) {
           sql`select id from heartbeat_runs where id = ${run.id} and company_id = ${run.companyId} for key share`,
         );
         await tx.execute(
-          sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id}) for update`,
+          sql`select id from issues where company_id = ${run.companyId} and (execution_run_id = ${run.id} or checkout_run_id = ${run.id} or id = ${run.issueId}) for update`,
         );
       }
 
@@ -8747,6 +8747,10 @@ export function heartbeatService(db: Db) {
         if (shouldAutoCompleteSuccessfulIssue
           && issue.originKind === "workflow_execution"
           && !shouldAutoCaptureMissionChildOutput) {
+          const lockOwnedByAnotherRun = [issue.checkoutRunId, issue.executionRunId]
+            .some(ownerRunId => ownerRunId !== null && ownerRunId !== run.id);
+          if (lockOwnedByAnotherRun) return { promotedRun: null };
+
           const evidence = await assessAutomaticCompletionEvidence({
             db: tx,
             issue,
@@ -8776,14 +8780,10 @@ export function heartbeatService(db: Db) {
                 nextStatus: issue.status,
               },
             });
-            const lockOwnedByAnotherRun = [issue.checkoutRunId, issue.executionRunId]
-              .some(ownerRunId => ownerRunId !== null && ownerRunId !== run.id);
-            if (!lockOwnedByAnotherRun) {
-              await applyMissingCompletionEvidenceOutcome({
-                requiredAction: MISSING_EVIDENCE_REQUIRED_ACTION,
-                requiredEvidence: ["current_workflow_artifact_or_qa_verdict"],
-              });
-            }
+            await applyMissingCompletionEvidenceOutcome({
+              requiredAction: MISSING_EVIDENCE_REQUIRED_ACTION,
+              requiredEvidence: ["current_workflow_artifact_or_qa_verdict"],
+            });
             queuePostTransactionWorkflowIssueSync(issue.id);
             return { promotedRun: null };
           }
