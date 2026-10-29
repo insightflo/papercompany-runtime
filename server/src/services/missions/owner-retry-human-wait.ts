@@ -253,7 +253,7 @@ export async function readExactOwnerRetryHumanWait(
   const toolTarget = context.toolTarget === undefined ? null : parseToolTarget(context.toolTarget);
   if (context.toolTarget !== undefined && !toolTarget) return unresolved("tool_target_unproven", checkedScopes);
   if (toolTarget) {
-    const scope: ExactRecoveryScope = { kind: "tool_step", ...toolTarget };
+    const scope: ExactRecoveryScope = { ...toolTarget };
     checkedScopes.push(scope);
     try {
       if (!await currentToolTarget(tx, context, toolTarget)) return unresolved("tool_target_not_current", checkedScopes);
