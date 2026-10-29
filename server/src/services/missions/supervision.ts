@@ -2068,13 +2068,13 @@ export function createSupervision({ db, deps, ownerActions }: {
                 let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
                 // [P3 producer rework authorization] upstream producer rework(isProducerRework ∧ source≠origin)
                 //   만 authorize 적용. 일반 source self-retry(sourceCandidate===origin)는 기존 reopen 계약 유지(codex 정정 2).
-                let reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
+                let reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"], authQaGateId: string | null = null;
                 if (isProducerRework && sourceCandidate.id !== issue.originId) {
                   // 명시 reworkTarget 또는 current-gen REQUEST_CHANGES 만 producer reopen 허용(req 3, codex 계약 3).
                   // DAG-guess/guardrail/stale/unverified = deny+replan.
                   // [cap-oversight QA authority] origin 이 oversight 라 resolveQaGateIssueId 가 null 인
                   //   qa-cap 이슈는 설명의 QA step id 로 stepRows 를 직접 찾아 QA 게이트 이슈를 구한다.
-                  let authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
                   if (!authQaGateId && isQaReworkCapOversightIssue(issue.description)) {
                     const capQaStepId = extractQaCapQaStepId(issue.description);
                     if (capQaStepId) {
@@ -2113,7 +2113,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                   const applied = await applyAutomaticOwnerRetryIfClear({
                     db, companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
                     ownerActionIssueId: issue.id, ownerActionStatus: issue.status,
-                    originalSourceIssueId: issue.originId!, retryTargetId: sourceCandidate.id,
+                    originalSourceIssueId: issue.originId!, retryIssueId: sourceCandidate.id, retryTargetId: sourceCandidate.id,
                     retryKey: idempotencyKey, applyKey: retryApplyIdempotencyKey, now, graceMs: 20 * 60 * 1000,
                     dispatchRequested: Boolean(input.dispatchOwnerDecisionWakeups),
                     callbackAvailable: Boolean(deps.onOwnerDecisionRetrySourceIssueApplied),

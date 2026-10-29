@@ -162,14 +162,21 @@ describe("automatic owner retry vs exact human wait", () => {
     expect(await applyRows(settled)).toHaveLength(0);
 
     const rollback = await seedAutomatic(db);
+    const rollbackOutcomes: unknown[] = [], nativeRollbackCallback = nativeCallback(db, rollbackOutcomes);
+    let rollbackCallbackCalls = 0;
+    const rollbackCallback = async (input: Parameters<typeof nativeRollbackCallback>[0]) => {
+      rollbackCallbackCalls += 1;
+      return nativeRollbackCallback(input);
+    };
     await db.$client.unsafe(`CREATE FUNCTION h24_fail_retry_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
       IF NEW.event_type = 'mission_owner_retry_apply' THEN RAISE EXCEPTION 'h24 apply insert rejected'; END IF;
       RETURN NEW; END $$; CREATE TRIGGER h24_fail_retry_apply BEFORE INSERT ON workflow_transition_events
       FOR EACH ROW EXECUTE FUNCTION h24_fail_retry_apply()`);
-    try { await expect(supervise(db, rollback, undefined)).rejects.toThrow("h24 apply insert rejected"); }
+    try { await expect(supervise(db, rollback, rollbackCallback)).rejects.toThrow("h24 apply insert rejected"); }
     finally { await db.$client.unsafe("DROP TRIGGER h24_fail_retry_apply ON workflow_transition_events; DROP FUNCTION h24_fail_retry_apply()"); }
     expect(await db.select().from(issues).where(eq(issues.id, rollback.sourceIssueId))).toMatchObject([{ status: "blocked" }]);
-    expect(await applyRows(rollback)).toHaveLength(0);
+    expect(await applyRows(rollback)).toHaveLength(0); expect(rollbackCallbackCalls).toBe(0);
+    expect(rollbackOutcomes).toHaveLength(0);
   }, 45_000);
 
   it("keeps the current explicit retry path live", async () => {
