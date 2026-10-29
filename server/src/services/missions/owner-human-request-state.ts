@@ -10,7 +10,7 @@ import {
   OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, ownerHumanCurrentKey, ownerHumanCurrentSchema,
   ownerHumanEndKey, ownerHumanEndSchema, ownerHumanLifetimeKey, ownerHumanLifetimeSchema,
   ownerHumanSubmissionSchema, sameOwnerHumanValue,
-  type OwnerHumanCurrent, type OwnerHumanEnd, type OwnerHumanLifetime, type OwnerHumanTx,
+  type OwnerHumanCurrent, type OwnerHumanEnd, type OwnerHumanLifetime, type OwnerHumanScope, type OwnerHumanTx,
 } from "./owner-human-request-contract.js";
 
 type Event = typeof workflowTransitionEvents.$inferSelect;
@@ -57,20 +57,23 @@ async function lifetimeFromRow(tx: OwnerHumanTx, row: Event): Promise<OwnerHuman
 }
 
 // The unique pointer is authoritative. Malformed/missing referenced records never fall back to history.
-export async function readOwnerHumanCurrent(auth: OwnerHumanAuthority): Promise<OwnerHumanCurrentRecord | null> {
-  const row = await byKey(auth.tx, auth.scope.companyId, ownerHumanCurrentKey(auth.scope), true);
+export async function readOwnerHumanCurrentForScope(
+  tx: OwnerHumanTx,
+  scope: OwnerHumanScope,
+  options: { lockPointer: boolean },
+): Promise<OwnerHumanCurrentRecord | null> {
+  const row = await byKey(tx, scope.companyId, ownerHumanCurrentKey(scope), options.lockPointer);
   if (!row) return null;
   const pointer = decode(ownerHumanCurrentSchema, row.payload);
-  if (!sameOwnerHumanValue(pointer.scope, auth.scope)) fail("owner_human_request_corrupt");
-  const [stored] = await auth.tx.select().from(workflowTransitionEvents).where(and(
-    eq(workflowTransitionEvents.id, pointer.lifetimeId),
-    eq(workflowTransitionEvents.companyId, auth.scope.companyId)));
+  if (!sameOwnerHumanValue(pointer.scope, scope)) fail("owner_human_request_corrupt");
+  const [stored] = await tx.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.id, pointer.lifetimeId), eq(workflowTransitionEvents.companyId, scope.companyId)));
   if (!stored) return fail("owner_human_request_corrupt");
-  const lifetime = await lifetimeFromRow(auth.tx, stored);
-  header(row, lifetime, pointer.kind, ownerHumanCurrentKey(auth.scope));
+  const lifetime = await lifetimeFromRow(tx, stored);
+  header(row, lifetime, pointer.kind, ownerHumanCurrentKey(scope));
   if (!sameOwnerHumanValue(lifetime.scope, pointer.scope) || pointer.requestKey !== lifetime.requestKey
     || pointer.anchorIssueId !== lifetime.anchorIssueId) fail("owner_human_request_corrupt");
-  const ended = await byKey(auth.tx, auth.scope.companyId, ownerHumanEndKey(lifetime.lifetimeId));
+  const ended = await byKey(tx, scope.companyId, ownerHumanEndKey(lifetime.lifetimeId));
   if (pointer.recoveryNeeded) {
     if (ended) fail("owner_human_request_corrupt");
   } else {
@@ -82,6 +85,12 @@ export async function readOwnerHumanCurrent(auth: OwnerHumanAuthority): Promise<
       || ending.nextLifetimeId !== null) fail("owner_human_request_corrupt");
   }
   return { pointerEventId: row.id, pointer, lifetime };
+}
+
+// Existing C08 writers retain their pointer row lock; read-only recovery callers opt out while
+// already holding the mission prefix, avoiding a second authority lock-order traversal.
+export async function readOwnerHumanCurrent(auth: OwnerHumanAuthority): Promise<OwnerHumanCurrentRecord | null> {
+  return readOwnerHumanCurrentForScope(auth.tx, auth.scope, { lockPointer: true });
 }
 
 async function appendEnd(auth: OwnerHumanAuthority, lifetime: OwnerHumanLifetime,
