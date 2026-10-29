@@ -20,6 +20,7 @@ import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
 import { deliverPauseResume, selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
 import { recheckPauseQuiescence } from "./heartbeat-pause-quiescence.js";
 import { writeSkippedWakeupRequest } from "./quality/heartbeat-admission.js";
+import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
 type SkippedInput = Parameters<typeof writeSkippedWakeupRequest>[1];
 /** Assemble the unchanged skipped-wake record outside heartbeat.ts. */
@@ -97,6 +98,14 @@ export async function promoteQueuedWakeupRequestsForAgent(
   }
   return promotedRuns;
 }
+
+async function isWaitingOnOperatorApproval(db: Db, request: typeof agentWakeupRequests.$inferSelect, contextKey: string) {
+  const payload = parseObject(request.payload), context = parseObject(payload[contextKey]), waits = operatorApprovalWaitService(db);
+  for (const issueId of new Set([request.issueId, readNonEmptyString(context.issueId), readNonEmptyString(payload.issueId)].filter((id): id is string => Boolean(id))))
+    if ((await waits.markerForIssue(issueId)).waiting) return true;
+  return false;
+}
+
 async function promoteQueuedWakeupRequest(
   deps: HeartbeatFollowupQueueDeps,
   agent: AgentRow,
@@ -112,24 +121,33 @@ async function promoteQueuedWakeupRequest(
     eq(agentWakeupRequests.agentId, agent.id),
   ));
   if (candidate && readQaCorrectionWakeRef(candidate)) {
+    if (candidate.status !== "queued" || candidate.runId !== null || await isWaitingOnOperatorApproval(db, candidate, deps.deferredWakeContextKey)) return null;
     if (!deps.deliverCorrection) throw new Error("qa_correction_delivery_connector_required");
     const result = await deps.deliverCorrection({ wakeupRequestId }, "public_callback");
     return result.kind === "new_delivery" ? result.run : null;
   }
   return withTxTimeout(db, async (tx) => {
     const [observed] = await tx.select().from(agentWakeupRequests).where(and(
-      eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId)));
+      eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
+      eq(agentWakeupRequests.agentId, agent.id), eq(agentWakeupRequests.status, "queued"),
+      sql`${agentWakeupRequests.runId} is null`,
+    ));
     if (!observed) return null;
+    if (await isWaitingOnOperatorApproval(tx as unknown as Db, observed, DEFERRED_WAKE_CONTEXT_KEY)) return null;
     let request: typeof observed | null;
     try {
       request = await lockStoredRecoveryAdmission(tx, observed, DEFERRED_WAKE_CONTEXT_KEY);
     } catch (err) {
       if (isQaCorrectionRootOwnerRequired(err)) throw err;
+      const [current] = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.id, wakeupRequestId),
+        eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agent.id)));
+      if (!current || current.status !== "queued" || current.runId !== null
+        || await isWaitingOnOperatorApproval(tx as unknown as Db, current, DEFERRED_WAKE_CONTEXT_KEY)) return null;
       await tx.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date(), error: err instanceof Error ? err.message : "Recovery admission refused", updatedAt: new Date() })
-        .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
+        .where(and(eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agent.id), eq(agentWakeupRequests.status, "queued"), sql`${agentWakeupRequests.runId} is null`));
       return null;
     }
-    if (!request || request.agentId !== agent.id || request.status !== "queued" || request.runId !== null) return null;
+    if (!request || request.agentId !== agent.id || request.status !== "queued" || request.runId !== null || await isWaitingOnOperatorApproval(tx as unknown as Db, request, DEFERRED_WAKE_CONTEXT_KEY)) return null;
     // [거절] agent 가 실행 불가 상태면 run 도 만들지 않고 request 를 terminal-fail.
     if (agent.status === "terminated" || agent.status === "paused" || agent.status === "pending_approval") {
       return failFollowupWake(tx, request.id, `Queued wakeup rejected: agent not runnable (status=${agent.status})`);
