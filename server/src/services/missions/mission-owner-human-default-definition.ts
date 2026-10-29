@@ -1,10 +1,16 @@
 import type { OperatorDecisionDefinition } from "@paperclipai/shared/types/operator-decision";
+import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
+import { sameOwnerHumanValue } from "./owner-human-request-contract.js";
+import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
   WORKFLOW_RESTART_FROM_START_SCOPE,
 } from "./workflow-restart-option.js";
+
+const historicalRestartReason = "완료된 수집 단계까지 다시 수행해야 하는 실패를 보드 권한으로 복구합니다.";
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function buildDefaultOwnerHumanDefinition(
   evidenceRefs: { label: string; href: string }[],
@@ -23,8 +29,6 @@ export function buildDefaultOwnerHumanDefinition(
         description: WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
         facts: [{ label: "선택 시", value: `실패 실행 ${workflowRunId} 대신 새 최상위 실행을 생성합니다`, status: "known" as const }],
         evidenceRefs,
-        recommended: true,
-        recommendationReason: "완료된 수집 단계까지 다시 수행해야 하는 실패를 보드 권한으로 복구합니다.",
       }] : []),
       option("approve", "승인", "요청된 다음 단계를 승인합니다", "오너가 승인받은 다음 단계를 자기 권한으로 진행합니다"),
       option("hold", "보류", "진행을 보류하고 현재 상태를 유지합니다", "실행은 보류되고 요청은 대기 상태로 남습니다"),
@@ -40,4 +44,31 @@ export function buildDefaultOwnerHumanDefinition(
     approvedScope: ["operator_decision.resolve", ...(workflowRunId ? [WORKFLOW_RESTART_FROM_START_SCOPE] : [])],
     forbiddenScope: ["agent_substitute_submission", ...(workflowRunId ? [] : ["auto_execution"])],
   };
+}
+
+/** Match only the prior neutral default shape, then return its exact historical restart recommendation. */
+export function buildHistoricalDefaultOwnerHumanInputVariant(
+  rawInput: CreateOperatorDecisionInput,
+): CreateOperatorDecisionInput | null {
+  let input: CreateOperatorDecisionInput;
+  try {
+    input = validateAndHashOperatorDecisionCreate(rawInput).input;
+  } catch {
+    return null;
+  }
+  const runId = input.sourceContext.workflowRunId;
+  const keyMatches = input.requestKey === `moi1:${input.sourceId}`
+    || (input.requestKey.startsWith("moi2:") && uuidPattern.test(input.requestKey.slice("moi2:".length)));
+  if (input.sourceType !== "mission_owner_human_input" || !runId || !uuidPattern.test(runId) || !keyMatches) return null;
+
+  const { humanReview: _humanReview, ...defaultShape } = input.definition;
+  const evidenceRefs = input.definition.options[0]?.evidenceRefs;
+  if (!evidenceRefs || !sameOwnerHumanValue(defaultShape, buildDefaultOwnerHumanDefinition(evidenceRefs, runId))) return null;
+  const definition: OperatorDecisionDefinition = {
+    ...input.definition,
+    options: input.definition.options.map((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID
+      ? { ...option, recommended: true, recommendationReason: historicalRestartReason }
+      : option),
+  };
+  return validateAndHashOperatorDecisionCreate({ ...input, definition }).input;
 }

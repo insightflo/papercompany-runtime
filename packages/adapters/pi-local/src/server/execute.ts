@@ -733,7 +733,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? structuredErrorMessage
         : noopExitSuccess
           ? noopErrorMessage
-          : (effectiveExitCode ?? 0) === 0
+          : (effectiveExitCode ?? 0) === 0 && !attempt.proc.signal
             ? null
             : fallbackErrorMessage,
       usage: {

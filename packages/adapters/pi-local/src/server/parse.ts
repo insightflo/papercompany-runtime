@@ -19,12 +19,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function extractTextContent(content: string | Array<{ type: string; text?: string }>): string {
+function isWellShapedContent(content: unknown): content is string | Array<{ type: string; text?: string }> {
+  if (typeof content === "string") return true;
+  return Array.isArray(content) && content.every((part) => {
+    const item = asRecord(part);
+    if (!item || typeof item.type !== "string") return false;
+    return item.type === "text" ? typeof item.text === "string"
+      : item.text === undefined || typeof item.text === "string";
+  });
+}
+
+function extractTextContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((c) => c.type === "text" && c.text)
-    .map((c) => c.text!)
+    .filter((part) => asRecord(part)?.type === "text" && typeof asRecord(part)?.text === "string")
+    .map((part) => (asRecord(part)!.text as string))
     .join("");
 }
 
@@ -44,6 +54,7 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
   };
 
   let currentToolCall: { toolCallId: string; toolName: string; args: unknown } | null = null;
+  const structuredErrors: Array<{ message: string; recoverableTurn: boolean }> = [];
 
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -79,14 +90,17 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
     if (eventType === "auto_retry_end") {
       if (event.success !== true) {
         const finalError = asString(event.finalError, "").trim();
-        result.errors.push(finalError || "Pi exhausted automatic retries without producing a response.");
+        structuredErrors.push({
+          message: finalError || "Pi exhausted automatic retries without producing a response.",
+          recoverableTurn: false,
+        });
       }
       continue;
     }
 
     if (eventType === "error") {
       const message = asString(event.message, "").trim();
-      if (message) result.errors.push(message);
+      if (message) structuredErrors.push({ message, recoverableTurn: false });
       continue;
     }
 
@@ -100,16 +114,24 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
       if (message) {
         const status = asString(message.status, "").trim().toLowerCase();
         const stopReason = asString(message.stopReason, "").trim().toLowerCase();
-        if (status === "error" || stopReason === "error") {
+        const aborted = status === "aborted" || stopReason === "aborted";
+        const turnFailed = status === "error" || stopReason === "error";
+        if (aborted || turnFailed) {
           const errorMessage = asString(message.errorMessage, "").trim();
-          result.errors.push(
-            errorMessage ||
-              `Pi assistant turn failed${stopReason ? ` with stopReason=${stopReason}` : ""}.`,
-          );
+          structuredErrors.push({
+            message: errorMessage || `Pi assistant turn failed${stopReason ? ` with stopReason=${stopReason}` : ""}.`,
+            recoverableTurn: !aborted,
+          });
+        } else if (message.role === "assistant" && message.stopReason === "stop"
+          && status !== "error" && isWellShapedContent(message.content)) {
+          // Only a later assistant stop proves that pending provider-turn errors recovered.
+          // Top-level and exhausted-retry failures, and aborted turns, remain sticky.
+          for (let index = structuredErrors.length - 1; index >= 0; index -= 1) {
+            if (structuredErrors[index]!.recoverableTurn) structuredErrors.splice(index, 1);
+          }
         }
 
-        const content = message.content as string | Array<{ type: string; text?: string }>;
-        const text = extractTextContent(content);
+        const text = extractTextContent(message.content);
         if (text) {
           result.finalMessage = text;
           result.messages.push(text);
@@ -221,6 +243,7 @@ export function parsePiJsonl(stdout: string): ParsedPiOutput {
     }
   }
 
+  result.errors = structuredErrors.map(({ message }) => message);
   return result;
 }
 
