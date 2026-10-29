@@ -22,6 +22,7 @@ import {
 import { eq } from "drizzle-orm";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
+import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import {
   buildMissionOwnerHumanInputDecisionCard,
   createMissionOwnerHumanInputDecisionCard,
@@ -456,10 +457,23 @@ describeEP("mission owner human input card duplicate merge", () => {
 
   it("keeps separate cards when the anchor issue differs", async () => {
     const s = await seedDedupCase();
+    const sourceIssueId = randomUUID();
     const otherIssueId = randomUUID();
-    await dedupDb.insert(issues).values({ id: otherIssueId, companyId: s.companyId, missionId: s.missionId, title: "다른 앵커 이슈", status: "in_progress", originKind: "mission_main_executor_unblock", assigneeAgentId: s.ownerId });
+    const heartbeatRunId = randomUUID();
+    await dedupDb.insert(issues).values([
+      { id: sourceIssueId, companyId: s.companyId, missionId: s.missionId, title: "Source work", status: "blocked" },
+      { id: otherIssueId, companyId: s.companyId, missionId: s.missionId, title: "다른 앵커 이슈", status: "in_progress",
+        originKind: "mission_main_executor_unblock", originId: sourceIssueId, assigneeAgentId: s.ownerId },
+    ]);
+    await dedupDb.insert(heartbeatRuns).values({ id: heartbeatRunId, companyId: s.companyId,
+      agentId: s.ownerId, issueId: otherIssueId, status: "running" });
+    const recorded = await recordMissionOwnerDecision({ db: dedupDb,
+      issue: { id: otherIssueId, companyId: s.companyId, missionId: s.missionId },
+      sourceIssueId, heartbeatRunId,
+      submission: { decision: "request_input", reason: "사람 승인이 필요합니다" } });
     await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
-    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId }));
+    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId,
+      decisionEventId: recorded.eventId, sourceIssueId }));
     const cards = await cardsOf(s.companyId);
     expect(cards).toHaveLength(2);
     expect(new Set(cards.map((card) => card.issueId))).toHaveLength(2);

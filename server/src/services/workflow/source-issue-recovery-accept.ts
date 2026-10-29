@@ -14,6 +14,7 @@ import { isRunRecoveryServiceEnabled } from "./run-reopen-guard-flag.js";
 import { resumeWorkflowRun } from "./workflow-store.js";
 import type { OwnerHumanTx } from "../missions/owner-human-request-contract.js";
 import { HttpError } from "../../errors.js";
+import { z } from "zod";
 import type { AutomaticSourceRecovery } from "./source-issue-native-resume.js";
 import { reviveAuthorizedFailureCascade } from "./failure-cascade-recovery.js";
 import { loadLatestMissionOwnerDecision } from "../missions/mission-owner-recovery-ledger.js";
@@ -120,9 +121,12 @@ async function ownerActionResumeIsCurrent(tx: OwnerHumanTx, input: Pick<SourceRe
     || (latest.sourceIssueId !== source.id && latest.sourceIssueId !== target.id)) return false;
   const decision = latest.decision;
   const refMatches = async (ref: string) => {
+    const refPredicate = z.string().uuid().safeParse(ref).success
+      ? or(eq(issues.id, ref), eq(issues.identifier, ref))
+      : eq(issues.identifier, ref);
     const matches = await tx.select({ id: issues.id }).from(issues).where(and(
       eq(issues.companyId, input.run.companyId), eq(issues.missionId, missionId),
-      or(eq(issues.id, ref), eq(issues.identifier, ref)))).limit(2);
+      refPredicate)).limit(2);
     return matches.length === 1 && matches[0]!.id === target.id;
   };
   if (decision.recoveryTarget) {
