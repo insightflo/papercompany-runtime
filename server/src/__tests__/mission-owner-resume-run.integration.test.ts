@@ -121,7 +121,7 @@ describe("mission owner resume run (real DB + native failed-anchor recovery)", (
     await drainHeartbeatRuns(db);
     await failIssueBackedAttempt(db, companyId, base.stepRunId);
     await db.update(workflowStepRuns).set({ status: "failed", completedAt: new Date() }).where(eq(workflowStepRuns.id, base.stepRunId));
-    await db.update(workflowRuns).set({ status: "failed", missionId, completedAt: new Date() }).where(eq(workflowRuns.id, base.workflowRunId));
+    await db.update(workflowRuns).set({ status: "failed", missionId, completedAt: new Date() }).where(eq(workflowRuns.id, base.workflowRunId)); await db.update(issues).set({ missionId }).where(and(eq(issues.companyId, companyId), eq(issues.id, base.issueId)));
     let terminalDecisionId: string | null = null;
     if (!variant.noDecision) {
       const [row] = await db.insert(workflowTerminalDecisions).values({ companyId,

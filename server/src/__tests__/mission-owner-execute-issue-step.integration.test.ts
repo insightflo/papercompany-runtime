@@ -66,8 +66,8 @@ describe("mission owner execute issue step (real DB + native source-issue resume
     await db.update(workflowStepRuns).set({ status: variant.stepStatus ?? "failed", completedAt: new Date(),
       ...(variant.exhaust ? { metadata: { workflowRetryExhaustion: { attempts: 3, maxRetries: 2 } } } : {}) })
       .where(eq(workflowStepRuns.id, base.stepRunId));
-    await db.update(workflowRuns).set({ status: "failed", missionId, completedAt: new Date() })
-      .where(eq(workflowRuns.id, base.workflowRunId));
+    await db.update(workflowRuns).set({ status: "failed", missionId, completedAt: new Date() }).where(eq(workflowRuns.id, base.workflowRunId));
+    await db.update(issues).set({ missionId }).where(and(eq(issues.companyId, companyId), eq(issues.id, base.issueId)));
     if (variant.decision !== false) await db.insert(workflowTerminalDecisions).values({ companyId,
       workflowRunId: base.workflowRunId, decidedAuthorityVersion: 0, decision: "failed",
       policyCause: "recovery_deadline_hard", discoveryPath: "stuck_diagnostic", origin: "reconciler" });
