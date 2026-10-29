@@ -225,6 +225,7 @@ import { currentReplacementRootNotifications, isQaCorrectionRootOwnerRequired, v
 import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
+import { createHeartbeatQueuedStaleRecovery } from "./heartbeat-queued-stale-recovery.js";
 import {
   countSessionFileMessages,
   hasSessionCompactionThresholds,
@@ -5313,169 +5314,31 @@ export function heartbeatService(db: Db) {
     }
 
     if (queuedStaleThresholdMs > 0) {
-      const queuedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.status, "queued"));
-
-      // [approval-waiting marker] queued 런도 이슈에 pending 결정/승인이 있으면 사람 대기다.
-      const queuedApprovalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
-        queuedRuns.map((run) => run.issueId).filter((issueId): issueId is string => Boolean(issueId)),
-      );
-
-      for (const run of queuedRuns) {
-        if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
-
-        // [B2] Stale detection is decoupled from concurrency here. A queued run past
-        // queuedStaleThresholdMs is recorded as failed even while the agent owns a running
-        // run. Previously a `hasRunningRunForAgent` guard skipped every stale check when
-        // maxConcurrentRuns=1, so a single phantom running run blocked all queued runs
-        // forever (paperclip-stuck 2026-08-06). Promotion still respects the slot via
-        // startNextQueuedRunForAgent below — only genuinely-stale queued runs are failed.
-
-        const refTime = run.createdAt ? new Date(run.createdAt).getTime() : new Date(run.updatedAt).getTime();
-        if (now.getTime() - refTime < queuedStaleThresholdMs) continue;
-
-        // [approval-waiting marker] pending 운영자 결정/승인 대기 중인 이슈의 queued 런은
-        // phantom 이 아니라 사람 대기다 — 결정 해결 시 continuation 이 재대기열한다.
-        const queuedApprovalWait = run.issueId ? queuedApprovalWaitByIssueId.get(run.issueId) : undefined;
-        if (queuedApprovalWait?.waiting) {
-          logger.info(
-            {
-              runId: run.id,
-              issueId: run.issueId,
-              operatorDecisionIds: queuedApprovalWait.operatorDecisionIds,
-              approvalIds: queuedApprovalWait.approvalIds,
-              queuedStaleThresholdMs,
-            },
-            "queued run is waiting on a pending operator decision/approval; skipping stale_queued reap",
-          );
-          continue;
-        }
-
-        const staleQueuedMessage = `Queued heartbeat run exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without starting`;
-        const failedRun = await setRunStatus(run.id, "failed", {
-          error: staleQueuedMessage,
-          errorCode: "stale_queued",
-          finishedAt: now,
-        }, { expectedStatuses: ["queued"] });
-        await setWakeupStatus(run.wakeupRequestId, "failed", {
-          finishedAt: now,
-          error: staleQueuedMessage,
-        });
-        if (failedRun) {
-          await appendRunEvent(failedRun, await nextRunEventSeq(failedRun.id), {
-            eventType: "lifecycle",
-            stream: "system",
-            level: "error",
-            message: staleQueuedMessage,
-            payload: { queuedStaleThresholdMs },
-          });
-          // [recovery liveness hardening] per-run isolation (release+promote 는 hang 가능 경로).
-          try {
-            await releaseIssueExecutionAndPromote(failedRun, { skipLocked: true });
-          } catch (err) {
-            logger.warn({ err, runId: run.id }, "failed to release+promote stale queued run; continuing sweep");
-          }
-
-          // A stale queued run never enters executeRun, so its normal finally block
-          // cannot settle finalization v1. Re-read after the terminal hook releases
-          // ownership, then settle here so it does not occupy the agent slot forever.
-          const terminalRun = await getRun(failedRun.id);
-          if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
-            await settleHeartbeatAfterExecution(db, terminalRun, now).catch((settlementErr) => {
-              logger.warn({ err: settlementErr, runId: terminalRun.id }, "failed to settle stale queued heartbeat");
-            });
-          }
-        }
-        // [recovery liveness hardening] terminal 체인 후속(finalize/startNext) 도 격리 — 이 run 의
-        // 실패가 전체 sweep 을 중단시키지 않는다.
-        try {
-          await finalizeAgentStatus(run.agentId, "failed");
-          await startNextQueuedRunForAgent(run.agentId);
-          reaped.push(run.id);
-        } catch (err) {
-          logger.warn({ err, runId: run.id }, "failed to finalize stale queued run; continuing sweep");
-        }
-      }
-      // [B1] Also reap stale agent_wakeup_requests rows that never created a heartbeat run
-      // (runId IS NULL). The mission-dedup enqueue path persists such rows without a
-      // heartbeat_runs row, so the loop above never inspects them and they sat queued
-      // forever in the incident (5 of them). Fail stale ones with a CAS guard so callers
-      // can re-enqueue fresh requests; idempotency keys dedupe duplicate re-enqueues.
-      const staleOrphanWakeups = await db
-        .select({
-          id: agentWakeupRequests.id,
-          companyId: agentWakeupRequests.companyId,
-          agentId: agentWakeupRequests.agentId,
-          issueId: agentWakeupRequests.issueId,
-          createdAt: agentWakeupRequests.createdAt,
-        })
-        .from(agentWakeupRequests)
-        .where(
-          and(
-            eq(agentWakeupRequests.status, "queued"),
-            sql`${agentWakeupRequests.runId} is null`,
-            lt(agentWakeupRequests.createdAt, new Date(now.getTime() - queuedStaleThresholdMs)),
-          ),
-        );
-
-      // [approval-waiting marker] 고아 queued 웨이크업도 대상 이슈가 사람 대기 중이면 회수하지 않는다.
-      const orphanApprovalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
-        staleOrphanWakeups.map((request) => request.issueId).filter((issueId): issueId is string => Boolean(issueId)),
-      );
-
-      const orphanAffectedAgentIds = new Set<string>();
-      const orphanReapedIds: string[] = [];
-      for (const request of staleOrphanWakeups) {
-        const orphanApprovalWait = request.issueId
-          ? orphanApprovalWaitByIssueId.get(request.issueId)
-          : undefined;
-        if (orphanApprovalWait?.waiting) {
-          logger.info(
-            {
-              wakeupRequestId: request.id,
-              issueId: request.issueId,
-              operatorDecisionIds: orphanApprovalWait.operatorDecisionIds,
-              approvalIds: orphanApprovalWait.approvalIds,
-            },
-            "queued orphan wakeup is waiting on a pending operator decision/approval; skipping stale reap",
-          );
-          continue;
-        }
-        const orphanMessage = `stale_queued: queued wakeup exceeded ${Math.round(queuedStaleThresholdMs / 1000)}s without a heartbeat run (mission dedup without heartbeatRuns)`;
-        const failed = await db
-          .update(agentWakeupRequests)
-          .set({ status: "failed", error: orphanMessage, finishedAt: now, updatedAt: now })
-          .where(and(eq(agentWakeupRequests.id, request.id), eq(agentWakeupRequests.status, "queued")))
-          .returning({ id: agentWakeupRequests.id })
-          .then((rows) => rows[0] ?? null);
-        if (!failed) continue; // raced: promoted/claimed between select and update
-        await recordQueueTransitionEvent({
-          companyId: request.companyId,
-          wakeupRequestId: request.id,
-          eventType: "wakeup_stale_queued",
-          layer: "heartbeat",
-          decision: "failed",
-          reason: "stale_queued",
-          reasonCode: "stale_queued",
-          idempotencyKey: `wakeup-stale-queued:${request.id}`,
-          payload: { queuedStaleThresholdMs, runId: null },
-        });
-        orphanAffectedAgentIds.add(request.agentId);
-        orphanReapedIds.push(request.id);
-      }
-
-      for (const affectedAgentId of orphanAffectedAgentIds) {
-        await startNextQueuedRunForAgent(affectedAgentId);
-      }
-
-      if (orphanReapedIds.length > 0) {
-        logger.warn(
-          { orphanWakeupCount: orphanReapedIds.length, wakeupIds: orphanReapedIds },
-          "reaped stale queued wakeup requests without a heartbeat run",
-        );
-      }
+      const recoverQueuedStaleWork = createHeartbeatQueuedStaleRecovery({
+        db,
+        activeExecutionTimeoutMs,
+        withAgentStartLock,
+        startNextQueuedRunForAgent,
+        countActiveRunsForAgent: countRunningRunsForAgent,
+        maxConcurrentRuns: agent => parseHeartbeatPolicy(agent).maxConcurrentRuns,
+        hasActiveExecution: runId => activeRunExecutions.has(runId),
+        hasLiveTrackedChild: runId => {
+          const child = runningProcesses.get(runId)?.child;
+          return Boolean(child && child.exitCode === null && child.signalCode === null && isProcessAlive(child.pid));
+        },
+        resolveActiveExecutionTimeoutMs: resolveRunActiveExecutionTimeoutMs,
+        setRunStatus: setHeartbeatRunStatus,
+        publishRunStatus: run => publishHeartbeatRunStatus(publishLiveEvent, run),
+        nextRunEventSeq,
+        appendRunEvent,
+        releaseIssueExecutionAndPromote,
+        getRun,
+        settleHeartbeatAfterExecution,
+        finalizeAgentStatus,
+        recordQueueTransitionEvent,
+      });
+      const queuedRecovery = await recoverQueuedStaleWork(queuedStaleThresholdMs);
+      reaped.push(...queuedRecovery.reapedRunIds);
     }
 
     if (reaped.length > 0) {
