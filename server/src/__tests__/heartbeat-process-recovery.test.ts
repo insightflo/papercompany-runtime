@@ -34,6 +34,7 @@ import {
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
 import { heartbeatService, setHeartbeatRunStatus } from "../services/heartbeat.ts";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { createHeartbeatQueuedStaleRecovery } from "../services/heartbeat-queued-stale-recovery.ts";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
 import { approvalWaitFixtures } from "./helpers/approval-wait-fixtures.js";
@@ -170,6 +171,7 @@ describe("heartbeat orphaned process recovery", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db, 5_000);
     // fire-and-forget wiki hooks(recordFailure)가 비동기 — cleanup delete 전에 settle해서
     // company/agent 삭제 후 늦은 insert가 도착해 agent_wiki_entries FK error가 나는 race를 방지.
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -206,6 +208,7 @@ describe("heartbeat orphaned process recovery", () => {
   });
 
   afterAll(async () => {
+    if (db) await waitForHeartbeatExecutionsToDrain(db, 5_000);
     for (const child of childProcesses) {
       child.kill("SIGKILL");
     }

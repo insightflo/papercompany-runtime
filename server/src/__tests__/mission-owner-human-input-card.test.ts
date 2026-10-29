@@ -397,6 +397,8 @@ describeEP("mission owner human input card duplicate merge", () => {
     vi.clearAllMocks();
     await dedupDb.delete(activityLog);
     await dedupDb.delete(operatorDecisions);
+    await dedupDb.delete(workflowTransitionEvents);
+    await dedupDb.delete(heartbeatRuns);
     await dedupDb.delete(issues);
     await dedupDb.delete(missions);
     await dedupDb.delete(agents);
