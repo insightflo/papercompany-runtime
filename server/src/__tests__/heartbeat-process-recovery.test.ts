@@ -4,12 +4,13 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   applyPendingMigrations,
   createDb,
   ensurePostgresDatabase,
+  approvals,
   agents,
   agentRuntimeState,
   agentWikiEntries,
@@ -20,17 +21,19 @@ import {
   companies,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueApprovals, issues,
   issueComments,
-  issues,
   missionSessions,
-  missions,
+  missions, operatorDecisions,
   workflowDefinitions,
   workflowRuns,
   workflowStepRuns,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
-import { heartbeatService } from "../services/heartbeat.ts";
+import { heartbeatService, setHeartbeatRunStatus } from "../services/heartbeat.ts";
+import { createHeartbeatQueuedStaleRecovery } from "../services/heartbeat-queued-stale-recovery.ts";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
+import { approvalWaitFixtures } from "./helpers/approval-wait-fixtures.js";
 
 type EmbeddedPostgresInstance = {
   initialise(): Promise<void>;
@@ -103,6 +106,8 @@ function spawnAliveProcess() {
     stdio: "ignore",
   });
 }
+
+const staleQueuedAt = () => new Date(Date.now() - 60_000);
 
 function isPidAlive(pid: number | null | undefined) {
   if (!pid) return false;
@@ -177,6 +182,7 @@ describe("heartbeat orphaned process recovery", () => {
     await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(workflowStepRuns);
+    await db.delete(issueApprovals); await db.delete(operatorDecisions); await db.delete(approvals);
     await db.delete(issues);
     await db.delete(workflowRuns);
     await db.delete(workflowDefinitions);
@@ -216,6 +222,9 @@ describe("heartbeat orphaned process recovery", () => {
     runError?: string | null;
     updatedAt?: Date;
     processStartedAt?: Date | null;
+    queuedAt?: Date;
+    agentStatus?: string;
+    maxConcurrentRuns?: number;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -237,10 +246,10 @@ describe("heartbeat orphaned process recovery", () => {
       companyId,
       name: "CodexCoder",
       role: "engineer",
-      status: "paused",
+      status: input?.agentStatus ?? "paused",
       adapterType: input?.adapterType ?? "codex_local",
       adapterConfig: input?.adapterConfig ?? {},
-      runtimeConfig: {},
+      runtimeConfig: input?.maxConcurrentRuns === undefined ? {} : { heartbeat: { maxConcurrentRuns: input.maxConcurrentRuns } },
       permissions: {},
     });
 
@@ -252,9 +261,11 @@ describe("heartbeat orphaned process recovery", () => {
       triggerDetail: "system",
       reason: "issue_assigned",
       payload: input?.includeIssue === false ? {} : { issueId },
-      status: "claimed",
+      status: input?.runStatus === "queued" ? "pending" : "claimed",
       runId,
       claimedAt: now,
+      createdAt: input?.queuedAt ?? now,
+      updatedAt: input?.queuedAt ?? now,
     });
 
     await db.insert(heartbeatRuns).values({
@@ -271,8 +282,9 @@ describe("heartbeat orphaned process recovery", () => {
       processLossRetryCount: input?.processLossRetryCount ?? 0,
       errorCode: input?.runErrorCode ?? null,
       error: input?.runError ?? null,
-      startedAt: now,
-      updatedAt: input?.updatedAt ?? new Date("2026-03-19T00:00:00.000Z"),
+      startedAt: input?.runStatus === "queued" ? null : now,
+      createdAt: input?.queuedAt ?? now,
+      updatedAt: input?.updatedAt ?? input?.queuedAt ?? new Date("2026-03-19T00:00:00.000Z"),
     });
 
     if (input?.includeIssue !== false) {
@@ -292,6 +304,153 @@ describe("heartbeat orphaned process recovery", () => {
 
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
+
+  async function seedRunnableAgent(input?: { adapterConfig?: Record<string, unknown>; maxConcurrentRuns?: number }) {
+    const companyId = randomUUID(), agentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Queue recovery", issuePrefix: `Q${companyId.slice(0, 6)}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Queue runner", role: "engineer", status: "active", adapterType: "process",
+      adapterConfig: input?.adapterConfig ?? {}, runtimeConfig: { heartbeat: { maxConcurrentRuns: input?.maxConcurrentRuns ?? 1 } }, permissions: {},
+    });
+    return { companyId, agentId };
+  }
+
+  async function insertOrphanWake(companyId: string, agentId: string, options?: { id?: string; issueId?: string | null; missionId?: string | null; reason?: string }) {
+    const wakeupRequestId = options?.id ?? randomUUID();
+    const staleAt = new Date("2026-03-19T00:00:00.000Z");
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId, companyId, agentId, source: "automation", triggerDetail: "system", reason: options?.reason ?? "manual",
+      payload: {}, issueId: options?.issueId ?? null, missionId: options?.missionId ?? null,
+      status: "queued", runId: null, createdAt: staleAt, updatedAt: staleAt,
+    });
+    return wakeupRequestId;
+  }
+
+  async function insertRunningRun(companyId: string, agentId: string, wakeupRequestId = randomUUID()) {
+    const id = randomUUID(), now = new Date();
+    await db.insert(agentWakeupRequests).values({ id: wakeupRequestId, companyId, agentId, source: "automation", triggerDetail: "system", reason: "manual", payload: {}, status: "claimed", runId: id });
+    await db.insert(heartbeatRuns).values({ id, companyId, agentId, invocationSource: "automation", triggerDetail: "system", status: "running", wakeupRequestId, contextSnapshot: {}, startedAt: now, updatedAt: now });
+    return { id, wakeupRequestId };
+  }
+
+  function createCountingCommand() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-queue-count-"));
+    tempDirs.add(dir);
+    const command = path.join(dir, "count.cjs"), countPath = path.join(dir, "count.txt");
+    fs.writeFileSync(command, `#!/usr/bin/env node\nconst fs=require('node:fs');let n=0;try{n=Number(fs.readFileSync(${JSON.stringify(countPath)},'utf8'))}catch{};fs.writeFileSync(${JSON.stringify(countPath)},String(n+1));\n`, "utf8");
+    fs.chmodSync(command, 0o755);
+    return { command, countPath };
+  }
+
+  function makeQueuedRecovery(beforeLock?: (agentId: string) => Promise<void>, setRunStatus = setHeartbeatRunStatus) {
+    const effects = { runEvents: 0, queueEvents: 0, releases: 0, settlements: 0, finalizations: 0, liveStatusEvents: 0 };
+    const recovery = createHeartbeatQueuedStaleRecovery({
+      db, activeExecutionTimeoutMs: 0,
+      withAgentStartLock: async (agentId, fn) => { await beforeLock?.(agentId); return fn(); },
+      startNextQueuedRunForAgent: async () => [],
+      countActiveRunsForAgent: async agentId => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).length,
+      maxConcurrentRuns: agent => {
+        const config = agent.runtimeConfig as Record<string, unknown>;
+        return Number((config.heartbeat as Record<string, unknown> | undefined)?.maxConcurrentRuns ?? 1);
+      },
+      hasActiveExecution: () => false,
+      hasLiveTrackedChild: runId => {
+        const child = runningProcesses.get(runId)?.child;
+        return Boolean(child && child.exitCode === null && child.signalCode === null && isPidAlive(child.pid));
+      },
+      resolveActiveExecutionTimeoutMs: async () => 0,
+      setRunStatus, publishRunStatus: () => { effects.liveStatusEvents++; }, nextRunEventSeq: async () => 1,
+      appendRunEvent: async () => { effects.runEvents++; }, releaseIssueExecutionAndPromote: async () => { effects.releases++; },
+      getRun: runId => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then(rows => rows[0] ?? null),
+      settleHeartbeatAfterExecution: async () => { effects.settlements++; }, finalizeAgentStatus: async () => { effects.finalizations++; },
+      recordQueueTransitionEvent: async () => { effects.queueEvents++; },
+    });
+    return { recover: recovery, effects };
+  }
+
+  it("preserves a full-capacity queued heartbeat unchanged, then starts that same run once", async () => {
+    const command = createCountingCommand();
+    const queued = await seedRunFixture({ adapterType: "process", adapterConfig: { command: command.command }, runStatus: "queued", agentStatus: "active", maxConcurrentRuns: 1, queuedAt: staleQueuedAt() });
+    const blocker = await insertRunningRun(queued.companyId, queued.agentId), child = spawnAliveProcess();
+    childProcesses.add(child); runningProcesses.set(blocker.id, { child, graceSec: 1 });
+    await db.update(heartbeatRuns).set({ processPid: child.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
+    const [beforeRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued.runId));
+    const [beforeWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
+    expect((await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 })).reaped).toBe(0);
+    const [waitingRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued.runId));
+    const [waitingWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
+    expect(waitingRun).toMatchObject({ id: beforeRun.id, status: "queued", wakeupRequestId: beforeRun.wakeupRequestId, issueId: beforeRun.issueId, createdAt: beforeRun.createdAt, updatedAt: beforeRun.updatedAt });
+    expect(waitingWake).toMatchObject({ id: beforeWake.id, status: "pending", runId: queued.runId, updatedAt: beforeWake.updatedAt });
+    const [issue] = await db.select().from(issues).where(eq(issues.id, queued.issueId));
+    expect(issue).toMatchObject({ checkoutRunId: queued.runId, executionRunId: queued.runId });
+    child.kill("SIGKILL"); await waitForPidExit(child.pid ?? 0); runningProcesses.delete(blocker.id);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() }).where(eq(heartbeatRuns.id, blocker.id));
+    await heartbeatService(db).resumeQueuedRuns(queued.agentId);
+    expect(await waitForRunStatus(db, queued.runId, "succeeded")).toMatchObject({ id: queued.runId, wakeupRequestId: queued.wakeupRequestId });
+    expect(fs.readFileSync(command.countPath, "utf8")).toBe("1");
+  });
+
+  it.each(["bare-pid", "tracked-exited-child", "other-agent", "other-company"] as const)("does not treat %s as live capacity for another queue", async kind => {
+    let companyId: string, agentId: string;
+    const target = await seedRunFixture({ runStatus: "queued", includeIssue: false, agentStatus: "active", maxConcurrentRuns: 1, queuedAt: staleQueuedAt() });
+    companyId = target.companyId; agentId = target.agentId;
+    if (kind === "other-agent") {
+      agentId = randomUUID();
+      await db.insert(agents).values({ id: agentId, companyId, name: "Other agent", role: "engineer", status: "active", adapterType: "process", adapterConfig: {}, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } }, permissions: {} });
+    } else if (kind === "other-company") ({ companyId, agentId } = await seedRunnableAgent());
+    const blocker = await insertRunningRun(companyId, agentId);
+    let child: ChildProcess | null = null;
+    if (kind === "tracked-exited-child") {
+      child = spawnAliveProcess(); childProcesses.add(child); child.kill("SIGKILL"); await waitForPidExit(child.pid ?? 0);
+      runningProcesses.set(blocker.id, { child, graceSec: 1 });
+    } else if (kind === "other-agent" || kind === "other-company") {
+      child = spawnAliveProcess(); childProcesses.add(child); runningProcesses.set(blocker.id, { child, graceSec: 1 });
+    }
+    await db.update(heartbeatRuns).set({ processPid: kind === "bare-pid" ? process.pid : child?.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
+    await makeQueuedRecovery().recover(1_000);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, target.runId)))[0]).toMatchObject({ status: "failed", errorCode: "stale_queued" });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, blocker.id)))[0]).toMatchObject({ status: "running" });
+  });
+
+  it("fails only the stale queued sibling and preserves the fresh sibling fields", async () => {
+    const stale = await seedRunFixture({ runStatus: "queued", includeIssue: false, agentStatus: "active", queuedAt: staleQueuedAt() });
+    const siblingId = randomUUID(), wakeId = randomUUID(), freshAt = new Date();
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: stale.companyId, agentId: stale.agentId, source: "automation", triggerDetail: "system", reason: "fresh sibling", payload: {}, status: "pending", runId: siblingId, createdAt: freshAt, updatedAt: freshAt });
+    await db.insert(heartbeatRuns).values({ id: siblingId, companyId: stale.companyId, agentId: stale.agentId, invocationSource: "automation", triggerDetail: "system", status: "queued", wakeupRequestId: wakeId, contextSnapshot: {}, startedAt: null, createdAt: freshAt, updatedAt: freshAt });
+    expect((await makeQueuedRecovery().recover(1_000)).reapedRunIds).toEqual([stale.runId]);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, stale.runId)))[0]).toMatchObject({ status: "failed", errorCode: "stale_queued", finishedAt: expect.any(Date) });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, siblingId)))[0]).toMatchObject({ status: "queued", error: null, errorCode: null, finishedAt: null, createdAt: freshAt, updatedAt: freshAt });
+  });
+
+  it("expires an invalid stale orphan without making a heartbeat or starting an adapter", async () => {
+    const command = createCountingCommand(), agent = await seedRunnableAgent({ adapterConfig: { command: command.command } });
+    const issueId = randomUUID(), wakeId = await insertOrphanWake(agent.companyId, agent.agentId, { issueId });
+    await db.update(agentWakeupRequests).set({ payload: { issueId } }).where(eq(agentWakeupRequests.id, wakeId));
+    await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(wake).toMatchObject({ status: "failed", runId: null, finishedAt: expect.any(Date) });
+    expect(wake.error).toMatch(/issue not found/i);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakeId))).toHaveLength(0);
+    expect(fs.existsSync(command.countPath)).toBe(false);
+  });
+
+  it.each(["decision", "approval"] as const)("skips an approval-waiting wake and promotes the next valid wake (%s)", async kind => {
+    const command = createCountingCommand(), fixtures = approvalWaitFixtures(db), base = await fixtures.seedBase();
+    await db.update(agents).set({ status: "active", adapterType: "process", adapterConfig: { command: command.command }, runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, base.agentId));
+    await db.update(issues).set({ assigneeAgentId: base.agentId }).where(eq(issues.id, base.issueId));
+    if (kind === "decision") await fixtures.seedPendingDecision(base.companyId, base.issueId);
+    else await fixtures.seedPendingApproval(base.companyId, base.issueId);
+    const waiting = await fixtures.seedRun({ ...base, status: "queued", withRunRow: false });
+    const validId = await insertOrphanWake(base.companyId, base.agentId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, base.agentId))).toHaveLength(0);
+    await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 });
+    const [waitingWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, waiting.wakeupId));
+    const [validWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, validId));
+    expect(waitingWake).toMatchObject({ status: "queued", runId: null });
+    expect(validWake?.runId).toBeTypeOf("string");
+    expect(await waitForRunStatus(db, validWake!.runId!, "succeeded")).toMatchObject({ wakeupRequestId: validId });
+    expect(fs.readFileSync(command.countPath, "utf8")).toBe("1");
+  });
 
   it("keeps a local run active when the recorded pid is still alive", async () => {
     const child = spawnAliveProcess();
@@ -872,204 +1031,130 @@ describe("heartbeat orphaned process recovery", () => {
     expect(run?.error).toBeNull();
   });
 
-  it("expires queued heartbeat runs that exceed an explicit queued staleness threshold", async () => {
-    const { runId, issueId, wakeupRequestId } = await seedRunFixture({
-      runStatus: "queued",
-    });
-    await db
-      .update(heartbeatRuns)
-      .set({
-        createdAt: new Date("2026-03-19T00:00:00.000Z"),
-        updatedAt: new Date("2026-03-19T00:00:00.000Z"),
-      })
-      .where(eq(heartbeatRuns.id, runId));
+  it("fails a free stale queue once and releases its issue", async () => {
+    const command = createCountingCommand();
+    const { runId, issueId, wakeupRequestId } = await seedRunFixture({ runStatus: "queued", queuedAt: staleQueuedAt(), agentStatus: "active", adapterType: "process", adapterConfig: { command: command.command } });
     const heartbeat = heartbeatService(db);
-
-    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
-    expect(result.reaped).toBe(1);
-    expect(result.runIds).toEqual([runId]);
-
-    const run = await heartbeat.getRun(runId);
-    expect(run?.status).toBe("failed");
-    expect(run?.errorCode).toBe("stale_queued");
-
-    const issue = await db
-      .select()
-      .from(issues)
-      .where(eq(issues.id, issueId))
-      .then((rows) => rows[0] ?? null);
-    expect(issue?.executionRunId).toBeNull();
-
-    const wakeup = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, wakeupRequestId))
-      .then((rows) => rows[0] ?? null);
-    expect(wakeup?.status).toBe("failed");
+    expect((await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 })).reaped).toBe(1);
+    expect((await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 })).reaped).toBe(0);
+    expect((await heartbeat.getRun(runId))?.errorCode).toBe("stale_queued");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)))[0]?.status).toBe("failed");
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.executionRunId).toBeNull();
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.filter(event => event.eventType === "lifecycle" && event.message?.startsWith("Queued heartbeat run exceeded"))).toHaveLength(1);
+    await heartbeat.resumeQueuedRuns();
+    expect(fs.existsSync(command.countPath)).toBe(false);
   });
 
-  it("expires a stale queued run even while the same agent is still running another run (B2)", async () => {
-    // [paperclip-stuck 2026-08-06, B2] Previously a single running run caused the stale
-    // check for every queued run of that agent to be skipped (hasRunningRunForAgent guard),
-    // so with maxConcurrentRuns=1 one phantom running run blocked all queued runs forever.
-    // Stale detection is now independent of whether a running run exists: a queued run past
-    // queuedStaleThresholdMs is recorded as failed (stale_queued) regardless. Promotion still
-    // respects the concurrency slot, so only genuinely-stale queued runs are affected.
-    const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
-      includeIssue: false,
-      updatedAt: new Date(),
+  it("publishes a stale status only after commit and never after rollback", async () => {
+    const committed = await seedRunFixture({ runStatus: "queued", includeIssue: false, queuedAt: staleQueuedAt() });
+    const winner = makeQueuedRecovery();
+    await winner.recover(1_000);
+    expect(winner.effects.liveStatusEvents).toBe(1);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, committed.runId)))[0]?.status).toBe("failed");
+
+    const rolledBack = await seedRunFixture({ runStatus: "queued", includeIssue: false, queuedAt: staleQueuedAt() });
+    const rollback = makeQueuedRecovery(undefined, async (tx, runId, status, patch, options) => {
+      await setHeartbeatRunStatus(tx, runId, status, patch, options);
+      throw new Error("force stale transition rollback");
     });
-    const queuedRunId = randomUUID();
-    const queuedWakeupId = randomUUID();
-    const staleAt = new Date("2026-03-19T00:00:00.000Z");
-
-    await db.insert(agentWakeupRequests).values({
-      id: queuedWakeupId,
-      companyId,
-      agentId,
-      source: "assignment",
-      triggerDetail: "system",
-      reason: "issue_assigned",
-      payload: {},
-      status: "pending",
-      runId: queuedRunId,
-      createdAt: staleAt,
-      updatedAt: staleAt,
-    });
-    await db.insert(heartbeatRuns).values({
-      id: queuedRunId,
-      companyId,
-      agentId,
-      invocationSource: "assignment",
-      triggerDetail: "system",
-      status: "queued",
-      wakeupRequestId: queuedWakeupId,
-      contextSnapshot: {},
-      createdAt: staleAt,
-      updatedAt: staleAt,
-    });
-    await db
-      .update(heartbeatRuns)
-      .set({ startedAt: new Date(), updatedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runningRunId));
-    const child = spawnAliveProcess();
-    childProcesses.add(child);
-    runningProcesses.set(runningRunId, { child, graceSec: 1 });
-
-    const heartbeat = heartbeatService(db);
-    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
-    // B2: the stale queued run is failed even though the agent still owns a running run.
-    expect(result.reaped).toBe(1);
-    expect(result.runIds).toContain(queuedRunId);
-
-    const queuedRun = await heartbeat.getRun(queuedRunId);
-    expect(queuedRun?.status).toBe("failed");
-    expect(queuedRun?.errorCode).toBe("stale_queued");
-
-    const queuedWakeup = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, queuedWakeupId))
-      .then((rows) => rows[0] ?? null);
-    expect(queuedWakeup?.status).toBe("failed");
+    await rollback.recover(1_000);
+    expect(rollback.effects.liveStatusEvents).toBe(0);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, rolledBack.runId)))[0]?.status).toBe("queued");
   });
 
-  it("does not expire a within-threshold queued run while the agent is running another run", async () => {
-    // [B2 threshold guard] Removing the hasRunningRunForAgent guard must not make every
-    // queued run eligible — only runs past queuedStaleThresholdMs. A freshly-queued run
-    // sitting behind a running run must still be preserved (it is legitimately waiting).
-    const { companyId, agentId, runId: runningRunId } = await seedRunFixture({
-      includeIssue: false,
-      updatedAt: new Date(),
-    });
-    const queuedRunId = randomUUID();
-    const queuedWakeupId = randomUUID();
-    const freshAt = new Date(); // within threshold
-
-    await db.insert(agentWakeupRequests).values({
-      id: queuedWakeupId,
-      companyId,
-      agentId,
-      source: "assignment",
-      triggerDetail: "system",
-      reason: "issue_assigned",
-      payload: {},
-      status: "pending",
-      runId: queuedRunId,
-      createdAt: freshAt,
-      updatedAt: freshAt,
-    });
-    await db.insert(heartbeatRuns).values({
-      id: queuedRunId,
-      companyId,
-      agentId,
-      invocationSource: "assignment",
-      triggerDetail: "system",
-      status: "queued",
-      wakeupRequestId: queuedWakeupId,
-      contextSnapshot: {},
-      createdAt: freshAt,
-      updatedAt: freshAt,
-    });
-    const child = spawnAliveProcess();
-    childProcesses.add(child);
-    runningProcesses.set(runningRunId, { child, graceSec: 1 });
-
-    const heartbeat = heartbeatService(db);
-    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
-    expect(result.reaped).toBe(0);
-
-    const queuedRun = await heartbeat.getRun(queuedRunId);
-    expect(queuedRun?.status).toBe("queued");
-    expect(queuedRun?.errorCode).toBeNull();
+  it.each([
+    { capacity: 2, live: 1, statusOnly: false, expected: "failed" },
+    { capacity: 2, live: 2, statusOnly: false, expected: "queued" },
+    { capacity: 2, live: 0, statusOnly: true, expected: "failed" },
+    { capacity: 1, live: 1, resizeTo: 2, expected: "failed" },
+  ])("protects only a positively full current capacity ($capacity/$live)", async ({ capacity, live, statusOnly, resizeTo, expected }) => {
+    const target = await seedRunFixture({ runStatus: "queued", includeIssue: false, agentStatus: "active", maxConcurrentRuns: capacity, queuedAt: staleQueuedAt() });
+    const children: ChildProcess[] = [];
+    for (let i = 0; i < Math.max(live, Number(statusOnly)); i++) {
+      const blocker = await insertRunningRun(target.companyId, target.agentId);
+      if (i < live) {
+        const child = spawnAliveProcess(); childProcesses.add(child); children.push(child);
+        await db.update(heartbeatRuns).set({ processPid: child.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
+        runningProcesses.set(blocker.id, { child, graceSec: 1 });
+      }
+    }
+    const recovery = makeQueuedRecovery(resizeTo ? async () => {
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: resizeTo } } }).where(eq(agents.id, target.agentId));
+    } : undefined);
+    await recovery.recover(1_000);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, target.runId)))[0]?.status).toBe(expected);
+    if (statusOnly) expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, target.agentId))).filter(run => run.status === "running")).toHaveLength(1);
   });
 
-  it("expires stale agent_wakeup_requests rows that never created a heartbeat run (runId IS NULL, B1)", async () => {
-    // [paperclip-stuck 2026-08-06, B1] The mission-dedup enqueue path persists an
-    // agent_wakeup_requests row with status='queued' and runId=NULL but never creates a
-    // heartbeat_runs row. The stale-queued reaper only inspected heartbeat_runs, so these
-    // rows sat queued forever (5 of them in the incident). The reaper must now also fail
-    // stale runId=NULL queued wakeup requests so callers can re-enqueue fresh requests.
-    const { companyId, agentId } = await seedRunFixture({
-      includeIssue: false,
-      runStatus: "queued",
-    });
-    const orphanWakeupId = randomUUID();
-    const staleAt = new Date("2026-03-19T00:00:00.000Z");
-
-    await db.insert(agentWakeupRequests).values({
-      id: orphanWakeupId,
-      companyId,
-      agentId,
-      source: "automation",
-      triggerDetail: "system",
-      reason: "mission_owner_retry_source_issue",
-      payload: {},
-      status: "queued",
-      runId: null,
-      idempotencyKey: "mission-owner-plan-rework:abc:def",
-      createdAt: staleAt,
-      updatedAt: staleAt,
-    });
-    // Make the seeded queued heartbeat run fresh so only the orphan wakeup is stale.
-    await db
-      .update(heartbeatRuns)
-      .set({ createdAt: new Date(), updatedAt: new Date() })
-      .where(eq(heartbeatRuns.status, "queued"));
-
+  it("keeps an unlinked stale wake while full, then starts that same request once", async () => {
+    const command = createCountingCommand();
+    const { companyId, agentId } = await seedRunnableAgent({ adapterConfig: { command: command.command } });
+    const blocker = await insertRunningRun(companyId, agentId), child = spawnAliveProcess(); childProcesses.add(child);
+    await db.update(heartbeatRuns).set({ processPid: child.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
+    runningProcesses.set(blocker.id, { child, graceSec: 1 });
+    const wakeupRequestId = await insertOrphanWake(companyId, agentId);
     const heartbeat = heartbeatService(db);
-    const result = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 5 * 60 * 1000 });
+    const first = await heartbeat.reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 });
+    const preserved = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)))[0]!;
+    expect(first.reaped).toBe(0);
+    expect(preserved.status).toBe("queued");
+    expect(preserved.runId).toBeNull();
+    expect(fs.existsSync(command.countPath)).toBe(false);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakeupRequestId))).length).toBe(0);
+    child.kill("SIGKILL"); await waitForPidExit(child.pid ?? 0); runningProcesses.delete(blocker.id);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, blocker.id));
+    await heartbeat.resumeQueuedRuns(agentId);
+    const promoted = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)))[0]!;
+    expect(promoted.runId).toBeTypeOf("string");
+    expect((await waitForRunStatus(db, promoted.runId!, "succeeded"))?.wakeupRequestId).toBe(wakeupRequestId);
+    expect(fs.readFileSync(command.countPath, "utf8")).toBe("1");
+  });
 
-    const orphanWakeup = await db
-      .select()
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, orphanWakeupId))
-      .then((rows) => rows[0] ?? null);
-    expect(orphanWakeup?.status).toBe("failed");
-    expect(orphanWakeup?.error).toContain("stale_queued");
-    expect(orphanWakeup?.finishedAt).toBeInstanceOf(Date);
-    // The fresh seeded queued run is untouched.
-    expect(result.reaped).toBe(0);
+  it("promotes a valid wake with no heartbeat rows through the ordinary queue", async () => {
+    const command = createCountingCommand(), { companyId, agentId } = await seedRunnableAgent({ adapterConfig: { command: command.command } });
+    const wakeupRequestId = await insertOrphanWake(companyId, agentId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(0);
+    await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 });
+    const wakeup = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)))[0]!;
+    expect(wakeup.runId).toBeTypeOf("string");
+    expect((await waitForRunStatus(db, wakeup.runId!, "succeeded"))?.wakeupRequestId).toBe(wakeupRequestId);
+    expect(fs.readFileSync(command.countPath, "utf8")).toBe("1");
+  });
+
+  it("discards stale decisions when a run claim or wake attachment wins", async () => {
+    const target = await seedRunFixture({ runStatus: "queued", includeIssue: false, agentStatus: "active", queuedAt: staleQueuedAt() });
+    let reachedBeforeLock = false;
+    const claim = makeQueuedRecovery(async () => {
+      reachedBeforeLock = true;
+      await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date(), updatedAt: new Date() }).where(eq(heartbeatRuns.id, target.runId));
+    });
+    expect((await claim.recover(1_000)).reapedRunIds).toEqual([]);
+    expect(reachedBeforeLock).toBe(true);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, target.runId)))[0]).toMatchObject({ status: "running", startedAt: expect.any(Date) });
+    expect(claim.effects).toMatchObject({ runEvents: 0, liveStatusEvents: 0, releases: 0, settlements: 0, finalizations: 0 });
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, target.wakeupRequestId)))[0]?.status).toBe("pending");
+
+    const agent = await seedRunnableAgent(), attachedId = await insertOrphanWake(agent.companyId, agent.agentId);
+    const winner = await insertRunningRun(agent.companyId, agent.agentId);
+    const attached = makeQueuedRecovery(async () => { await db.update(agentWakeupRequests).set({ runId: winner.id, updatedAt: new Date() }).where(eq(agentWakeupRequests.id, attachedId)); });
+    await attached.recover(1_000);
+    const [attachedWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, attachedId));
+    expect(attachedWake).toMatchObject({ status: "queued", runId: winner.id });
+    expect(attached.effects.queueEvents).toBe(0);
+  });
+
+  it("preserves a fresh reverse-linked heartbeat while refusing to orphan its stale wake", async () => {
+    const agent = await seedRunnableAgent(), reverseId = await insertOrphanWake(agent.companyId, agent.agentId);
+    const reverseRunId = randomUUID(), freshAt = new Date();
+    await db.insert(heartbeatRuns).values({ id: reverseRunId, companyId: agent.companyId, agentId: agent.agentId, invocationSource: "automation", triggerDetail: "system", status: "queued", wakeupRequestId: reverseId, contextSnapshot: {}, startedAt: null, createdAt: freshAt, updatedAt: freshAt });
+    const recovery = makeQueuedRecovery();
+    await recovery.recover(1_000);
+    const [wakeup] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, reverseId));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, reverseRunId));
+    expect(wakeup).toMatchObject({ status: "queued", runId: null });
+    expect(run).toMatchObject({ status: "queued", errorCode: null, finishedAt: null, wakeupRequestId: reverseId });
+    expect(recovery.effects.queueEvents).toBe(0);
   });
 
   it("marks a failed mission_main_executor_unblock blocked without emitting a Human Operator request (boundary)", async () => {
