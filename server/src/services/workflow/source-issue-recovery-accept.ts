@@ -12,6 +12,7 @@ import { latestTerminalDecision, recoverTerminalRun } from "./run-recovery-autho
 import { evaluateRecoveryChannels } from "./run-terminal-recovery-gate.js";
 import { isRunRecoveryServiceEnabled } from "./run-reopen-guard-flag.js";
 import { resumeWorkflowRun } from "./workflow-store.js";
+import type { OwnerHumanTx } from "../missions/owner-human-request-contract.js";
 import { HttpError } from "../../errors.js";
 import type { AutomaticSourceRecovery } from "./source-issue-native-resume.js";
 import { reviveAuthorizedFailureCascade } from "./failure-cascade-recovery.js";
@@ -89,7 +90,7 @@ type SourceResumeInput = {
   ownerAction?: { ownerActionIssueId: string; missionId: string; decisionCommentId: string };
 };
 
-async function ownerActionResumeIsCurrent(tx: Db, input: Pick<SourceResumeInput, "run" | "issueId" | "ownerAction">): Promise<boolean> {
+async function ownerActionResumeIsCurrent(tx: OwnerHumanTx, input: Pick<SourceResumeInput, "run" | "issueId" | "ownerAction">): Promise<boolean> {
   const action = input.ownerAction, missionId = input.run.missionId;
   if (!action || !missionId || action.missionId !== missionId) return false;
   const [mission] = await tx.select({ ownerAgentId: missions.ownerAgentId }).from(missions).where(and(
@@ -106,7 +107,7 @@ async function ownerActionResumeIsCurrent(tx: Db, input: Pick<SourceResumeInput,
     eq(issues.id, input.issueId), eq(issues.companyId, input.run.companyId), eq(issues.missionId, missionId)));
   if (!source || !target || target.hiddenAt) return false;
 
-  const latest = await loadLatestMissionOwnerDecision({ db: tx, companyId: input.run.companyId,
+  const latest = await loadLatestMissionOwnerDecision({ db: tx as unknown as Db, companyId: input.run.companyId,
     missionId, ownerActionIssueId: action.ownerActionIssueId });
   if (!action.decisionCommentId) {
     const wait = await readExactOwnerRetryHumanWait(tx, { companyId: input.run.companyId, missionId,
@@ -182,7 +183,7 @@ export async function queueSourceIssueResume(db: Db, input: SourceResumeInput): 
         const [issue] = await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.id, input.issueId),
           eq(issues.companyId, run.companyId), ...(run.missionId ? [eq(issues.missionId, run.missionId)] : [])));
         if (!issue) return false;
-        if (input.ownerAction && !await ownerActionResumeIsCurrent(t, { run, issueId: input.issueId, ownerAction: input.ownerAction })) return false;
+        if (input.ownerAction && !await ownerActionResumeIsCurrent(tx, { run, issueId: input.issueId, ownerAction: input.ownerAction })) return false;
         const oe = input.ownerExecution;
         if (oe && (run.id !== oe.workflowRunId || run.missionId !== oe.missionId || stepRun.id !== oe.stepRunId
           || run.dispatchAuthorityVersion !== oe.expectedAuthorityVersion

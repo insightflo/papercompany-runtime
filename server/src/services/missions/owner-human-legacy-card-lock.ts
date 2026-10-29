@@ -10,9 +10,11 @@ import type { OwnerHumanTx } from "./owner-human-request-contract.js";
 
 const ownerUnblockOrigin = "mission_main_executor_unblock";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const invalidScope = (): never => { throw unprocessable("Legacy human request target is not bound to its company mission", {
-  code: "owner_human_target_scope_unproven",
-}); };
+function invalidScope(): never {
+  throw unprocessable("Legacy human request target is not bound to its company mission", {
+    code: "owner_human_target_scope_unproven",
+  });
+}
 
 function isPayload(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -82,18 +84,20 @@ export async function lockLegacyOwnerHumanCardMission(
   const [observedOwner] = await tx.select({ companyId: issues.companyId, missionId: issues.missionId,
     originKind: issues.originKind }).from(issues).where(eq(issues.id, input.issueId));
   if (!observedOwner || observedOwner.companyId !== companyId || observedOwner.originKind !== ownerUnblockOrigin) return;
+  const ownerMissionId = observedOwner.missionId;
 
   const context = operatorDecisionSourceContextSchema.safeParse(input.sourceContext);
-  const snapshot = context.success ? context.data.targetSnapshot : null;
-  if (!context.success || !context.data.missionId || !uuidPattern.test(context.data.missionId)
-    || !observedOwner.missionId || context.data.missionId !== observedOwner.missionId
-    || !snapshot?.issueId || snapshot.issueId !== input.issueId
+  if (!context.success) invalidScope();
+  const missionId = context.data.missionId;
+  const snapshot = context.data.targetSnapshot;
+  if (!missionId || !uuidPattern.test(missionId) || !ownerMissionId || missionId !== ownerMissionId
+    || !snapshot || !snapshot.issueId || snapshot.issueId !== input.issueId
     || (snapshot.workflowRunStatus != null && snapshot.workflowRunId == null)
     || (snapshot.stepRunStatus != null && snapshot.stepRunId == null)
     || !uuidPattern.test(input.sourceId) || input.requestKey !== `moi1:${input.sourceId}`) invalidScope();
 
   const [mission] = await tx.select({ id: missions.id }).from(missions).where(and(
-    eq(missions.id, observedOwner.missionId), eq(missions.companyId, companyId),
+    eq(missions.id, missionId), eq(missions.companyId, companyId),
   )).for("update");
   if (!mission) invalidScope();
 
@@ -101,10 +105,10 @@ export async function lockLegacyOwnerHumanCardMission(
     originKind: issues.originKind, originId: issues.originId }).from(issues).where(and(
     eq(issues.id, input.issueId), eq(issues.companyId, companyId),
   ));
-  if (!owner || owner.missionId !== observedOwner.missionId || owner.originKind !== ownerUnblockOrigin
+  if (!owner || owner.missionId !== missionId || owner.originKind !== ownerUnblockOrigin
     || !owner.originId || !uuidPattern.test(owner.originId)) invalidScope();
   const [source] = await tx.select({ id: issues.id }).from(issues).where(and(
-    eq(issues.id, owner.originId), eq(issues.companyId, companyId), eq(issues.missionId, owner.missionId),
+    eq(issues.id, owner.originId), eq(issues.companyId, companyId), eq(issues.missionId, missionId),
   ));
   if (!source) invalidScope();
 
@@ -118,7 +122,7 @@ export async function lockLegacyOwnerHumanCardMission(
     payload: workflowTransitionEvents.payload }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.id, input.sourceId), eq(workflowTransitionEvents.companyId, companyId),
   ));
-  if (!event || event.missionId !== owner.missionId || event.issueId !== input.issueId || !isPayload(event.payload)
+  if (!event || event.missionId !== missionId || event.issueId !== input.issueId || !isPayload(event.payload)
     || !hasSupportedEventBinding(event, input.issueId, source.id)) invalidScope();
   const payload = event.payload;
   if (event.heartbeatRunId) {
@@ -139,7 +143,7 @@ export async function lockLegacyOwnerHumanCardMission(
   const runId = runIds[0];
   if (runId) {
     const [run] = await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
-      eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, owner.missionId),
+      eq(workflowRuns.id, runId), eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId),
     ));
     if (!run) invalidScope();
   }
@@ -153,7 +157,7 @@ export async function lockLegacyOwnerHumanCardMission(
       missionId: workflowRuns.missionId }).from(workflowStepRuns)
       .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
       .where(eq(workflowStepRuns.id, stepId));
-    if (!step || step.companyId !== companyId || step.missionId !== owner.missionId
+    if (!step || step.companyId !== companyId || step.missionId !== missionId
       || (runId !== undefined && step.workflowRunId !== runId)
       || (snapshot.executionGeneration != null && step.executionGeneration !== snapshot.executionGeneration)) invalidScope();
   } else if (snapshot.stepRunStatus != null || snapshot.executionGeneration != null) invalidScope();

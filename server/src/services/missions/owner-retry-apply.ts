@@ -2,11 +2,12 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, missions, workflowRuns,
   workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { loadExecutionDefinition } from "../workflow/execution-definition.js";
+import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { loadLatestMissionOwnerDecision, MISSION_OWNER_DECISION_EVENT_TYPE,
   MISSION_OWNER_DECISION_SOURCE, MISSION_OWNER_RECOVERY_LAYER } from "./mission-owner-recovery-ledger.js";
 import { buildMissionOwnerDecisionWakeupIdempotencyKey } from "./mission-owner-recovery-events.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
-import { isQaLikeStep, resolveProducerStepIdFromDag, type DagStepLike } from "./supervision-helpers.js";
+import { isQaLikeStep, resolveProducerStepIdFromDag } from "./supervision-helpers.js";
 import { isQaRecoveryLive, resolveRecoveryOwnership } from "./recovery-ownership-guard.js";
 import { readExactOwnerRetryHumanWait, type OwnerRetryHumanWaitContext,
   type OwnerRetryHumanWaitVerdict } from "./owner-retry-human-wait.js";
@@ -114,25 +115,23 @@ async function producerReworkAllowed(tx: CheckInputTx, input: AutomaticOwnerRetr
     eq(workflowRuns.companyId, input.companyId), eq(workflowRuns.missionId, input.missionId))).for("share");
   if (!run) return { allowed: false, reopenDone: false };
   const execution = await loadExecutionDefinition(tx as unknown as Db, run.id, { requireHistorical: false });
-  const steps = execution.steps as DagStepLike[];
-  const originStep = steps.find((step) => (step as { id?: string }).id === originRunRow.stepId);
-  const producerStep = steps.find((step) => (step as { id?: string }).id === producerRunRow.stepId);
+  const steps: WorkflowStep[] = execution.steps;
+  const originStep = steps.find((step) => step.id === originRunRow.stepId);
+  const producerStep = steps.find((step) => step.id === producerRunRow.stepId);
   if (!originStep || !producerStep || resolveProducerStepIdFromDag(originRunRow.stepId ?? "", steps)
     !== producerRunRow.stepId) return { allowed: false, reopenDone: false };
-  const hasLoop = steps.some((step) => Array.isArray((step as { conditionalDependencies?: unknown }).conditionalDependencies)
-    && ((step as { conditionalDependencies: Array<{ isBackEdge?: boolean }> }).conditionalDependencies)
-      .some((edge) => edge.isBackEdge === true));
+  const hasLoop = steps.some((step) =>
+    (step.conditionalDependencies ?? []).some((edge) => edge.isBackEdge === true));
   if (hasLoop !== context.missionHasNativeLoop) return { allowed: false, reopenDone: false };
-  const edges = (producerStep as { conditionalDependencies?: Array<{ isBackEdge?: boolean; maxIterations?: number }> })
-    .conditionalDependencies ?? [];
+  const edges = producerStep.conditionalDependencies ?? [];
   const maxIterations = edges.filter((edge) => edge.isBackEdge && typeof edge.maxIterations === "number")
     .reduce((max, edge) => Math.max(max, edge.maxIterations ?? 0), 0);
   if (hasLoop && maxIterations > (producerRunRow.iterationIndex ?? 0)) return { allowed: false, reopenDone: false };
   if (context.qaGateIssueId) {
     const [qaRunRow] = await tx.select({ stepId: workflowStepRuns.stepId }).from(workflowStepRuns)
       .where(and(eq(workflowStepRuns.issueId, context.qaGateIssueId), eq(workflowStepRuns.workflowRunId, run.id)));
-    const qaStep = qaRunRow && execution.steps.find((step) => (step as { id?: string }).id === qaRunRow.stepId);
-    if (!qaStep || !isQaLikeStep(qaStep as Parameters<typeof isQaLikeStep>[0])) return { allowed: false, reopenDone: false };
+    const qaStep = qaRunRow && execution.steps.find((step) => step.id === qaRunRow.stepId);
+    if (!qaStep || !isQaLikeStep(qaStep)) return { allowed: false, reopenDone: false };
   }
   const [product] = await tx.select({ updatedAt: issueWorkProducts.updatedAt }).from(issueWorkProducts).where(and(
     eq(issueWorkProducts.companyId, input.companyId), eq(issueWorkProducts.issueId, source.id),
