@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, heartbeatRuns, withTxTimeout } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import { lifecycleActiveClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -55,10 +56,11 @@ function isPreStart(run: Run) {
 
 export function createHeartbeatQueuedStaleRecovery(deps: HeartbeatQueuedStaleRecoveryDeps) {
   async function liveOccupiedSlots(conn: Db, companyId: string, agentId: string) {
+    const activeClause = await lifecycleActiveClause(conn);
     const runs = await conn.select().from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, agentId),
-      eq(heartbeatRuns.status, "running"),
+      activeClause,
     ));
     const liveIds = new Set<string>();
     for (const run of runs) {

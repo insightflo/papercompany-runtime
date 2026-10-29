@@ -9,6 +9,7 @@ import { MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE, readTargetSnapshot } from "./ope
 import { activePlanDecisionHash } from "./operator-decision-server-context.js";
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
 import { connectOwnerHumanRequestCard, isOwnerHumanLifetimeCard, lockOwnerHumanRequestCard } from "./missions/owner-human-request-card.js";
+import { lockLegacyOwnerHumanCardMission } from "./missions/owner-human-legacy-card-lock.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
@@ -81,6 +82,7 @@ export function operatorDecisionCreateService(db: Db, { read, conflictFor }: Ope
       committed = await db.transaction(async (tx) => {
         const ownerCard = await lockOwnerHumanRequestCard(tx, companyId, validated.input, actor);
         if (ownerCard?.card) return { id: ownerCard.card.id, replayed: true };
+        await lockLegacyOwnerHumanCardMission(tx, companyId, validated.input);
         let storedSourceContext: typeof operatorDecisions.$inferInsert.sourceContext = validated.input.sourceContext;
         if (validated.input.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE
           && validated.input.sourceContext.missionId) {

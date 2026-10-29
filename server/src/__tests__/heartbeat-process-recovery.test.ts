@@ -20,7 +20,10 @@ import {
   agentWakeupRequests,
   companies,
   heartbeatRunEvents,
+  heartbeatRunFinalizationSteps,
+  heartbeatRunFinalizations,
   heartbeatRuns,
+  instanceSettings,
   issueApprovals, issues,
   issueComments,
   missionSessions,
@@ -31,6 +34,7 @@ import {
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.ts";
 import { heartbeatService, setHeartbeatRunStatus } from "../services/heartbeat.ts";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { createHeartbeatQueuedStaleRecovery } from "../services/heartbeat-queued-stale-recovery.ts";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
 import { approvalWaitFixtures } from "./helpers/approval-wait-fixtures.js";
@@ -167,6 +171,7 @@ describe("heartbeat orphaned process recovery", () => {
   }, 60_000);
 
   afterEach(async () => {
+    await waitForHeartbeatExecutionsToDrain(db, 5_000);
     // fire-and-forget wiki hooks(recordFailure)가 비동기 — cleanup delete 전에 settle해서
     // company/agent 삭제 후 늦은 insert가 도착해 agent_wiki_entries FK error가 나는 race를 방지.
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -179,6 +184,7 @@ describe("heartbeat orphaned process recovery", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     tempDirs.clear();
+    await db.delete(instanceSettings);
     await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(workflowStepRuns);
@@ -190,6 +196,8 @@ describe("heartbeat orphaned process recovery", () => {
     await db.delete(missions);
     await db.delete(companySecrets);
     await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRunFinalizationSteps);
+    await db.delete(heartbeatRunFinalizations);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
@@ -200,6 +208,7 @@ describe("heartbeat orphaned process recovery", () => {
   });
 
   afterAll(async () => {
+    if (db) await waitForHeartbeatExecutionsToDrain(db, 5_000);
     for (const child of childProcesses) {
       child.kill("SIGKILL");
     }
@@ -368,12 +377,23 @@ describe("heartbeat orphaned process recovery", () => {
     return { recover: recovery, effects };
   }
 
-  it("preserves a full-capacity queued heartbeat unchanged, then starts that same run once", async () => {
+  async function setFinalizationV1(enabled: boolean) {
+    await db.delete(instanceSettings);
+    await db.insert(instanceSettings).values({
+      singletonKey: "default", general: {}, experimental: { enableHeartbeatFinalizationV1: enabled },
+    });
+  }
+
+  it.each([{ terminal: false }, { terminal: true }])("preserves the original queue behind a live blocker (terminal-unsettled v1=$terminal)", async ({ terminal }) => {
+    await setFinalizationV1(terminal);
     const command = createCountingCommand();
     const queued = await seedRunFixture({ adapterType: "process", adapterConfig: { command: command.command }, runStatus: "queued", agentStatus: "active", maxConcurrentRuns: 1, queuedAt: staleQueuedAt() });
     const blocker = await insertRunningRun(queued.companyId, queued.agentId), child = spawnAliveProcess();
     childProcesses.add(child); runningProcesses.set(blocker.id, { child, graceSec: 1 });
     await db.update(heartbeatRuns).set({ processPid: child.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
+    if (terminal) await db.update(heartbeatRuns).set({
+      status: "succeeded", finishedAt: new Date(), finalizationVersion: 1, settledAt: null,
+    }).where(eq(heartbeatRuns.id, blocker.id));
     const [beforeRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued.runId));
     const [beforeWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
     expect((await heartbeatService(db).reapOrphanedRuns({ queuedStaleThresholdMs: 1_000 })).reaped).toBe(0);
@@ -381,10 +401,17 @@ describe("heartbeat orphaned process recovery", () => {
     const [waitingWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
     expect(waitingRun).toMatchObject({ id: beforeRun.id, status: "queued", wakeupRequestId: beforeRun.wakeupRequestId, issueId: beforeRun.issueId, createdAt: beforeRun.createdAt, updatedAt: beforeRun.updatedAt });
     expect(waitingWake).toMatchObject({ id: beforeWake.id, status: "pending", runId: queued.runId, updatedAt: beforeWake.updatedAt });
+    const [waitingBlocker] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, blocker.id));
+    expect(waitingBlocker).toMatchObject(terminal
+      ? { status: "succeeded", finalizationVersion: 1, settledAt: null }
+      : { status: "running" });
+    expect(fs.existsSync(command.countPath)).toBe(false);
     const [issue] = await db.select().from(issues).where(eq(issues.id, queued.issueId));
     expect(issue).toMatchObject({ checkoutRunId: queued.runId, executionRunId: queued.runId });
     child.kill("SIGKILL"); await waitForPidExit(child.pid ?? 0); runningProcesses.delete(blocker.id);
-    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() }).where(eq(heartbeatRuns.id, blocker.id));
+    await db.update(heartbeatRuns).set(terminal
+      ? { settledAt: new Date(), updatedAt: new Date() }
+      : { status: "succeeded", finishedAt: new Date(), updatedAt: new Date() }).where(eq(heartbeatRuns.id, blocker.id));
     await heartbeatService(db).resumeQueuedRuns(queued.agentId);
     expect(await waitForRunStatus(db, queued.runId, "succeeded")).toMatchObject({ id: queued.runId, wakeupRequestId: queued.wakeupRequestId });
     expect(fs.readFileSync(command.countPath, "utf8")).toBe("1");
@@ -1068,16 +1095,20 @@ describe("heartbeat orphaned process recovery", () => {
     { capacity: 2, live: 2, statusOnly: false, expected: "queued" },
     { capacity: 2, live: 0, statusOnly: true, expected: "failed" },
     { capacity: 1, live: 1, resizeTo: 2, expected: "failed" },
-  ])("protects only a positively full current capacity ($capacity/$live)", async ({ capacity, live, statusOnly, resizeTo, expected }) => {
+    { capacity: 1, live: 0, statusOnly: false, terminal: true, finalization: true, expected: "failed" },
+    { capacity: 1, live: 1, statusOnly: false, terminal: true, finalization: false, expected: "failed" },
+  ])("protects only a positively full current capacity ($capacity/$live)", async ({ capacity, live, statusOnly, resizeTo, terminal, finalization, expected }) => {
+    if (finalization !== undefined) await setFinalizationV1(finalization);
     const target = await seedRunFixture({ runStatus: "queued", includeIssue: false, agentStatus: "active", maxConcurrentRuns: capacity, queuedAt: staleQueuedAt() });
     const children: ChildProcess[] = [];
-    for (let i = 0; i < Math.max(live, Number(statusOnly)); i++) {
+    for (let i = 0; i < Math.max(live, Number(Boolean(statusOnly)), Number(Boolean(terminal))); i++) {
       const blocker = await insertRunningRun(target.companyId, target.agentId);
       if (i < live) {
         const child = spawnAliveProcess(); childProcesses.add(child); children.push(child);
         await db.update(heartbeatRuns).set({ processPid: child.pid ?? null }).where(eq(heartbeatRuns.id, blocker.id));
         runningProcesses.set(blocker.id, { child, graceSec: 1 });
       }
+      if (terminal) await db.update(heartbeatRuns).set({ status: "succeeded", finalizationVersion: 1, settledAt: null }).where(eq(heartbeatRuns.id, blocker.id));
     }
     const recovery = makeQueuedRecovery(resizeTo ? async () => {
       await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: resizeTo } } }).where(eq(agents.id, target.agentId));

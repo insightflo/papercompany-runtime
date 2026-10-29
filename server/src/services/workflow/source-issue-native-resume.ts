@@ -115,19 +115,12 @@ export async function dispatchSourceIssueNativeResume(
   // [BLOCKER1] durable crash-window recovery FIRST: a prior cap-override forward may have committed
   //   (run=running/step=pending/issue=todo/audit=pending) and crashed before wake. resolve any existing
   //   audit for this decision before the failed/completed gate. returns null when no audit → fresh/normal path.
-  if (input.ownerAction && !input.ownerExecution) {
+  if (input.ownerAction?.decisionCommentId && !input.ownerExecution) {
     const recovered = await recoverOwnerCapOverride(db, { companyId: input.companyId, issueId: input.issueId, allowBlockedIssue: input.allowBlockedIssue, ownerAction: input.ownerAction, wakeFn: input.wakeFn });
     if (recovered) return recovered;
   }
   const [stepRun] = await db
-    .select({
-      id: workflowStepRuns.id,
-      workflowRunId: workflowStepRuns.workflowRunId,
-      stepId: workflowStepRuns.stepId,
-      status: workflowStepRuns.status,
-      completedAt: workflowStepRuns.completedAt,
-      metadata: workflowStepRuns.metadata,
-    })
+    .select()
     .from(workflowStepRuns)
     .where(eq(workflowStepRuns.issueId, input.issueId))
     .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt))
@@ -154,7 +147,7 @@ export async function dispatchSourceIssueNativeResume(
 
   // [cap-override] failed run + completed producer(at/beyond cap) + owner action → cap 초과 1회 retry.
   //   자동(ownerExecution) 입력은 특권 분기에 닿지 않는다 — blocked 로 끝난다.
-  if (run.status === "failed" && stepRun.status === "completed" && input.ownerAction && !input.ownerExecution) {
+  if (run.status === "failed" && stepRun.status === "completed" && input.ownerAction?.decisionCommentId && !input.ownerExecution) {
     return applyOwnerCapOverrideRetry(db, {
       companyId: input.companyId,
       issueId: input.issueId,
@@ -265,7 +258,7 @@ export async function dispatchSourceIssueNativeResume(
   const queued = await queueSourceIssueResume(db, {
     run, definition, step, stepRun, issueId: input.issueId,
     allowBlockedIssue: input.allowBlockedIssue ?? true,
-    wakeFn: input.wakeFn, ownerExecution: input.ownerExecution,
+    wakeFn: input.wakeFn, ownerExecution: input.ownerExecution, ownerAction: input.ownerAction,
   });
   if (!queued) {
     return { kind: "report_only", reason: "wake_rejected",

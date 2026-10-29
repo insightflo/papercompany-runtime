@@ -21,6 +21,8 @@ import type { MissionServiceDeps } from "../missions.js";
 import { buildWorkProductReuseWakeIdempotencyKey } from "./mission-owner-recovery-events.js";
 import { hasStructuredSourceRecoveryDecision, loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { acquireOwnerRetryLock, resolveOwnerRetryKey } from "./mission-owner-retry-identity.js";
+import { applyAutomaticOwnerRetryIfClear, checkAutomaticOwnerRetryWait, isCapOverrideRetryCandidate,
+  loadLatestFailureReasonCode, loadQaGateVerdictMap } from "./owner-retry-apply.js";
 import {
   DEAD_TARGET_RETRY_BREAKER_THRESHOLD,
   countOwnerDecisionNotApplied,
@@ -110,19 +112,6 @@ function readWakeupResultDetailReason(value: unknown): string | null {
   const reason = (value as { reason?: unknown }).reason;
   return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
-// [integration blocker] dispatchSourceIssueNativeResume 의 cap-override 진입 조건과 동일: source issue 의
-//   최신 step run 의 run 이 failed 이고 step 이 completed. 이면 supervision 이 producer issue 를 먼저 reopen
-//   하지 않고 cap-override 의 atomic reopen/rollback 에 맡긴다. under-cap/running 정상 경로는 기존 reopen 유지.
-async function isCapOverrideRetryCandidate(db: Db, companyId: string, sourceIssueId: string): Promise<boolean> {
-  const [stepRun] = await db.select({ status: workflowStepRuns.status, workflowRunId: workflowStepRuns.workflowRunId })
-    .from(workflowStepRuns).where(eq(workflowStepRuns.issueId, sourceIssueId))
-    .orderBy(desc(workflowStepRuns.startedAt), desc(workflowStepRuns.completedAt)).limit(1);
-  if (!stepRun || stepRun.status !== "completed") return false;
-  const [run] = await db.select({ status: workflowRuns.status }).from(workflowRuns)
-    .where(and(eq(workflowRuns.id, stepRun.workflowRunId), eq(workflowRuns.companyId, companyId))).limit(1);
-  return Boolean(run && run.status === "failed");
-}
-
 function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): string {
   switch (action.type) {
     case "dispatch_missing_step":
@@ -160,30 +149,6 @@ function isPlanSubmissionRecoveryIssueStatus(status: string): boolean {
 
 const REJECTED_PLAN_RECOVERY_PROMPT_REVISION = "v2";
 
-// [P3] authorizeProducerRework 용 QA gate verdict 맵 로드. issue.originId(QA gate)의 최신 verdict.
-async function loadQaGateVerdictMap(
-  db: Db,
-  companyId: string,
-  qaGateIssueId: string | null,
-): Promise<Map<string, { verdict: string | null; observedAt: Date | null }>> {
-  const map = new Map<string, { verdict: string | null; observedAt: Date | null }>();
-  if (!qaGateIssueId) return map;
-  const rows = await db
-    .select({ verdict: workflowTransitionEvents.verdict, observedAt: workflowTransitionEvents.createdAt })
-    .from(workflowTransitionEvents)
-    .where(and(
-      eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.issueId, qaGateIssueId),
-      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-    ))
-    .orderBy(desc(workflowTransitionEvents.createdAt))
-    .limit(5);
-  if (rows.length > 0) {
-    map.set(qaGateIssueId, { verdict: rows[0].verdict, observedAt: rows[0].observedAt });
-  }
-  return map;
-}
-
 // [P3] originId 가 실제 workflow QA gate step 이면 그 id, 아니면 null. QA chain 오인 방지(codex 정정 1).
 function resolveQaGateIssueId(input: {
   originId: string | null;
@@ -202,21 +167,6 @@ function resolveQaGateIssueId(input: {
   // supervision-helpers 의 isQaLikeStep 사용(QA 이름/title/한국어 검수/validate/audit/qaType 포괄, codex 보완 1).
   if (step && isQaLikeStep(step as Parameters<typeof isQaLikeStep>[0])) return input.originId;
   return null;
-}
-
-// [P3] source 의 최신 heartbeat errorCode(guardrail 판별용).
-async function loadLatestFailureReasonCode(db: Db, companyId: string, issueId: string): Promise<string | null> {
-  const row = await db.select({ errorCode: heartbeatRuns.errorCode })
-    .from(heartbeatRuns)
-    .where(and(
-      eq(heartbeatRuns.companyId, companyId),
-      eq(heartbeatRuns.issueId, issueId),
-      inArray(heartbeatRuns.status, ["failed", "timed_out"]),
-    ))
-    .orderBy(desc(heartbeatRuns.createdAt))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  return row?.errorCode ?? null;
 }
 
 // [P3] source 의 active workProduct updatedAt(current-generation 기준, codex 정정 4).
@@ -1523,6 +1473,15 @@ export function createSupervision({ db, deps, ownerActions }: {
                 };
                 findings.push(`owner_action_grace_default_dead_target: ${label} source=${graceSourceLabel} is not actionable (${graceSource ? (graceSource.hiddenAt ? "hidden" : `terminal status=${graceSource.status}`) : "missing"}${(stepRowsByIssueId.get(issue.originId) ?? []).length > 0 ? "; producer-rework candidates exist so application decides" : ""}, prior not_applied=${gracePriorNotApplied}) — auto-default switched retry_source_issue to escalate; human decision card=${escalation.ensured ? "ensured" : `skipped(${escalation.reason})`}. Loop escape: replan, retry a live source, or cancel this recovery`);
               } else {
+                const graceWait = await checkAutomaticOwnerRetryWait(db, {
+                  companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                  ownerActionIssueId: issue.id, ownerActionStatus: issue.status,
+                  originalSourceIssueId: issue.originId, retryIssueId: issue.originId,
+                });
+                if (graceWait.kind !== "clear") {
+                  findings.push(`owner_action_grace_default_waiting: ${label} exact human wait=${graceWait.kind}${graceWait.kind === "unresolved" ? ` reason=${graceWait.reasonCode}` : ` bindings=${graceWait.bindingIds.join(",")}`}`);
+                  continue;
+                }
                 autoDefaulted = true;
                 ownerDecision = {
                   decision: "retry_source_issue",
@@ -1577,6 +1536,7 @@ export function createSupervision({ db, deps, ownerActions }: {
                 // Structured fields only — nextAction free text is never producer-target authority.
                 const ownerReworkRef = ownerDecision.reworkTargetRef ?? null;
                 let sourceIssueId: string | null = null;
+                let automaticProducerIdentity: { originStepRunId: string; producerStepRunId: string } | null = null;
                 const resolveOwnerIssueRef = (ref: string | null | undefined) => {
                   if (!ref) return null;
                   const target = missionIssues.find((mi) => (mi.identifier ?? null) === ref || mi.id === ref) ?? null;
@@ -1613,6 +1573,10 @@ export function createSupervision({ db, deps, ownerActions }: {
                       if (producerRow?.stepRun.issueId) {
                         sourceIssueId = producerRow.stepRun.issueId;
                         producerReworkResolved = true;
+                        const originStepRun = originStepRows[0]?.stepRun;
+                        if (originStepRun?.id) automaticProducerIdentity = {
+                          originStepRunId: originStepRun.id, producerStepRunId: producerRow.stepRun.id,
+                        };
                         // [Patch 2 cap-exhausted] native loop 의 rework budget = producer iterationIndex vs
                         //   producer back-edge 들의 maxIterations 최댓값(loop-driver 가 쓰는 producer-level cap 과 동일 기준).
                         const producerIters = producerRow.stepRun.iterationIndex ?? 0;
@@ -1698,13 +1662,13 @@ export function createSupervision({ db, deps, ownerActions }: {
                   await handleDeadTargetNotApplied("source_unresolvable", "owner-action issue has no canonical originId source issue", "none", sourceLabel);
                   break;
                 }
-                const sourceCandidate = await db
+                let sourceCandidate = await db
                   .select()
                   .from(issues)
                   .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, mission.companyId)))
                   .limit(1)
                   .then((rows) => rows[0] ?? null);
-                const sourceCandidateLabel = sourceCandidate ? (sourceCandidate.identifier ?? sourceCandidate.id) : sourceLabel;
+                let sourceCandidateLabel = sourceCandidate ? (sourceCandidate.identifier ?? sourceCandidate.id) : sourceLabel;
                 if (!sourceCandidate) {
                   await handleDeadTargetNotApplied("source_missing", "canonical source issue is missing or outside this company", sourceIssueId, sourceCandidateLabel);
                   break;
@@ -1729,6 +1693,17 @@ export function createSupervision({ db, deps, ownerActions }: {
                 if (sourcePlanGateReason) {
                   findings.push(summarizeOwnerDecisionNotApplied({ ownerActionLabel: label, sourceLabel: sourceCandidateLabel, reason: sourcePlanGateReason }));
                   break;
+                }
+                if (autoDefaulted) {
+                  const resolvedWait = await checkAutomaticOwnerRetryWait(db, {
+                    companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                    ownerActionIssueId: issue.id, ownerActionStatus: issue.status,
+                    originalSourceIssueId: issue.originId!, retryIssueId: sourceCandidate.id,
+                  });
+                  if (resolvedWait.kind !== "clear") {
+                    findings.push(`owner_action_grace_default_waiting: ${label} exact human wait=${resolvedWait.kind}${resolvedWait.kind === "unresolved" ? ` reason=${resolvedWait.reasonCode}` : ` bindings=${resolvedWait.bindingIds.join(",")}`}`);
+                    break;
+                  }
                 }
                 const staleValidationGateRetry = await requeueStaleValidationGateBeforeOwnerRetry({ language: supervisionLanguage,
                   db,
@@ -2093,13 +2068,13 @@ export function createSupervision({ db, deps, ownerActions }: {
                 let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchOwnerDecisionWakeups ? "skipped_no_assignee" : "not_requested";
                 // [P3 producer rework authorization] upstream producer rework(isProducerRework ∧ source≠origin)
                 //   만 authorize 적용. 일반 source self-retry(sourceCandidate===origin)는 기존 reopen 계약 유지(codex 정정 2).
-                let reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"];
+                let reopenStatuses = isProducerRework ? ["blocked", "todo", "backlog", "done"] : ["blocked", "todo", "backlog"], authQaGateId: string | null = null;
                 if (isProducerRework && sourceCandidate.id !== issue.originId) {
                   // 명시 reworkTarget 또는 current-gen REQUEST_CHANGES 만 producer reopen 허용(req 3, codex 계약 3).
                   // DAG-guess/guardrail/stale/unverified = deny+replan.
                   // [cap-oversight QA authority] origin 이 oversight 라 resolveQaGateIssueId 가 null 인
                   //   qa-cap 이슈는 설명의 QA step id 로 stepRows 를 직접 찾아 QA 게이트 이슈를 구한다.
-                  let authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
+                  authQaGateId = resolveQaGateIssueId({ originId: issue.originId, missionIssueById, stepRowsByIssueId });
                   if (!authQaGateId && isQaReworkCapOversightIssue(issue.description)) {
                     const capQaStepId = extractQaCapQaStepId(issue.description);
                     if (capQaStepId) {
@@ -2132,16 +2107,35 @@ export function createSupervision({ db, deps, ownerActions }: {
                   && !!sourceCandidate.assigneeAgentId
                   && !!deps.onOwnerDecisionRetrySourceIssueApplied;
                 const sourceIsWorkflowBacked = (stepRowsByIssueId.get(sourceCandidate.id)?.length ?? 0) > 0;
-                const shouldReopenToTodo = !capOverrideCandidate
+                let shouldReopenToTodo = !capOverrideCandidate
                   && (isProducerRework || (willDispatchWakeup && sourceIsWorkflowBacked));
-                if (shouldReopenToTodo) {
+                if (autoDefaulted) {
+                  const applied = await applyAutomaticOwnerRetryIfClear({
+                    db, companyId: mission.companyId, missionId: mission.id, ownerAgentId: mission.ownerAgentId,
+                    ownerActionIssueId: issue.id, ownerActionStatus: issue.status,
+                    originalSourceIssueId: issue.originId!, retryIssueId: sourceCandidate.id, retryTargetId: sourceCandidate.id,
+                    retryKey: idempotencyKey, applyKey: retryApplyIdempotencyKey, now, graceMs: 20 * 60 * 1000,
+                    dispatchRequested: Boolean(input.dispatchOwnerDecisionWakeups),
+                    callbackAvailable: Boolean(deps.onOwnerDecisionRetrySourceIssueApplied),
+                    producerRework: isProducerRework,
+                    producer: automaticProducerIdentity ? { ...automaticProducerIdentity, qaGateIssueId: authQaGateId,
+                      missionHasNativeLoop } : null,
+                  });
+                  if (applied.kind !== "applied") {
+                    findings.push(`owner_action_grace_default_not_applied: ${label} source=${sourceCandidateLabel} reason=${applied.reason}`);
+                    break;
+                  }
+                  sourceCandidate = applied.sourceIssue;
+                  sourceCandidateLabel = sourceCandidate.identifier ?? sourceCandidate.id;
+                  shouldReopenToTodo = applied.reopened;
+                } else if (shouldReopenToTodo) {
                   await db
                     .update(issues)
                     .set({ status: "todo", updatedAt: now, completedAt: null })
                     .where(and(eq(issues.id, sourceCandidate.id), eq(issues.companyId, mission.companyId), inArray(issues.status, reopenStatuses), isNull(issues.hiddenAt)));
                 }
                 const activeSourceWorkProducts = await loadActiveSourceIssueWorkProducts(db, mission.companyId, mission.id, sourceCandidate.id);
-                const retryComment = await issueService(db).addComment(
+                await issueService(db).addComment(
                   sourceCandidate.id,
                   buildRetrySourceIssueComment({
                     ownerActionIssueId: issue.id,
@@ -2157,15 +2151,10 @@ export function createSupervision({ db, deps, ownerActions }: {
                   }),
                   { agentId: mission.ownerAgentId },
                 );
-                await recordRecoveryAction({
-                  db,
-                  companyId: mission.companyId,
-                  missionId: mission.id,
-                  issueId: issue.id,
-                  sourceIssueId: sourceCandidate.id,
-                  idempotencyKey: retryApplyIdempotencyKey,
-                  eventType: "mission_owner_retry_apply",
-                  decision: "retry_source_issue",
+                if (!autoDefaulted) await recordRecoveryAction({
+                  db, companyId: mission.companyId, missionId: mission.id, issueId: issue.id,
+                  sourceIssueId: sourceCandidate.id, idempotencyKey: retryApplyIdempotencyKey,
+                  eventType: "mission_owner_retry_apply", decision: "retry_source_issue",
                   resultStatus: shouldReopenToTodo ? "todo" : sourceCandidate.status,
                 });
                 if (input.dispatchOwnerDecisionWakeups) {

@@ -270,7 +270,11 @@ describeDb("C08 current lifetime card creation", () => {
     expect(await operatorDecisionWriteService(db).resolve(first.decision.id,
       { actionId: "approve", selectedOptionIds: ["approve"], comment: "legacy" }, "board"))
       .toMatchObject({ applied: true, decision: { status: "resolved" } });
-    const structured = { ...legacy, decisionEventId: randomUUID(), structuredOptions: [{ id: "check", label: "확인" }] };
+    const structuredDecision = await recordMissionOwnerDecision({ db, issue: {
+      id: w.ownerActionIssueId, companyId: w.companyId, missionId: w.missionId,
+    }, submission: { decision: "request_input", reason: "구조화 선택지 검증", nextAction: "선택지 확인", evidence: "구조화 이벤트 근거" },
+    sourceIssueId: w.sourceId, heartbeatRunId: w.heartbeatRunId });
+    const structured = { ...legacy, decisionEventId: structuredDecision.eventId, structuredOptions: [{ id: "check", label: "확인" }] };
     expect((await createMissionOwnerHumanInputDecisionCard(db, structured)).decision.definition.options[0]!.id).toBe("check");
     const generic = { ...buildMissionOwnerHumanInputDecisionCard(legacy),
       requestKey: "ordinary", sourceType: "ordinary", sourceId: "ordinary" };
