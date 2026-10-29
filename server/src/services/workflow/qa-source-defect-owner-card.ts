@@ -19,8 +19,8 @@ import { buildHistoricalQaSourceDefectCard } from "./qa-source-defect-card-histo
 
 export const QA_SOURCE_DEFECT_CARD_SOURCE_TYPE = "workflow_qa_rejection";
 // 카드 definition 문구가 바뀌면 이 값을 올린다 — 문구가 requestHash에 포함되어 같은 키 재요청 conflict를 막는 유일한 안전장치.
-// v3: 선택지 추천(recommended) 표시 + 선택지별 반복되는 연관 업무 링크(evidenceRefs) 제거.
-export const QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION = 3;
+// v4: recurrence remains diagnostic, and collection advice needs typed upstream scope.
+export const QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION = 4;
 const QA_SOURCE_DEFECT_CARD_HASH_REPLACEMENT_REQUEST_KEY_LIMIT = 160;
 const QA_SOURCE_DEFECT_CARD_SOURCE_ID_REJECTION_LIMIT = 200;
 /** UTF-16 한도를 유지하되 경계에서 갈라지는 서로게이트 쌍은 통째로 제외한다. */
@@ -65,16 +65,17 @@ export function buildCardCreateInput(input: {
   readonly qaRefs: readonly QaSourceDefectCardQaRef[];
   readonly missionId: string | null;
   readonly linkIssueId: string | null;
-  /** [qa layer feedback loop] 재발 승격된 finding id — 표시 마커([source_data*])/팩트 렌더에만 쓴다. */
+  /** Retained for compatibility; recurrence cannot relabel findings. */
   readonly promotedFindingIds?: readonly string[];
+  readonly recurringFindingIds?: readonly string[];
 }) {
   const text = (en: string, ko: string) => input.language === "ko" ? ko : en;
-  const promotedIds = new Set(input.promotedFindingIds ?? []);
+  const recurringIds = new Set(input.recurringFindingIds ?? []);
   const findingsSorted = [...input.findings].sort((left, right) => left.id.localeCompare(right.id));
   const qaRefsSorted = [...input.qaRefs].sort((left, right) => left.qaStepId.localeCompare(right.qaStepId));
-  const layerBadge = (finding: WorkflowVerdictFinding) => `${finding.layer}${promotedIds.has(finding.id) ? "*" : ""}`;
+  const layerBadge = (finding: WorkflowVerdictFinding) => finding.layer;
   const findingsLines = findingsSorted.map((finding) => `- [${layerBadge(finding)}] (${finding.id}) ${finding.summary}`);
-  const promotedCount = findingsSorted.filter((finding) => promotedIds.has(finding.id)).length;
+  const recurringCount = findingsSorted.filter((finding) => recurringIds.has(finding.id)).length;
   const sourceOnly = findingsSorted.every((finding) => finding.layer === "source_data");
   const qaList = qaRefsSorted
     .map((ref) => `- QA step \`${ref.qaStepId}\`${ref.qaIssueId ? ` (issue ${ref.qaIssueId})` : ""}`)
@@ -87,7 +88,7 @@ export function buildCardCreateInput(input: {
         : sourceOnly ? text("All findings concern source data (collection stage)", "전부 원천 데이터(수집 단계) 문제")
           : findingsSorted.some((finding) => finding.layer === "source_data") ? text("Mixed: source data + output problems", "혼합: 원천 데이터 + 산출물 문제")
             : text("All findings concern output problems (production stage)", "전부 산출물(생산 단계) 문제"),
-      ...(promotedCount > 0 ? [text(`${promotedCount} recurring finding (repeated from the previous rejection)`, `같은 사유 재발 ${promotedCount}건(직전 반려에서 반복)`)] : []),
+      ...(recurringCount > 0 ? [text(`${recurringCount} finding(s) repeated; declared cause unchanged`, `같은 finding ${recurringCount}건 재발(선언 원인 유지)`)] : []),
     ].join(" — "), 200),
     status: "known" as const,
   };
@@ -122,10 +123,6 @@ export function buildCardCreateInput(input: {
     evidenceRefs: [],
   });
 
-  // [요청자 추천] humanReview.recommendedNextStep와 같은 판단을 선택지 배지(추천)로도 표시한다.
-  const rerunRecommendation = findingsSorted.length > 0 && sourceOnly
-    ? { reason: text("Producer rework cannot fix source data defects; re-running collection replaces the flawed source material.", "생산자 재작업으로는 원천 데이터 결함을 고칠 수 없습니다. 수집을 다시 실행해야 결함 있는 원천 자료가 교체됩니다.") }
-    : undefined;
   const reworkRecommendation = findingsSorted.length > 0 && !sourceOnly
     ? { reason: text("The defect is in the produced output; the producer can fix it through rework. If rework cannot solve it, consider replanning the mission.", "결함이 산출물 자체에 있어 생산자가 재작업으로 고칠 수 있습니다. 재작업으로 해결이 어렵다면 미션 재계획을 검토하세요.") }
     : undefined;
@@ -135,7 +132,7 @@ export function buildCardCreateInput(input: {
       option("rerun_source_collection", text("Run data collection again", "자료 수집 다시 실행"), text(
         "Choose this when the collected source material appears to be the cause. Ask the collection task to run again, replace the source material, and let the following work continue. Internal command: `retry_source_issue`.",
         "자료를 모으는 단계의 결과가 문제의 원인으로 보일 때 고르세요. 수집 단계 업무를 다시 실행해 원천 자료를 새로 만들고 이어지는 작업이 계속되도록 지시합니다. 내부 명령: `retry_source_issue`."),
-        rerunRecommendation),
+      ),
       option("extra_producer_rework", text("Allow one more producer rework", "생산자 재작업 1회 더 허용"), text(
         `Choose this when the output itself needs fixing. Allow the agent that creates it one more rework attempt, then request rework of its task. Used ${input.iteration}/${input.maxIterations}. Internal command: \`qaReworkCapBoost\` (+1), then \`retry_source_issue\`.`,
         `산출물(생산 단계의 결과물) 자체를 고쳐야 할 때 고르세요. 생산자(산출물을 만드는 에이전트)의 재작업을 1회 더 허용한 뒤 해당 업무의 재작업을 지시합니다. 현재 사용 ${input.iteration}/${input.maxIterations}회. 내부 명령: \`qaReworkCapBoost\`(+1), 이후 \`retry_source_issue\`.`),
@@ -172,6 +169,7 @@ export function buildCardCreateInput(input: {
       interpretation: truncateText([
         findingsSorted.length === 0 ? text("Quality review (QA) findings were not submitted (legacy review).", "품질검수(QA)의 결함 항목(findings)이 제출되지 않았습니다(구버전 판정).")
           : text("Quality review (QA) submitted a structured 'changes needed' verdict with findings.", "품질검수(QA) 단계가 '수정 필요' 판정을 구조화된 형식(findings)으로 제출했습니다."),
+        ...(recurringCount > 0 ? [text("Repeated finding IDs are diagnostic only; each finding keeps its declared cause.", "반복된 finding ID는 진단 정보일 뿐이며 각 항목의 선언 원인은 유지됩니다.")] : []),
         findingsSorted.length === 0 ? text("The defect scope is unknown. Inspect the quality review task and related evidence to determine whether the problem concerns source data or output before choosing an action.", "결함 범위는 확인되지 않았습니다. 처리 방침을 선택하기 전에 품질검수 업무와 관련 증거를 살펴 원천 데이터 문제인지 산출물 문제인지 확인해 주세요.") : sourceOnly ? text(
           "All rejection reasons concern source data: the original material from the collection stage. Rebuilding the output cannot fix it, so human judgment is requested instead of automatic producer rework.",
           "반려 사유 전부가 원천 데이터(수집 단계가 만든 원본 자료) 문제입니다. 생산자가 다시 만들어도 고쳐지지 않는 문제라 자동 재작업 대신 사람 판단을 요청합니다.") : text(
@@ -189,7 +187,7 @@ export function buildCardCreateInput(input: {
       unresolvedFacts: findingsSorted.length === 0 ? [text("QA submitted no findings. Only the exhausted rework limit is known; the defect scope is unknown.", "품질검수가 결함 항목을 제출하지 않았습니다. 재작업 한도에 도달한 사실만 알 수 있고 결함 범위는 확인되지 않았습니다.")] : [],
       questions: findingsSorted.length === 0 ? [text("Can you inspect the quality review task and related evidence to confirm the defect scope before choosing an action?", "처리 방침을 선택하기 전에 품질검수 업무와 관련 증거를 살펴 결함 범위를 확인할 수 있을까요?")] : sourceOnly ? [text("Would collecting the source material again fix the problem, or does the underlying cause need maintenance?", "자료를 다시 수집하면 해결될까요, 아니면 근본 원인을 고치는 유지보수 업무가 필요할까요?")]
         : [text("Can the producer fix the output through rework?", "생산자가 산출물을 다시 만들면 이 문제를 해결할 수 있을까요?")],
-      recommendedNextStep: findingsSorted.length === 0 ? text("First inspect the quality review task and related evidence to confirm the defect scope, then choose an action.", "먼저 품질검수 업무와 관련 증거를 살펴 결함 범위를 확인한 뒤 처리 방침을 선택해 주세요.") : sourceOnly ? text("Run data collection again (rerun_source_collection) is recommended: producer rework cannot fix source data defects.", "자료 수집 다시 실행(rerun_source_collection)을 권장합니다. 생산자 재작업으로는 원천 데이터 결함을 고칠 수 없습니다.")
+      recommendedNextStep: findingsSorted.length === 0 ? text("First inspect the quality review task and related evidence to confirm the defect scope, then choose an action.", "먼저 품질검수 업무와 관련 증거를 살펴 결함 범위를 확인한 뒤 처리 방침을 선택해 주세요.") : sourceOnly ? text("Review the source findings and confirm the affected input and approved scope before choosing an action.", "원천 결함 항목을 검토하고 영향을 받는 입력과 승인 범위를 확인한 뒤 조치를 선택해 주세요.")
         : text("Consider Allow one more producer rework (extra_producer_rework) or Replan the mission (replan_mission).", "생산자 재작업 1회 더 허용(extra_producer_rework) 또는 미션 재계획(replan_mission)을 검토해 주세요."),
       requiredReviewer: "human-operator",
     },
@@ -269,7 +267,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
   if (`qa-source-defect:v${QA_SOURCE_DEFECT_CARD_TEMPLATE_VERSION}:${sourceId}`.length > QA_SOURCE_DEFECT_CARD_HASH_REPLACEMENT_REQUEST_KEY_LIMIT
     && sourceId !== sourceId.normalize("NFC")) return { outcome: "failed",
     message: "QA source identity changes under NFC normalization in hash replacement path; rejected before supersede or write" };
-  // 두 생성 경로의 결정성을 위해 카드 입력 직전 승격을 1회 계산; 조회 실패는 선언 계층 유지.
+  // Both creation paths use the same cause-preserving recurrence diagnostics.
   const promotion = await resolveRecurrencePromotion(input);
   let language: SystemLanguage = "en";
   try {
@@ -285,6 +283,7 @@ export async function ensureQaSourceDefectOwnerCard(input: {
       build: (displayLanguage) => buildCardCreateInput({
         ...input, language: displayLanguage,
         findings: promotion.findings, promotedFindingIds: promotion.promotedFindingIds,
+        recurringFindingIds: promotion.recurringFindingIds,
       }),
     });
     return { outcome: result.replayed ? "replayed" : "created", decisionId: result.decision.id };
@@ -302,11 +301,7 @@ interface CleanupStepRun {
 }
 
 /**
- * [qa layer feedback loop — 카드 입력 직전 승격 1회] 이 카드 generation 의 재발 승격을 계산한다.
- *   qaRefs 각 QA 라인의 직전 세대 반려 findings(같은 stepRun 의 최신 판정 바로 이전 이벤트)와
- *   finding id 가 완전 일치하는 항목만 승격하며, 세대 경계 가드(직전 판정이 이번 생산자 세대
- *   완료 이전 관측)는 loadPriorRejectedFindings 가 담당한다. 순수 계산은 applyRecurrencePromotion
- *   (rework-contract) — loop-driver 라우팅과 동일 함수/동일 입력으로 같은 값을 얻는다.
+ * Loads prior findings for diagnostic recurrence only; lookup failure preserves current findings.
  */
 async function resolveRecurrencePromotion(input: {
   readonly db: Db;
@@ -316,7 +311,7 @@ async function resolveRecurrencePromotion(input: {
   readonly findings: readonly WorkflowVerdictFinding[];
   readonly qaRefs: readonly QaSourceDefectCardQaRef[];
 }): Promise<QaRecurrencePromotion> {
-  const identity: QaRecurrencePromotion = { findings: input.findings, promotedFindingIds: [] };
+  const identity: QaRecurrencePromotion = { findings: input.findings, promotedFindingIds: [], recurringFindingIds: [] };
   if (input.findings.length === 0) return identity;
   try {
     const [producerRun] = await input.db
@@ -355,7 +350,7 @@ async function resolveRecurrencePromotion(input: {
     if (priorFindings.length === 0) return identity;
     return applyRecurrencePromotion(input.findings, priorFindings);
   } catch {
-    // 승격 조회 실패가 카드 생성 경로를 깨뜨리지 않게 한다(보수: 승격 없음 — 기존 라우팅 유지).
+    // A failed prior lookup cannot change the current finding cause.
     return identity;
   }
 }

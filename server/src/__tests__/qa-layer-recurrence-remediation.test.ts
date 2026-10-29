@@ -1,10 +1,6 @@
 // server/src/__tests__/qa-layer-recurrence-remediation.test.ts
 //
-// [purpose] [qa layer feedback loop] 재발 승격 항목이 기계적 remediation 을 차단하는지 검증.
-//   tryQaRemediationPass 에 들어가는 findingsByQaStepId 매핑에 유효 계층 findings 가 전달되므로,
-//   선언은 artifact 지만 재발 승격된 항목이 있으면 not_applicable 이 발동해 생산자 재작업 경로로
-//   폴백한다(선언 source_data 와 동일 취급 — 설계 §4.2.2). 대조군: 재발 없는 동일 시드은 remediation 이
-//   그대로 적용된다(원인이 승격임을 인과적으로 증명).
+// [purpose] Verify recurrence preserves cause, remediation idempotency, and explicit-source guards.
 
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -38,8 +34,9 @@ const PRODUCER = "produce";
 const QA = "qa-validate";
 const MAX_ITER = 2;
 
-/** 재발 대상 finding — 선언 계층은 artifact(승격 전에는 기계적 수정 대상이 될 수 있는 계층). */
+/** Recurrence must not change this declared cause. */
 const RECURRING_FINDING = { id: "term-exposure", summary: "internal term exposed in index.html", layer: "artifact" as const };
+const SOURCE_FINDING = { id: "source-missing", summary: "source rows are absent", layer: "source_data" as const };
 
 function buildSteps(agentId: string) {
   return [
@@ -73,7 +70,7 @@ async function seedScenario(db: Db, opts: {
   const missionId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: `RecCo-${companyId.slice(0, 8)}`, issuePrefix: `RC${companyId.slice(0, 8)}`, requireBoardApprovalForNewAgents: false });
   await db.insert(agents).values({ id: agentId, companyId, name: `worker-${agentId.slice(0, 8)}`, role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
-  // oversight 이슈 없음 — source_only 승격이어도 오너 카드 확보가 실패해 기존 재작업 경로로 폴백한다(fail-closed).
+  // No oversight issue: an explicit source-only finding cannot create an owner card without a linked issue.
   await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: `recurrence mission ${missionId.slice(0, 8)}`, status: "active" });
 
   const producerIssueId = randomUUID();
@@ -144,7 +141,7 @@ async function seedScenario(db: Db, opts: {
   return { companyId, agentId, missionId, workflowRunId: runId, producerIssueId, qaIssueId };
 }
 
-describeEP("qa layer feedback loop — recurrence promotion blocks mechanical remediation", () => {
+describeEP("qa layer feedback loop — cause-preserving remediation", () => {
   let db: Db;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let tempRoot: string;
@@ -188,42 +185,62 @@ describeEP("qa layer feedback loop — recurrence promotion blocks mechanical re
     expect(await readFile(artifactPath, "utf8")).toBe("<html>내부 용어 선별 근거 요약 노출됨</html>");
   });
 
-  it("promoted finding (same id as prior generation) → remediation not_applicable → producer rework with recurrence tag", async () => {
+  it("recurring artifact keeps its cause, applies the official correction once, then waits", async () => {
     const artifactPath = path.join(tempRoot, "recurrence", "index.html");
     await mkdir(path.dirname(artifactPath), { recursive: true });
     await writeFile(artifactPath, "<html>내부 용어 leads/evidence.json 노출됨</html>", "utf8");
     const seed = await seedScenario(db, {
       artifactUrl: artifactPath,
       findings: [RECURRING_FINDING],
-      priorFindings: [RECURRING_FINDING], // 같은 finding id 재발 → 유효 계층 source_data 승격
+      priorFindings: [RECURRING_FINDING],
     });
 
     const refireLog: Array<{ stepRunId: string }> = [];
     const result = await runPass(seed, refireLog);
 
-    // remediation 미적용(원천 결함은 기계적 산출물 수정으로 해결 불가) → 기존 재작업 경로로 폴백.
-    expect(result.remediatedCount).toBe(0);
-    expect(result.reworkedCount).toBe(1);
-    expect(refireLog).toHaveLength(0);
-    expect(await readFile(artifactPath, "utf8")).toBe("<html>내부 용어 leads/evidence.json 노출됨</html>");
-    const applied = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+    expect(result.remediatedCount).toBe(1);
+    expect(result.reworkedCount).toBe(0);
+    expect(refireLog).toHaveLength(1);
+    expect(await readFile(artifactPath, "utf8")).toBe("<html>내부 용어 선별 근거 요약 노출됨</html>");
+    const applied = () => db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.companyId, seed.companyId),
       eq(workflowTransitionEvents.eventType, "qa_remediation_applied"),
     ));
-    expect(applied).toHaveLength(0);
+    expect(await applied()).toHaveLength(1);
 
-    // 재작업 계약 feedback 에 재발 승격 태그가 병기된다.
+    const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.workflowRunId));
+    const second = await runPass(seed, refireLog);
+    expect(second.remediatedCount).toBe(0);
+    expect(second.reworkedCount).toBe(0);
+    expect(refireLog).toHaveLength(1);
+    expect(await applied()).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.workflowRunId))).toEqual(wakeups);
+
     const [producer] = await db.select().from(workflowStepRuns).where(and(
       eq(workflowStepRuns.workflowRunId, seed.workflowRunId),
       eq(workflowStepRuns.stepId, PRODUCER),
     ));
+    expect(producer!.status).toBe("completed");
+    expect(producer!.iterationIndex).toBe(0);
+    expect(producer!.metadata ?? {}).not.toHaveProperty("qaReworkCapBoost");
+  });
+
+  it("explicit source_data still blocks mechanical correction and stays within the producer cap", async () => {
+    const artifactPath = path.join(tempRoot, "source", "index.html");
+    await mkdir(path.dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, "<html>source-dependent output</html>", "utf8");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath, findings: [SOURCE_FINDING] });
+    const refireLog: Array<{ stepRunId: string }> = [];
+    const result = await runPass(seed, refireLog);
+
+    expect(result.remediatedCount).toBe(0);
+    expect(result.reworkedCount).toBe(1);
+    expect(refireLog).toHaveLength(0);
+    expect(await readFile(artifactPath, "utf8")).toBe("<html>source-dependent output</html>");
+    const [producer] = await db.select().from(workflowStepRuns).where(and(
+      eq(workflowStepRuns.workflowRunId, seed.workflowRunId), eq(workflowStepRuns.stepId, PRODUCER),
+    ));
     expect(producer!.status).toBe("pending");
     expect(producer!.iterationIndex).toBe(1);
-    const metadata = (producer!.metadata ?? {}) as Record<string, unknown>;
-    const contract = metadata.workflowReworkContract as { qaFeedbacks: Array<{ feedback: string | null }> } | undefined;
-    expect(contract).toBeDefined();
-    const feedback = contract!.qaFeedbacks[0]!.feedback ?? "";
-    expect(feedback).toContain("생산자 범위 밖(재발 승격)");
-    expect(feedback).toContain("(term-exposure)");
   });
 });
