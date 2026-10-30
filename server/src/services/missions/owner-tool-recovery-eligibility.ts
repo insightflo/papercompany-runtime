@@ -20,6 +20,13 @@ const settledToolQueue = z.object({ status: z.literal("settled"), settledAt: tim
 const sourceMetadata = z.object({ toolResult: successfulToolResult, toolInvocation: completedToolInvocation,
   toolQueue: settledToolQueue }).passthrough();
 
+// heartbeat.ts TERMINAL_HEARTBEAT_RUN_STATUSES 와 같은 종단 목록(timed_out 포함). 여기서는
+// settledAt 이 있는 경우에만 종단 관찰로 인정한다.
+const HEARTBEAT_SETTLED_TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"];
+// timed_out wake 는 연결된 heartbeat 가 긍정적으로 종결(settledAt 존재 + 정확한 튜플)된 경우에만
+// 종단 관찰로 인정한다. 깨우기 단독 타임아웃은 미실행·재시도 권한의 증명이 될 수 없다.
+const WAKE_TERMINAL_STATUSES = ["completed", "failed", "cancelled", "skipped", "timed_out"];
+
 export type OwnerToolSourceState =
   | { kind: "source_recovered"; requestId: string; completedAt: string; authorityVersion: number; executionGeneration: number }
   | { kind: "failed_source" }
@@ -43,7 +50,7 @@ export async function loadOwnerToolSourceFacts(input: {
     const [wakeup] = stepRun.dispatchOwnerWakeupRequestId
       ? await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, stepRun.dispatchOwnerWakeupRequestId)).limit(1) : [];
     const activeWake = (status: string) => ["queued", "claimed", "deferred_issue_execution", "coalesced"].includes(status);
-    const settledHeartbeat = heartbeat && ["succeeded", "failed", "cancelled"].includes(heartbeat.status) && heartbeat.settledAt !== null;
+    const settledHeartbeat = heartbeat && HEARTBEAT_SETTLED_TERMINAL_STATUSES.includes(heartbeat.status) && heartbeat.settledAt !== null;
     if (stepRun.dispatchOwnerHeartbeatRunId && (!heartbeat || heartbeat.companyId !== mission.companyId
       || heartbeat.workflowStepRunId !== stepRun.id || heartbeat.workflowExecutionGeneration !== stepRun.executionGeneration
       || heartbeat.wakeupRequestId !== (stepRun.dispatchOwnerWakeupRequestId ?? null)
@@ -53,7 +60,8 @@ export async function loadOwnerToolSourceFacts(input: {
     if (stepRun.dispatchOwnerWakeupRequestId && (!wakeup || wakeup.companyId !== mission.companyId
       || wakeup.workflowRunId !== run.id || wakeup.workflowStepRunId !== stepRun.id
       || wakeup.workflowExecutionGeneration !== stepRun.executionGeneration || activeWake(wakeup.status)
-      || !["completed", "failed", "cancelled", "skipped"].includes(wakeup.status)))
+      || !WAKE_TERMINAL_STATUSES.includes(wakeup.status)
+      || (wakeup.status === "timed_out" && !settledHeartbeat)))
       return held(wakeup && activeWake(wakeup.status) ? "source_dispatch_still_live" : "source_dispatch_reference_mismatch");
     return { state: classifyOwnerToolSourceFacts({ mission, run, stepRun, step: steps[0]! }),
       step: steps[0]!, definitionSource: execution.source };
