@@ -1,16 +1,11 @@
 // server/src/__tests__/qa-layer-recurrence-routing.test.ts
 //
-// [purpose] [qa layer feedback loop] 재발(직전 세대와 같은 finding id) 승격의 loop-driver 라우팅 통합 검증.
-//   (재발-only) 선언 artifact 지만 직전 세대에 같은 id → 유효 계층 source_data 로 승격되어
-//     source_only 경로(생산자 리셋 0 + iteration 불변 + 오너 카드 1장)를 탄다.
-//   (혼합 재발) 신규 artifact + 재발 → 기존 재작업 경로(리셋 1) + 카드 1장 + 재작업 feedback 에
-//     '생산자 범위 밖(재발 승격)' 태그.
-//   (비재발) id 불일치 → 현행 동작과 100% 동일(재작업 + 카드, 태그 없음, 승격 0건).
-//   (카드 결정성) 같은 입력으로 두 번 빌드 시 동일 카드(replay) + 재발 마커 [source_data*] 렌더.
+// [purpose] Verify recurrence stays diagnostic while official source findings retain bounded routing.
 
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentWakeupRequests,
   createDb,
   operatorDecisions,
   workflowStepRuns,
@@ -22,7 +17,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { applyBackEdgeReworkPass } from "../services/workflow/control-flow/loop-driver.js";
 import { ensureQaSourceDefectOwnerCard } from "../services/workflow/qa-source-defect-owner-card.js";
-import { seedQaSourceDefectScenario } from "./helpers/qa-source-defect-seed.js";
+import { FINDINGS_MIXED, FINDINGS_SOURCE_ONLY, seedQaSourceDefectScenario } from "./helpers/qa-source-defect-seed.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -53,7 +48,7 @@ async function loadProducer(db: ReturnType<typeof createDb>, runId: string) {
   return producer!;
 }
 
-describeDb("qa layer feedback loop — recurrence promotion routing", () => {
+describeDb("qa layer feedback loop — cause-preserving recurrence routing", () => {
   let db: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
@@ -63,40 +58,38 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
   }, 60_000);
   afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
-  it("recurrence-only (declared artifact, same id as prior generation) → source_only: no reset, iteration unchanged, 1 owner card", async () => {
+  it("recurring artifact keeps its cause, reworks within cap, and does not create a source card", async () => {
     const seed = await seedQaSourceDefectScenario(db, [RECURRING_ARTIFACT], { priorFindings: [RECURRING_ARTIFACT] });
 
     const result = await runBackEdgePass(db, seed);
-    expect(result.reworkedCount).toBe(0);
+    expect(result.reworkedCount).toBe(1);
 
     const producer = await loadProducer(db, seed.runId);
-    expect(producer.status).toBe("completed");
-    expect(producer.iterationIndex).toBe(0); // 한도 미소모
+    expect(producer.status).toBe("pending");
+    expect(producer.iterationIndex).toBe(1);
+    expect(producer.metadata ?? {}).not.toHaveProperty("qaReworkCapBoost");
 
     const routed = await db.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.workflowRunId, seed.runId),
       eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
     ));
-    expect(routed).toHaveLength(1);
-    const routedPayload = routed[0]!.payload as Record<string, unknown>;
-    expect(routedPayload.route).toBe("source_only");
-    expect(routedPayload.promotedFindingIds).toEqual(["kr-index-missing"]);
-    // 라우팅 이벤트의 findings 는 선언 계층 원본 그대로(불변 — 설계 §4.4).
-    expect(routedPayload.findings).toEqual([RECURRING_ARTIFACT]);
-
-    // 카드 1장 — 유효 계층(승격) 기준으로 렌더: 재발 마커 [source_data*] + 재발 승격 fact.
-    const [card] = await db.select().from(operatorDecisions).where(and(
+    expect(routed).toHaveLength(0);
+    expect(await db.select().from(operatorDecisions).where(and(
       eq(operatorDecisions.companyId, seed.companyId),
       eq(operatorDecisions.requestKey, seed.requestKey),
-    ));
-    expect(card).toBeDefined();
-    const rendered = JSON.stringify(card!.definition);
-    expect(rendered).toContain("[source_data*] (kr-index-missing)");
-    expect(rendered).not.toContain("[artifact] (kr-index-missing)");
-    expect(rendered).toContain("All findings concern source data (collection stage) — 1 recurring finding (repeated from the previous rejection)");
+    ))).toHaveLength(0);
+
+    const stepRunIds = (await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, seed.runId))).map((row) => row.id);
+    const wakeupsBefore = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.runId));
+    expect((await runBackEdgePass(db, seed)).reworkedCount).toBe(0);
+    expect((await loadProducer(db, seed.runId)).iterationIndex).toBe(1);
+    expect((await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns)
+      .where(eq(workflowStepRuns.workflowRunId, seed.runId))).map((row) => row.id)).toEqual(stepRunIds);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.runId))).toEqual(wakeupsBefore);
   });
 
-  it("mixed recurrence (new artifact + recurring) → reset 1 + card 1 + rework feedback tags '생산자 범위 밖(재발 승격)'", async () => {
+  it("a recurring finding in a mixed artifact set does not become source scope", async () => {
     const seed = await seedQaSourceDefectScenario(
       db,
       [RECURRING_ARTIFACT, NEW_ARTIFACT],
@@ -114,26 +107,18 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
       eq(workflowTransitionEvents.workflowRunId, seed.runId),
       eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
     ));
-    expect(routed).toHaveLength(1);
-    const routedPayload = routed[0]!.payload as Record<string, unknown>;
-    expect(routedPayload.route).toBe("mixed");
-    expect(routedPayload.promotedFindingIds).toEqual(["kr-index-missing"]);
-
-    const [card] = await db.select().from(operatorDecisions).where(and(
+    expect(routed).toHaveLength(0);
+    expect(await db.select().from(operatorDecisions).where(and(
       eq(operatorDecisions.companyId, seed.companyId),
       eq(operatorDecisions.requestKey, seed.requestKey),
-    ));
-    expect(card).toBeDefined();
+    ))).toHaveLength(0);
 
-    // 재작업 계약 feedback: 재발 승격 항목이 '생산자 범위 밖(재발 승격)' 태그로 병기된다(표시 전용).
     const metadata = (producer.metadata ?? {}) as Record<string, unknown>;
     const contract = metadata.workflowReworkContract as { qaFeedbacks: Array<{ feedback: string | null }> } | undefined;
     expect(contract).toBeDefined();
     const feedback = contract!.qaFeedbacks[0]!.feedback ?? "";
-    expect(feedback).toContain("생산자 범위 밖(재발 승격)");
-    expect(feedback).toContain("(kr-index-missing)");
-    // 신규 artifact 항목은 태그 대상이 아니다.
-    expect(feedback).not.toContain("(mobile-overflow)");
+    expect(feedback).not.toContain("생산자 범위 밖(재발 승격)");
+    expect(feedback).not.toContain("[source_data]");
   });
 
   it("non-recurrence (id mismatch) artifact-only → rework only: reset 1, NO card, NO routing event", async () => {
@@ -150,8 +135,7 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     expect(producer.status).toBe("pending");
     expect(producer.iterationIndex).toBe(1);
 
-    // [2026-10-08 계약] 유효 source_data(선언+재발 승격)가 없으면 오너 카드/라우팅 이벤트 없이
-    //   기존 재작업 경로만 밟는다 — 순수 artifact 결함은 사람 입력 대상이 아니다.
+    // Without an explicitly declared source_data finding, artifact-only QA uses the existing rework path.
     const routed = await db.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.workflowRunId, seed.runId),
       eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
@@ -170,7 +154,93 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
     expect(feedback).not.toContain("생산자 범위 밖");
   });
 
-  it("card determinism: two ensures with the same declared findings replay the same decision (recurrence markers included)", async () => {
+  it("explicit source findings retain bounded source-only routing and a neutral, idempotent card", async () => {
+    const seed = await seedQaSourceDefectScenario(db, FINDINGS_SOURCE_ONLY);
+    const result = await runBackEdgePass(db, seed);
+    expect(result.reworkedCount).toBe(0);
+    const producer = await loadProducer(db, seed.runId);
+    expect(producer.status).toBe("completed");
+    expect(producer.iterationIndex).toBe(0);
+
+    const routed = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, seed.runId),
+      eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
+    ));
+    expect(routed).toHaveLength(1);
+    expect(routed[0]!.payload).toMatchObject({ route: "source_only", findings: FINDINGS_SOURCE_ONLY, promotedFindingIds: [] });
+
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.requestKey, seed.requestKey));
+    expect(card).toBeDefined();
+    expect(card!.definition.options.map(({ id }) => id)).toEqual([
+      "rerun_source_collection", "extra_producer_rework", "maintenance_issue", "replan_mission", "cancel",
+    ]);
+    expect(card!.definition.options.every((option) => !option.recommended)).toBe(true);
+    expect(card!.definition.humanReview!.recommendedNextStep).not.toContain("rerun_source_collection");
+    expect(card!.definition.humanReview!.recommendedNextStep).not.toContain("recommended");
+
+    const input = {
+      db, companyId: seed.companyId, missionId: seed.missionId, workflowRunId: seed.runId,
+      producerStepId: "produce", iteration: 0, maxIterations: 2, findings: FINDINGS_SOURCE_ONLY,
+      qaRefs: [{ qaStepId: "qa-validate", qaIssueId: seed.qaIssueId }], linkIssueId: seed.oversightIssueId,
+    };
+    const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.runId));
+    const replay = await ensureQaSourceDefectOwnerCard(input);
+    expect(replay).toMatchObject({ outcome: "replayed", decisionId: card!.id });
+    expect((await runBackEdgePass(db, seed)).reworkedCount).toBe(0);
+    expect(await db.select().from(operatorDecisions).where(eq(operatorDecisions.requestKey, seed.requestKey))).toHaveLength(1);
+    expect(await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, seed.runId),
+      eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
+    ))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowRunId, seed.runId))).toEqual(wakeups);
+  });
+
+  it("explicit mixed findings retain the source cause without recommending broad collection", async () => {
+    const seed = await seedQaSourceDefectScenario(db, FINDINGS_MIXED);
+    const result = await runBackEdgePass(db, seed);
+    expect(result.reworkedCount).toBe(1);
+    const producer = await loadProducer(db, seed.runId);
+    expect(producer.status).toBe("pending");
+    expect(producer.iterationIndex).toBe(1);
+    const routed = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, seed.runId),
+      eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
+    ));
+    expect(routed).toHaveLength(1);
+    expect(routed[0]!.payload).toMatchObject({ route: "mixed", findings: FINDINGS_MIXED, promotedFindingIds: [] });
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.requestKey, seed.requestKey));
+    expect(card).toBeDefined();
+    const collection = card!.definition.options.find(({ id }) => id === "rerun_source_collection");
+    expect(collection).toBeDefined();
+    expect(collection!.recommended).toBeUndefined();
+    expect(card!.definition.options.map(({ id }) => id)).toEqual([
+      "rerun_source_collection", "extra_producer_rework", "maintenance_issue", "replan_mission", "cancel",
+    ]);
+    const metadata = (producer.metadata ?? {}) as Record<string, unknown>;
+    const contract = metadata.workflowReworkContract as { qaFeedbacks: Array<{ feedback: string | null }> } | undefined;
+    expect(contract!.qaFeedbacks[0]!.feedback).toContain("생산자 범위 밖 — 원천 데이터 결함");
+    expect(contract!.qaFeedbacks[0]!.feedback).not.toContain("재발 승격");
+  });
+
+  it("recurrence does not create work or bypass an exhausted producer cap", async () => {
+    const seed = await seedQaSourceDefectScenario(db, [RECURRING_ARTIFACT], { priorFindings: [RECURRING_ARTIFACT] });
+    await db.update(workflowStepRuns).set({ iterationIndex: 2 }).where(and(
+      eq(workflowStepRuns.workflowRunId, seed.runId), eq(workflowStepRuns.stepId, "produce"),
+    ));
+    const result = await runBackEdgePass(db, seed);
+    const producer = await loadProducer(db, seed.runId);
+    expect(result.reworkedCount).toBe(0);
+    expect(producer.status).toBe("completed");
+    expect(producer.iterationIndex).toBe(2);
+    expect(producer.metadata).not.toHaveProperty("qaReworkCapBoost");
+    expect(await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.workflowRunId, seed.runId),
+      eq(workflowTransitionEvents.eventType, "qa_source_defect_routed"),
+    ))).toHaveLength(0);
+    expect(await db.select().from(operatorDecisions).where(eq(operatorDecisions.requestKey, seed.requestKey))).toHaveLength(0);
+  });
+
+  it("card replay keeps the recurring artifact cause and never recommends source collection", async () => {
     const seed = await seedQaSourceDefectScenario(db, [RECURRING_ARTIFACT], { priorFindings: [RECURRING_ARTIFACT] });
     const base = {
       db,
@@ -180,8 +250,7 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
       producerStepId: "produce",
       iteration: 0,
       maxIterations: 2,
-      // 두 생성 지점((a) loop-driver, (b) supervision) 모두 선언 findings 만 넘긴다 —
-      // 승격 계산은 ensure 내부 빌더 입력 직전 1회 수행되므로 같은 입력 → 같은 requestHash.
+      // Both creation paths use declared findings and the same diagnostic recurrence lookup.
       findings: [RECURRING_ARTIFACT],
       qaRefs: [{ qaStepId: "qa-validate", qaIssueId: seed.qaIssueId }],
       linkIssueId: seed.oversightIssueId,
@@ -195,7 +264,9 @@ describeDb("qa layer feedback loop — recurrence promotion routing", () => {
 
     const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, first.decisionId));
     const rendered = JSON.stringify(card!.definition);
-    expect(rendered).toContain("[source_data*] (kr-index-missing)");
-    expect(rendered).toContain("All findings concern source data (collection stage) — 1 recurring finding (repeated from the previous rejection)");
+    expect(rendered).toContain("[artifact] (kr-index-missing)");
+    expect(rendered).not.toContain("[source_data*]");
+    expect(card!.definition.options.find(({ id }) => id === "rerun_source_collection")?.recommended).toBeUndefined();
+    expect(rendered).toMatch(/declared cause unchanged|선언 원인 유지/);
   });
 });

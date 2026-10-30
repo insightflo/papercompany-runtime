@@ -7,7 +7,7 @@ import { loadCompanySystemLanguage } from "./system-language.js";
 import { loadToolRecoveryProducerFacts } from "./tool-recovery-producer-facts.js";
 import { displayRecord, toolRecoveryHiddenValues, toolRecoveryPathFacts, toolRecoverySafeText } from "./tool-recovery-safe-display.js";
 import { MISSION_OWNER_DECISION_OPTIONS } from "./mission-owner-recovery-events.js";
-import { evaluateOwnerToolRecoverySnapshot, ownerDecisionRequestsHuman, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
+import { loadOwnerToolSourceFacts, ownerDecisionRequestsHuman, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
 import { ownerRecoveryActorFailure, ownerRecoveryIssueFailure, ownerRecoveryOwnerMatches, ownerRecoverySourceMatches, ownerRecoveryRunMatches, ownerRecoveryStepMatches } from "./owner-recovery-submission-guards.js";
 import { isIssueLessToolStep } from "../workflow/issue-less-tool-shape.js";
 import { isWorkflowChildStep } from "../workflow/workflow-child-guards.js";
@@ -27,10 +27,23 @@ async function optionalRead<T>(db: Db, read: (tx: Db) => Promise<T>): Promise<T 
   catch { return null; } // Never publish SQL/config/error bodies into the issue.
 }
 export async function loadToolRecoveryBriefFacts(db: Db, input: ToolRecoveryBriefInput) {
-  const { mission, run, stepRun, step } = input;
-  const names = getWorkflowStepToolNames(step).slice(0, 12);
+  const { mission, run, stepRun } = input;
+  const loadedSourceFacts = await optionalRead(db, tx => loadOwnerToolSourceFacts({
+    db: tx, mission, run, stepRun, propagateReadErrors: true,
+  }));
+  const sourceFacts = loadedSourceFacts ?? {
+    state: { kind: "held" as const, reason: "source_definition_unavailable" }, step: null, definitionSource: null,
+  };
+  const sourceState = sourceFacts.definitionSource === "legacy_current" && sourceFacts.state.kind === "failed_source"
+    ? { kind: "held" as const, reason: "legacy_source_observation_only" } : sourceFacts.state;
+  // Caller steps retain descriptive registry/declaration and redaction hints only.
+  const step = sourceFacts.step;
+  const canonicalNames = getWorkflowStepToolNames(step).slice(0, 12);
+  const callerNames = getWorkflowStepToolNames(input.step).slice(0, 12);
+  const canonicalNameSet = new Set(canonicalNames);
+  const names = [...new Set([...canonicalNames, ...callerNames])];
   const tools = await optionalRead(db, tx => names.length ? tx.select().from(toolDefinitions).where(and(
-    eq(toolDefinitions.companyId, mission.companyId), inArray(toolDefinitions.name, names))).limit(12) : Promise.resolve([]));
+    eq(toolDefinitions.companyId, mission.companyId), inArray(toolDefinitions.name, names))).limit(names.length) : Promise.resolve([]));
   const secrets = [...(tools ?? []).flatMap(t => toolRecoveryHiddenValues(t.adapterConfig)), ...toolRecoveryHiddenValues(stepRun.metadata)];
   const safe = (v: unknown) => toolRecoverySafeText(v, secrets);
   const language = await optionalRead(db, tx => loadCompanySystemLanguage(tx, mission.companyId));
@@ -56,14 +69,17 @@ export async function loadToolRecoveryBriefFacts(db: Db, input: ToolRecoveryBrie
     unchecked: ["issuing heartbeat company/agent/owner-action identity", "current issue identity", "checkout ownership/adoption", "HTTP schema"],
   };
   const ownership = toolRecoveryOwnsStepFailure(step, stepRun);
-  const preflight = evaluateOwnerToolRecoverySnapshot({ mission, issue: { originId: input.oversightIssue.id },
-    sourceIssue: input.oversightIssue, stepRows: [], decision: null, toolCard: true, qaCard: false, apply: true });
+  // Creation has no owner decision or identity link yet; classify the exact run/step already held by the caller.
   return {
     language: language ?? "en", languageLookup: language === null ? "unavailable" : "available", recoveryTarget, submission,
-    // This is a creation snapshot: there is no decision for the not-yet-created issue. No invented ledger event.
-    execution: { decision: preflight.kind === "blocked" ? preflight.reason : preflight.kind, ownership,
+    // This is a creation snapshot: known source rows are descriptive evidence, never locked execution permission.
+    execution: { decision: sourceState.kind === "source_recovered" ? "source_already_recovered"
+      : sourceState.kind === "failed_source" ? "requires_decision" : sourceState.reason,
+      sourceState: sourceState.kind, ownership,
       canonicalToolShape: step ? isIssueLessToolStep(step) : "unavailable",
-      childStep: step ? isWorkflowChildStep(step) : "unavailable", status: "requires_decision",
+      childStep: step ? isWorkflowChildStep(step) : "unavailable",
+      status: sourceState.kind === "source_recovered" ? "no_recovery_needed"
+        : sourceState.kind === "failed_source" ? "requires_decision" : "blocked_evidence_unavailable",
       unchecked: ["latest scoped owner decision", "retry key consumption", "active mission under lock", "unreplaced run",
         "budget", "execution in flight", "current failed terminal decision", "authority consumption", "completedAt fence", "artifact contract/bytes"] },
     decisions: MISSION_OWNER_DECISION_OPTIONS.map(decision => ({ decision,
@@ -90,6 +106,7 @@ export async function loadToolRecoveryBriefFacts(db: Db, input: ToolRecoveryBrie
       const config = displayRecord(tool.adapterConfig);
       return { id: tool.id, name: safe(tool.name), enabled: tool.enabled, adapterType: safe(tool.adapterType),
         source: "current company tool registry; not a historical invocation snapshot",
+        provenance: canonicalNameSet.has(name) ? "canonical execution reference; display only" : "caller display hint; display only",
         command: safe(config.command), cwd: safe(config.workingDirectory ?? config.cwd), url: safe(config.url),
         instructionRefs: { registry: `/api/companies/${mission.companyId}/tools`,
           paths: [config.instructionsFilePath, config.instructionsPath].filter(v => typeof v === "string").map(safe),

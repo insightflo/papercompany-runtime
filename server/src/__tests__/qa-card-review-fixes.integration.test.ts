@@ -6,7 +6,7 @@ import type { WorkflowVerdictFinding } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
 import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 import * as decisionWrites from "../services/operator-decisions-write.js";
-import { ensureQaSourceDefectOwnerCard } from "../services/workflow/qa-source-defect-owner-card.js";
+import { buildCardCreateInput, ensureQaSourceDefectOwnerCard } from "../services/workflow/qa-source-defect-owner-card.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 // Frozen outputs of the actual Git builders, not the current builder with an old key.
@@ -32,24 +32,34 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
   }, 60_000);
   afterEach(() => vi.restoreAllMocks());
   afterAll(async () => { await db?.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
+  function scenarioInput(companyId: string, kind: string) {
+    return { db, companyId, ...fixture(kind).input };
+  }
   async function scenario(kind = "iteration0") {
     const companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "QA review", issuePrefix: companyId });
-    return { db, companyId, ...fixture(kind).input };
+    return scenarioInput(companyId, kind);
   }
   const rows = (companyId: string) => db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, companyId));
   const audits = (companyId: string) => db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
-  async function seed(companyId: string, kind: string, current = false) {
+  async function seedHistorical(companyId: string, kind: string) {
     const payload = fixture(kind).payload;
-    return (await operatorDecisionWriteService(db).create(companyId, {
-      ...payload, ...(current ? { requestKey: String(payload.requestKey).replace("qa-source-defect:", "qa-source-defect:v3:") } : {}),
-    }, system)).decision;
+    return (await operatorDecisionWriteService(db).create(companyId, payload, system)).decision;
+  }
+  async function seedCurrentV4(input: Parameters<typeof ensureQaSourceDefectOwnerCard>[0]) {
+    const payload = buildCardCreateInput({
+      language: "en", workflowRunId: input.workflowRunId, producerStepId: input.producerStepId,
+      iteration: input.iteration, maxIterations: input.maxIterations, findings: input.findings,
+      qaRefs: input.qaRefs, missionId: input.missionId, linkIssueId: input.linkIssueId,
+    });
+    expect(payload.requestKey).toBe(`qa-source-defect:v4:${input.workflowRunId}:${input.producerStepId}:${input.iteration}`);
+    return (await operatorDecisionWriteService(db).create(input.companyId, payload, system)).decision;
   }
 
   it.each(["source", "mixed", "empty"].flatMap((kind) => ["resolved", "cancelled"].map((terminal) => ({ kind, terminal }))))(
     "replays frozen pre-#329 $kind payload in $terminal state", async ({ kind, terminal }) => {
       const input = await scenario(kind);
-      const original = await seed(input.companyId, kind);
+      const original = await seedHistorical(input.companyId, kind);
       if (kind === "source") expect((await rows(input.companyId))[0]!.requestHash).toBe("c747d2743fdca074efc7bedc29ffa54fe0f8752991ee6a4046faa3b1b6af0e1f");
       const write = operatorDecisionWriteService(db);
       if (terminal === "resolved") {
@@ -65,9 +75,9 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("keeps historical non-display changes conflicting without cancelling other cards", async () => {
     const input = await scenario("source");
-    const original = await seed(input.companyId, "source");
+    const original = await seedHistorical(input.companyId, "source");
     await operatorDecisionWriteService(db).cancel(original.id, { type: "user", id: "human" });
-    await seed(input.companyId, "iteration1", true);
+    await seedCurrentV4(scenarioInput(input.companyId, "iteration1"));
     const before = await rows(input.companyId);
     for (const change of [
       { maxIterations: 3 }, { findings: [{ id: "f", summary: "Changed", layer: "source_data" as const }] },
@@ -80,7 +90,7 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it.each(["iteration0", "source"])("retries %s replacement after committed upgrade cancellation and failed create", async (kind) => {
     const input = await scenario(kind);
-    const original = await seed(input.companyId, kind);
+    const original = await seedHistorical(input.companyId, kind);
     const transaction = db.transaction.bind(db);
     let transactions = 0;
     const fault = vi.spyOn(db, "transaction").mockImplementation((...args) => {
@@ -102,7 +112,7 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("a concurrent upgrader fills the committed-cancel/pre-create window", async () => {
     const input = await scenario();
-    await seed(input.companyId, "iteration0");
+    await seedHistorical(input.companyId, "iteration0");
     const transaction = db.transaction.bind(db);
     let transactions = 0;
     let reached!: () => void;
@@ -132,7 +142,7 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("a pending-read CAS loser recovers the concurrent upgrader window", async () => {
     const input = await scenario();
-    await seed(input.companyId, "iteration0");
+    await seedHistorical(input.companyId, "iteration0");
     let atFirstCancel!: () => void, releaseFirst!: () => void, atCreate!: () => void, releaseCreate!: () => void;
     const firstCancel = new Promise<void>((resolve) => { atFirstCancel = resolve; });
     const firstMayCancel = new Promise<void>((resolve) => { releaseFirst = resolve; });
@@ -175,9 +185,9 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("upgrade recovery rejects changed inputs before cleaning other generations", async () => {
     const input = await scenario();
-    const original = await seed(input.companyId, "iteration0");
+    const original = await seedHistorical(input.companyId, "iteration0");
     await operatorDecisionWriteService(db).cancel(original.id, system, reason);
-    await seed(input.companyId, "iteration1", true);
+    await seedCurrentV4(scenarioInput(input.companyId, "iteration1"));
     const before = await rows(input.companyId);
     const beforeAudit = await audits(input.companyId);
     expect((await ensureQaSourceDefectOwnerCard({ ...input, maxIterations: 3 })).outcome).toBe("conflict");
@@ -187,7 +197,7 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it.each(["human", "system-other-reason", "missing-audit", "wrong-scope", "wrong-version", "wrong-detail-actor", "wrong-detail-id", "wrong-time"])("does not recover cancellation with %s provenance", async (kind) => {
     const input = await scenario();
-    const original = await seed(input.companyId, "iteration0");
+    const original = await seedHistorical(input.companyId, "iteration0");
     await operatorDecisionWriteService(db).cancel(original.id, { type: "user", id: kind === "human" ? "human" : "system" },
       kind === "system-other-reason" ? "qa_source_defect_card_run_completed" : reason);
     const cancellation = (await audits(input.companyId)).find(({ action }) => action === "operator_decision.cancelled")!;
@@ -206,8 +216,8 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("latest exact replay cleans stale pending generations", async () => {
     const input = await scenario("iteration1");
-    const stale = await seed(input.companyId, "iteration0", true);
-    const latest = await seed(input.companyId, "iteration1", true);
+    const stale = await seedCurrentV4(scenarioInput(input.companyId, "iteration0"));
+    const latest = await seedCurrentV4(input);
     expect(await ensureQaSourceDefectOwnerCard(input)).toEqual({ outcome: "replayed", decisionId: latest.id });
     const after = await rows(input.companyId);
     expect(after.find(({ id }) => id === stale.id)?.status).toBe("cancelled");
@@ -216,8 +226,8 @@ describeDb("QA review findings: real historical replay and recoverable upgrade",
 
   it("current hash conflict does not clean stale pending generations", async () => {
     const input = await scenario("iteration1");
-    await seed(input.companyId, "iteration0", true);
-    await seed(input.companyId, "iteration1", true);
+    await seedCurrentV4(scenarioInput(input.companyId, "iteration0"));
+    await seedCurrentV4(input);
     const before = await rows(input.companyId);
     const beforeAudit = await audits(input.companyId);
     expect((await ensureQaSourceDefectOwnerCard({ ...input, maxIterations: 3 })).outcome).toBe("conflict");

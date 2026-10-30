@@ -1,5 +1,6 @@
 import { api } from "./client";
 import type { Issue } from "@paperclipai/shared";
+import type { HumanOperatorRequestStateV1 } from "@paperclipai/shared/types/human-operator-request-state";
 import type { MissionRevisionSourceInput } from "@paperclipai/shared/types/mission-revision";
 
 export type MissionStatus = "planning" | "active" | "paused" | "completed" | "cancelled";
@@ -322,6 +323,8 @@ export interface MissionHumanOperatorRequest {
   /** 같은 (missionId, issueId, decision 종류) 반복 행 수 — 서버 표시 통합(2026-10-18) 추가. 없으면 1. */
   count?: number;
   severity?: MissionGovernanceThreadSeverity;
+  /** Optional P1 read-only decision and continuation projection; absent on older servers. */
+  requestState?: HumanOperatorRequestStateV1;
   event: MissionGovernanceThreadEvent;
 }
 

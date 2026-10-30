@@ -4930,7 +4930,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     expect(result.missionIds).toContain(missionId);
     expect(result.missions[0]?.appliedActions).toEqual([]);
     expect(result.missions[0]?.recoveryOutcomes).toContainEqual(expect.objectContaining({
-      ownerActionIssueId: recoveryIssue.id, kind: "no_op", reason: "target_missing",
+      ownerActionIssueId: recoveryIssue.id, kind: "no_op", outcome: "blocked", reason: "legacy_source_observation_only",
     }));
     const [runAfter] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
     expect(runAfter?.status).toBe("failed");

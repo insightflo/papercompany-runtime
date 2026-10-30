@@ -1,9 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { issues, missions, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { completeWorkflowToolStepFromResult, retryIssueLessToolWorkflowStep } from "../workflow/dag-engine.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { loadAuthorizedNativeToolStepRecovery } from "./tool-step-recovery-result.js";
-import { evaluateOwnerToolRecoverySnapshot, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
+import { evaluateOwnerToolRecoverySnapshot, loadBoundOwnerToolSourceState, toolRecoveryDecisionEffect } from "./owner-tool-recovery-eligibility.js";
 import type { MissionSupervisionIssue, MissionSupervisionMission, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
 import type { MissionOwnerSupervisionAppliedAction } from "./supervision-types.js";
 import type { OwnerRecoveryTarget } from "./mission-owner-recovery-events.js";
@@ -32,17 +32,32 @@ export async function applyOwnerToolRecovery(input: {
   const { db, mission, issue } = input;
   const decision = await loadLatestMissionOwnerDecision({ db, companyId: mission.companyId, ownerActionIssueId: issue.id });
   const target = decision?.decision.recoveryTarget ?? null;
-  const links = await db.select({ eventType: workflowTransitionEvents.eventType }).from(workflowTransitionEvents).where(and(
-    eq(workflowTransitionEvents.companyId, mission.companyId), eq(workflowTransitionEvents.missionId, mission.id),
-    eq(workflowTransitionEvents.issueId, issue.id)));
-  const toolCard = links.some((link) => link.eventType === "owner_tool_recovery_target_v1");
-  const qaCard = links.some((link) => link.eventType === "qa_cap_oversight_claim");
-  const eligibility = evaluateOwnerToolRecoverySnapshot({ ...input, decision, toolCard, qaCard });
-  if (eligibility.kind === "not_applicable") return null;
   const base = { schemaVersion: 1 as const, ownerActionIssueId: issue.id, decisionEventId: decision?.eventId ?? null, target };
   const noOp = (reason: string, outcome: OwnerToolRecoveryOutcome["outcome"] = "blocked") => ({
     outcome: { ...base, kind: "no_op" as const, outcome, reason },
   });
+  // Include damaged and cross-scope identity rows so they hold closed instead of looking absent.
+  const identityRows = await db.select().from(workflowTransitionEvents).where(or(
+    eq(workflowTransitionEvents.issueId, issue.id),
+    sql`${workflowTransitionEvents.payload}->>'anchorIssueId' = ${issue.id}`));
+  const toolLinks = identityRows.filter((link) => {
+    const payload = link.payload && typeof link.payload === "object" && !Array.isArray(link.payload)
+      ? link.payload as Record<string, unknown> : {};
+    return link.eventType === "owner_tool_recovery_target_v1" || payload.kind === "tool_step"
+      || link.idempotencyKey?.startsWith("owner-tool-card:") === true;
+  });
+  const toolCard = toolLinks.length > 0;
+  const qaCard = identityRows.some((link) => link.companyId === mission.companyId && link.missionId === mission.id
+    && link.eventType === "qa_cap_oversight_claim");
+  if (toolCard) {
+    if (toolLinks.length !== 1 || toolLinks.some(link => link.companyId !== mission.companyId
+      || link.missionId !== mission.id || link.issueId !== issue.id)) return noOp("source_binding_ambiguous");
+    const source = await loadBoundOwnerToolSourceState({ ...input, decision });
+    if (source.kind === "held") return noOp(source.reason);
+    if (source.kind === "source_recovered") return noOp("source_already_recovered");
+  }
+  const eligibility = evaluateOwnerToolRecoverySnapshot({ ...input, decision, toolCard, qaCard });
+  if (eligibility.kind === "not_applicable") return null;
   if (eligibility.kind === "blocked") return noOp(eligibility.reason, eligibility.outcome);
   // Narrowing only: the shared guard already proves these identities.
   if (!decision || target?.kind !== "tool_step") return noOp("target_missing", "requires_decision");

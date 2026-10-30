@@ -31,10 +31,10 @@ const cases: Array<{
   { name: "empty legacy findings", findings: [], en: "source data", ko: "원천 데이터",
     scopeEn: "Not submitted (legacy review)", scopeKo: "제출 없음(구버전 판정)" },
   {
-    name: "recurring artifact promoted to effective source layer", findings: [artifact], priorFindings: [artifact],
-    en: "source data", ko: "원천 데이터",
-    scopeEn: "All findings concern source data (collection stage) — 1 recurring finding (repeated from the previous rejection)",
-    scopeKo: "전부 원천 데이터(수집 단계) 문제 — 같은 사유 재발 1건(직전 반려에서 반복)",
+    name: "recurring artifact keeps its declared cause", findings: [artifact], priorFindings: [artifact],
+    en: "output", ko: "산출물",
+    scopeEn: "All findings concern output problems (production stage) — 1 finding(s) repeated; declared cause unchanged",
+    scopeKo: "전부 산출물(생산 단계) 문제 — 같은 finding 1건 재발(선언 원인 유지)",
   },
 ];
 
@@ -94,7 +94,7 @@ describeDb("QA owner card title reflects effective structured finding layers", (
     const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, created.decisionId));
     expect(card).toMatchObject({
       title,
-      requestKey: `qa-source-defect:v3:${seed.runId}:produce:0`,
+      requestKey: `qa-source-defect:v4:${seed.runId}:produce:0`,
       sourceType: "workflow_qa_rejection", sourceId: `${seed.runId}:produce:0`,
       sourceContext: { missionId: seed.missionId, workflowRunId: seed.runId },
       issueId: seed.oversightIssueId, continuationMode: "issue_current_assignee", interactionType: "single_select",
@@ -113,7 +113,7 @@ describeDb("QA owner card title reflects effective structured finding layers", (
       { id: "dismiss", outcome: "hold", requiresSelection: false },
     ]);
     for (const finding of findings) {
-      const badge = priorFindings ? "source_data*" : finding.layer;
+      const badge = finding.layer;
       const rawLine = `- [${badge}] (${finding.id}) ${finding.summary}`;
       expect(card!.description).toContain(rawLine);
       expect(card!.definition.humanReview!.interpretation).toContain(rawLine);
@@ -147,7 +147,7 @@ describeDb("QA owner card title reflects effective structured finding layers", (
     }
     expect(card!.description).toContain(`- QA step \`qa-validate\` (issue ${seed.qaIssueId})`);
     if (priorFindings) expect(card!.definition.options[0]!.facts[0]!.value).toContain(language === "ko"
-      ? "같은 사유 재발 1건(직전 반려에서 반복)" : "1 recurring finding (repeated from the previous rejection)");
+      ? "같은 finding 1건 재발(선언 원인 유지)" : "1 finding(s) repeated; declared cause unchanged");
     const hash = card!.requestHash;
     const replay = await ensureQaSourceDefectOwnerCard(input);
     expect(replay).toEqual({ outcome: "replayed", decisionId: created.decisionId });

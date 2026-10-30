@@ -43,8 +43,12 @@ describeDb("QA card same-generation replay safety", () => {
     const [row] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, result.decisionId));
     return row!;
   }
-  async function legacy(input: Parameters<typeof ensureQaSourceDefectOwnerCard>[0]) {
+  async function legacy(
+    input: Parameters<typeof ensureQaSourceDefectOwnerCard>[0],
+    beforeFreeze?: (id: string) => Promise<unknown>,
+  ) {
     const first = await create(input);
+    await beforeFreeze?.(first.id);
     // Ordinary c7a091cc pre-v2 payload (not the older pre-#329 contract, whose
     // frozen Git-produced payload regressions live in qa-card-review-fixes).
     const { input: oldInput, requestHash } = validateAndHashOperatorDecisionCreate({
@@ -78,13 +82,14 @@ describeDb("QA card same-generation replay safety", () => {
   it.each(["resolved", "cancelled"] as const)(
     "reuses a same-generation legacy %s decision without new cards or continuations", async (terminal) => {
       const input = await scenario();
-      const id = await legacy(input);
       const write = operatorDecisionWriteService(db);
-      if (terminal === "resolved") {
-        await write.resolve(id, { actionId: "submit", selectedOptionIds: ["rerun_source_collection"], comment: null }, "test-user");
-      } else {
-        await write.cancel(id, { type: "user", id: "test-user" }, "terminal fixture");
-      }
+      const id = await legacy(input, async (currentId) => {
+        if (terminal === "resolved") {
+          await write.resolve(currentId, { actionId: "submit", selectedOptionIds: ["rerun_source_collection"], comment: null }, "test-user");
+        } else {
+          await write.cancel(currentId, { type: "user", id: "test-user" }, "terminal fixture");
+        }
+      });
       const before = await cards(input.companyId);
       const beforeContinuations = await continuations(input.companyId);
       expect(before[0]!.status).toBe(terminal);
