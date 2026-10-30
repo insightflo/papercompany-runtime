@@ -35,10 +35,10 @@ import { queryKeys } from "../lib/queryKeys";
 import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { useAfterInitialPaint } from "../hooks/useAfterInitialPaint";
+import { selectHumanOperatorSurface } from "../lib/human-operator-surface";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { CORE_INTEGRATED_PLUGIN_KEYS } from "@/plugins/core-integrated";
-import { humanOperatorBadgeCount } from "./human-operator-badge-count";
 
 interface SidebarProps {
   onOpenHermes?: () => void;
@@ -66,6 +66,13 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
     enabled: !!deferredCompanyId,
     refetchInterval: 30_000,
   });
+  const missionStatusQuery = useQuery({
+    queryKey: deferredCompanyId ? queryKeys.missions.list(deferredCompanyId) : ["missions"],
+    queryFn: () => missionsApi.list(deferredCompanyId!),
+    enabled: !!deferredCompanyId,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
   const { data: pendingOperatorDecisions } = useQuery({
     queryKey: deferredCompanyId
       ? queryKeys.operatorDecisions.list(deferredCompanyId, "pending")
@@ -74,10 +81,25 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
     enabled: !!deferredCompanyId,
     refetchInterval: 30_000,
   });
-  const humanOperatorRequestCount = humanOperatorBadgeCount(
-    humanOperatorRequests?.length,
-    pendingOperatorDecisions?.data.length,
-  );
+  const humanOperatorSurface = selectHumanOperatorSurface({
+    companyId: deferredCompanyId,
+    missions: missionStatusQuery.isError ? undefined : missionStatusQuery.data,
+    requests: humanOperatorRequests ?? [],
+    pendingDecisions: pendingOperatorDecisions?.data ?? [],
+    pendingNextCursor: pendingOperatorDecisions?.page.nextCursor,
+  });
+  const missionStatusLabel = missionStatusQuery.isLoading
+    ? "loading status"
+    : missionStatusQuery.isError
+      ? "status error"
+      : missionStatusQuery.isFetching || missionStatusQuery.isStale
+        ? "status stale"
+        : null;
+  const humanOperatorBadgeLabel = [
+    `${humanOperatorSurface.activeCount} active item${humanOperatorSurface.activeCount === 1 ? "" : "s"} displayed`,
+    humanOperatorSurface.pendingPageIncomplete ? "more pending cards" : null,
+    missionStatusLabel,
+  ].filter(Boolean).join(" · ");
 
   function openSearch() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
@@ -135,9 +157,9 @@ export function Sidebar({ onOpenHermes, hermesPanelOpen = false }: SidebarProps)
             to="/human-operator"
             label="Human Operator"
             icon={UserRoundCheck}
-            badge={humanOperatorRequestCount}
-            badgeTone="danger"
-            alert={humanOperatorRequestCount > 0}
+            textBadge={humanOperatorBadgeLabel}
+            textBadgeTone={missionStatusLabel || humanOperatorSurface.pendingPageIncomplete ? "amber" : "default"}
+            alert={humanOperatorSurface.activeCount > 0}
           />
           <SidebarNavItem
             to="/inbox"

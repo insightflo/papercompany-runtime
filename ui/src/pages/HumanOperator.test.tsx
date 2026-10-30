@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OperatorDecisionView } from "@paperclipai/shared/types/operator-decision";
+import type { MissionHumanOperatorRequest, MissionListItem, MissionStatus } from "../api/missions";
 import {
   CompanyLanguageProvider,
 } from "../lib/companyLanguage";
@@ -16,7 +17,8 @@ import {
 const { mockState, resolveSpy, invalidateSpy } = vi.hoisted(() => ({
   mockState: {
     pendingCards: [] as OperatorDecisionView[],
-    requests: [] as unknown[],
+    requests: [] as MissionHumanOperatorRequest[],
+    missions: [] as MissionListItem[],
   },
   resolveSpy: vi.fn().mockResolvedValue({ decision: {}, applied: true, continuation: null }),
   invalidateSpy: vi.fn().mockResolvedValue(undefined),
@@ -28,9 +30,15 @@ vi.mock("@tanstack/react-query", () => ({
     if (queryKey[0] === "operator-decisions" && queryKey[2] === "pending") {
       return { data: { data: mockState.pendingCards, page: { nextCursor: null } }, isLoading: false, isFetching: false, error: null, refetch: vi.fn() };
     }
+    if (queryKey[0] === "missions" && queryKey[2] === "human-operator-requests") {
+      return { data: mockState.requests, isLoading: false, isFetching: false, isStale: false, error: null, refetch: vi.fn() };
+    }
+    if (queryKey[0] === "missions" && queryKey[1] === "company-1") {
+      return { data: mockState.missions, isLoading: false, isFetching: false, isStale: false, error: null, refetch: vi.fn() };
+    }
     return {
       data: mockState.requests,
-      isLoading: false, isFetching: false, error: null, refetch: vi.fn(),
+      isLoading: false, isFetching: false, isStale: false, error: null, refetch: vi.fn(),
     };
   },
 }));
@@ -57,7 +65,7 @@ const pending: OperatorDecisionView = {
   id: "pending-1", companyId: "company-1", schemaVersion: 1, requestKey: "pending", status: "pending",
   priority: "critical", interactionType: "action", title: "Pending Interactive Card", description: "Act now",
   sourceType: "system", sourceId: "source",
-  sourceContext: { missionId: null, workflowId: null, workflowRunId: null, artifactRefs: [] },
+  sourceContext: { missionId: "mission-1", workflowId: null, workflowRunId: null, artifactRefs: [] },
   definition: {
     options: [], actions: [{ id: "hold", label: "Hold", outcome: "hold", tone: "neutral", requiresSelection: false }],
     selection: null, comment: { mode: "disabled", label: null, placeholder: null, maxLength: 0 },
@@ -72,6 +80,8 @@ const pending: OperatorDecisionView = {
 const moiCard: OperatorDecisionView = {
   ...pending,
   id: "moi-card-1", requestKey: "moi1:decision-event-1", sourceType: "mission_owner_human_input", sourceId: "decision-event-1",
+  companyId: "company-1", issueId: "owner-issue-1",
+  sourceContext: { missionId: "mission-1", workflowId: null, workflowRunId: "run-1", artifactRefs: [], targetSnapshot: { issueId: "owner-issue-1", workflowRunId: "run-1" } },
   title: "Owner asks for direction", description: "Choose the next step for the blocked mission.",
   interactionType: "single_select",
   definition: {
@@ -96,15 +106,30 @@ const moiCard: OperatorDecisionView = {
   },
 };
 
-function moiRequest(id: string, decisionEventId: string | null) {
+function mission(id: string, status: MissionStatus): MissionListItem {
+  const now = new Date("2026-07-29T10:00:00Z");
+  return { id, companyId: "company-1", ownerAgentId: "owner-1", title: "Mission", description: null, status, goalId: null,
+    startedAt: null, completedAt: null, createdAt: now, updatedAt: now };
+}
+
+const activeMission = mission("mission-1", "active");
+const pausedMission = mission("mission-2", "paused");
+
+function moiRequest(
+  id: string,
+  decisionEventId: string | null,
+  missionId = "mission-1",
+  issueId = "owner-issue-1",
+  missionStatus: MissionStatus = "active",
+): MissionHumanOperatorRequest {
   return {
-    id: `request-${id}`, severity: "attention", missionStatus: "active", timestamp: "2026-07-29T10:00:00Z",
+    id: `request-${id}`, companyId: "company-1", missionId, missionTitle: "Mission", issueId,
+    severity: "attention", missionStatus, timestamp: "2026-07-29T10:00:00Z",
     title: `Mission request ${id}`,
     summary: "무엇이: 미션 Mission · 이슈 RES-3638 — Draft\n왜 막힘: the source issue is blocked\n운영자 할 일: assign the idle agent",
-    missionTitle: "Mission", missionId: "mission-1", issueId: null,
     event: {
       id: `owner_diagnosis:activity_log:${id}`, companyId: "company-1",
-      scope: { missionId: "mission-1" },
+      scope: { missionId, issueId },
       sourceRef: { type: "activity_log", id, table: "activity_log" },
       eventType: "owner_diagnosis", title: "Human/operator input requested", summary: "…",
       timestamp: "2026-07-29T10:00:00Z",
@@ -115,15 +140,12 @@ function moiRequest(id: string, decisionEventId: string | null) {
   };
 }
 
-const legacyRequest = {
-  id: "request-1", severity: "attention", missionStatus: "active", timestamp: "2026-07-29T10:00:00Z", title: "Mission request",
-  summary: "무엇이: 미션 Mission · 이슈 RES-3638 — Draft\n왜 막힘: the source issue is blocked\n운영자 할 일: assign the idle agent",
-  missionTitle: "Mission", missionId: "mission-1", issueId: null,
-};
+const legacyRequest = moiRequest("1", null);
 
 function setDefaultMocks() {
   mockState.pendingCards = [pending];
   mockState.requests = [legacyRequest];
+  mockState.missions = [activeMission];
 }
 
 // 배지·레이블은 회사 언어를 따르므로 검증 언어를 ko 로 고정한다.
@@ -172,7 +194,7 @@ describe("HumanOperator", () => {
 
   it("counts pending cards plus existing requests", () => {
     const html = renderToStaticMarkup(<HumanOperator />);
-    expect(html).toContain("2 actionable");
+    expect(html).toContain("2 items displayed");
   });
 
   it("moves success focus to next pending, attention, then empty heading", () => {
@@ -248,6 +270,20 @@ describe("HumanOperator", () => {
     const html = renderKo(<HumanOperator />);
     expect(html.split("Owner asks for direction").length - 1).toBe(1);
     expect(html).toContain("Pending Interactive Card"); // non-moi pending stays in its section
-    expect(html).toContain("2 actionable"); // 1 unbound pending + 1 request (bound card counts once via its row)
+    expect(html).toContain("항목 2개 표시 중"); // 1 unbound pending + 1 request (bound card counts once via its row)
+  });
+
+  it("coalesces an exact moi2 card once and keeps its pending decision visible while paused", () => {
+    const issueId = "paused-owner-issue";
+    mockState.missions = [activeMission, pausedMission];
+    mockState.requests = [moiRequest("paused", "decision-event-paused", "mission-2", issueId, "paused")];
+    mockState.pendingCards = [{ ...moiCard, id: "moi2-paused-card", requestKey: "moi2:00000000-0000-4000-8000-000000000002",
+      sourceId: "decision-event-paused", issueId,
+      sourceContext: { ...moiCard.sourceContext, missionId: "mission-2", targetSnapshot: { issueId, workflowRunId: "run-1" } } }];
+    const html = renderKo(<HumanOperator />);
+    expect(html).toContain('data-human-operator-lifecycle="paused"');
+    expect(html.split("Owner asks for direction").length - 1).toBe(1);
+    expect(html).toContain("방향을 선택해도 미션이 자동으로 재개되지는 않습니다.");
+    expect(html).toContain("(1 displayed)");
   });
 });

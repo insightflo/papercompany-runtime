@@ -15,6 +15,12 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { L, useCompanyLanguage } from "../lib/companyLanguage";
+import {
+  selectHumanOperatorSurface,
+  type HumanOperatorLifecycle,
+  type HumanOperatorScope,
+  type HumanOperatorSurfaceSection,
+} from "../lib/human-operator-surface";
 
 function formatRequestTime(value: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -27,33 +33,17 @@ function missionLink(request: MissionHumanOperatorRequest): string {
   return `/missions/${request.missionId}${query}`;
 }
 
-// [C4 바인딩 규약] Stage 1 서비스(mission-owner-human-input-card.ts)가 requestKey=`moi1:{decisionEventId}`·
-//   sourceId=decisionEventId 로 카드를 만들고, 요청 행은 activity payload 의 decisionEventId 를 log
-//   evidenceRef 로 노출한다(human-operator-requests.ts — 현재 제출 경로는 commentId 를 기록하지 않으므로
-//   log ref 가 항상 decisionEventId). 서버 수정 없이 이 규약으로 행↔카드를 연결한다.
-const MOI_REQUEST_KEY_PREFIX = "moi1:";
-
-function requestDecisionEventId(request: MissionHumanOperatorRequest): string | null {
-  const ref = request.event?.evidenceRefs?.find(
-    (item) => item.type === "log" && item.label === "mission owner decision",
-  );
-  return ref?.ref ? ref.ref : null;
-}
-
-function requestKeyOf(request: MissionHumanOperatorRequest): string | null {
-  const decisionEventId = requestDecisionEventId(request);
-  return decisionEventId ? `${MOI_REQUEST_KEY_PREFIX}${decisionEventId}` : null;
-}
-
 function HumanOperatorRow({
   request,
   card,
   resolvedCard,
+  scope,
   onResolve,
 }: {
   request: MissionHumanOperatorRequest;
   card: OperatorDecisionView | null;
   resolvedCard: OperatorDecisionView | null;
+  scope: HumanOperatorScope;
   onResolve: (decisionId: string, input: ResolveOperatorDecisionInput) => Promise<unknown>;
 }) {
   const lang = useCompanyLanguage();
@@ -67,12 +57,12 @@ function HumanOperatorRow({
         : L(lang, { en: "Cancelled", ko: "취소됨" })
       : L(lang, { en: "No card", ko: "카드 없음" });
   return (
-    <li className="border border-border bg-card p-4">
+    <li data-human-operator-lifecycle={scope.lifecycle} className="border border-border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={request.severity ?? "attention"} />
-            <StatusBadge status={request.missionStatus} />
+            <StatusBadge status={scope.missionStatus ?? "unknown"} />
             {cardStatusBadge && (
               <span data-human-input-card-badge className="inline-flex items-center rounded-full border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
                 {cardStatusBadge}
@@ -121,6 +111,13 @@ export function HumanOperator() {
     enabled: !!selectedCompanyId,
     refetchInterval: 30_000,
   });
+  const missionsQuery = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.missions.list(selectedCompanyId) : ["missions"],
+    queryFn: () => missionsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
   const pendingQuery = useQuery({
     queryKey: selectedCompanyId ? queryKeys.operatorDecisions.list(selectedCompanyId, "pending") : ["operator-decisions", "pending"],
     queryFn: () => operatorDecisionsApi.list(selectedCompanyId!, "pending"),
@@ -149,24 +146,21 @@ export function HumanOperator() {
 
   const requests = requestsQuery.data ?? [];
   const pending = pendingQuery.data?.data ?? [];
-  // [C4] moi 카드 ↔ 요청 행 매칭. 행에 바인딩된 pending 카드는 요청 섹션에서만 렌더하고
-  //   pending 카드 섹션에서 제외해 같은 카드의 중복 렌더를 막는다. 행이 없는 moi pending 카드는
-  //   (소유자 이슈가 닫혀 행에서 빠진 경우) 여전히 pending 섹션에 남는다.
-  const moiPendingByKey = new Map(
-    pending.filter((decision) => decision.requestKey.startsWith(MOI_REQUEST_KEY_PREFIX))
-      .map((decision) => [decision.requestKey, decision]),
-  );
-  const boundRequestKeys = new Set(
-    requests.map(requestKeyOf).filter((key): key is string => key !== null && moiPendingByKey.has(key)),
-  );
-  const actionableCount = requests.length + pending.length - boundRequestKeys.size;
-  const error = requestsQuery.error ?? pendingQuery.error;
-  const isFetching = requestsQuery.isFetching || pendingQuery.isFetching;
+  const surface = selectHumanOperatorSurface({
+    companyId: selectedCompanyId,
+    missions: missionsQuery.isError ? undefined : missionsQuery.data,
+    requests,
+    pendingDecisions: pending,
+    pendingNextCursor: pendingQuery.data?.page.nextCursor,
+  });
+  const error = requestsQuery.error ?? pendingQuery.error ?? missionsQuery.error;
+  const isFetching = requestsQuery.isFetching || pendingQuery.isFetching || missionsQuery.isFetching;
 
   async function refreshDecisionSurfaces() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.operatorDecisions.list(selectedCompanyId!, "pending") }),
       queryClient.invalidateQueries({ queryKey: queryKeys.missions.humanOperatorRequests(selectedCompanyId!) }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.missions.list(selectedCompanyId!) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId!) }),
       queryClient.invalidateQueries({ queryKey: queryKeys.activity(selectedCompanyId!) }),
     ]);
@@ -179,8 +173,27 @@ export function HumanOperator() {
   }
 
   async function refreshAll() {
-    await Promise.all([requestsQuery.refetch(), pendingQuery.refetch()]);
+    await Promise.all([requestsQuery.refetch(), pendingQuery.refetch(), missionsQuery.refetch()]);
   }
+
+  const sections: { lifecycle: HumanOperatorLifecycle; title: string; note?: string; data: HumanOperatorSurfaceSection }[] = [
+    { lifecycle: "active", title: L(lang, { en: "Active and planning", ko: "활성 및 계획 중" }), data: surface.active },
+    { lifecycle: "paused", title: L(lang, { en: "Paused missions", ko: "일시 중지된 미션" }),
+      note: L(lang, { en: "A pending decision remains available while paused. Choosing a direction does not resume the mission.", ko: "미션이 멈춰 있어도 대기 중인 결정은 유지됩니다. 방향을 선택해도 미션이 자동으로 재개되지는 않습니다." }), data: surface.paused },
+    { lifecycle: "terminal", title: L(lang, { en: "Completed or cancelled missions", ko: "완료 또는 취소된 미션" }), data: surface.terminal },
+    { lifecycle: "unknown", title: L(lang, { en: "Mission status unknown", ko: "미션 상태를 알 수 없음" }), data: surface.unknown },
+    { lifecycle: "unscoped", title: L(lang, { en: "Unscoped work", ko: "미션 범위가 없는 작업" }), data: surface.unscoped },
+  ];
+  const missionStatusNotice = missionsQuery.isLoading
+    ? L(lang, { en: "Loading the complete company mission list; scoped items remain visible as unknown until it loads.", ko: "회사 전체 미션 목록을 불러오는 중입니다. 완료될 때까지 범위가 있는 항목은 상태 미확인으로 표시됩니다." })
+    : missionsQuery.isError
+      ? L(lang, { en: "The mission list could not be loaded; scoped items remain visible as unknown.", ko: "미션 목록을 불러오지 못했습니다. 범위가 있는 항목은 상태 미확인으로 표시됩니다." })
+      : missionsQuery.isFetching || missionsQuery.isStale
+        ? L(lang, { en: "Mission status may be stale; displayed groups use the last successful complete list.", ko: "미션 상태가 오래되었을 수 있습니다. 마지막으로 성공한 전체 목록으로 분류했습니다." })
+        : null;
+  const displayedLabel = surface.pendingPageIncomplete
+    ? L(lang, { en: `At least ${surface.displayedCount} ${surface.displayedCount === 1 ? "item" : "items"} displayed; more pending cards exist.`, ko: `항목 ${surface.displayedCount}개 이상 표시 중이며, 대기 카드가 더 있습니다.` })
+    : L(lang, { en: `${surface.displayedCount} ${surface.displayedCount === 1 ? "item" : "items"} displayed`, ko: `항목 ${surface.displayedCount}개 표시 중` });
 
   return (
     <div className="space-y-4">
@@ -190,7 +203,13 @@ export function HumanOperator() {
           <p className="mt-1 text-sm text-muted-foreground">
             Structured decisions, mission escalations, and input requests needing operator attention.
           </p>
-          <p className="mt-1 text-xs font-medium text-foreground">{actionableCount} actionable</p>
+          <p className="mt-1 text-xs font-medium text-foreground">{displayedLabel}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {L(lang, {
+              en: `${surface.activeCount} active/planning item${surface.activeCount === 1 ? "" : "s"} displayed`,
+              ko: `활성/계획 미션 항목 ${surface.activeCount}개 표시 중`,
+            })}
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => void refreshAll()} disabled={isFetching}>
           <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
@@ -203,28 +222,43 @@ export function HumanOperator() {
         <span>{error instanceof Error ? error.message : "Failed to load Human Operator work."}</span>
       </div>}
 
-      <section aria-labelledby="interactive-cards-heading" className="space-y-2">
-        <h2 id="interactive-cards-heading" className="text-base font-semibold">Pending Interactive Cards</h2>
-        {pending.filter((decision) => !boundRequestKeys.has(decision.requestKey))
-          .map((decision) => <OperatorDecisionCard key={decision.id} decision={decision} onResolve={resolveDecision} />)}
-      </section>
+      {missionStatusNotice && <p className="text-xs text-muted-foreground" role={missionsQuery.isError ? "alert" : "status"}>{missionStatusNotice}</p>}
 
-      <ExternalAutomationApprovals />
-
-      {requests.length > 0 ? <ul className="space-y-2">{requests.map((request) => {
-        const key = requestKeyOf(request);
+      {sections.map(({ lifecycle, title, note, data }) => {
+        const sectionCount = data.cards.length + data.requests.length;
+        if (lifecycle !== "active" && sectionCount === 0) return null;
+        const headingId = `human-operator-${lifecycle}-heading`;
         return (
-          <HumanOperatorRow
-            key={request.id}
-            request={request}
-            card={key ? moiPendingByKey.get(key) ?? null : null}
-            resolvedCard={null}
-            onResolve={resolveDecision}
-          />
+          <section key={lifecycle} aria-labelledby={headingId} className="space-y-2">
+            <h2 id={headingId} className="text-base font-semibold">
+              {title} <span className="text-xs font-normal text-muted-foreground">({sectionCount} displayed)</span>
+            </h2>
+            {note && sectionCount > 0 && <p className="text-sm text-muted-foreground">{note}</p>}
+            {data.cards.length > 0 && (
+              <div aria-label={L(lang, { en: "Pending Interactive Cards", ko: "대기 중인 인터랙티브 카드" })} className="space-y-2">
+                <h3 className="text-sm font-medium">{L(lang, { en: "Pending Interactive Cards", ko: "대기 중인 인터랙티브 카드" })}</h3>
+                {data.cards.map(({ decision }) => <OperatorDecisionCard key={decision.id} decision={decision} onResolve={resolveDecision} />)}
+              </div>
+            )}
+            {lifecycle === "active" && <ExternalAutomationApprovals />}
+            {data.requests.length > 0 && <ul className="space-y-2">{data.requests.map(({ request, card, scope }) => (
+              <HumanOperatorRow
+                key={request.id}
+                request={request}
+                card={card}
+                resolvedCard={null}
+                scope={scope}
+                onResolve={resolveDecision}
+              />
+            ))}</ul>}
+            {surface.displayedCount === 0 && lifecycle === "active" && (
+              <h3 data-human-operator-empty-heading tabIndex={-1} className="text-sm font-medium">
+                {L(lang, { en: "No open human operator requests.", ko: "열려 있는 사람 운영자 요청이 없습니다." })}
+              </h3>
+            )}
+          </section>
         );
-      })}</ul> : pending.length === 0 ? (
-        <h2 data-human-operator-empty-heading tabIndex={-1} className="text-sm font-medium">{L(lang, { en: "No open human operator requests.", ko: "열려 있는 사람 운영자 요청이 없습니다." })}</h2>
-      ) : null}
+      })}
     </div>
   );
 }
