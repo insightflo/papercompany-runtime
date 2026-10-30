@@ -13,6 +13,7 @@ import { operatorDecisionWriteService } from "../services/operator-decisions-wri
 import { operatorDecisionReadService } from "../services/operator-decisions-read.js";
 import { startWorkflowRestartFromOperatorDecision } from "../services/missions/approved-workflow-restart.js";
 import { WORKFLOW_RESTART_FROM_START_OPTION_ID } from "../services/missions/workflow-restart-option.js";
+import { workflowRestartDb } from "./helpers/operator-decision-restart-fixture.js";
 import { workflowService } from "../services/workflow/engine.js";
 
 vi.mock("../services/workflow/engine.js", () => ({ workflowService: { trigger: vi.fn() } }));
@@ -75,27 +76,6 @@ function humanInputDb(pendingRows: unknown[], historicalRows: unknown[] = []) {
   }) }) });
   return { select: vi.fn().mockImplementationOnce(() => query(pendingRows))
     .mockImplementationOnce(() => query(historicalRows)), insert: vi.fn(), update: vi.fn() } as unknown as Db;
-}
-
-function dbWithSource(source: Record<string, unknown>) {
-  const forUpdate = vi.fn().mockResolvedValue([source]);
-  const sourceLimit = vi.fn(() => ({ for: forUpdate }));
-  const replacementLimit = vi.fn().mockResolvedValue([]);
-  const updateWhere = vi.fn().mockResolvedValue([]);
-  const updateSet = vi.fn(() => ({ where: updateWhere }));
-  const insertValues = vi.fn().mockResolvedValue([]);
-  const db = {
-    select: vi.fn()
-      .mockImplementationOnce(() => ({ from: vi.fn(() => ({
-        where: vi.fn(() => ({ limit: sourceLimit })),
-      })) }))
-      .mockImplementationOnce(() => ({ from: vi.fn(() => ({
-        where: vi.fn(() => ({ limit: replacementLimit })),
-      })) })),
-    update: vi.fn(() => ({ set: updateSet })),
-    insert: vi.fn(() => ({ values: insertValues })),
-  } as unknown as Db;
-  return { db, updateSet, updateWhere, insertValues };
 }
 
 describe("operator-decision workflow restart", () => {
@@ -239,13 +219,14 @@ describe("operator-decision workflow restart", () => {
   it("starts a fresh top-level run and reopens blocked oversight from the approved source run", async () => {
     const input = ids();
     const workflowId = randomUUID();
-    const { db, updateSet, updateWhere, insertValues } = dbWithSource({
+    const fixture = workflowRestartDb(input, {
       id: input.sourceWorkflowRunId, companyId: input.companyId, missionId: input.missionId,
       workflowId, parentRunId: null, status: "failed", runDate: "2026-10-25",
     });
     trigger.mockResolvedValue({ runId: randomUUID(), status: "running", stepRuns: [] });
 
-    const result = await startWorkflowRestartFromOperatorDecision(db, input);
+    const { db, updateSet, updateWhere, insertValues } = fixture;
+    const result = await startWorkflowRestartFromOperatorDecision(db, fixture.input);
 
     expect(trigger).toHaveBeenCalledWith(db, expect.objectContaining({
       companyId: input.companyId, missionId: input.missionId, workflowId,
@@ -265,14 +246,31 @@ describe("operator-decision workflow restart", () => {
 
   it("fails closed when the bound source run is no longer failed", async () => {
     const input = ids();
-    const { db, updateSet, insertValues } = dbWithSource({
+    const fixture = workflowRestartDb(input, {
       id: input.sourceWorkflowRunId, companyId: input.companyId, missionId: input.missionId,
       workflowId: randomUUID(), parentRunId: null, status: "completed", runDate: "2026-10-25",
     });
-    await expect(startWorkflowRestartFromOperatorDecision(db, input))
+    await expect(startWorkflowRestartFromOperatorDecision(fixture.db, fixture.input))
       .rejects.toThrow("workflow_restart_source_not_failed");
     expect(trigger).not.toHaveBeenCalled();
-    expect(updateSet).not.toHaveBeenCalled();
-    expect(insertValues).not.toHaveBeenCalled();
+    expect(fixture.updateSet).not.toHaveBeenCalled();
+    expect(fixture.insertValues).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "mismatched"] as const)("rejects %s supplied decision binding before effects", async (damage) => {
+    const input = ids();
+    const fixture = workflowRestartDb(input, {
+      id: input.sourceWorkflowRunId, companyId: input.companyId, missionId: input.missionId,
+      workflowId: randomUUID(), parentRunId: null, status: "failed", runDate: "2026-10-25",
+    });
+    const supplied = damage === "missing"
+      ? { ...fixture.input, decisionRequestHash: undefined, decisionResult: undefined }
+      : { ...fixture.input, decisionResult: { ...fixture.decisionResult, comment: "changed" } };
+    await expect(startWorkflowRestartFromOperatorDecision(fixture.db, supplied)).rejects.toMatchObject({
+      status: 409, details: { code: "workflow_restart_decision_binding_invalid" },
+    });
+    expect(trigger).not.toHaveBeenCalled();
+    expect(fixture.updateSet).not.toHaveBeenCalled();
+    expect(fixture.insertValues).not.toHaveBeenCalled();
   });
 });

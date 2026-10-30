@@ -12,168 +12,27 @@ import {
 } from "@paperclipai/db";
 import type {
   OperatorDecisionContinuationView,
-  OperatorDecisionEffectiveStatus,
+  OperatorDecisionDefinition,
   OperatorDecisionRequesterOutcomeView,
   OperatorDecisionView,
 } from "@paperclipai/shared/types/operator-decision";
+import {
+  evaluateRecoveryAdvice,
+  loadRecoveryAdviceFacts,
+  overlayRecoveryAdvice,
+} from "./operator-decision-recovery-advice.js";
+import {
+  buildContinuationRetryHint,
+  deriveOperatorDecisionContinuationStatus,
+  type ContinuationStatusInput,
+  type DerivedContinuationStatus,
+} from "./operator-decision-continuation-status.js";
 
-export interface ContinuationStatusInput {
-  continuation: typeof operatorDecisionContinuations.$inferSelect;
-  // [열 좁히기 2026-10-20] 파생은 status/runId 만 읽는다. heartbeat_runs 는 행당 수백 KB TOAST 라
-  //   전체 행 로드가 목록 병목(90행 = 1.1s)이었으므로 최소 필드만 요청한다. 전체 행도 구조적으로 만족한다.
-  wakeup: Pick<typeof agentWakeupRequests.$inferSelect, "id" | "status" | "runId"> | null;
-  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "status"> | null;
-  issue: Pick<typeof issues.$inferSelect, "id" | "status" | "assigneeAgentId"> | null;
-  targetAgent: Pick<typeof agents.$inferSelect, "id" | "status"> | null;
-  /** 카드 원 요청자 에이전트 — 있으면 전달 대상이 요청자로 고정된 카드다. */
-  requestedByAgentId?: string | null;
-  now: Date;
-}
-
-export interface DerivedContinuationStatus {
-  effectiveStatus: OperatorDecisionEffectiveStatus;
-  errorCode: string | null;
-  attention: boolean;
-}
-
-const terminalRunMapping: Record<string, [OperatorDecisionEffectiveStatus, string | null, boolean]> = {
-  succeeded: ["completed", null, false],
-  failed: ["failed", "heartbeat_failed", true],
-  // [terminal cleanup] a cancelled/timed-out continuation run whose linked issue is
-  // done/cancelled has no remaining delivery — the mission moved past it (mission cancel
-  // cascades run terminalization). Non-attention, same as 8/25 morning GAZ-1315 rows.
-  cancelled: ["cancelled", "heartbeat_cancelled", false],
-  timed_out: ["timed_out", "heartbeat_timed_out", false],
-};
-const terminalRequestMapping: Record<string, [OperatorDecisionEffectiveStatus, string | null, boolean]> = {
-  completed: ["completed", null, false],
-  failed: ["failed", "heartbeat_failed", true],
-  cancelled: ["cancelled", "heartbeat_cancelled", false],
-  skipped: ["skipped", "heartbeat_skipped", false],
-  timed_out: ["timed_out", "heartbeat_timed_out", false],
-};
-
-function derived(tuple: [OperatorDecisionEffectiveStatus, string | null, boolean]): DerivedContinuationStatus {
-  return { effectiveStatus: tuple[0], errorCode: tuple[1], attention: tuple[2] };
-}
-
-/** Operator-facing Korean hint: what retrying this continuation actually does next. */
-function buildContinuationRetryHint(
-  effectiveStatus: OperatorDecisionEffectiveStatus,
-  errorCode: string | null,
-  issueStatus: string | null,
-): string | null {
-  if (errorCode === "issue_unassigned") {
-    return issueStatus === "in_progress"
-      ? "연결 이슈가 진행 중이지만 담당자가 없습니다. 이슈에 담당자를 지정하면 재시도가 깨움으로 이어집니다."
-      : "연결 이슈에 담당자가 없습니다. 이슈에 담당자를 지정한 뒤 재시도하세요.";
-  }
-  if (errorCode === "issue_terminal") {
-    return "연결 이슈가 완료/취소로 종결되어 후속 실행이 불가합니다. 새 카드 또는 이슈 재오픈이 필요합니다.";
-  }
-  if (errorCode === "requester_unavailable") {
-    return "카드를 요청한 에이전트(요청자)를 확인할 수 없어 후속 실행이 차단되었습니다. 요청자 에이전트 확인 후 재시도하세요.";
-  }
-  if (effectiveStatus === "exhausted") {
-    return "자동 후속 실행이 시도 한도를 소진했습니다. 재시도는 수동으로 한 번 더 깨웁니다.";
-  }
-  if (effectiveStatus === "failed" || effectiveStatus === "timed_out") {
-    return "후속 실행 런이 실패/시간 초과했습니다. 재시도는 같은 지시로 실행을 다시 깨웁니다.";
-  }
-  return null;
-}
-
-export function deriveOperatorDecisionContinuationStatus(
-  input: ContinuationStatusInput,
-): DerivedContinuationStatus {
-  const result = deriveContinuationStatusInternal(input);
-  const { issue } = input;
-  // [terminal cleanup 2026-10-04] 연결 이슈가 완료/취소로 종결된 continuation 은 어떤
-  //   상태(failed/deferred/unassigned/exhausted/…)도 운영자 행동 대상이 아니다 — 미션은
-  //   이미 지나갔다(attention 뷰에는 지우기 수단이 없어 카드가 영구히 남는다).
-  //   성공 전달(completed, 원래 비-attention)은 그대로 둔다. blocked 상태에 대한 기존
-  //   GAZ-1315 정리와 같은 원칙을 전 상태로 확장한다.
-  if (result.attention && issue && ["done", "cancelled"].includes(issue.status)) {
-    return { effectiveStatus: "skipped", errorCode: "issue_terminal", attention: false };
-  }
-  return result;
-}
-
-function deriveContinuationStatusInternal(
-  input: ContinuationStatusInput,
-): DerivedContinuationStatus {
-  const { continuation, wakeup, run, issue, targetAgent, now } = input;
-  if (continuation.state === "blocked") {
-    // [terminal cleanup] A blocked continuation whose linked issue has since reached a
-    // terminal state (done/cancelled) no longer represents actionable operator work —
-    // the mission moved on (e.g. oversight issue completed after a workflow finished).
-    // Classify as skipped (non-attention) instead of leaving a stale retry card up.
-    if (
-      continuation.errorCode === "issue_unassigned" || continuation.errorCode === "issue_terminal"
-    ) {
-      if (issue && ["done", "cancelled"].includes(issue.status)) {
-        return { effectiveStatus: "skipped", errorCode: "issue_terminal", attention: false };
-      }
-    }
-    return { effectiveStatus: "blocked", errorCode: continuation.errorCode, attention: true };
-  }
-  if (continuation.state === "exhausted") {
-    return { effectiveStatus: "exhausted", errorCode: "attempts_exhausted", attention: true };
-  }
-  if (continuation.state === "pending") {
-    if (now.getTime() > continuation.nextAttemptAt.getTime() + 30_000) {
-      return { effectiveStatus: "pending", errorCode: "dispatch_delayed", attention: true };
-    }
-    return {
-      effectiveStatus: "pending",
-      errorCode: continuation.errorCode === "dispatch_failed" ? "dispatch_failed" : null,
-      attention: false,
-    };
-  }
-  if (continuation.state === "leased") {
-    const expired = continuation.leaseExpiresAt !== null && continuation.leaseExpiresAt.getTime() < now.getTime();
-    return { effectiveStatus: "dispatching", errorCode: expired ? "lease_expired" : null, attention: expired };
-  }
-  if (continuation.state !== "accepted" || !wakeup) {
-    return { effectiveStatus: "blocked", errorCode: "proof_missing", attention: true };
-  }
-  if (run && terminalRunMapping[run.status]) return derived(terminalRunMapping[run.status]!);
-  if (terminalRequestMapping[wakeup.status]) return derived(terminalRequestMapping[wakeup.status]!);
-  if (wakeup.status === "coalesced" && run && ["queued", "running"].includes(run.status)) {
-    return { effectiveStatus: "coalesced", errorCode: null, attention: false };
-  }
-  if (wakeup.status === "claimed" && run && ["queued", "running"].includes(run.status)) {
-    return { effectiveStatus: "running", errorCode: null, attention: false };
-  }
-  if (["coalesced", "claimed"].includes(wakeup.status)) {
-    return { effectiveStatus: "blocked", errorCode: "proof_missing", attention: true };
-  }
-  if (["queued", "deferred_issue_execution"].includes(wakeup.status)) {
-    if (!issue) return { effectiveStatus: "blocked", errorCode: "issue_missing", attention: true };
-    // [requester delivery] 요청자 전달 카드는 대상이 요청자로 고정된다 — 담당자 유무/변경은
-    //   전달 유효성과 무관하므로 issue_unassigned/assignee_changed 오경보를 내지 않는다.
-    //   요청자 불능은 targetAgent paused/terminated/pending_approval 검사가 담당한다.
-    const requesterTargeted = Boolean(input.requestedByAgentId);
-    if (!requesterTargeted && !issue.assigneeAgentId) {
-      return { effectiveStatus: "blocked", errorCode: "issue_unassigned", attention: true };
-    }
-    if (["done", "cancelled"].includes(issue.status)) {
-      return { effectiveStatus: "issue_terminal", errorCode: "issue_terminal", attention: true };
-    }
-    if (!requesterTargeted && issue.assigneeAgentId !== continuation.targetAgentId) {
-      return { effectiveStatus: "assignee_changed", errorCode: "assignee_changed", attention: true };
-    }
-    if (!targetAgent || ["paused", "terminated", "pending_approval"].includes(targetAgent.status)) {
-      return { effectiveStatus: "agent_unrunnable", errorCode: "agent_unrunnable", attention: true };
-    }
-    return {
-      effectiveStatus: wakeup.status === "queued" ? "queued" : "deferred",
-      errorCode: null,
-      attention: false,
-    };
-  }
-  return { effectiveStatus: "blocked", errorCode: "proof_missing", attention: true };
-}
+export {
+  deriveOperatorDecisionContinuationStatus,
+  type ContinuationStatusInput,
+  type DerivedContinuationStatus,
+} from "./operator-decision-continuation-status.js";
 
 type OperatorDecisionRow = typeof operatorDecisions.$inferSelect;
 type OperatorDecisionProjection = {
@@ -197,6 +56,8 @@ export async function loadOperatorDecisionProjections(
   if (rows.length === 0) return [];
 
   const decisionIds = rows.map((row) => row.id);
+  const adviceFactsByDecisionId = await loadRecoveryAdviceFacts(db, rows);
+
   const continuations = await db.select().from(operatorDecisionContinuations)
     .where(inArray(operatorDecisionContinuations.operatorDecisionId, decisionIds));
   const continuationByDecisionId = new Map(continuations.map((row) => [row.operatorDecisionId, row]));
@@ -304,6 +165,12 @@ export async function loadOperatorDecisionProjections(
         ? { type: "user" as const, id: row.requestedByUserId }
         : null;
 
+    const adviceFacts = adviceFactsByDecisionId.get(row.id);
+    const advice = adviceFacts ? evaluateRecoveryAdvice({ card: row, ...adviceFacts }) : null;
+    const projectedDefinition = advice
+      ? overlayRecoveryAdvice(row.definition as OperatorDecisionDefinition, advice)
+      : row.definition;
+
     let requesterOutcome: OperatorDecisionRequesterOutcomeView | null = null;
     let cancellationReason: string | null = null;
     if (row.status === "cancelled") {
@@ -335,7 +202,7 @@ export async function loadOperatorDecisionProjections(
         sourceType: row.sourceType,
         sourceId: row.sourceId,
         sourceContext: row.sourceContext,
-        definition: row.definition,
+        definition: projectedDefinition,
         result: row.result,
         issueId: row.issueId,
         issueIdentifier: linkedIssue?.identifier ?? null,

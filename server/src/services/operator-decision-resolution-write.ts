@@ -1,6 +1,6 @@
 import { and, eq, getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companies, issueComments, missions, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
+import { activityLog, companies, issueComments, missions, operatorDecisionContinuations, operatorDecisions, workflowRuns } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -21,7 +21,9 @@ import {
   type ResumeMutationTransaction,
   type ResumeSerializationContext,
 } from "./workflow/resume/serialization.js";
-import { startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
+import { assertExactBoardWorkflowRestartPolicy, holdUnprovenRestart,
+  startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
+import { evaluateRecoveryAdviceIdentity, loadRecoveryAdviceIdentityFacts } from "./operator-decision-recovery-advice.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_SCOPE,
@@ -119,7 +121,41 @@ export function operatorDecisionResolutionWriteService(
       resumeContext?: ResumeSerializationContext,
     ) => {
       const now = new Date();
+      if (before.status === "pending" && directRestartSelected) {
+        const [observed] = await tx.select().from(operatorDecisions).where(eq(operatorDecisions.id, id));
+        if (observed?.status === "resolved" && sameOperatorDecisionResult(observed.result, result)) return false;
+      }
       if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before);
+      if (before.status === "pending" && directRestartSelected) {
+        const [current] = await tx.select().from(operatorDecisions).where(eq(operatorDecisions.id, id)).for("update");
+        if (current?.status === "resolved" && sameOperatorDecisionResult(current.result, result)) return false;
+        if (!current || current.status !== "pending") throw conflictFor(id, current?.status ?? "missing");
+        if (current.requestHash !== before.requestHash) throw conflict("Operator decision changed while it was being resolved", {
+          code: "operator_decision_binding_changed", operatorDecisionId: id,
+        });
+        const currentResult = validateOperatorDecisionResult(current.definition, rawInput);
+        if (!sameOperatorDecisionResult(currentResult, result)) throw conflict("Operator decision result no longer matches the submitted selection", {
+          code: "operator_decision_binding_changed", operatorDecisionId: id,
+        });
+        if (!current.definition.approvedScope.includes(WORKFLOW_RESTART_FROM_START_SCOPE)) {
+          throw conflict("workflow_restart_scope_missing");
+        }
+        if (!current.sourceContext.missionId || !current.sourceContext.workflowRunId) {
+          throw conflict("workflow_restart_scope_missing");
+        }
+        const targetSnapshot = readTargetSnapshot(current.sourceContext);
+        if (targetSnapshot) await assertTargetSnapshotCurrent(tx, id, current.companyId, targetSnapshot,
+          current.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
+        const facts = await loadRecoveryAdviceIdentityFacts(tx as unknown as Db, current);
+        const advice = facts
+          ? evaluateRecoveryAdviceIdentity({ kind: "pending_owner_human_restart_candidate", card: current, ...facts })
+          : evaluateRecoveryAdviceIdentity({ kind: "outside_default_scope", card: current });
+        if (advice.disposition !== "outside_default_scope") holdUnprovenRestart(id);
+        assertExactBoardWorkflowRestartPolicy(current, currentResult, {
+          companyId: current.companyId, missionId: current.sourceContext.missionId,
+          sourceWorkflowRunId: current.sourceContext.workflowRunId,
+        });
+      }
       const updated = await tx.update(operatorDecisions).set({
         status: "resolved",
         result,
@@ -187,6 +223,8 @@ export function operatorDecisionResolutionWriteService(
           operatorDecisionId: updated.id,
           resolvedByUserId,
           issueId: updated.issueId,
+          decisionRequestHash: updated.requestHash,
+          decisionResult: updated.result ?? undefined,
         });
       }
       if (directResumeSelected) {
@@ -216,6 +254,11 @@ export function operatorDecisionResolutionWriteService(
             eq(missions.companyId, before.companyId),
           )).for("update");
           if (!lockedMission) throw conflict("workflow_restart_scope_missing");
+          await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+            eq(workflowRuns.id, before.sourceContext.workflowRunId!),
+            eq(workflowRuns.companyId, before.companyId),
+            eq(workflowRuns.missionId, before.sourceContext.missionId!),
+          )).for("update");
           return resolveInsideTransaction(tx);
         })
         : await db.transaction((tx) => resolveInsideTransaction(tx));
