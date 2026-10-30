@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { issueWorkProducts, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { issueWorkProducts, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { createQualityTestDb, describeQualityDb } from "./helpers/quality-db.js";
 import { seedToolRecoveryScenario } from "./helpers/tool-recovery-scenario.js";
 import { rmSync } from "node:fs";
@@ -34,6 +34,17 @@ describeQualityDb("read-only same-run producer observations", () => {
     const [oversightIssue] = await db.select().from(issues).where(eq(issues.id, card.originId!));
     const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, s.workflowRunId));
     const [stepRun] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.stepRunId));
+    // Producer facts are resolved from the CANONICAL execution definition (stepsJson),
+    // never from the caller-passed display step. Seed the actual definition with the
+    // producer step plus the selector/dependency/toolArgs under test BEFORE the card call.
+    await db.update(workflowDefinitions).set({ stepsJson: [
+      { id: "producer", name: "Produce input", type: "agent", agentId: mission.ownerAgentId, dependencies: [] },
+      { id: "collect-us-stockflow", name: "Collect US stockflow", type: "tool", dependencies: ["producer"],
+        toolNames: ["collect-us-stockflow"], toolArgs: { input: "{$steps.producer.workProductPath}" },
+        workProductSelectors: { producer: { type: "document", title: "input.json" } } },
+      { id: "summarize-stockflow", name: "Summarize stockflow", type: "agent", agentId: mission.ownerAgentId,
+        dependencies: ["collect-us-stockflow"] },
+    ] }).where(eq(workflowDefinitions.id, run.workflowId));
     const [producer] = await db.insert(workflowStepRuns).values({ workflowRunId: run.id, stepId: "producer", issueId: card.id,
       status: "completed", executionGeneration: 3, retryCount: 2, iterationIndex: 1 }).returning();
     const heartbeatRunId = randomUUID();

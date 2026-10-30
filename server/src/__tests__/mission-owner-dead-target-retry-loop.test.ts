@@ -12,6 +12,7 @@
 // [수정시 주의] 마커/카드는 companyId+combo 로만 구분(테스트마다 randomUUID) — 상호 오염 없음.
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -24,12 +25,14 @@ import {
   issues,
   missions,
   operatorDecisions,
+  workflowRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { seedToolRecoveryScenario } from "./helpers/tool-recovery-scenario.js";
 import { missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
@@ -54,7 +57,7 @@ async function seedBase(db: ReturnType<typeof createDb>, name: string): Promise<
   return { companyId, ownerAgentId, workerAgentId, missionId };
 }
 
-async function recordOwnerRetryDecision(db: ReturnType<typeof createDb>, base: Base, ownerActionIssueId: string, sourceIssueId: string) {
+async function recordOwnerRetryDecision(db: ReturnType<typeof createDb>, base: Pick<Base, "companyId" | "ownerAgentId" | "missionId">, ownerActionIssueId: string, sourceIssueId: string) {
   const ownerWakeupId = randomUUID();
   await db.insert(agentWakeupRequests).values({
     id: ownerWakeupId, companyId: base.companyId, agentId: base.ownerAgentId, source: "test",
@@ -77,6 +80,7 @@ async function recordOwnerRetryDecision(db: ReturnType<typeof createDb>, base: B
 describeEP("mission owner dead-target retry loop prevention", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  const roots: string[] = [];
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("dead-target-retry-loop-");
@@ -92,11 +96,12 @@ describeEP("mission owner dead-target retry loop prevention", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(missions);
+    await db.delete(workflowRuns);
     await db.delete(agents);
     await db.delete(companies);
   });
 
-  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
+  afterAll(async () => { for (const root of roots) rmSync(root, { recursive: true, force: true }); await db.$client.end({ timeout: 5 }); await tempDb?.cleanup(); });
 
   it("grace auto-default escalates instead of retrying a terminal canonical source, once, with a human decision card", async () => {
     const base = await seedBase(db, "Grace Dead Target Co");
@@ -247,72 +252,43 @@ describeEP("mission owner dead-target retry loop prevention", () => {
     expect(fifth.findings.join("\n")).toContain("owner_action_decision_not_applied");
   });
 
+  // [C2 2026-10-30] 이하 2케이스는 실제 스냅샷 기반 실패 tool 소스 + 정상 v1 바인딩 카드로만 새 source proof 를 통과한다.
+  async function seedSnapshotToolCard(cardStatus: "todo" | "done") {
+    const s = await seedToolRecoveryScenario({ db, artifactExists: false, captureExecutionDefinitionSnapshot: true });
+    roots.push(s.tempRoot);
+    await db.update(issues).set({ status: cardStatus }).where(eq(issues.id, s.recoveryIssueId));
+    await db.insert(workflowTransitionEvents).values({ companyId: s.companyId, missionId: s.missionId,
+      issueId: s.recoveryIssueId, workflowRunId: s.workflowRunId, workflowStepRunId: s.stepRunId,
+      layer: "mission_owner_recovery", eventType: "owner_tool_recovery_target_v1",
+      idempotencyKey: `owner-tool-card:${s.stepRunId}`,
+      payload: { schemaVersion: 1, kind: "tool_step", workflowRunId: s.workflowRunId, stepRunId: s.stepRunId } });
+    return s;
+  }
+  const superviseOwner = (missionId: string, now: Date) => missionService(db).runMainExecutorSupervision({
+    missionId, staleAfterMinutes: 1, now, applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false });
+
   it("escalates immediately when the recorded decision lacks a tool-step target (dead decision)", async () => {
-    const base = await seedBase(db, "Tool Dead Decision Co");
-    const svc = missionService(db);
-    const source = await issueService(db).create(base.companyId, {
-      assigneeAgentId: base.workerAgentId, missionId: base.missionId,
-      originKind: "workflow_execution", status: "blocked", title: "Tool recovery source",
-    });
-    await svc.runMainExecutorSupervision({ missionId: base.missionId, staleAfterMinutes: 1, now: new Date() });
-    const ownerAction = await issueService(db).create(base.companyId, {
-      assigneeAgentId: base.ownerAgentId, missionId: base.missionId,
-      originKind: "mission_main_executor_unblock", originId: source.id, status: "done",
-      title: "Tool recovery card without a tool target",
-    });
-    await recordOwnerRetryDecision(db, base, ownerAction.id, source.id);
-    // [2단계 2026-10-23] 결정이 기록됐는데 도구 대상이 없으면(죽은 결정) 3틱 대기 없이 첫 틱에 즉시
-    //   사람 에스컬레이션 — no_op 재기록·재노출 금지(RES-9071 3회 반복 사고 방지).
-    await db.insert(workflowTransitionEvents).values({
-      companyId: base.companyId, missionId: base.missionId, issueId: ownerAction.id,
-      eventType: "owner_tool_recovery_target_v1", layer: "mission_owner_recovery",
-      idempotencyKey: `test-tool-card:${ownerAction.id}`,
-      payload: { kind: "owner_tool_recovery_target_v1" },
-    });
-    const first = await svc.runMainExecutorSupervision({
-      missionId: base.missionId, staleAfterMinutes: 1, now: new Date(),
-      applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false,
-    });
+    const s = await seedSnapshotToolCard("done");
+    // [2단계 2026-10-23] 죽은 결정(기록됐으나 도구 대상 없음)은 3틱 대기 없이 첫 틱에 즉시 에스컬레이션(RES-9071).
+    await recordOwnerRetryDecision(db, { companyId: s.companyId, ownerAgentId: s.ownerAgentId, missionId: s.missionId },
+      s.recoveryIssueId, s.oversightIssueId);
+    const first = await superviseOwner(s.missionId, new Date());
     expect(first.findings.join("\n")).toContain("owner_tool_recovery_dead_target_breaker");
     expect(first.findings.join("\n")).not.toContain("tool_step_recovery_no_op");
     const cards = await db.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
-      eq(operatorDecisions.companyId, base.companyId),
-      eq(operatorDecisions.sourceType, "mission_owner_human_input"),
-    ));
+      eq(operatorDecisions.companyId, s.companyId), eq(operatorDecisions.sourceType, "mission_owner_human_input")));
     expect(cards).toHaveLength(1);
   });
 
   it("keeps the 3-strike breaker while the owner simply has not decided yet", async () => {
-    const base = await seedBase(db, "Tool Undecided Co");
-    const svc = missionService(db);
-    const source = await issueService(db).create(base.companyId, {
-      assigneeAgentId: base.workerAgentId, missionId: base.missionId,
-      originKind: "workflow_execution", status: "blocked", title: "Tool recovery source",
-    });
-    await svc.runMainExecutorSupervision({ missionId: base.missionId, staleAfterMinutes: 1, now: new Date() });
-    const [ownerAction] = await db.select().from(issues).where(and(
-      eq(issues.companyId, base.companyId), eq(issues.missionId, base.missionId),
-      eq(issues.originKind, "mission_main_executor_unblock"), eq(issues.originId, source.id)));
-    expect(ownerAction).toBeTruthy();
+    const s = await seedSnapshotToolCard("todo");
     // 결정 기록 없음 + 도구 회복 카드만 존재 → 오너 응답 대기: 기존 3회 브레이컈 유지.
-    await db.insert(workflowTransitionEvents).values({
-      companyId: base.companyId, missionId: base.missionId, issueId: ownerAction!.id,
-      eventType: "owner_tool_recovery_target_v1", layer: "mission_owner_recovery",
-      idempotencyKey: `test-tool-card:${ownerAction!.id}`,
-      payload: { kind: "owner_tool_recovery_target_v1" },
-    });
     const baseTime = Date.now();
     for (const minute of [1, 2, 3]) {
-      const run = await svc.runMainExecutorSupervision({
-        missionId: base.missionId, staleAfterMinutes: 1, now: new Date(baseTime + minute * 60_000),
-        applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false,
-      });
+      const run = await superviseOwner(s.missionId, new Date(baseTime + minute * 60_000));
       expect(run.findings.join("\n")).toContain("tool_step_recovery_no_op");
     }
-    const fourth = await svc.runMainExecutorSupervision({
-      missionId: base.missionId, staleAfterMinutes: 1, now: new Date(baseTime + 4 * 60_000),
-      applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false,
-    });
-    expect(fourth.findings.join("\n")).toContain("owner_tool_recovery_dead_target_breaker");
+    expect((await superviseOwner(s.missionId, new Date(baseTime + 4 * 60_000))).findings.join("\n"))
+      .toContain("owner_tool_recovery_dead_target_breaker");
   });
 });

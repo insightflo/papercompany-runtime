@@ -108,7 +108,7 @@ function resolveMissionScope(
 function isResult(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return isString(value.actionId)
-    && ["submit", "approve", "reject", "hold"].includes(String(value.outcome))
+    && typeof value.outcome === "string" && ["submit", "approve", "reject", "hold"].includes(value.outcome)
     && Array.isArray(value.selectedOptionIds) && value.selectedOptionIds.every(isString)
     && isNullableString(value.comment);
 }
@@ -147,7 +147,7 @@ function isRequestContinuation(value: unknown): value is RequestContinuation {
 
 function isRequestStateV1(value: unknown): value is HumanOperatorRequestStateV1 {
   if (!isRecord(value) || value.schemaVersion !== 1
-    || !["exact", "missing", "ambiguous", "unsupported"].includes(String(value.identity))
+    || typeof value.identity !== "string" || !["exact", "missing", "ambiguous", "unsupported"].includes(value.identity)
     || !isString(value.decisionEventId) || !isString(value.ownerActionIssueId)
     || !(value.sourceIssueId === null || isString(value.sourceIssueId))
     || !isNullableString(value.reasonCode)

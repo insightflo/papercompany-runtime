@@ -38,7 +38,9 @@ describe("stage1 supervision continuity with durable recovery authority", () => 
   });
 
   async function seed(decision: "recover_artifact" | "retry_source_issue") {
-    const s = await seedToolRecoveryScenario({ db, artifactExists: true });
+    // Snapshot-backed source: supervision must treat this run as a captured (non-legacy)
+    // definition so the recovery decision path is exercised instead of the legacy hold.
+    const s = await seedToolRecoveryScenario({ db, artifactExists: true, captureExecutionDefinitionSnapshot: true });
     roots.push(s.tempRoot);
     await db.update(agents).set({ adapterConfig: { command: 'node -e "setTimeout(()=>process.exit(0),500)"' } })
       .where(eq(agents.id, s.ownerAgentId));

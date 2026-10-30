@@ -14,6 +14,10 @@ import {
   workflowStepRuns,
 } from "@paperclipai/db";
 import type { createDb } from "@paperclipai/db";
+import { captureExecutionDefinition } from "../../services/workflow/execution-definition.js";
+
+const FAILED_STARTED_AT = new Date("2026-07-06T04:52:47.000Z");
+const FAILED_COMPLETED_AT = new Date("2026-07-06T04:56:23.000Z");
 
 type TestDb = ReturnType<typeof createDb>;
 
@@ -33,6 +37,10 @@ export type ToolRecoveryScenario = {
 export async function seedToolRecoveryScenario(input: {
   readonly db: TestDb;
   readonly artifactExists: boolean;
+  /** Opt-in only: capture a REAL execution-definition snapshot while the run is still
+   * pending/not started, then restore the intended failed facts. Default false keeps
+   * the legacy unmarked run for every existing caller. */
+  readonly captureExecutionDefinitionSnapshot?: boolean;
 }): Promise<ToolRecoveryScenario> {
   const companyId = randomUUID();
   const ownerAgentId = randomUUID();
@@ -119,16 +127,39 @@ export async function seedToolRecoveryScenario(input: {
       },
     ],
   });
-  await input.db.insert(workflowRuns).values({
-    id: workflowRunId,
-    workflowId,
-    companyId,
-    missionId,
-    triggeredBy: "test",
-    status: "failed",
-    startedAt: new Date("2026-07-06T04:52:47.000Z"),
-    completedAt: new Date("2026-07-06T04:56:23.000Z"),
-  });
+  await input.db.insert(workflowRuns).values(input.captureExecutionDefinitionSnapshot
+    ? {
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "test",
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+      metadata: { executionDefinitionVersion: 1 },
+    }
+    : {
+      id: workflowRunId,
+      workflowId,
+      companyId,
+      missionId,
+      triggeredBy: "test",
+      status: "failed",
+      startedAt: FAILED_STARTED_AT,
+      completedAt: FAILED_COMPLETED_AT,
+    });
+  if (input.captureExecutionDefinitionSnapshot) {
+    // Real capture path: the production invariant is "snapshot only inside run creation
+    // while pending". Capture here with the real service, then restore the intended
+    // failed facts BEFORE any execution or assertion can observe the pending window.
+    await input.db.transaction((tx) => captureExecutionDefinition(tx, workflowRunId));
+    await input.db.update(workflowRuns).set({
+      status: "failed",
+      startedAt: FAILED_STARTED_AT,
+      completedAt: FAILED_COMPLETED_AT,
+    }).where(eq(workflowRuns.id, workflowRunId));
+  }
   await input.db.insert(workflowStepRuns).values([
     {
       id: stepRunId,
