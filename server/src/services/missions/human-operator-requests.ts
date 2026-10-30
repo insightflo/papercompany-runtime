@@ -1,7 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { activityLog, issues, missions } from "@paperclipai/db";
 import type { HumanOperatorRequestStateV1 } from "@paperclipai/shared/types/human-operator-request-state";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { GovernanceThreadEvent } from "./governance-thread.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION, type HumanOperatorRequestPayload } from "./human-operator-alert-events.js";
 import { formatOperatorDecisionSummary } from "./operator-card-summary.js";
@@ -82,7 +82,14 @@ export async function listCompanyHumanOperatorRequests(
       entityId: activityLog.entityId,
       details: activityLog.details,
       createdAt: activityLog.createdAt,
-    }).from(activityLog).where(and(
+    }).from(activityLog).innerJoin(issues, and(
+      eq(issues.companyId, input.companyId),
+      sql`${issues.id}::text = ${activityLog.entityId}`,
+    )).innerJoin(missions, and(
+      eq(missions.companyId, input.companyId),
+      eq(missions.id, issues.missionId),
+      inArray(missions.status, [...OPEN_MISSION_STATUSES]),
+    )).where(and(
       eq(activityLog.companyId, input.companyId),
       eq(activityLog.action, HUMAN_OPERATOR_REQUEST_ACTION),
       eq(activityLog.entityType, "issue"),
