@@ -18,9 +18,8 @@ const collectionOption = "rerun_source_collection";
 function readScope(card: DecisionRow): Scope | null {
   const context = card.sourceContext;
   if (!context || typeof context !== "object" || Array.isArray(context)) return null;
-  const source = context as Record<string, unknown>;
-  const missionId = z.string().uuid().safeParse(source.missionId);
-  const workflowRunId = z.string().uuid().safeParse(source.workflowRunId);
+  const missionId = z.string().uuid().safeParse(context.missionId);
+  const workflowRunId = z.string().uuid().safeParse(context.workflowRunId);
   return missionId.success && workflowRunId.success
     ? { missionId: missionId.data, workflowRunId: workflowRunId.data }
     : null;
