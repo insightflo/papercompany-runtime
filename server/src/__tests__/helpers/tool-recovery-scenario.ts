@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
@@ -43,7 +43,10 @@ export async function seedToolRecoveryScenario(input: {
   const downstreamStepRunId = randomUUID();
   const oversightIssueId = randomUUID();
   const recoveryIssueId = randomUUID();
-  const tempRoot = mkdtempSync(path.join(os.tmpdir(), "tool-recovery-result-"));
+  // macOS tmpdir(/var/folders)는 realpath 시 /private/var/folders 로 달라져 artifact 루트
+  // canonical 검증(artifact-files.ts captureArtifactRoot)이 거부한다. 생성 직후 realpath 로
+  // 정규화해 artifactPath/기록/DB 사실 전부 canonical 경로에서 파생한다.
+  const tempRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "tool-recovery-result-")));
   const artifactPath = path.join(tempRoot, "us-stockflow_latest.json");
   if (input.artifactExists) {
     writeFileSync(artifactPath, JSON.stringify({ status: "success" }));

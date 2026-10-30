@@ -16,16 +16,18 @@ describeQualityDb("brief boundaries and accepted decision matrix", () => {
   const roots: string[] = [];
   beforeAll(async () => { f = await createQualityTestDb(); }, 60_000);
   afterAll(async () => { await f?.close(); roots.forEach(root => rmSync(root, { recursive: true, force: true })); });
-  async function input() {
+  async function input(step: unknown = null) {
     const s = await seedToolRecoveryScenario({ db: f.db, artifactExists: false }); roots.push(s.tempRoot);
     const [mission] = await f.db.select().from(missions).where(eq(missions.id, s.missionId));
     const [oversightIssue] = await f.db.select().from(issues).where(eq(issues.id, s.oversightIssueId));
     const [run] = await f.db.select().from(workflowRuns).where(eq(workflowRuns.id, s.workflowRunId));
     const [stepRun] = await f.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, s.stepRunId));
-    return { mission, oversightIssue, run, stepRun, step: null, workflowName: "test" };
+    return { mission, oversightIssue, run, stepRun, step: step as never, workflowName: "test" };
   }
   it("all nine accepted options distinguish recorded intent from direct effects and operator authority", async () => {
-    const i = await input();
+    const i = await input({ id: "collect-us-stockflow", type: "agent", toolNames: ["caller-hint-only"] });
+    await f.db.insert(toolDefinitions).values({ companyId: i.mission.companyId, name: "caller-hint-only", adapterType: "builtin",
+      adapterConfig: { env: { PRIVATE_HINT_TOKEN: "HINT_SECRET" } } });
     const facts = await f.db.transaction(tx => loadToolRecoveryBriefFacts(tx as never, i));
     expect(facts.decisions.map(d => [d.decision, d.effect, d.humanRequest, Boolean(d.replacement)])).toEqual([
       ["request_input", "no_tool_action", true, false], ["retry_source_issue", "retry", false, false],
@@ -36,9 +38,13 @@ describeQualityDb("brief boundaries and accepted decision matrix", () => {
     ]);
     for (const row of facts.decisions) expect(missionOwnerDecisionSubmitSchema.safeParse({ decision: row.decision,
       ...(row.decision === "reassign_source_issue" ? { targetAgentId: i.mission.ownerAgentId } : {}) }).success).toBe(true);
-    expect(facts.execution.status).toBe("requires_decision");
-    expect(facts.execution.ownership).toBe(false); // missing frozen definition is NOT permissive
-    expect(facts.execution.canonicalToolShape).toBe("unavailable");
+    expect(facts.execution).toMatchObject({ decision: "legacy_source_observation_only", sourceState: "held",
+      status: "blocked_evidence_unavailable", ownership: true, canonicalToolShape: true });
+    expect(facts.registry).toContainEqual(expect.objectContaining({ name: "caller-hint-only",
+      provenance: "caller display hint; display only" }));
+    const canonicalFacts = await f.db.transaction(tx => loadToolRecoveryBriefFacts(tx as never, { ...i, step: null }));
+    expect(facts.execution).toEqual(canonicalFacts.execution);
+    expect(renderToolRecoveryBriefFacts(facts)).not.toContain("HINT_SECRET");
     expect(facts.registration.status).toBe("registration_not_applicable");
     expect(facts.submission.unchecked).toContain("checkout ownership/adoption");
     expect(facts.submission.actor).toContain("board cannot submit");
