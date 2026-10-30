@@ -4,6 +4,7 @@ import {
   activityLog,
   agentWakeupRequests,
   agents,
+  companies,
   heartbeatRuns,
   issues,
   missions,
@@ -21,6 +22,8 @@ import {
   loadRecoveryAdviceFacts,
   overlayRecoveryAdvice,
 } from "./operator-decision-recovery-advice.js";
+import { loadQaRecoveryAdviceFacts, overlayQaRecoveryAdvice } from "./operator-decision-qa-recovery-advice.js";
+import { normalizeSystemLanguage } from "./missions/system-language.js";
 import {
   buildContinuationRetryHint,
   deriveOperatorDecisionContinuationStatus,
@@ -57,6 +60,11 @@ export async function loadOperatorDecisionProjections(
 
   const decisionIds = rows.map((row) => row.id);
   const adviceFactsByDecisionId = await loadRecoveryAdviceFacts(db, rows);
+  const qaAdviceFactsByDecisionId = await loadQaRecoveryAdviceFacts(db, rows);
+  const companyIds = uniqueIds(rows.map((row) => row.companyId));
+  const companyLanguages = await db.select({ id: companies.id, defaultLanguage: companies.defaultLanguage })
+    .from(companies).where(inArray(companies.id, companyIds));
+  const languageByCompanyId = new Map(companyLanguages.map((row) => [row.id, normalizeSystemLanguage(row.defaultLanguage)]));
 
   const continuations = await db.select().from(operatorDecisionContinuations)
     .where(inArray(operatorDecisionContinuations.operatorDecisionId, decisionIds));
@@ -167,9 +175,13 @@ export async function loadOperatorDecisionProjections(
 
     const adviceFacts = adviceFactsByDecisionId.get(row.id);
     const advice = adviceFacts ? evaluateRecoveryAdvice({ card: row, ...adviceFacts }) : null;
+    const qaAdviceFacts = qaAdviceFactsByDecisionId.get(row.id);
+    const qaProjection = qaAdviceFacts
+      ? overlayQaRecoveryAdvice(row, qaAdviceFacts, languageByCompanyId.get(row.companyId) ?? "en")
+      : null;
     const projectedDefinition = advice
       ? overlayRecoveryAdvice(row.definition as OperatorDecisionDefinition, advice)
-      : row.definition;
+      : qaProjection?.definition ?? row.definition;
 
     let requesterOutcome: OperatorDecisionRequesterOutcomeView | null = null;
     let cancellationReason: string | null = null;
@@ -197,8 +209,8 @@ export async function loadOperatorDecisionProjections(
         status: row.status as OperatorDecisionView["status"],
         priority: row.priority as OperatorDecisionView["priority"],
         interactionType: row.interactionType as OperatorDecisionView["interactionType"],
-        title: row.title,
-        description: row.description,
+        title: qaProjection?.title ?? row.title,
+        description: qaProjection?.description ?? row.description,
         sourceType: row.sourceType,
         sourceId: row.sourceId,
         sourceContext: row.sourceContext,

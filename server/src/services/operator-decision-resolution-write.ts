@@ -24,6 +24,7 @@ import {
 import { assertExactBoardWorkflowRestartPolicy, holdUnprovenRestart,
   startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
 import { evaluateRecoveryAdviceIdentity, loadRecoveryAdviceIdentityFacts } from "./operator-decision-recovery-advice.js";
+import { lockQaRecoveryCollectionAdmission } from "./operator-decision-qa-recovery-admission.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_SCOPE,
@@ -125,6 +126,8 @@ export function operatorDecisionResolutionWriteService(
         const [observed] = await tx.select().from(operatorDecisions).where(eq(operatorDecisions.id, id));
         if (observed?.status === "resolved" && sameOperatorDecisionResult(observed.result, result)) return false;
       }
+      const collectionAdmission = await lockQaRecoveryCollectionAdmission({ tx, before, result, rawInput, conflictFor });
+      if (collectionAdmission?.kind === "replayed") return false;
       if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before);
       if (before.status === "pending" && directRestartSelected) {
         const [current] = await tx.select().from(operatorDecisions).where(eq(operatorDecisions.id, id)).for("update");
