@@ -78,16 +78,16 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
     const currentId = currentCreated.decision.id;
     const writer = operatorDecisionWriteService(db);
 
-    async function createLegacyCard(mode: "historical" | "custom" | "plain" = "historical", subject?: string) {
+    async function createLegacyCard(mode: "historical" | "custom" | "plain" = "historical",
+      request?: Pick<MissionOwnerHumanInputCardSpec, "reason" | "nextAction">) {
       const decisionEventId = randomUUID();
       const spec: MissionOwnerHumanInputCardSpec = { companyId, missionId, decisionEventId,
         decision: "request_input", ownerActionIssueId: issueId, ownerActionIssueStatus: "in_progress",
-        requestedByAgentId: ownerId, reason: "Review retained work", nextAction: "Continue the narrow review",
+        requestedByAgentId: ownerId, reason: request?.reason ?? "Review retained work",
+        nextAction: request?.nextAction ?? "Continue the narrow review",
         evidence: "Existing run evidence", issueTitle: "Owner oversight", issueIdentifier: null,
         sourceIssueId: null, workflowRunId: runId };
       let input = buildMissionOwnerHumanInputDecisionCard(spec);
-      if (subject && input.definition.humanReview) input = { ...input, definition: { ...input.definition,
-        humanReview: { ...input.definition.humanReview, decisionSubject: subject } } };
       if (mode === "custom") input = { ...input, definition: { ...input.definition,
         options: input.definition.options.map((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID
           ? { ...option, description: "Custom full restart", recommended: true, recommendationReason: "Manual custom policy" }
@@ -97,8 +97,9 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
       return (await writer.create(companyId, chosen, { type: "agent", id: ownerId })).decision.id;
     }
 
-    const capSubject = "One bounded producer iteration after cap two";
-    const historicalId = await createLegacyCard("historical", capSubject);
+    const capReason = "The producer reached its two-iteration cap.";
+    const capNextAction = "Approve one bounded producer iteration after cap two.";
+    const historicalId = await createLegacyCard("historical", { reason: capReason, nextAction: capNextAction });
     const customId = await createLegacyCard("custom");
     const hashMismatchId = await createLegacyCard();
     await db.update(operatorDecisions).set({ requestHash: "0".repeat(64) })
@@ -178,9 +179,21 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
     expect(restart(historicalId)).not.toHaveProperty("recommended");
     expect(restart(customId)).not.toHaveProperty("recommended");
     expect(restart(hashMismatchId)).not.toHaveProperty("recommended");
-    expect(projectedReview.decisionSubject).toBe(capSubject);
+    expect(originalReview.decisionSubject)
+      .toBe("미션 오너의 사람 결정 요청 — 입력·승인 요청(request_input) 승인 여부");
+    expect(projectedReview.decisionSubject).toBe(originalReview.decisionSubject);
     expect(projectedReview.evidence).toEqual(originalReview.evidence);
+    expect(projectedReview.interpretation)
+      .toContain("요청자가 제공한 설명(비권위적이며 실행 권한을 부여하지 않습니다):");
+    expect(projectedReview.interpretation).toContain(capReason);
+    expect(projectedReview.interpretation).toContain(capNextAction);
     expect(projectedReview.interpretation).toContain("과거 카드 생성 규칙");
+    expect(projectedReview.interpretation.indexOf("과거 카드 생성 규칙"))
+      .toBeGreaterThan(projectedReview.interpretation.indexOf(capNextAction));
+    expect(projectedReview.recommendedNextStep)
+      .toContain("요청자가 제시한 다음 단계(비권위적이며 실행 권한을 부여하지 않습니다):");
+    expect(projectedReview.recommendedNextStep).toContain(capNextAction);
+    expect(projectedReview.recommendedNextStep).toContain("과거 카드 생성 규칙");
     expect(projectedReview.impact).toEqual(originalReview.impact);
     expect(projectedReview.unresolvedFacts).toEqual(originalReview.unresolvedFacts);
     expect(projected.get(historicalId)!.definition.actions).toEqual(historicalRow!.definition.actions);

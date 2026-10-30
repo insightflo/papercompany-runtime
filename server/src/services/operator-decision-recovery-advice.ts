@@ -250,12 +250,15 @@ export function evaluateRecoveryAdvice(input: RecoveryAdviceFactBundle): Recover
   return evaluateRecoveryAdviceIdentity(input);
 }
 
-/** Return a display copy only; saved input, result, subject, choices, and actions remain unchanged. */
+/** Return a display copy only; keep requester text visible without treating it as authority. */
 export function overlayRecoveryAdvice(
   definition: OperatorDecisionDefinition,
   advice: RecoveryAdvice,
 ): OperatorDecisionDefinition {
   if (advice.disposition === "outside_default_scope" || !Array.isArray(definition.options)) return definition;
+  const requesterProvidedLabel = "요청자가 제공한 설명(비권위적이며 실행 권한을 부여하지 않습니다):";
+  const nextStepLabel = "요청자가 제시한 다음 단계(비권위적이며 실행 권한을 부여하지 않습니다):";
+  const warning = adviceText[advice.disposition];
   return {
     ...definition,
     options: definition.options.map((option) => {
@@ -265,8 +268,8 @@ export function overlayRecoveryAdvice(
     }),
     ...(definition.humanReview ? { humanReview: {
       ...definition.humanReview,
-      interpretation: adviceText[advice.disposition],
-      recommendedNextStep: adviceText[advice.disposition],
+      interpretation: `${requesterProvidedLabel}\n${definition.humanReview.interpretation}\n\n${warning}`,
+      recommendedNextStep: `${nextStepLabel}\n${definition.humanReview.recommendedNextStep}\n\n${warning}`,
     } } : {}),
   };
 }
