@@ -38,7 +38,7 @@ export function assertExactBoardWorkflowRestartPolicy(
 
 function assertRecoveryRestartAdvice(decision: RecoveryAdviceDecision, facts: Awaited<ReturnType<typeof loadRecoveryAdviceIdentityFacts>>): void {
   const advice = facts
-    ? evaluateRecoveryAdviceIdentity({ kind: "pending_owner_human_restart_candidate", card: decision, ...facts })
+    ? evaluateRecoveryAdviceIdentity({ card: decision, ...facts })
     : evaluateRecoveryAdviceIdentity({ kind: "outside_default_scope", card: decision });
   if (advice.disposition !== "outside_default_scope") holdUnprovenRestart(decision.id);
 }

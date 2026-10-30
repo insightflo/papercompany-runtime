@@ -148,7 +148,7 @@ export function operatorDecisionResolutionWriteService(
           current.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
         const facts = await loadRecoveryAdviceIdentityFacts(tx as unknown as Db, current);
         const advice = facts
-          ? evaluateRecoveryAdviceIdentity({ kind: "pending_owner_human_restart_candidate", card: current, ...facts })
+          ? evaluateRecoveryAdviceIdentity({ card: current, ...facts })
           : evaluateRecoveryAdviceIdentity({ kind: "outside_default_scope", card: current });
         if (advice.disposition !== "outside_default_scope") holdUnprovenRestart(id);
         assertExactBoardWorkflowRestartPolicy(current, currentResult, {
