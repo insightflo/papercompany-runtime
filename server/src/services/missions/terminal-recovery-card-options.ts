@@ -5,11 +5,6 @@ import {
   TERMINAL_RESUME_OPTION_ID,
   TERMINAL_RESUME_OPTION_LABEL,
 } from "./terminal-resume-from-decision.js";
-import {
-  WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
-  WORKFLOW_RESTART_FROM_START_OPTION_ID,
-  WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
-} from "./workflow-restart-option.js";
 
 export async function terminalRestartPathAvailable(
   db: Db,
@@ -41,18 +36,12 @@ export async function terminalRestartPathAvailable(
   return !replacement;
 }
 
-export function terminalCardStructuredOptions(resumeAvailable: boolean, restartAvailable: boolean): {
+export function terminalCardStructuredOptions(resumeAvailable: boolean, _restartAvailable: boolean): {
   structuredOptions: { id: string; label: string; description?: string }[];
   recommendedOptionId: string; recommendationReason: string;
 } {
-  const directOptions = [
-    ...(resumeAvailable ? [{ id: TERMINAL_RESUME_OPTION_ID, label: TERMINAL_RESUME_OPTION_LABEL,
-      description: TERMINAL_RESUME_OPTION_DESCRIPTION }] : []),
-    ...(restartAvailable ? [{ id: WORKFLOW_RESTART_FROM_START_OPTION_ID,
-      label: WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
-      description: WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION }] : []),
-  ];
-  if (directOptions.length === 0) {
+  // This compatibility signal checks for a competing run, not whether prior effects started.
+  if (!resumeAvailable) {
     return {
       structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요",
         description: "현재 실행에는 검증된 재개 또는 재시작 대상이 없습니다. 새 구조화 복구 대상을 지정해야 합니다." }],
@@ -61,10 +50,9 @@ export function terminalCardStructuredOptions(resumeAvailable: boolean, restartA
     };
   }
   return {
-    structuredOptions: directOptions,
-    recommendedOptionId: resumeAvailable ? TERMINAL_RESUME_OPTION_ID : WORKFLOW_RESTART_FROM_START_OPTION_ID,
-    recommendationReason: resumeAvailable
-      ? "실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다."
-      : "검증된 재개가 불가능하므로 같은 미션을 중복 없이 처음부터 새 실행으로 시작합니다.",
+    structuredOptions: [{ id: TERMINAL_RESUME_OPTION_ID, label: TERMINAL_RESUME_OPTION_LABEL,
+      description: TERMINAL_RESUME_OPTION_DESCRIPTION }],
+    recommendedOptionId: TERMINAL_RESUME_OPTION_ID,
+    recommendationReason: "실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다.",
   };
 }
