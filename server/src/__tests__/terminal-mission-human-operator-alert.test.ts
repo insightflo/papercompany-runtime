@@ -245,19 +245,22 @@ describe("terminalCardStructuredOptions (resume option on the terminal card)", (
     expect(terminalResumeCandidateRunId(null, failedRuns)).toBeNull();
   });
 
-  it("returns an explicit external-input block when no direct command is eligible", () => {
-    expect(terminalCardStructuredOptions(false, false)).toMatchObject({
-      structuredOptions: [{ id: "missing-recovery-target" }],
+  it.each([false, true])("holds when resume is unavailable, even if weak restart availability is %s", (restartAvailable) => {
+    const options = terminalCardStructuredOptions(false, restartAvailable);
+    expect(options).toEqual({
+      structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요",
+        description: "현재 실행에는 검증된 재개 또는 재시작 대상이 없습니다. 새 구조화 복구 대상을 지정해야 합니다." }],
       recommendedOptionId: "missing-recovery-target",
+      recommendationReason: "실행 권한이 없는 자연어 복구 경로를 선택하지 않고 유효한 대상을 먼저 지정해야 합니다.",
     });
+    expect(JSON.stringify(options)).not.toContain("중복 없이");
+    expect(JSON.stringify(options)).not.toContain("처음부터");
   });
-  it("offers only verified direct commands and never derives commands from prose", () => {
-    const options = terminalCardStructuredOptions(true, true);
+  it.each([false, true])("offers only the exact-run resume option when weak restart availability is %s", (restartAvailable) => {
+    const options = terminalCardStructuredOptions(true, restartAvailable);
+    expect(options.structuredOptions).toHaveLength(1);
     expect(options.structuredOptions[0]).toMatchObject({ id: "resume-this-run" });
     expect(options.structuredOptions[0]!.label).toContain("이 실행 이어서 진행");
-    expect(options.structuredOptions.map((o) => o.id)).toEqual([
-      "resume-this-run", "restart-workflow-from-start",
-    ]);
     expect(options.recommendedOptionId).toBe("resume-this-run");
   });
 });
