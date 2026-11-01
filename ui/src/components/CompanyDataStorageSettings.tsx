@@ -99,7 +99,7 @@ export function CompanyDataStorageSettings({ companyId }: { companyId: string })
     mutationFn: () => dataStorageApi.save(companyId, configFromForm(form)),
     onSuccess: (config) => {
       queryClient.setQueryData(storageKey, config); setForm(formFromConfig(config)); setTestResult(null);
-      pushToast({ tone: "success", title: "Shared Data Storage saved", body: config.provider === "s3" ? "S3-compatible shared data storage is enabled." : "Shared Data Storage uses Papercompany local disk." });
+      pushToast({ tone: "success", title: "Shared Data Storage saved", body: config.provider === "s3" ? "S3-compatible shared data storage is enabled." : "Shared Data Storage uses Paperwork local disk." });
     },
     onError: (error) => pushToast({ tone: "error", title: "Storage settings could not be saved", body: error instanceof Error ? error.message : "Please review the settings." }),
   });
@@ -133,18 +133,18 @@ export function CompanyDataStorageSettings({ companyId }: { companyId: string })
     <div className="space-y-4 rounded-md border border-border px-4 py-4">
       <div className="flex items-start gap-2"><Database className="mt-0.5 h-4 w-4 text-muted-foreground" />
         <div className="space-y-1 text-sm text-muted-foreground">
-          <p>Normalized, cumulative source data for this company. External workflows such as n8n place raw responses in a separate incoming store and write the normalized history and latest snapshots here; Papercompany agents read and append to this cumulative data.</p>
+          <p>Normalized, cumulative source data for this company. External workflows such as n8n place raw responses in a separate incoming store and write the normalized history and latest snapshots here; Paperwork agents read and append to this cumulative data.</p>
           <p>Example layout: <code>&lt;prefix&gt;/&lt;category&gt;/latest.json</code> and <code>&lt;prefix&gt;/&lt;category&gt;/history/&lt;timestamp&gt;.json</code> for change detection. Final deliverables belong in Work-product Storage, not here.</p>
         </div>
       </div>
       <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Data storage mode</span>
         <select value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value === "s3" ? "s3" : "local_disk" })}
           className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm">
-          <option value="local_disk">Local disk (Papercompany-managed company data folder)</option><option value="s3">S3-compatible shared object storage</option>
+          <option value="local_disk">Local disk (Paperwork-managed company data folder)</option><option value="s3">S3-compatible shared object storage</option>
         </select>
       </label>
       {storageQuery.isError ? <p className="text-xs text-destructive">Current shared-data settings could not be loaded.</p> : null}
-      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">Data stays on Papercompany local disk under a company-scoped folder. Agents read and write it through the company data API; no object-storage credentials are exposed.</p> : <div className="space-y-3 border-t border-border pt-4">
+      {form.provider === "local_disk" ? <p className="text-xs text-muted-foreground">Data stays on Paperwork local disk under a company-scoped folder. Agents read and write it through the company data API; no object-storage credentials are exposed.</p> : <div className="space-y-3 border-t border-border pt-4">
         <p className="text-xs text-muted-foreground">The key prefix is the company data root. n8n must write the exact shared layout under this prefix; agents access the same keys through the data API. Operators must choose a unique prefix per company.</p>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1.5 text-sm"><span className="text-muted-foreground">Endpoint</span><Input value={form.endpoint} onChange={(event) => setForm({ ...form, endpoint: event.target.value })} placeholder="https://storage.example.com" /></label>
