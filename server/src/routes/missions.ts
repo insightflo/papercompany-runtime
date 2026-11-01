@@ -25,12 +25,17 @@ import { missionService } from "../services/missions.js";
 import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { logger } from "../middleware/logger.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest, conflict } from "../errors.js";
 import { isTerminalMissionStatus } from "../services/missions/shared-types.js";
 import { logActivity } from "../services/activity-log.js";
 import { listMissionGovernanceThread } from "../services/missions/governance-thread.js";
-import { listCompanyHumanOperatorRequests } from "../services/missions/human-operator-requests.js";
+import {
+  listCompanyHumanOperatorRequests,
+  type HumanOperatorRequest,
+} from "../services/missions/human-operator-requests.js";
+import { cardSummaryService, type CardSummaryRow } from "../services/card-summaries.js";
 import { loadMissionRuntimeSnapshot } from "../services/missions/mission-runtime-snapshot.js";
 import { getMissionRecoveryAdvice } from "../services/missions/mission-recovery-advice.js";
 import {
@@ -38,6 +43,55 @@ import {
   getMissionDecisionLog,
 } from "../services/missions/mission-decision-reports.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "../services/missions/plan-qa-wakeup.js";
+
+/** [휴먼카드 해석] 표시용 해석 스냅숋(원문 폴백 판단은 UI 책임 — null이면 원문만). */
+function serializeSummary(row: CardSummaryRow | null | undefined) {
+  if (!row) return null;
+  return {
+    status: row.status,
+    adapterType: row.adapterType,
+    model: row.model,
+    summary: row.summaryJson ?? null,
+    error: row.error ?? null,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** 해석 입력은 운영자가 보는 요청 행의 표시 필드만 쓴다(원본 이벤트 로그 미전달). */
+function buildOwnerRequestSourceView(request: HumanOperatorRequest) {
+  return {
+    kind: "owner_recovery" as const,
+    title: request.title,
+    status: request.missionStatus,
+    payload: {
+      missionTitle: request.missionTitle,
+      severity: request.severity ?? null,
+      issueId: request.issueId ?? null,
+      count: request.count,
+    },
+    bodyText: request.summary,
+  };
+}
+
+/** 조회 후킹(표시 전용): 목록은 열린 미션+열린 이슈 요청만 반환하므로 전 행이 해석 대상이다.
+ *  늦은 생성/재기동은 비동기 fire-and-forget — 조회 응답을 절대 막지 않는다. */
+function attachOwnerRequestSummaries(
+  svc: ReturnType<typeof cardSummaryService>,
+  companyId: string,
+  requests: HumanOperatorRequest[],
+): Promise<Array<ReturnType<typeof serializeSummary>>> {
+  return svc.getRows(companyId, "owner_recovery", requests.map((r) => r.id)).then((rows) =>
+    requests.map((request) => {
+      const row = rows.get(request.id);
+      if (!row || row.status !== "done") {
+        void svc.ensureSummary(companyId, "owner_recovery", request.id, buildOwnerRequestSourceView(request)).catch((err) =>
+          logger.error({ err: String(err), requestId: request.id }, "owner request summary ensure failed"),
+        );
+      }
+      return serializeSummary(row);
+    }),
+  );
+}
 
 export function missionRoutes(db: Db) { const router = Router();
   const heartbeat = heartbeatService(db);
@@ -50,6 +104,7 @@ export function missionRoutes(db: Db) { const router = Router();
     { requestedByActorId: "missions-route-plan-rework", contextSource: "missions_route_plan_rework" },
   );
   const delegationSvc = missionDelegationService(db);
+  const summariesSvc = cardSummaryService(db);
   const svc = missionService(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
       return heartbeat.wakeup(mission.ownerAgentId, {
@@ -200,8 +255,38 @@ export function missionRoutes(db: Db) { const router = Router();
       ...(Number.isFinite(limit) && limit && limit > 0 ? { limit: Math.min(limit, 100) } : {}),
     });
 
-    res.json(requests);
+    const summaries = await attachOwnerRequestSummaries(summariesSvc, companyId, requests);
+    res.json(requests.map((request, i) => ({ ...request, humanSummary: summaries[i] ?? null })));
   });
+
+  /**
+   * POST /companies/:companyId/missions/human-operator-requests/:requestId/summary/retranslate
+   *
+   * [휴먼카드 해석] 화면의 '다시 해석' — 표시 전용. board 권한만.
+   * requestId 는 `${missionId}:${activityId}` — 목록 재조회 결과에서 일치 행으로 뷰를 재구성한다.
+   */
+  router.post(
+    "/companies/:companyId/missions/human-operator-requests/:requestId/summary/retranslate",
+    async (req, res) => {
+      const { companyId, requestId } = req.params;
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+      const requests = await listCompanyHumanOperatorRequests(db, { companyId });
+      const request = requests.find((row) => row.id === requestId);
+      if (!request) {
+        res.status(404).json({ error: "Human operator request not found" });
+        return;
+      }
+      const adapterType = typeof req.body?.adapterType === "string" ? req.body.adapterType : undefined;
+      const model = typeof req.body?.model === "string" ? req.body.model : undefined;
+      const row = await summariesSvc.retranslate(companyId, "owner_recovery", request.id, {
+        adapterType,
+        model,
+        view: buildOwnerRequestSourceView(request),
+      });
+      res.json({ id: request.id, humanSummary: serializeSummary(row) });
+    },
+  );
 
   /**
    * GET /companies/:companyId/missions

@@ -235,6 +235,26 @@ describe("HumanOperator", () => {
     expect(html).toContain("이 서버 응답에 결정 상태가 없습니다");
   });
 
+  it("shows the AI easy-summary block under the request summary when the server attached one", () => {
+    const summarized = makeRequest("summarized", undefined);
+    summarized.humanSummary = {
+      status: "done", adapterType: "pi_local", model: "m1",
+      summary: {
+        oneLine: "미션 방향 요청 해석 한 줄",
+        whatHappening: "미션이 진행을 멈추고 운영자 방향을 기다리고 있습니다.",
+        decisionNeeded: "운영자가 방향을 선택해야 합니다.",
+        options: [], cautions: ["선택만으로 실행되지 않습니다."],
+      },
+      error: null, updatedAt: timestamp,
+    };
+    mockState.requests = [summarized];
+    const html = renderKo(<HumanOperator />);
+    expect(html).toContain("쉬운 해석 (AI)");
+    expect(html).toContain("미션 방향 요청 해석 한 줄");
+    // 해석 블록은 원문 요약 아래에 위치한다(원문 유지 계약).
+    expect(html.indexOf("운영자 할 일: assign the idle agent")).toBeLessThan(html.indexOf("쉬운 해석 (AI)"));
+  });
+
   it("counts only displayed rows and cards, and still labels an empty bounded window", () => {
     expect(renderToStaticMarkup(<HumanOperator />)).toContain("2 items displayed");
     mockState.pendingCards = []; mockState.requests = [];
