@@ -47,6 +47,10 @@ const DEFAULT_MODEL = (process.env.CARD_SUMMARY_MODEL ?? "").trim();
 const CLI_TIMEOUT_MS = Number(process.env.CARD_SUMMARY_TIMEOUT_MS ?? 90_000);
 const MAX_SOURCE_JSON_CHARS = 12_000;
 
+/** vitest 실행 중에는 배경 보장(행 생성·CLI 스폰)을 하지 않는다 — 테스트 정리 경합·자식 프로세스 누수 방지.
+ *  표시 전용 기능이라 기능 손실 없음(원문 폴백). 배경 동작은 목 테스트+배포 후 라이브 검증이 담당한다. */
+const BACKGROUND_ENABLED = process.env.VITEST === undefined;
+
 function buildPrompt(view: CardSourceView): string {
   const source = JSON.stringify(
     {
@@ -173,6 +177,7 @@ export function cardSummaryService(db: Db) {
   }
 
   function kick(row: CardSummaryRow, view: CardSourceView): void {
+    if (!BACKGROUND_ENABLED) return;
     const k = key(row.companyId, row.cardKind, row.cardId);
     if (inFlight.has(k)) return;
     const p = runTranslation(row, view)
@@ -191,6 +196,7 @@ export function cardSummaryService(db: Db) {
     cardId: string,
     view: CardSourceView,
   ): Promise<CardSummaryRow | null> {
+    if (!BACKGROUND_ENABLED) return getRow(companyId, cardKind, cardId);
     const existing = await getRow(companyId, cardKind, cardId);
     if (existing) {
       if (existing.status !== "done") kick(existing, view);
