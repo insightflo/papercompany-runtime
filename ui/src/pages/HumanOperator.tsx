@@ -9,6 +9,7 @@ import { operatorDecisionsApi, type ResolveOperatorDecisionInput } from "../api/
 import { ExternalAutomationApprovals } from "../components/ExternalAutomationApprovals";
 import { EmptyState } from "../components/EmptyState";
 import { OperatorDecisionCard } from "../components/OperatorDecisionCard";
+import { CardHumanSummary } from "../components/CardHumanSummary";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { Button } from "../components/ui/button";
@@ -158,6 +159,17 @@ function HumanOperatorRow({
             <h2 className="text-sm font-semibold text-foreground">{request.title}</h2>
             <p className="mt-1 text-xs font-medium text-muted-foreground">{L(lang, { en: "Historical request evidence · not a current instruction", ko: "과거 요청 증거 · 현재 지시가 아닙니다" })}</p>
             <p className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{request.summary}</p>
+            {/* 초보자 해석(표시 전용 — 원문 유지, 실패·부재 시 자동 숨김). 재해석은 board 전용 라우트. */}
+            <CardHumanSummary
+              approvalId={request.id}
+              companyId={request.companyId}
+              summary={request.humanSummary ?? null}
+              retranslate={(id, body) => missionsApi.retranslateHumanOperatorRequestSummary(request.companyId, id, body)}
+              fetchCurrent={async (id) => {
+                const rows = await missionsApi.listHumanOperatorRequests(request.companyId);
+                return rows.find((row) => row.id === id)?.humanSummary ?? null;
+              }}
+            />
             {requestState && requestState.identity !== "exact" && requestState.reasonCode && (
               <p data-human-operator-request-reason className="mt-1 text-xs text-muted-foreground">{L(lang, { en: "Reason", ko: "사유 코드" })}: {requestState.reasonCode}</p>
             )}

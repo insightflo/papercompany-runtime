@@ -44,7 +44,8 @@ export type CardSourceView = {
 
 const DEFAULT_ADAPTER = (process.env.CARD_SUMMARY_DEFAULT_ADAPTER ?? "pi_local").trim() || "pi_local";
 const DEFAULT_MODEL = (process.env.CARD_SUMMARY_MODEL ?? "").trim();
-const CLI_TIMEOUT_MS = Number(process.env.CARD_SUMMARY_TIMEOUT_MS ?? 90_000);
+/** 해석 CLI 시간제한(ms). 기본은 제한 없음(0) — 화면 실행 해석이 긴 카드에서 인위적으로 실패하지 않게 한다(2026-11-01 사용자 지시). 필요 시 CARD_SUMMARY_TIMEOUT_MS로 제한 복원. */
+const CLI_TIMEOUT_MS = Number(process.env.CARD_SUMMARY_TIMEOUT_MS ?? 0);
 const MAX_SOURCE_JSON_CHARS = 12_000;
 
 /** vitest 실행 중에는 배경 보장(행 생성·CLI 스폰)을 하지 않는다 — 테스트 정리 경합·자식 프로세스 누수 방지.
@@ -99,15 +100,17 @@ function runCliOnce(prompt: string, model: string): Promise<string> {
     const child = spawn("pi", args, { cwd: process.env.TMPDIR ?? "/tmp", stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`card summary CLI timeout after ${CLI_TIMEOUT_MS}ms`));
-    }, CLI_TIMEOUT_MS);
+    const timer = CLI_TIMEOUT_MS > 0
+      ? setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error(`card summary CLI timeout after ${CLI_TIMEOUT_MS}ms`));
+        }, CLI_TIMEOUT_MS)
+      : null;
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    child.on("error", (err) => { if (timer) clearTimeout(timer); reject(err); });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (code === 0 && stdout.trim().length > 0) resolve(stdout);
       else reject(new Error(`card summary CLI exit=${code} stderr=${stderr.slice(0, 300)}`));
     });

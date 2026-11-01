@@ -325,6 +325,8 @@ export interface MissionHumanOperatorRequest {
   severity?: MissionGovernanceThreadSeverity;
   /** Optional P1 read-only decision and continuation projection; absent on older servers. */
   requestState?: HumanOperatorRequestStateV1;
+  /** [휴먼카드 해석] 표시 전용 해석 스냅숋 — 구 서버는 미포함(원문 폴백). */
+  humanSummary?: import("./approvals").HumanSummaryView | null;
   event: MissionGovernanceThreadEvent;
 }
 
@@ -505,6 +507,16 @@ export const missionsApi = {
     api.post<MissionDecisionLogResponse>(`/missions/${id}/decision-reports`, data),
   listHumanOperatorRequests: (companyId: string) =>
     api.get<MissionHumanOperatorRequest[]>(`/companies/${companyId}/missions/human-operator-requests`),
+  /** [휴먼카드 해석] 운영자 요청 카드 다시 해석 — board 전용 라우트, 표시 전용. */
+  retranslateHumanOperatorRequestSummary: (
+    companyId: string,
+    requestId: string,
+    body: { adapterType?: string; model?: string },
+  ) =>
+    api.post<{ id: string; humanSummary: import("./approvals").HumanSummaryView | null }>(
+      `/companies/${companyId}/missions/human-operator-requests/${encodeURIComponent(requestId)}/summary/retranslate`,
+      body,
+    ),
   create: (companyId: string, data: CreateMissionInput) =>
     api.post<MissionListItem>(`/companies/${companyId}/missions`, data),
   update: (id: string, data: UpdateMissionInput) =>
