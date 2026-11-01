@@ -77,7 +77,7 @@ export function CliAuthPage() {
         <div className="rounded-lg border border-border bg-card p-6">
           <h1 className="text-xl font-semibold">CLI access approved</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            The papercompany CLI can now finish authentication on the requesting machine.
+            The Paperwork CLI can now finish authentication on the requesting machine.
           </p>
           <p className="mt-4 text-sm text-muted-foreground">
             Command: <span className="font-mono text-foreground">{challenge.command}</span>
@@ -121,9 +121,9 @@ export function CliAuthPage() {
   return (
     <div className="mx-auto max-w-xl py-10">
       <div className="rounded-lg border border-border bg-card p-6">
-          <h1 className="text-xl font-semibold">Approve papercompany CLI access</h1>
+          <h1 className="text-xl font-semibold">Approve Paperwork CLI access</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-            A local papercompany CLI process is requesting board access to this instance.
+            A local Paperwork CLI process is requesting board access to this instance.
         </p>
 
         <div className="mt-5 space-y-3 text-sm">
@@ -151,7 +151,7 @@ export function CliAuthPage() {
 
         <HumanReviewPacket packet={{
           schemaVersion: "human-review-v1",
-          decisionSubject: `${challenge.clientName ?? "papercompany CLI"}에 ${challenge.requestedAccess === "instance_admin_required" ? "인스턴스 관리자" : "Board"} 접근을 허용할까요?`,
+          decisionSubject: `${challenge.clientName ?? "Paperwork CLI"}에 ${challenge.requestedAccess === "instance_admin_required" ? "인스턴스 관리자" : "Board"} 접근을 허용할까요?`,
           evidence: [{ label: "CLI 인증 요청 원본", href: currentPath, location: `요청 ${challenge.id} > 명령 ${challenge.command}`, description: `만료 시각 ${challenge.expiresAt}` }],
           interpretation: `표시된 명령을 실행한 로컬 CLI가 ${challenge.requestedCompanyName ?? "이 인스턴스"}의 운영 API 인증 키를 요청합니다.`,
           impact: { ifApproved: "요청한 CLI가 표시된 범위의 운영 API를 호출할 수 있습니다.", ifRejected: "인증 키가 발급되지 않아 이 요청으로는 접근할 수 없습니다.", ifWrong: "신뢰하지 않는 프로세스가 회사 데이터와 운영 기능에 접근할 수 있습니다." },
