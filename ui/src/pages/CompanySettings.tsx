@@ -290,8 +290,8 @@ export function CompanySettings() {
             </select>
           </Field>
           <Field
-            label="Papercompany local work folder"
-            hint="Private folder on the Papercompany server where agents and workflows create and validate files first. It is not shared with n8n. Leave empty to use the project default."
+            label="Paperwork local work folder"
+            hint="Private folder on the Paperwork server where agents and workflows create and validate files first. It is not shared with n8n. Leave empty to use the project default."
           >
             <input
               className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
