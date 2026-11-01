@@ -20,6 +20,7 @@ import {
   operatorDecisionWriteService,
   type OperatorDecisionActor,
 } from "../services/operator-decisions-write.js";
+import { cardSummaryService } from "../services/card-summaries.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 
 function requestActor(req: Request): OperatorDecisionActor {
@@ -41,6 +42,45 @@ export function operatorDecisionRoutes(db: Db) {
   const read = operatorDecisionReadService(db);
   const write = operatorDecisionWriteService(db);
   const heartbeat = heartbeatService(db);
+  const summaries = cardSummaryService(db);
+
+  /** [휴먼카드 해석] 표시 전용 조인+늦은 생성 — 결정 플로우 무변경, 실패 시 원문 폴백. */
+  async function attachDecisionSummaries(
+    decisions: Array<{ id: string; companyId: string; status: string; title: string; description: string; interactionType: string; definition?: unknown }>,
+  ) {
+    if (decisions.length === 0) return [];
+    const companyId = decisions[0].companyId;
+    const rows = await summaries.getRows(companyId, "operator_decision", decisions.map((d) => d.id));
+    return decisions.map((decision) => {
+      const row = rows.get(decision.id);
+      const pending = decision.status === "pending" || decision.status === "attention";
+      if (pending && (!row || row.status !== "done")) {
+        void summaries.ensureSummary(companyId, "operator_decision", decision.id, {
+          kind: "operator_decision",
+          title: decision.title,
+          type: decision.interactionType,
+          status: decision.status,
+          payload: {
+            description: decision.description,
+            definition: decision.definition ?? null,
+          },
+        }).catch((err) => logger.error({ err: String(err), decisionId: decision.id }, "operator decision summary ensure failed"));
+      }
+      return row ?? null;
+    });
+  }
+
+  function serializeSummary(row: Awaited<ReturnType<typeof attachDecisionSummaries>>[number]) {
+    if (!row) return null;
+    return {
+      status: row.status,
+      adapterType: row.adapterType,
+      model: row.model,
+      summary: row.summaryJson ?? null,
+      error: row.error ?? null,
+      updatedAt: row.updatedAt,
+    };
+  }
 
   router.post(
     "/companies/:companyId/operator-decisions",
@@ -58,7 +98,9 @@ export function operatorDecisionRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const parsed = operatorDecisionListQuerySchema.parse(req.query);
-    res.json(await read.list(companyId, parsed));
+    const list = await read.list(companyId, parsed);
+    const summaryRows = await Promise.all(await attachDecisionSummaries(list.data));
+    res.json({ ...list, data: list.data.map((d, i) => ({ ...d, humanSummary: serializeSummary(summaryRows[i]) })) });
   });
 
   router.get("/operator-decisions/:id", async (req, res) => {
@@ -74,7 +116,27 @@ export function operatorDecisionRoutes(db: Db) {
         throw forbidden("Agent cannot view this operator decision");
       }
     }
-    res.json({ data: decision });
+    res.json({ data: decision, humanSummary: serializeSummary((await attachDecisionSummaries([decision]))[0]) });
+  });
+  /** [휴먼카드 해석] 화면의 '다시 해석' — 표시 전용. board 권한만. */
+  router.post("/operator-decisions/:id/summary/retranslate", async (req, res) => {
+    const decision = await read.getRequired(req.params.id as string);
+    assertBoard(req);
+    assertCompanyAccess(req, decision.companyId);
+    const adapterType = typeof req.body?.adapterType === "string" ? req.body.adapterType : undefined;
+    const model = typeof req.body?.model === "string" ? req.body.model : undefined;
+    const row = await summaries.retranslate(decision.companyId, "operator_decision", decision.id, {
+      adapterType,
+      model,
+      view: {
+        kind: "operator_decision",
+        title: decision.title,
+        type: decision.interactionType,
+        status: decision.status,
+        payload: { description: decision.description, definition: (decision as { definition?: unknown }).definition ?? null },
+      },
+    });
+    res.json({ id: decision.id, humanSummary: serializeSummary(row) });
   });
 
   router.post(

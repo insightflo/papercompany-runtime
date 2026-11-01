@@ -6,6 +6,8 @@ import { approvalLabel, typeIcon, defaultTypeIcon, ApprovalPayloadRenderer } fro
 import { timeAgo } from "../lib/timeAgo";
 import type { Approval, Agent } from "@paperclipai/shared";
 import { HumanReviewPacket } from "./HumanReviewPacket";
+import { CardHumanSummary } from "./CardHumanSummary";
+import type { HumanSummaryView } from "@/api/approvals";
 import { approvalHumanReview } from "../lib/humanReview";
 import { L, useCompanyLanguage } from "../lib/companyLanguage";
 import { humanLabel } from "../lib/humanLabels";
@@ -27,7 +29,7 @@ export function ApprovalCard({
   detailLink,
   isPending,
 }: {
-  approval: Approval;
+  approval: Approval & { humanSummary?: HumanSummaryView | null };
   requesterAgent: Agent | null;
   onApprove: () => void;
   onReject: () => void;
@@ -64,6 +66,9 @@ export function ApprovalCard({
           <span className="text-xs text-muted-foreground">· {timeAgo(approval.createdAt)}</span>
         </div>
       </div>
+
+      {/* 초보자 해석 (표시 전용 — 원문 아래 유지, 실패 시 자동 숨김) */}
+      <CardHumanSummary approvalId={approval.id} companyId={approval.companyId} summary={approval.humanSummary} />
 
       {/* Payload */}
       <ApprovalPayloadRenderer type={approval.type} payload={approval.payload} />

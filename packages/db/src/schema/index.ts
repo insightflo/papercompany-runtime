@@ -58,6 +58,7 @@ export { hermesChatSessions, hermesChatMessages } from "./hermes_chats.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";
+export { cardHumanSummaries } from "./card_human_summaries.js";
 export { approvalComments } from "./approval_comments.js";
 export { activityLog } from "./activity_log.js";
 export { companySecrets } from "./company_secrets.js";

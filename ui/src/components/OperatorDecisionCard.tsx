@@ -10,6 +10,8 @@ import { Link } from "../lib/router";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { HumanReviewPacket } from "./HumanReviewPacket";
+import { CardHumanSummary } from "./CardHumanSummary";
+import { operatorDecisionsApi } from "../api/operator-decisions";
 import { L, useCompanyLanguage } from "../lib/companyLanguage";
 import { humanLabel } from "../lib/humanLabels";
 import { commonDecisionFacts, uniqueDecisionFacts, OperatorDecisionFacts } from "./OperatorDecisionFacts";
@@ -161,6 +163,15 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       )}
 
       <HumanReviewPacket packet={decision.definition.humanReview ?? null} variant="compact" />
+
+      {/* 초보자 해석(표시 전용 — 원문 유지, 실패 시 자동 숨김) */}
+      <CardHumanSummary
+        approvalId={decision.id}
+        companyId={decision.companyId}
+        summary={(decision as { humanSummary?: import("../api/approvals").HumanSummaryView | null }).humanSummary}
+        retranslate={operatorDecisionsApi.retranslateSummary}
+        fetchCurrent={async (id) => (await operatorDecisionsApi.get(id) as { humanSummary?: import("../api/approvals").HumanSummaryView | null }).humanSummary}
+      />
 
       <div className="mt-3 flex flex-wrap gap-2">
         {decision.issueId && (

@@ -869,6 +869,13 @@
       "when": 1792218600000,
       "tag": "0124_qa_rebind_recovery_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1775000000000,
+      "tag": "0125_card_human_summaries",
+      "breakpoints": true
     }
   ]
 }

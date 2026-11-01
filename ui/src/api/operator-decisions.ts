@@ -36,6 +36,8 @@ export const operatorDecisionsApi = {
   resolve: (id: string, input: ResolveOperatorDecisionInput) =>
     api.post<{ data: OperatorDecisionResolutionResponse }>(`/operator-decisions/${id}/resolve`, input)
       .then((response) => response.data),
+  retranslateSummary: (id: string, body: { adapterType?: string; model?: string }) =>
+    api.post<{ id: string; humanSummary: import("./approvals").HumanSummaryView | null }>(`/operator-decisions/${id}/summary/retranslate`, body),
   retryContinuation: (id: string) =>
     api.post<{ data: OperatorDecisionResolutionResponse }>(
       `/operator-decisions/${id}/retry-continuation`,
