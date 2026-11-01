@@ -99,7 +99,7 @@ export function CompanyWorkProductStorageSettings({ companyId }: { companyId: st
     mutationFn: () => workProductStorageApi.save(companyId, configFromForm(form)),
     onSuccess: (config) => {
       queryClient.setQueryData(storageKey, config); setForm(formFromConfig(config)); setTestResult(null);
-      pushToast({ tone: "success", title: "Shared-storage settings saved", body: config.provider === "s3" ? "S3-compatible shared storage is enabled." : "Shared storage is off; files stay in Papercompany's local work folder." });
+      pushToast({ tone: "success", title: "Shared-storage settings saved", body: config.provider === "s3" ? "S3-compatible shared storage is enabled." : "Shared storage is off; files stay in Paperwork's local work folder." });
     },
     onError: (error) => pushToast({ tone: "error", title: "Storage settings could not be saved", body: error instanceof Error ? error.message : "Please review the settings." }),
   });
