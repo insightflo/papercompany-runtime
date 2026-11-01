@@ -1,6 +1,6 @@
 # @paperclipai/ui
 
-Published static assets for the papercompany board UI.
+Published static assets for the Paperwork board UI.
 
 ## What gets published
 
