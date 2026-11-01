@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="doc/assets/header.svg" alt="papercompany — control plane for agent-run company operations" width="720" />
+  <img src="doc/assets/header.svg" alt="Paperwork — control plane for agent-run company operations" width="720" />
 </p>
 
 <p align="center">
@@ -18,19 +18,21 @@
 
 <br/>
 
-> `papercompany` is built on the open-source [Paperclip base](https://github.com/paperclipai/paperclip), extended into a mission-driven operating system for agent companies. The original Paperclip project remains the upstream source for several package names, CLI commands, environment variables, and compatibility paths that still use `paperclipai`, `PAPERCLIP_*`, or `~/.paperclip`.
+> `Paperwork` is built on the open-source [Paperclip base](https://github.com/paperclipai/paperclip), extended into a mission-driven operating system for agent companies. The original Paperclip project remains the upstream source for several package names, CLI commands, environment variables, and compatibility paths that still use `paperclipai`, `PAPERCLIP_*`, or `~/.paperclip`.
 
-## What is papercompany?
+<a id="what-is-papercompany"></a>
+
+## What is Paperwork?
 
 # Open-source operating system for agent teams
 
-**If OpenClaw is an _employee_, papercompany is the _company_**
+**If OpenClaw is an _employee_, Paperwork is the _company_**
 
-papercompany is a Node.js server and React UI that coordinates agent teams inside real companies. Bring your own agents, define missions and goals, and track work, approvals, costs, and outcomes from one dashboard.
+Paperwork is a Node.js server and React UI that coordinates agent teams inside real companies. Bring your own agents, define missions and goals, and track work, approvals, costs, and outcomes from one dashboard.
 
-papercompany does not try to replace the systems your company already uses to get work done. It acts as the control plane that helps agent teams operate through those systems with shared rules, visibility, and governance.
+Paperwork does not try to replace the systems your company already uses to get work done. It acts as the control plane that helps agent teams operate through those systems with shared rules, visibility, and governance.
 
-papercompany sits one layer above direct CLI daily use: community best practice is the reference layer, day-to-day CLI work is the reality layer, and papercompany is the organizational harness that turns that reality into governed team operations. In that sense, it is not just an orchestration tool — it is the bridge from ad-hoc agent work toward durable company operations.
+Paperwork sits one layer above direct CLI daily use: community best practice is the reference layer, day-to-day CLI work is the reality layer, and Paperwork is the organizational harness that turns that reality into governed team operations. In that sense, it is not just an orchestration tool — it is the bridge from ad-hoc agent work toward durable company operations.
 
 **Manage company operations, not just pull requests.**
 
@@ -44,7 +46,7 @@ papercompany sits one layer above direct CLI daily use: community best practice 
 
 ## What changed from Paperclip base
 
-papercompany keeps the upstream Paperclip base control-plane foundation, then changes the product toward running agent companies instead of only coordinating agent tasks. Eight evolutions define the difference:
+Paperwork keeps the upstream Paperclip base control-plane foundation, then changes the product toward running agent companies instead of only coordinating agent tasks. Eight evolutions define the difference:
 
 | # | Evolution | What it adds |
 | --- | --- | --- |
@@ -57,7 +59,7 @@ papercompany keeps the upstream Paperclip base control-plane foundation, then ch
 | 7 | **Tool registration & agent permissions** | Companies register tools (executable programs or external execution paths) and control which agents may invoke them. |
 | 8 | **Work products** | Formal storage of deliverables with work-product storage backed by S3-compatible or local object storage. |
 
-| Area | What changed in papercompany |
+| Area | What changed in Paperwork |
 | --- | --- |
 | **Product model** | The main unit is an agent-run company: missions, goals, org structure, budgets, approvals, work products, and outcomes are treated as one operating loop. |
 | **Mission execution** | Missions now carry workflow runs, governance decisions, issue plans, recovery state, and evidence requirements instead of being plain task containers. |
@@ -65,14 +67,14 @@ papercompany keeps the upstream Paperclip base control-plane foundation, then ch
 | **Workflow ownership** | Server-native workflow/DAG execution owns workflow definitions, runs, step runs, resume behavior, and downstream step materialization. |
 | **Cross-company work** | Mission delegation can create governed target-company missions while the source company tracks blocked handoff issues and receives copied work products on completion. |
 | **Operator surface** | The board UI emphasizes company operations: missions, scheduler, approvals, channels, costs, exceptions, workflow state, and output review. |
-| **Local operations** | Worktree-local instances isolate dev databases, ports, branding, and config so multiple papercompany servers can run side by side safely. |
+| **Local operations** | Worktree-local instances isolate dev databases, ports, branding, and config so multiple Paperwork servers can run side by side safely. |
 | **Extensibility** | Plugins, tool registry integration, service-request bridges, research workbench tools, and company skill management extend the control plane without making every workflow core logic. |
 
 Some lower-level names still say Paperclip because they are compatibility surfaces, not the product story: `paperclipai`, `@paperclipai/*`, `PAPERCLIP_*`, `~/.paperclip`, and `.paperclip.yaml`.
 
 <br/>
 
-> **COMING SOON: Clipmart** — Download and run entire companies with one click. Browse pre-built company templates — full org structures, agent configs, and skills — and import them into your papercompany instance in seconds.
+> **COMING SOON: Clipmart** — Download and run entire companies with one click. Browse pre-built company templates — full org structures, agent configs, and skills — and import them into your Paperwork instance in seconds.
 
 <br/>
 
@@ -95,7 +97,9 @@ Some lower-level names still say Paperclip because they are compatibility surfac
 
 <br/>
 
-## papercompany is right for you if
+<a id="papercompany-is-right-for-you-if"></a>
+
+## Paperwork is right for you if
 
 - ✅ You want to build **agent-run companies**, not just isolated agent workflows
 - ✅ You **coordinate many different agents** toward shared missions and operating goals
@@ -156,28 +160,32 @@ Monitor and manage your autonomous businesses from anywhere.
 
 <br/>
 
-## Problems papercompany solves
+<a id="problems-papercompany-solves"></a>
 
-| Without papercompany                                                                                                                     | With papercompany                                                                                                                         |
+## Problems Paperwork solves
+
+| Without Paperwork                                                                                                                     | With Paperwork                                                                                                                         |
 | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | ❌ Your agents work in isolated tabs and scripts, and you can't tell which team owns what, what is blocked, or what still needs review. | ✅ Work is tracked as part of the company, with shared context, visible ownership, approvals, and durable history.                     |
 | ❌ You manually gather context from several places to remind your bot what the business is actually trying to do.                      | ✅ Context flows from the company mission down through goals, teams, and work items, so agents know both the work and the reason.      |
-| ❌ Agent configs, recurring jobs, and exception handling are scattered across tools and ad hoc scripts.                                | ✅ papercompany gives you org charts, routines, governance, and work tracking in one control plane.                                       |
+| ❌ Agent configs, recurring jobs, and exception handling are scattered across tools and ad hoc scripts.                                | ✅ Paperwork gives you org charts, routines, governance, and work tracking in one control plane.                                       |
 | ❌ Runaway loops waste hundreds of dollars of tokens and max your quota before you even know what happened.                            | ✅ Cost tracking surfaces token budgets and throttles agents when they hit limits.                                                     |
-| ❌ Your team works in ERP, ticketing, back-office, or engineering systems, but there is no shared operating layer above them.         | ✅ papercompany coordinates agent teams across those systems without trying to replace them.                                               |
-| ❌ You want autonomous teams, but still need human review for exceptions, approvals, and risky changes.                                | ✅ papercompany keeps approvals, intervention, and audit visibility explicit so autonomy stays governable.                                 |
+| ❌ Your team works in ERP, ticketing, back-office, or engineering systems, but there is no shared operating layer above them.         | ✅ Paperwork coordinates agent teams across those systems without trying to replace them.                                               |
+| ❌ You want autonomous teams, but still need human review for exceptions, approvals, and risky changes.                                | ✅ Paperwork keeps approvals, intervention, and audit visibility explicit so autonomy stays governable.                                 |
 
 <br/>
 
-## Why papercompany is special
+<a id="why-papercompany-is-special"></a>
 
-papercompany handles the hard orchestration details correctly.
+## Why Paperwork is special
+
+Paperwork handles the hard orchestration details correctly.
 
 |                                   |                                                                                                               |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | **Atomic execution.**             | Work checkout and budget enforcement are atomic, so no double-work and no runaway spend.                      |
 | **Persistent agent state.**       | Agents resume the same work context across heartbeats instead of restarting from scratch.                     |
-| **Runtime skill injection.**      | Agents can learn papercompany operating procedures and company context at runtime, without retraining.           |
+| **Runtime skill injection.**      | Agents can learn Paperwork operating procedures and company context at runtime, without retraining.           |
 | **Governance with rollback.**     | Approval gates are enforced, config changes are revisioned, and bad changes can be rolled back safely.        |
 | **Goal-aware execution.**         | Work items carry full goal ancestry so agents consistently see the "why," not just a title.                   |
 | **Portable company templates.**   | Export/import orgs, agents, and skills with secret scrubbing and collision handling.                          |
@@ -185,22 +193,24 @@ papercompany handles the hard orchestration details correctly.
 
 <br/>
 
-## What papercompany is not
+<a id="what-papercompany-is-not"></a>
+
+## What Paperwork is not
 
 |                              |                                                                                                                      |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | **Not a chatbot.**           | Agents have jobs, not chat windows.                                                                                  |
 | **Not an agent framework.**  | We don't tell you how to build agents. We tell you how to run a company made of them.                                |
-| **Not a workflow builder.**  | No drag-and-drop pipelines. papercompany models companies — with org charts, goals, budgets, and governance.            |
-| **Not a prompt manager.**    | Agents bring their own prompts, models, and runtimes. papercompany manages the organization they work in.               |
-| **Not a single-agent tool.** | This is for teams. If you have one agent, you probably don't need papercompany. If you have twenty — you definitely do. |
-| **Not a code review tool.**  | papercompany orchestrates work, not pull requests. Bring your own review process.                                       |
+| **Not a workflow builder.**  | No drag-and-drop pipelines. Paperwork models companies — with org charts, goals, budgets, and governance.            |
+| **Not a prompt manager.**    | Agents bring their own prompts, models, and runtimes. Paperwork manages the organization they work in.               |
+| **Not a single-agent tool.** | This is for teams. If you have one agent, you probably don't need Paperwork. If you have twenty — you definitely do. |
+| **Not a code review tool.**  | Paperwork orchestrates work, not pull requests. Bring your own review process.                                       |
 
 <br/>
 
 ## Quickstart
 
-Open source. Self-hosted. No papercompany account required.
+Open source. Self-hosted. No Paperwork account required.
 
 ```bash
 npx paperclipai onboard --yes
@@ -228,21 +238,21 @@ This starts the API server at `http://localhost:3200`; the board UI is served fr
 **What does a typical setup look like?**
 Locally, a single Node.js process manages an embedded Postgres and local file storage. For production, point it at your own Postgres and deploy however you like. Configure work contexts, agents, and goals - the agents take care of the rest.
 
-If you're a solo entrepreneur you can use Tailscale to access papercompany on the go. Later, you can move the same instance to a hosted deployment when you need it.
+If you're a solo entrepreneur you can use Tailscale to access Paperwork on the go. Later, you can move the same instance to a hosted deployment when you need it.
 
 **Can I run multiple companies?**
 Yes. A single deployment can run an unlimited number of companies with complete data isolation.
 
-**How is papercompany different from agents like OpenClaw or Claude Code?**
-papercompany _uses_ those agents. It organizes them into agent teams that operate inside a company, with missions, org structure, budgets, governance, and accountability.
+**How is Paperwork different from agents like OpenClaw or Claude Code?**
+Paperwork _uses_ those agents. It organizes them into agent teams that operate inside a company, with missions, org structure, budgets, governance, and accountability.
 
-**Why should I use papercompany instead of just pointing my OpenClaw to Asana or Trello?**
-papercompany is not just a work board. It handles the company-level operating layer around agent teams: mission alignment, ownership, approvals, persistent execution state, cost controls, and governed work across real systems.
+**Why should I use Paperwork instead of just pointing my OpenClaw to Asana or Trello?**
+Paperwork is not just a work board. It handles the company-level operating layer around agent teams: mission alignment, ownership, approvals, persistent execution state, cost controls, and governed work across real systems.
 
 (Bring-your-own work system is on the Roadmap)
 
 **Do agents run continuously?**
-By default, agents run on scheduled heartbeats and event-based triggers (work assignment, @-mentions). You can also hook in continuous agents like OpenClaw. You bring your agent and papercompany coordinates.
+By default, agents run on scheduled heartbeats and event-based triggers (work assignment, @-mentions). You can also hook in continuous agents like OpenClaw. You bring your agent and Paperwork coordinates.
 
 <br/>
 
@@ -295,7 +305,7 @@ MIT. Portions of this repository derive from Paperclip base, copyright 2025 Pape
 
 ## Upstream
 
-papercompany keeps explicit compatibility with the upstream Paperclip base ecosystem while changing the product surface and operating model. See [Paperclip base](https://github.com/paperclipai/paperclip) for the original project.
+Paperwork keeps explicit compatibility with the upstream Paperclip base ecosystem while changing the product surface and operating model. See [Paperclip base](https://github.com/paperclipai/paperclip) for the original project.
 
 <br/>
 
