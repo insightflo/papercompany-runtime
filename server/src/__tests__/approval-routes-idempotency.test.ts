@@ -35,6 +35,13 @@ const mockSecretService = vi.hoisted(() => ({
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
+const mockCardSummaryService = vi.hoisted(() => ({
+  getRow: vi.fn(),
+  getRows: vi.fn(),
+  ensureSummary: vi.fn(),
+  retranslate: vi.fn(),
+}));
+
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
   approvalService: () => mockApprovalService,
@@ -42,6 +49,10 @@ vi.mock("../services/index.js", () => ({
   issueApprovalService: () => mockIssueApprovalService,
   logActivity: mockLogActivity,
   secretService: () => mockSecretService,
+}));
+
+vi.mock("../services/card-summaries.js", () => ({
+  cardSummaryService: () => mockCardSummaryService,
 }));
 
 function createApp(actor: Record<string, unknown> = {
@@ -65,6 +76,9 @@ function createApp(actor: Record<string, unknown> = {
 describe("approval routes idempotent retries", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCardSummaryService.getRows.mockResolvedValue(new Map());
+    mockCardSummaryService.ensureSummary.mockResolvedValue(null);
+    mockCardSummaryService.retranslate.mockResolvedValue(null);
     mockAgentService.getById.mockResolvedValue({
       id: "root-agent",
       companyId: "company-1",

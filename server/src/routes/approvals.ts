@@ -21,12 +21,57 @@ import { forbidden, notFound } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import { shouldEmitApprovalDecided, buildApprovalDecidedDetails } from "../services/approval-decision-event.js";
+import { cardSummaryService, type CardSummaryRow } from "../services/card-summaries.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
     ...approval,
     payload: redactEventPayload(approval.payload) ?? {},
   };
+}
+
+/** 결정 대기 중인 카드 상태 — 이 카드들만 해석 자동 생성 대상. */
+const DECISION_PENDING_APPROVAL_STATUSES = new Set(["pending", "revision_requested"]);
+
+/** 표시용 해석 스냅숋(원문 폴백 판단은 UI 책임 — null이면 원문만). */
+function serializeSummary(row: CardSummaryRow | null | undefined) {
+  if (!row) return null;
+  return {
+    status: row.status,
+    adapterType: row.adapterType,
+    model: row.model,
+    summary: row.summaryJson ?? null,
+    error: row.error ?? null,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** 해석 입력은 운영자가 보는 것과 동일한 재편집본만 쓴다(비밀 원본 미전달). */
+function buildApprovalSourceView(approval: { type: string; status: string; payload: Record<string, unknown> }) {
+  const redacted = redactApprovalPayload(approval);
+  return { kind: "approval" as const, type: redacted.type, status: redacted.status, payload: redacted.payload };
+}
+
+/** 조회 후킹(표시 전용): 결정 대기 카드의 해석을 늦은 생성/재기동하고 응답에 스냅숋만 붙인다. 응답을 막지 않는다. */
+function attachApprovalSummaries(
+  svc: ReturnType<typeof cardSummaryService>,
+  companyId: string,
+  approvals: Array<{ id: string; type: string; status: string; payload: Record<string, unknown> }>,
+): Promise<Array<ReturnType<typeof serializeSummary>>> {
+  return svc.getRows(companyId, "approval", approvals.map((a) => a.id)).then((rows) =>
+    approvals.map((approval) => {
+      const row = rows.get(approval.id);
+      if (DECISION_PENDING_APPROVAL_STATUSES.has(approval.status)) {
+        const view = buildApprovalSourceView(approval);
+        if (!row || row.status !== "done") {
+          void svc.ensureSummary(companyId, "approval", approval.id, view).catch((err) =>
+            logger.error({ err: String(err), approvalId: approval.id }, "approval summary ensure failed"),
+          );
+        }
+      }
+      return serializeSummary(row);
+    }),
+  );
 }
 
 async function assertCanResolveApproval(
@@ -94,6 +139,7 @@ export function approvalRoutes(db: Db) {
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
   const agentsSvc = agentService(db);
+  const summariesSvc = cardSummaryService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
@@ -101,7 +147,9 @@ export function approvalRoutes(db: Db) {
     assertCompanyAccess(req, companyId);
     const status = req.query.status as string | undefined;
     const result = await svc.list(companyId, status);
-    res.json(result.map((approval) => redactApprovalPayload(approval)));
+    const redacted = result.map((approval) => redactApprovalPayload(approval));
+    const summaries = await attachApprovalSummaries(summariesSvc, companyId, redacted);
+    res.json(redacted.map((approval, i) => ({ ...approval, humanSummary: summaries[i] ?? null })));
   });
 
   router.get("/approvals/:id", async (req, res) => {
@@ -112,7 +160,29 @@ export function approvalRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, approval.companyId);
-    res.json(redactApprovalPayload(approval));
+    const redacted = redactApprovalPayload(approval);
+    const [summary] = await attachApprovalSummaries(summariesSvc, approval.companyId, [redacted]);
+    res.json({ ...redacted, humanSummary: summary ?? null });
+  });
+
+  /** [휴먼카드 해석] 화면의 '다시 해석' — 표시 전용. board 권한만. */
+  router.post("/approvals/:id/summary/retranslate", async (req, res) => {
+    const id = req.params.id as string;
+    const approval = await svc.getById(id);
+    if (!approval) {
+      res.status(404).json({ error: "Approval not found" });
+      return;
+    }
+    assertBoard(req);
+    assertCompanyAccess(req, approval.companyId);
+    const adapterType = typeof req.body?.adapterType === "string" ? req.body.adapterType : undefined;
+    const model = typeof req.body?.model === "string" ? req.body.model : undefined;
+    const row = await summariesSvc.retranslate(approval.companyId, "approval", approval.id, {
+      adapterType,
+      model,
+      view: buildApprovalSourceView(approval),
+    });
+    res.json({ id: approval.id, humanSummary: serializeSummary(row) });
   });
 
   router.post("/companies/:companyId/approvals", validate(createApprovalSchema), async (req, res) => {

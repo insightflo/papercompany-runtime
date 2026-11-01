@@ -21,6 +21,13 @@ const mockIssueApprovalService = vi.hoisted(() => ({ listIssuesForApproval: vi.f
 const mockSecretService = vi.hoisted(() => ({ normalizeHireApprovalPayloadForPersistence: vi.fn() }));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
+const mockCardSummaryService = vi.hoisted(() => ({
+  getRow: vi.fn(),
+  getRows: vi.fn(),
+  ensureSummary: vi.fn(),
+  retranslate: vi.fn(),
+}));
+
 vi.mock("../services/index.js", () => ({
   agentService: () => mockAgentService,
   approvalService: () => mockApprovalService,
@@ -28,6 +35,10 @@ vi.mock("../services/index.js", () => ({
   issueApprovalService: () => mockIssueApprovalService,
   logActivity: mockLogActivity,
   secretService: () => mockSecretService,
+}));
+
+vi.mock("../services/card-summaries.js", () => ({
+  cardSummaryService: () => mockCardSummaryService,
 }));
 
 function createApp(actor: Record<string, unknown>) {
@@ -47,6 +58,9 @@ const agentActor = (companyId: string) => ({ type: "agent", agentId: "reporter-a
 describe("approval agent-key access + decision event", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCardSummaryService.getRows.mockResolvedValue(new Map());
+    mockCardSummaryService.ensureSummary.mockResolvedValue(null);
+    mockCardSummaryService.retranslate.mockResolvedValue(null);
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",
       companyId: "company-1",
