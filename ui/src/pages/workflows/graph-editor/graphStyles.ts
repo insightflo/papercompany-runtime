@@ -387,7 +387,7 @@ export const graphDiagnosticRowStyle: CSSProperties = {
 };
 
 export const graphPaletteItems: Array<{ kind: WorkflowGraphPaletteNodeKind; label: string; description: string }> = [
-  { kind: "agent", label: "Agent", description: "Papercompany assignee step" },
+  { kind: "agent", label: "Agent", description: "Paperwork assignee step" },
   { kind: "tool", label: "Tool", description: "System tool execution" },
   { kind: "if", label: "IF", description: "Route by typed conditions" },
   { kind: "complete", label: "Complete", description: "Finish the workflow successfully" },
