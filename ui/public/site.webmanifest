@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "papercompany",
-  "short_name": "papercompany",
-  "description": "Agent-company control plane for papercompany",
+  "name": "Paperwork",
+  "short_name": "Paperwork",
+  "description": "Agent-company control plane for Paperwork",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
