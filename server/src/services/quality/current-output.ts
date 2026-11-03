@@ -1,8 +1,11 @@
 /** Quality correction: C03 issuance/consumption first; non-C03 current_output converges on E. */
-import { and, desc, eq, is, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { and, desc, eq, is, sql, or, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import {
+  workflowRecoveryAuthorities,
   agentWakeupRequests,
   heartbeatRuns,
   qualityActions,
@@ -60,6 +63,13 @@ import { normalizeWorkflowStepsForExecution } from "../workflow/dag-engine.js";
 import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
 import type { EdgeBearingStep } from "../workflow/control-flow/edge-condition.js";
 import { readWorkflowAttemptProof } from "../heartbeat-finalization/workflow-attempt-proof.js";
+
+import { getStorageService } from "../../storage/index.js";
+import { linkEvidence, uploadEvidence } from "./evidence-store.js";
+import type { TryQaRemediationInput, QualifiedQa, PreparedFile } from "../workflow/control-flow/qa-remediation-contract.js";
+import { remediationIdempotencyKey, QA_REMEDIATION_EVENT_TYPE } from "../workflow/control-flow/qa-remediation-contract.js";
+import { computeDefectSignature } from "../workflow/control-flow/knowledge-draft-capture.js";
+import { hasPendingQaRemediationForRun } from "../workflow/control-flow/qa-remediation-admission-root.js";
 
 export type CurrentOutputRemediationOutcome =
   | {
@@ -347,6 +357,8 @@ export async function applyCurrentOutputCorrection(db: Db, key: QualityKey): Pro
   }
 
   if (source.mission.kind !== "mission" || source.workflow.kind !== "workflow_step") return UNSUPPORTED;
+  if (!await currentOutputHasC5Scope(db, parsed.companyId, source.workflow.runId))
+    return applyLegacyCurrentOutput(db, { key: parsed, action, source, binding, envelope: envelope.data });
   const refreshedHistory = await readCurrentOutputEHistory(db, parsed.companyId, action, source);
   if (refreshedHistory.kind === "invalid") return invalidEHistory(refreshedHistory.detail);
   if (refreshedHistory.kind === "exact") {
@@ -702,6 +714,168 @@ async function evaluateVerification(db: Db, input: {
       });
     }
     return { status: "verification_pending", evidenceRefId: receipt.id, remediation };
+  }
+  return pending;
+}
+
+async function currentOutputHasC5Scope(db: Db, companyId: string, runId: string): Promise<boolean> {
+  const [run] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.id, runId)));
+  if (!run) return true;
+  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities).where(and(
+    eq(workflowRecoveryAuthorities.companyId, companyId), or(eq(workflowRecoveryAuthorities.workflowRunId, runId), eq(workflowRecoveryAuthorities.replacementRunId, runId)))).limit(1);
+  const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId), eq(workflowTransitionEvents.workflowRunId, runId),
+    inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared"])) ).limit(1);
+  const [actual] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId))
+    .where(and(eq(heartbeatRuns.companyId, companyId), eq(workflowStepRuns.workflowRunId, runId), isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken))).limit(1);
+  const [held] = await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns).where(and(
+    eq(workflowStepRuns.workflowRunId, runId), inArray(workflowStepRuns.status, ["held", "blocked"])) ).limit(1);
+  if (authority || history) await hasPendingQaRemediationForRun(db, run);
+  return Boolean(authority || history || actual || held);
+}
+
+async function applyLegacyCurrentOutput(db: Db, input: {
+  key: QualityKey; action: ActionRow; source: SourceAttempt;
+  binding: Awaited<ReturnType<typeof ensureCanonicalQualityExecution>>;
+  envelope: ReturnType<typeof retryEnvelopeSchema.parse>;
+}): Promise<CurrentOutputCorrectionStatus> {
+  const { key: parsed, action, source, binding } = input, envelope = { data: input.envelope };
+  const reviewItemId = await findActionReviewItem(db, parsed.companyId, action.occurrenceIds);
+  const [usedRow] = await db.select({ n: sql<number>`count(*)::int` }).from(qualityEvidenceRefs)
+    .where(and(eq(qualityEvidenceRefs.companyId, parsed.companyId), eq(qualityEvidenceRefs.qualityActionId, action.id), sql`${qualityEvidenceRefs.qualityContract}->>'kind' = 'use'`));
+  const appliedCount = usedRow?.n ?? 0;
+  if (!reviewItemId && appliedCount === 0) return UNSUPPORTED;
+  const prepared = await prepareQualification(db, { companyId: parsed.companyId, source, bindingStepRunId: binding.stepRunId, action, reviewItemId });
+  if (prepared instanceof CurrentOutputUnsupported && appliedCount === 0) return UNSUPPORTED;
+  if (prepared instanceof CurrentOutputUnsupported || prepared.status === "waiting") {
+    return await evaluateLegacyVerification(db, { key: parsed, actionId: action.id, binding, source });
+  }
+  if (prepared.status === "correction") return issueQualityCorrection(db, prepared.preparation);
+  if (appliedCount >= envelope.data.maxExecutorAttempts) return UNSUPPORTED;
+  if (!reviewItemId) return UNSUPPORTED;
+  const fileHashes = [...prepared.fileBuffers.entries()].map(([file, entry]) => ({
+    file, before: entry.beforeHash, after: createHash("sha256").update(entry.content).digest("hex"),
+  }));
+  const receiptBody = Buffer.from(JSON.stringify({
+    schemaVersion: 1, kind: "quality_current_output_correction", qualityActionId: action.id,
+    sourceAttemptHash: hashContract(source), fileHashes,
+  }));
+  let uploaded;
+  try {
+    uploaded = await uploadEvidence(getStorageService(), { companyId: parsed.companyId, body: receiptBody, contentType: "application/json", originalFilename: "current-output-correction.json" });
+  } catch {
+    return UNSUPPORTED;
+  }
+  const { writeError } = await writeLegacyQaRemediationPatches({
+    db, run: prepared.run, producerStep: prepared.producerStep, producerRun: prepared.producerRun,
+    qualified: prepared.qualified, fileBuffers: prepared.fileBuffers,
+    extraEventPayload: () => ({
+      qualityActionId: action.id,
+      qualityFileHashes: fileHashes,
+      qualitySourceAttemptHash: hashContract(source),
+    }),
+  });
+  if (writeError) return UNSUPPORTED;
+  const linked = await db.transaction(async (tx) => linkEvidence(tx, {
+    companyId: parsed.companyId, reviewItemId, source,
+    scope: { kind: "output_correction", companyId: parsed.companyId, actionId: action.id, source, verifierRunId: prepared.verifierHeartbeatId, verifierEpoch: prepared.verifierEpoch },
+    kind: "use", uploaded, expiresAt: envelope.data.deadlineAt, issuedBy: "quality:current-output",
+  }));
+  return { status: "verification_pending", evidenceRefId: linked.evidenceRefId };
+}
+
+async function writeLegacyQaRemediationPatches(input: Pick<TryQaRemediationInput, "db" | "run" | "producerStep" | "producerRun"> & {
+  qualified: readonly QualifiedQa[]; fileBuffers: ReadonlyMap<string, PreparedFile>;
+  extraEventPayload?: (qa: QualifiedQa) => Record<string, unknown>;
+}): Promise<{ writeError: string | null }> {
+  const { db, run } = input;
+  let writeError: string | null = null;
+  for (const [file, entry] of input.fileBuffers) {
+    try {
+      await writeFile(file, entry.content, "utf8");
+    } catch (error) {
+      writeError = error instanceof Error ? error.message : String(error);
+      break;
+    }
+  }
+  const nowIso = new Date().toISOString();
+  for (const qa of input.qualified) {
+    await db.insert(workflowTransitionEvents).values({
+      companyId: run.companyId,
+      missionId: run.missionId ?? null,
+      workflowRunId: run.id,
+      workflowStepRunId: qa.qaRun.id,
+      issueId: qa.qaRun.issueId ?? null,
+      heartbeatRunId: qa.heartbeatRunId,
+      eventType: QA_REMEDIATION_EVENT_TYPE,
+      layer: "workflow_validation",
+      decision: writeError ? "mechanical_remediation_write_failed" : "mechanical_remediation_applied",
+      verdict: "request_changes",
+      reason: "workflow_api",
+      reasonCode: "qa_remediation",
+      idempotencyKey: remediationIdempotencyKey(run.companyId, qa.qaRun.id, qa.sourceVerdictEventId),
+      payload: {
+        kind: "qa_remediation_applied",
+        outcome: writeError ? "write_failed" : "applied",
+        producerStepId: input.producerStep.id,
+        producerStepRunId: input.producerRun.id,
+        producerIteration: input.producerRun.iterationIndex ?? 0,
+        qaStepId: qa.qaRun.stepId,
+        sourceVerdictEventId: qa.sourceVerdictEventId,
+        appliedAt: nowIso,
+        items: qa.remediations.items,
+        signatures: qa.remediations.items.map((item) => computeDefectSignature(item.find, item.replace)),
+        ...(input.extraEventPayload ? input.extraEventPayload(qa) : {}),
+        ...(writeError ? { writeError } : {}),
+      },
+    }).onConflictDoNothing();
+  }
+  return { writeError };
+}
+
+async function evaluateLegacyVerification(db: Db, input: {
+  key: QualityKey; actionId: string; binding: Awaited<ReturnType<typeof ensureCanonicalQualityExecution>>; source: { heartbeatRunId: string };
+}): Promise<CurrentOutputCorrectionStatus> {
+  const { key, binding } = input;
+  const [appliedEvent] = await db.select({ createdAt: workflowTransitionEvents.createdAt }).from(workflowTransitionEvents)
+    .where(and(eq(workflowTransitionEvents.companyId, key.companyId), eq(workflowTransitionEvents.workflowStepRunId, binding.stepRunId), eq(workflowTransitionEvents.eventType, "qa_remediation_applied")))
+    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id)).limit(1);
+  const [useReceipt] = await db.select({ id: qualityEvidenceRefs.id, contract: qualityEvidenceRefs.qualityContract }).from(qualityEvidenceRefs)
+    .where(and(eq(qualityEvidenceRefs.companyId, key.companyId), eq(qualityEvidenceRefs.qualityActionId, input.actionId), sql`${qualityEvidenceRefs.qualityContract}->>'kind' = 'use'`))
+    .orderBy(desc(qualityEvidenceRefs.id)).limit(1);
+  const pending: CurrentOutputCorrectionStatus = { status: "verification_pending", evidenceRefId: useReceipt?.id ?? null };
+  if (!appliedEvent) return pending;
+  const observationReceipts = await db.select({ id: qualityEvidenceRefs.id, contract: qualityEvidenceRefs.qualityContract }).from(qualityEvidenceRefs)
+    .where(and(eq(qualityEvidenceRefs.companyId, key.companyId), eq(qualityEvidenceRefs.qualityActionId, input.actionId), sql`${qualityEvidenceRefs.qualityContract}->>'kind' = 'observation'`))
+    .orderBy(desc(qualityEvidenceRefs.id));
+  const [producerHeartbeat] = await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, key.companyId), eq(heartbeatRuns.id, input.source.heartbeatRunId)));
+  for (const receipt of observationReceipts) {
+    const contract = evidenceContractSchema.safeParse(receipt.contract);
+    if (!contract.success || contract.data.kind !== "observation") continue;
+    const scope = outputCorrectionScopeSchema.safeParse(contract.data.scope);
+    if (!scope.success) continue;
+    const [pass] = await db.select({ id: workflowTransitionEvents.id, heartbeatRunId: workflowTransitionEvents.heartbeatRunId, createdAt: workflowTransitionEvents.createdAt }).from(workflowTransitionEvents)
+      .where(and(
+        eq(workflowTransitionEvents.companyId, key.companyId), eq(workflowTransitionEvents.workflowStepRunId, binding.stepRunId),
+        eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"), eq(workflowTransitionEvents.verdict, "pass"),
+        eq(workflowTransitionEvents.heartbeatRunId, scope.data.verifierRunId),
+      )).limit(1);
+    if (!pass || pass.createdAt < appliedEvent.createdAt) continue;
+    const [verifier] = await db.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.companyId, key.companyId), eq(heartbeatRuns.id, scope.data.verifierRunId)));
+    if (!verifier || !producerHeartbeat || verifier.agentId === producerHeartbeat.agentId) continue;
+    const rows = await db.update(qualityActions).set({ state: "corrected", updatedAt: new Date() })
+      .where(and(eq(qualityActions.companyId, key.companyId), eq(qualityActions.id, input.actionId), sql`${qualityActions.state} <> 'corrected'`))
+      .returning({ id: qualityActions.id });
+    if (rows.length > 0) {
+      await insertActivityRecord(db, {
+        companyId: key.companyId, actorType: "system", actorId: "quality",
+        action: "quality.correction_verified", entityType: "quality_action", entityId: input.actionId,
+        details: { evidenceRefId: receipt.id, verifierRunId: scope.data.verifierRunId },
+      });
+    }
+    return { status: "verification_pending", evidenceRefId: receipt.id };
   }
   return pending;
 }
