@@ -139,7 +139,7 @@ function scenarioTraceIds(label: string, scenario: TestAction): Record<string, u
 }
 
 function armOneShotReleaseRunReadFailure(db: QualityTestDb["db"], heartbeatRunId: string) {
-  type PostgresClient = { unsafe: (query: string, params?: unknown[]) => unknown };
+  type PostgresClient = Pick<typeof db.$client, "unsafe">;
   type QueryDb = { select: (...args: unknown[]) => unknown };
   const client = db.$client as unknown as PostgresClient;
   const queryDb = db as unknown as QueryDb;
@@ -159,7 +159,8 @@ function armOneShotReleaseRunReadFailure(db: QualityTestDb["db"], heartbeatRunId
     }
     return originalSelect.apply(queryDb, args);
   };
-  client.unsafe = function (query, params) {
+  client.unsafe = function (...args: Parameters<PostgresClient["unsafe"]>) {
+    const [query, params] = args;
     const isExactRunRead = query.trimStart().toUpperCase().startsWith("SELECT")
       && query.includes('from "heartbeat_runs"')
       && query.includes('"heartbeat_runs"."id" = $1')
@@ -177,7 +178,7 @@ function armOneShotReleaseRunReadFailure(db: QualityTestDb["db"], heartbeatRunId
       })}\n`);
       throw new Error("c5_transient_exact_release_run_read_failure");
     }
-    return originalUnsafe.call(client, query, params);
+    return Reflect.apply(originalUnsafe, client, args);
   };
   return {
     arm: () => { armed = true; },
