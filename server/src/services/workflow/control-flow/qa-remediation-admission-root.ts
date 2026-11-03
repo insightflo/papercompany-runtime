@@ -236,6 +236,13 @@ export class QaRemediationAdmissionHold extends Error {
   }
 }
 
+// Only the owning root can attest rollback, clean owner close, and no adapter invocation.
+const preInvocationRollbacks = new WeakMap<object, { db: Db; identity: QaCorrectionExecutionIdentity; phase: "claim" | "adapter_start" }>();
+export function isC5PreInvocationRollback(error: unknown, db: Db, identity: QaCorrectionExecutionIdentity, phase: "claim" | "adapter_start"): boolean {
+  const proof = error && typeof error === "object" ? preInvocationRollbacks.get(error) : undefined;
+  return proof?.db === db && proof.phase === phase && isDeepStrictEqual(proof.identity, identity);
+}
+
 class InventoryDrift extends Error {}
 class UnknownTransactionOutcome extends Error {
   constructor(readonly primary: unknown, readonly transactionFailure?: unknown) {
@@ -876,6 +883,7 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
     let callbackFailurePresent = false;
     let callbackFailure: unknown;
     let invocationTokenEntered = false;
+    let adapterInvoked = false;
     let c5ScopeVersion: string | null = null;
     let nativeOwnerForProof: QaRemediationFileOwner | null = null;
     const privateNotificationState: { current: ReplacementRootNotifications | null } = { current: null };
@@ -943,6 +951,7 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
                 await execution.validateInvocation(t, currentExecutionScope, workContext);
                 await revalidateReplacementSourcePreservation(t, workContext, currentExecutionScope.primaryWorkflowRunId);
                 let actual: unknown;
+                adapterInvoked = true;
                 actual = execute();
                 let then: unknown;
                 try { then = actual && (actual as { then?: unknown }).then; }
@@ -1068,6 +1077,9 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
         }
         if (!close.clean) throw hold("owner_exit_unknown", eventIds, error, close.error ?? close.exit);
         if (unexpectedOwnerExit !== undefined) throw hold("owner_exit_unknown", eventIds, error, unexpectedOwnerExit);
+        if (execution && !adapterInvoked && error && typeof error === "object") {
+          preInvocationRollbacks.set(error, { db, identity: execution.identity, phase: execution.phase });
+        }
         if (error instanceof C5PreparationRefusal) {
           if (!execution || !c5ScopeVersion || !nativeOwnerForProof || invocationTokenEntered
             || transactionFailure !== undefined || !callbackProvedRollback) {

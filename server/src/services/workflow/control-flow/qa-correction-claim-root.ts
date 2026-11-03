@@ -14,6 +14,7 @@ import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission,
   from "./qa-remediation-admission-root.js";
 import { discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
+import { readAdmittedWorkflowIdentity } from "../../heartbeat-finalization/producer-identity.js";
 import { readWorkflowAttemptProof } from "../../heartbeat-finalization/workflow-attempt-proof.js";
 import { pauseDeliveryRun, provePauseDeliveryAttempt, type PauseDeliveryObservation } from "../../heartbeat-pause-admission.js";
 import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
@@ -533,25 +534,24 @@ export type ExecutionBoundary<T> = QaCorrectionExecutionBoundary<T>;
 /** The opt-in execution path keeps native acquisition outside DB locks and reuses the C02 lock prefix. */
 export async function withQaCorrectionExecutionRoot<T>(db: Db, run: Run,
   input: QaCorrectionExecutionRootInput<T>): Promise<ExecutionBoundary<T>> {
-  if (is(db, PgTransaction)) {
-    registerQaCorrectionRootDrain(db, run.agentId);
-    return { kind: "root_deferred" };
-  }
-  const identity = captureQaCorrectionExecutionIdentity(run);
-  const initialScope = await discoverExecutionScope(db, run, input.phase);
   let l: Lineage;
   let observation: Observation | null = null;
   try {
     l = await lineage(db, run);
-    if (l.ref) {
-      await prove(db, run, l, null);
-      observation = await observe(db, run, l);
+    if (l.ref) await prove(db, run, l, null);
+    else if (input.phase === "claim") await readAdmittedWorkflowIdentity(db, run);
+    if (is(db, PgTransaction)) {
+      registerQaCorrectionRootDrain(db, run.agentId);
+      return { kind: "root_deferred" };
     }
+    if (l.ref) observation = await observe(db, run, l);
   } catch (error) {
     if (isQaCorrectionRootOwnerRequired(error)) throw error;
     if (error instanceof QaRemediationAdmissionHold) throw error;
     throw error instanceof QaCorrectionClaimRejected ? error : new QaCorrectionClaimRejected(error);
   }
+  const identity = captureQaCorrectionExecutionIdentity(run);
+  const initialScope = await discoverExecutionScope(db, run, input.phase);
   if (l.ref && initialScope.kind === "unlinked") {
     throw new QaRemediationAdmissionHold("execution_correction_lineage_scope_unproven", []);
   }

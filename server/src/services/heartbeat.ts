@@ -372,7 +372,7 @@ import {
   QaCorrectionClaimRejected,
   withQaCorrectionClaimRoot,
 } from "./workflow/control-flow/qa-correction-claim-root.js";
-import { readC5NotInvokedProof, type C5NotInvokedProof, type QaCorrectionExecutionIdentity,
+import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type C5NotInvokedProof, type QaCorrectionExecutionIdentity,
   type QaRemediationSharedAdmissionRuntime }
   from "./workflow/control-flow/qa-remediation-admission-root.js";
 import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
@@ -6184,6 +6184,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const actualObservation = createHeartbeatActualObservation<AdapterExecutionResult>();
     let c5RootNotifications: ReplacementRootNotifications | null = null;
     let c5RootSettlementConfirmed = false;
+    let c5AdmissionEntered = false;
+    let c5RefusalConfirmed = false;
     const cleanupObservation = { releaseCalled: false, releaseSucceeded: false,
       settlementCalled: false, settlementSucceeded: false };
     let actualDrainIdentity: HeartbeatActualDrainIdentity | null = null;
@@ -6337,7 +6339,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         executionFrame.noActualInvocationConfirmed = true;
         return { kind: "legacy" };
       }
-      if (executionFrame.c5ExecutionOptedIn && !actual && !executionFrame.adapterInvocationAttempted) {
+      if (executionFrame.c5ExecutionOptedIn && !c5RefusalConfirmed && !actual && !executionFrame.adapterInvocationAttempted) {
         return holdOwnerRelease("adapter_start_outcome_unproven");
       }
       const positivelyNonworkflow = expectsV1 && current
@@ -7768,6 +7770,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             c5RootNotifications = outerNotifications;
           const started = await withReplacementRootNotificationDb(db, outerNotifications, async () => {
             const identity = captureQaCorrectionExecutionIdentity(run);
+            c5AdmissionEntered = true;
             const boundary = await startHeartbeatWithC5ExecutionGuard(db, run, executeActual, sharedAdmission);
             return { boundary, identity };
           });
@@ -8255,7 +8258,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const actual = await actualObservation.awaitSettled();
       const c5Held = err instanceof C5NotInvokedExecutionError
         && executionFrame.c5NotInvoked?.proof === err.proof;
-      if (executionFrame.c5ExecutionOptedIn && !c5Held && actual === null
+      c5RefusalConfirmed = !c5AdmissionEntered || (!(err instanceof QaRemediationAdmissionHold)
+        && (err instanceof QaCorrectionClaimRejected || isC5PreInvocationRollback(err, db, captureQaCorrectionExecutionIdentity(run), "adapter_start")));
+      if (executionFrame.c5ExecutionOptedIn && !c5Held && !c5RefusalConfirmed && actual === null
         && !executionFrame.adapterInvocationAttempted) {
         executionFrame.ownerReleaseBlocked = true;
         logger.warn({ err, runId }, "opt-in heartbeat adapter start remains held without authenticated no-invocation proof");

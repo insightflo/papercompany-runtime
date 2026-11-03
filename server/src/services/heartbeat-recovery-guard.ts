@@ -5,9 +5,9 @@ import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
 import { captureQaCorrectionExecutionIdentity, QaCorrectionClaimRejected, withQaCorrectionClaimRoot,
   withQaCorrectionExecutionRoot, type ExecutionBoundary, type QaCorrectionExecutionBox }
   from "./workflow/control-flow/qa-correction-claim-root.js";
-import { QaRemediationAdmissionHold, readC5NotInvokedProof, type QaRemediationSharedAdmissionRuntime }
+import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type QaRemediationSharedAdmissionRuntime }
   from "./workflow/control-flow/qa-remediation-admission-root.js";
-import { conflict } from "../errors.js";
+import { conflict, HttpError } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
 import { budgetBlockers } from "./workflow/resume/preview-facts.js";
@@ -112,8 +112,29 @@ async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, clai
   }, async t => claimWithinAdmission(t, run, claimedAt, pause));
 }
 
+// Preserve main's definitive refusal before C5 discovery; locked admission still rechecks before work.
+async function preflightC5Refusal(db: Db, run: typeof heartbeatRuns.$inferSelect, adapterStart = false) {
+  const passed = {}; // Even a successful preflight must roll back owner-response acceptance writes.
+  try {
+    await db.transaction(async tx => {
+      await assertHeartbeatRecoveryAdmission(tx as unknown as Db, run);
+      if (!adapterStart) throw passed;
+      const [current] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).for("share");
+      if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(run)) {
+        throw conflict("heartbeat_execution_cancelled_or_scope_changed");
+      }
+      throw passed;
+    });
+  } catch (error) {
+    if (error === passed) return;
+    const missionRefusal = error instanceof Error && "code" in error && error.code === "mission_not_accepting_work";
+    throw error instanceof HttpError || missionRefusal ? new QaCorrectionClaimRejected(error) : error;
+  }
+}
+
 async function guardedC5Claim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date,
   sharedAdmission: QaRemediationSharedAdmissionRuntime): Promise<ExecutionBoundary<typeof heartbeatRuns.$inferSelect | null>> {
+  await preflightC5Refusal(db, run);
   let pause: PauseChildAdmission | null = null;
   return withQaCorrectionExecutionRoot(db, run, {
     phase: "claim",
@@ -175,6 +196,7 @@ export async function startHeartbeatWithC5ExecutionGuard<T>(db: Db,
   sharedAdmission: QaRemediationSharedAdmissionRuntime): Promise<ExecutionBoundary<QaCorrectionExecutionBox<T>>> {
   let pause: PauseChildAdmission | null = null;
   try {
+    await preflightC5Refusal(db, run, true);
     return await withQaCorrectionExecutionRoot(db, run, {
       phase: "adapter_start",
       sharedAdmission,
@@ -229,7 +251,9 @@ export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: R
   catch (error) {
     if (isQaCorrectionRootOwnerRequired(error)
       || (is(deps.db, PgTransaction) && error instanceof QaCorrectionClaimRejected)) throw error;
-    if (deps.sharedAdmission && error instanceof QaRemediationAdmissionHold) return { kind: "c5_unknown" };
+    if (deps.sharedAdmission && error instanceof QaRemediationAdmissionHold) {
+      return { kind: isC5PreInvocationRollback(error, deps.db, captureQaCorrectionExecutionIdentity(run), "claim") ? "c5_held" : "c5_unknown" };
+    }
     await deps.cancelRun(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
     return { kind: error instanceof QaCorrectionClaimRejected ? "correction_rejected" : "not_claimed" };
   }
