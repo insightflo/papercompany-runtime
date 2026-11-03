@@ -940,7 +940,7 @@ async function syncStepRunsFromIssueState(
     stepRuns.filter(s => !correctionToolIds.has(s.id))) : new Set<string>();
   const issueRows = await db.select({
     id: issues.id, companyId: issues.companyId, status: issues.status, startedAt: issues.startedAt,
-    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, title: issues.title, originKind: issues.originKind,
+    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, updatedAt: issues.updatedAt, title: issues.title, originKind: issues.originKind,
   }).from(issues).where(inArray(issues.id, issueIds));
   const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
   const issueById = new Map(issueRows
@@ -1034,7 +1034,7 @@ async function syncStepRunsFromIssueState(
       patch.completedAt = null;
     } else if (desiredStatus === "completed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.completedAt ?? now;
+      patch.completedAt = issue.completedAt ?? issue.updatedAt;
       // When finalization v1 is active, issue-backed steps also need
       // dispatch_ready_at set so downstream edge-condition evaluation admits
       // successors. Heartbeat-linked steps get this via settlement.ts, but
@@ -1049,7 +1049,7 @@ async function syncStepRunsFromIssueState(
       }
     } else if (desiredStatus === "failed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? now;
+      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? issue.updatedAt;
     } else {
       patch.startedAt = null;
       patch.completedAt = null;
