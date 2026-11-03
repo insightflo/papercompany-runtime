@@ -15,7 +15,7 @@ import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission,
 import { hasPendingQaRemediationForRun, workflowRunHasC5AdmissionScope, discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
 import { readAdmittedWorkflowIdentity } from "../../heartbeat-finalization/producer-identity.js";
-import { readWorkflowAttemptProof } from "../../heartbeat-finalization/workflow-attempt-proof.js";
+import { readWorkflowAttemptProof, WORKFLOW_ATTEMPT_PROOF_KEY } from "../../heartbeat-finalization/workflow-attempt-proof.js";
 import { pauseDeliveryRun, provePauseDeliveryAttempt, type PauseDeliveryObservation } from "../../heartbeat-pause-admission.js";
 import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 import type { QaCorrectionFollowupRef } from "./qa-correction-contract.js";
@@ -167,7 +167,7 @@ async function discoverExecutionScope(db: Db, run: Run,
   })() : null;
 
   let proof: ReturnType<typeof readWorkflowAttemptProof> | null = null;
-  if (wake && (wake.workflowRunId || wake.workflowStepRunId || wake.workflowExecutionGeneration !== null)) {
+  if (wake && Object.hasOwn(wake.payload ?? {}, WORKFLOW_ATTEMPT_PROOF_KEY)) {
     try { proof = readWorkflowAttemptProof(wake); }
     catch (error) { throw new QaRemediationAdmissionHold("execution_attempt_proof_unproven", [], error); }
   }
@@ -201,18 +201,21 @@ async function discoverExecutionScope(db: Db, run: Run,
   if (!proof) {
     if (wake?.status === "pending" && wake.runId !== expected.heartbeatRunId)
       throw new QaRemediationAdmissionHold("execution_wake_identity_unproven", []);
+    const legacyStep = relatedSteps.length === 1 ? relatedSteps[0]! : null;
+    const canonicalLegacy = wake && !wakeRef && legacyStep && wake.workflowRunId === legacyStep.workflowRunId && wake.workflowStepRunId === legacyStep.id
+      && legacyStep.issueId === expected.issueId && stepIds.every(id => id === legacyStep.id) && generations.every(generation => generation === legacyStep.executionGeneration);
     const runIds = sorted([...relatedSteps.map(step => step.workflowRunId),
       ...origins.flatMap(origin => origin.runId ? [origin.runId] : [])]);
     const scopedRuns = runIds.length ? await db.select().from(workflowRuns).where(and(
       eq(workflowRuns.companyId, expected.companyId), inArray(sql<string>`${workflowRuns.id}::text`, runIds))) : [];
     let c5Pending = false;
-    for (const scopedRun of scopedRuns) c5Pending = (wake?.status === "pending"
+    for (const scopedRun of scopedRuns) c5Pending = (wake?.status === "pending" || hasWorkflowHint
       ? await workflowRunHasC5AdmissionScope(db, scopedRun.id) : await hasPendingQaRemediationForRun(db, scopedRun)) || c5Pending;
     const [authority] = scopedRuns.length ? await db.select({ id: workflowRecoveryAuthorities.id })
       .from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.companyId, expected.companyId),
         or(inArray(workflowRecoveryAuthorities.workflowRunId, scopedRuns.map(row => row.id)),
           inArray(workflowRecoveryAuthorities.replacementRunId, scopedRuns.map(row => row.id))))).limit(1) : [];
-    if (hasWorkflowHint || scopedRuns.length !== runIds.length || c5Pending || authority
+    if ((hasWorkflowHint && !canonicalLegacy) || scopedRuns.length !== runIds.length || c5Pending || authority
       || relatedSteps.some(step => step.status === "held" || step.status === "blocked")) {
       throw new QaRemediationAdmissionHold("execution_attempt_scope_unproven", []);
     }
@@ -330,7 +333,7 @@ async function lockCurrentExecutionIdentity(db: Db, expected: QaCorrectionExecut
     throw new QaRemediationAdmissionHold("execution_wake_identity_changed", []);
   }
   if (scope.kind === "unlinked") {
-    if (wake && (wake.workflowRunId || wake.workflowStepRunId || wake.workflowExecutionGeneration !== null)) {
+    if (wake && Object.hasOwn(wake.payload ?? {}, WORKFLOW_ATTEMPT_PROOF_KEY)) {
       throw new QaRemediationAdmissionHold("execution_unlinked_wake_changed", []);
     }
   } else {
