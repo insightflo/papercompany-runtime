@@ -12,7 +12,7 @@ import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission,
   type QaCorrectionExecutionScope, type QaCorrectionOriginalWakeIdentity, type QaCorrectionReplacementAuthority,
   type QaRemediationAdmissionContext, type QaRemediationSharedAdmissionRuntime }
   from "./qa-remediation-admission-root.js";
-import { hasPendingQaRemediationForRun, discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
+import { hasPendingQaRemediationForRun, workflowRunHasC5AdmissionScope, discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
 import { readAdmittedWorkflowIdentity } from "../../heartbeat-finalization/producer-identity.js";
 import { readWorkflowAttemptProof } from "../../heartbeat-finalization/workflow-attempt-proof.js";
@@ -153,7 +153,7 @@ async function discoverExecutionScope(db: Db, run: Run,
     || (wake.runId !== null && wake.runId !== expected.heartbeatRunId))) {
     throw new QaRemediationAdmissionHold("execution_wake_identity_unproven", []);
   }
-  if (wake && (phase === "claim" ? wake.status !== "queued"
+  if (wake && (phase === "claim" ? wake.status !== "queued" && wake.status !== "pending"
     : wake.status !== "claimed" || !wake.claimedAt)) {
     throw new QaRemediationAdmissionHold("execution_wake_state_unproven", []);
   }
@@ -199,12 +199,15 @@ async function discoverExecutionScope(db: Db, run: Run,
     || contextStepRunId || contextRunId || contextGeneration !== null || wake?.workflowRunId || wake?.workflowStepRunId
     || wake?.workflowExecutionGeneration !== null && wake?.workflowExecutionGeneration !== undefined || wakeRef);
   if (!proof) {
+    if (wake?.status === "pending" && wake.runId !== expected.heartbeatRunId)
+      throw new QaRemediationAdmissionHold("execution_wake_identity_unproven", []);
     const runIds = sorted([...relatedSteps.map(step => step.workflowRunId),
       ...origins.flatMap(origin => origin.runId ? [origin.runId] : [])]);
     const scopedRuns = runIds.length ? await db.select().from(workflowRuns).where(and(
       eq(workflowRuns.companyId, expected.companyId), inArray(sql<string>`${workflowRuns.id}::text`, runIds))) : [];
     let c5Pending = false;
-    for (const scopedRun of scopedRuns) c5Pending = await hasPendingQaRemediationForRun(db, scopedRun) || c5Pending;
+    for (const scopedRun of scopedRuns) c5Pending = (wake?.status === "pending"
+      ? await workflowRunHasC5AdmissionScope(db, scopedRun.id) : await hasPendingQaRemediationForRun(db, scopedRun)) || c5Pending;
     const [authority] = scopedRuns.length ? await db.select({ id: workflowRecoveryAuthorities.id })
       .from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.companyId, expected.companyId),
         or(inArray(workflowRecoveryAuthorities.workflowRunId, scopedRuns.map(row => row.id)),
@@ -222,6 +225,7 @@ async function discoverExecutionScope(db: Db, run: Run,
       resolvedAttempt: null, replacementAuthorities: Object.freeze([]) as readonly [] });
   }
 
+  if (wake?.status === "pending") throw new QaRemediationAdmissionHold("execution_wake_state_unproven", []);
   if (origins.some(origin => !origin.runId)) throw new QaRemediationAdmissionHold("execution_issue_origin_unproven", []);
 
   if (!wake || wake.runId !== expected.heartbeatRunId || wake.companyId !== proof.companyId
@@ -338,7 +342,8 @@ async function lockCurrentExecutionIdentity(db: Db, expected: QaCorrectionExecut
       throw new QaRemediationAdmissionHold("execution_attempt_changed", []);
     }
   }
-  if (phase === "claim") return current.status === "queued" && (!wake || wake.status === "queued");
+  if (phase === "claim") return current.status === "queued" && (!wake || wake.status === "queued"
+    || (scope.kind === "unlinked" && wake.status === "pending" && wake.runId === current.id));
   if (current.status !== "running" || (wake && (wake.status !== "claimed" || !wake.claimedAt))) {
     throw new QaRemediationAdmissionHold("execution_not_currently_started", []);
   }
