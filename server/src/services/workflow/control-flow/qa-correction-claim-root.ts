@@ -226,7 +226,6 @@ async function discoverExecutionScope(db: Db, run: Run,
   }
 
   if (wake?.status === "pending") throw new QaRemediationAdmissionHold("execution_wake_state_unproven", []);
-  if (origins.some(origin => !origin.runId)) throw new QaRemediationAdmissionHold("execution_issue_origin_unproven", []);
 
   if (!wake || wake.runId !== expected.heartbeatRunId || wake.companyId !== proof.companyId
     || proof.companyId !== expected.companyId || proof.agentId !== expected.agentId
@@ -247,6 +246,9 @@ async function discoverExecutionScope(db: Db, run: Run,
     || matchingSteps[0]!.retryCount !== proof.retryCount || matchingSteps[0]!.iterationIndex !== proof.iterationIndex) {
     throw new QaRemediationAdmissionHold("execution_attempt_scope_unproven", []);
   }
+  if (origins.some(origin => !origin.runId)
+    && (relatedSteps.length !== 1 || await workflowRunHasC5AdmissionScope(db, proof.workflowRunId)))
+    throw new QaRemediationAdmissionHold("execution_issue_origin_unproven", []);
   let attempt: { retryCount: number; iterationIndex: number };
   try {
     attempt = await producerAttempt(db, { ...current, workflowStepRunId: proof.stepRunId,

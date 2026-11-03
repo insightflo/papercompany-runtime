@@ -5,6 +5,7 @@ import { agentWakeupRequests, heartbeatRuns, missions, workflowRecoveryAuthoriti
   workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { replacementApprovalPayloadSchema, type ReplacementApprovalPayload }
   from "@paperclipai/shared/validators/workflow-replacement";
+import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 import { readQaRemediationActualDrain } from "../../heartbeat-actual-drain.js";
 import { createReplacementRootNotifications, registerQaCorrectionRootDrain, withReplacementRootNotificationDb,
   type ReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
@@ -619,8 +620,10 @@ export async function workflowRunHasC5AdmissionScope(db: Db, runId: string): Pro
   const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, runId),
     inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared"])) ).limit(1);
-  const [actual] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId)).where(and(
-    eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, runId), isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken))).limit(1);
+  const actuals = await db.select({ wake: agentWakeupRequests }).from(heartbeatRuns).innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId))
+    .leftJoin(agentWakeupRequests, eq(agentWakeupRequests.id, heartbeatRuns.wakeupRequestId)).where(and(
+      eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, runId), isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken)));
+  const actual = actuals.some(({ wake }) => { try { return !wake || readQaCorrectionWakeRef(wake) !== null; } catch { return true; } });
   const [held] = await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, runId), inArray(workflowStepRuns.status, ["held", "blocked"])) ).limit(1);
   const inventory = await inventoryForRun(db, run);
   return Boolean(authority || history || actual || held || inventory.pending.length);
