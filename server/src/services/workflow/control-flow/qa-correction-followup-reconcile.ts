@@ -64,6 +64,13 @@ type QaRemediationRootHold = Exclude<QaRemediationReconcileResult,
 // Per-sync handoff only: the workflow loop consumes the typed root result on reentry; publication authority is re-read by reconcile.
 const qaRemediationRootResolutions = new WeakMap<ReplacementRootNotifications,
   Map<string, QaRemediationRootResolution>>();
+// One sync observation time survives rollback/reentry; it is not publication or completion authority.
+const qaCorrectionSyncTimes = new WeakMap<ReplacementRootNotifications, number>();
+export function currentQaCorrectionSyncTime(db: Db): Date | null {
+  const notifications = currentReplacementRootNotifications(db);
+  const time = notifications ? qaCorrectionSyncTimes.get(notifications) : undefined;
+  return time === undefined ? null : new Date(time);
+}
 const qaRemediationResolutionKey = (request: QaRemediationReconcileRequest, syncIdentity: string) => JSON.stringify([
   request.companyId, request.missionId, request.workflowRunId, request.producerStepRunId,
   [...request.qaStepRunIds].sort(), syncIdentity,
@@ -323,6 +330,8 @@ export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string
   const notifications = createReplacementRootNotifications(), handled = new Set<string>();
   const resolutions = new Map<string, QaRemediationRootResolution>();
   qaRemediationRootResolutions.set(notifications, resolutions);
+  const syncTime = Date.now();
+  qaCorrectionSyncTimes.set(notifications, syncTime);
   const driftBudget = { corrections: 0 };
   const ownerRuntime = createQaFileOwnerRuntime(loadConfig());
   const execution = await loadExecutionDefinition(db, runId, { requireHistorical: false });
@@ -332,8 +341,10 @@ export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string
         if (!await workflowRunHasC5AdmissionScope(db, runId)) return await sync(db);
         return await withQaRemediationSharedAdmission({ db, runId, ownerRuntime,
           outerNotifications: notifications, resolutionMap: resolutions,
-          bindResolutionMap: (attemptNotifications, map) => qaRemediationRootResolutions.set(attemptNotifications,
-            map as Map<string, QaRemediationRootResolution>),
+          bindResolutionMap: (attemptNotifications, map) => {
+            qaRemediationRootResolutions.set(attemptNotifications, map as Map<string, QaRemediationRootResolution>);
+            qaCorrectionSyncTimes.set(attemptNotifications, syncTime);
+          },
           driftBudget, work: sync });
       }
       catch (error) {

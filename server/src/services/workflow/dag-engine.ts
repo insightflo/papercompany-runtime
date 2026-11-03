@@ -31,7 +31,7 @@ import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, o
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { createQaRemediationRefire } from "./control-flow/qa-remediation.js";
-import { withQaCorrectionFollowupReconcile,
+import { withQaCorrectionFollowupReconcile, currentQaCorrectionSyncTime,
   queueCurrentIssuedQaCorrectionTargets } from "./control-flow/qa-correction-followup-reconcile.js";
 import { QaRemediationAdmissionHold, unresolvedQaRemediationAdmissionPending,
   type QaRemediationAdmissionContext } from "./control-flow/qa-remediation-admission-root.js";
@@ -940,7 +940,7 @@ async function syncStepRunsFromIssueState(
     stepRuns.filter(s => !correctionToolIds.has(s.id))) : new Set<string>();
   const issueRows = await db.select({
     id: issues.id, companyId: issues.companyId, status: issues.status, startedAt: issues.startedAt,
-    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, updatedAt: issues.updatedAt, title: issues.title, originKind: issues.originKind,
+    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, title: issues.title, originKind: issues.originKind,
   }).from(issues).where(inArray(issues.id, issueIds));
   const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
   const issueById = new Map(issueRows
@@ -1034,7 +1034,7 @@ async function syncStepRunsFromIssueState(
       patch.completedAt = null;
     } else if (desiredStatus === "completed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.completedAt ?? issue.updatedAt;
+      patch.completedAt = issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
       // When finalization v1 is active, issue-backed steps also need
       // dispatch_ready_at set so downstream edge-condition evaluation admits
       // successors. Heartbeat-linked steps get this via settlement.ts, but
@@ -1049,7 +1049,7 @@ async function syncStepRunsFromIssueState(
       }
     } else if (desiredStatus === "failed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? issue.updatedAt;
+      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
     } else {
       patch.startedAt = null;
       patch.completedAt = null;
