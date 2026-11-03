@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs
 import os from "node:os";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agentWakeupRequests, agents, assets, heartbeatRuns, issues, issueAttachments, qualityActions, qualityActionGroups, qualityEvidenceRefs, qualityPolicyVersions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { hashContract } from "../services/quality/contract.js";
 import { readVerifiedEvidenceUpload } from "../services/quality/evidence-store.js";
@@ -20,7 +20,7 @@ import { scheduleWorkflowStepRetry } from "../services/workflow/step-retry-sched
 import { submitWorkflowVerdict } from "../services/workflow/agent-api.js";
 import { createQaCorrectionTestDb } from "./helpers/qa-correction-fixture.js";
 import { seedQualityFixture } from "./helpers/quality-fixture.js";
-import { reviewItemForAction, seedCurrentOutputScenario } from "./helpers/quality-proofs.js";
+import { reviewItemForAction } from "./helpers/quality-proofs.js";
 import { deferred, within, PYTHON } from "./helpers/qa-remediation-parent-death-harness.js";
 
 const ioHooks = vi.hoisted(() => ({ putFile: null as null | { entered: () => void; release: Promise<void> }, uploadCalls: 0 }));
@@ -38,18 +38,29 @@ vi.mock("../storage/index.js", async (importOriginal) => {
     },
   }) };
 });
+import { seedInternalQualityWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => {
+  const actual = await original<typeof import("../adapters/index.js")>();
+  return { ...actual, getServerAdapter: (kind: string) => kind === "codex_local"
+    ? { supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter } : actual.getServerAdapter(kind) };
+});
+const fixtureClosers = new Set<() => Promise<void>>();
+afterEach(async () => { await Promise.all([...fixtureClosers].map(close => close())); fixtureClosers.clear(); });
 const before = "old flawed draft\n", sha = (v: string | Buffer) => createHash("sha256").update(v).digest("hex");
 type Owned = Awaited<ReturnType<typeof createQaCorrectionTestDb>>;
 type Quality = Awaited<ReturnType<typeof seedQualityFixture>>;
 type World = Awaited<ReturnType<typeof qualityRootWorld>>;
 let owned: Owned, quality: Quality, root = "", storageRoot = "";
 async function qualityRootWorld(withRetryBranch = false) {
-  const dir = await realpath(await mkdtemp(path.join(root, "root-world-"))), file = path.join(dir, "report.md");
+  const dir = await realpath(await mkdtemp(path.join(root, "root-world-")));
+  let file = path.join(dir, "report.md");
   const beforeBytes = Buffer.concat([Buffer.from([0xff]), Buffer.from(before)]);
   const beforeText = beforeBytes.toString("utf8"), afterText = beforeText.replace("flawed", "polished");
   await writeFile(file, beforeBytes);
-  const world = await seedCurrentOutputScenario(owned.db, { companyId: quality.companyId, authorAgentId: quality.authorAgentId, verifierAgentId: quality.verifierAgentId,
-    artifactUrl: file, remediations: { items: [{ op: "string_replace", file, find: "flawed", replace: "polished" }] } });
+  const world = await seedInternalQualityWorld(owned.db, dir, dir, { file,
+    bytes: beforeBytes, find: "flawed", replace: "polished",
+    existing: { companyId: quality.companyId, authorId: quality.authorAgentId, verifierId: quality.verifierAgentId } });
+  file = world.file; fixtureClosers.add(world.close);
   await owned.db.update(issues).set({ originKind: "workflow_execution", originId: world.workflowRunId, originRunId: world.workflowRunId }).where(eq(issues.id, world.qaIssueId));
   let retryBranchStepId: string | undefined, retryBranchIssueId: string | undefined, retryBranchStepRunId: string | undefined;
   if (withRetryBranch) {
@@ -159,7 +170,7 @@ describe.sequential("C5 E-root extra", () => {
       releaseUpload.resolve(undefined); holderReleased.resolve(undefined); ioHooks.putFile = null;
       if (holderPromise) await holderPromise;
       await Promise.allSettled([rootPromise]);
-      try { await drainReplacementRootNotifications(owned.db, notifications); await waitForHeartbeatExecutionsToDrain(owned.db); }
+      try { await drainReplacementRootNotifications(owned.db, notifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db); }
       finally { debugClient.options.debug = previousDebug; await lock.cleanup(); }
     }
     const result = await rootPromise;
@@ -219,7 +230,7 @@ describe.sequential("C5 E-root extra", () => {
       expect(fast.result.completion.wakes.map(row => row.wakeupRequestId)).toEqual([wake!.id]);
       expect(fastNotifications.agentIds.has(wake!.agentId)).toBe(true);
       expect(fastNotifications.correctionWakeupRequestIds.size).toBe(0);
-      await drainReplacementRootNotifications(owned.db, fastNotifications); await waitForHeartbeatExecutionsToDrain(owned.db);
+      await drainReplacementRootNotifications(owned.db, fastNotifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db);
       const heartbeatRows = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wake!.id));
       const [wakeAfterDrain] = await owned.db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
       expect(heartbeatRows).toHaveLength(1);
@@ -265,12 +276,12 @@ describe.sequential("C5 E-root extra", () => {
       expect(a.result.publication).toEqual([]);
       expect(await effects(w)).toEqual(effectsBeforeA); expect(ioHooks.uploadCalls).toBe(1);
       expect(await readFile(w.file)).toEqual(afterBytes); expect((await stat(w.file)).ino).toBe(afterStat.ino);
-      await drainReplacementRootNotifications(owned.db, bNotifications); await waitForHeartbeatExecutionsToDrain(owned.db);
+      await drainReplacementRootNotifications(owned.db, bNotifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db);
       const afterBothDrains = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wake!.id)); expect(afterBothDrains.map(row => row.id)).toEqual([heartbeat.id]);
     } finally {
       allowBTransaction.resolve(undefined); allowPublish.resolve(undefined); allowClose.resolve(undefined);
       await Promise.allSettled(aPromise ? [bPromise, aPromise] : [bPromise]);
-      try { await drainReplacementRootNotifications(owned.db, fastNotifications); await drainReplacementRootNotifications(owned.db, bNotifications); await waitForHeartbeatExecutionsToDrain(owned.db); }
+      try { await drainReplacementRootNotifications(owned.db, fastNotifications); await drainReplacementRootNotifications(owned.db, bNotifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db); }
       finally { await native.cleanup(); }
     }
   }, 180_000);

@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issueWorkProducts, issues, missions,
@@ -22,7 +22,10 @@ import {
   workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
-import { admittedProducer } from "./helpers/admitted-producer.js";
+import { seedInternalAdmissionWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(),
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter }) }));
+const fixtureClosers = new Set<() => Promise<void>>();
 import { createQaCorrectionTestDb } from "./helpers/qa-correction-fixture.js";
 import { prepareQaRemediationReservation } from "../services/workflow/control-flow/qa-remediation-prepare.js";
 import { parseQaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
@@ -88,9 +91,6 @@ function errorGraph(value: unknown, seen = new Set<object>()): unknown[] {
 }
 
 async function seedWorld(db: Db = owned.db, files: 1 | 2 = 1) {
-  const companyId = randomUUID(), author = randomUUID(), verifier = randomUUID();
-  await db.insert(companies).values({ id: companyId, name: "Reconcile owner", issuePrefix: `PB${companyId.slice(0, 8)}` });
-  await db.insert(agents).values([{ id: author, companyId, name: "Producer" }, { id: verifier, companyId, name: "Verifier" }]);
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-remediation-reconcile-")));
   tempDirs.push(dir);
   const lockRoot = path.join(dir, ".locks");
@@ -106,34 +106,15 @@ async function seedWorld(db: Db = owned.db, files: 1 | 2 = 1) {
   await writeFile(file, BEFORE, "utf8");
   const file2 = files === 2 ? path.join(dir, "notes.md") : null;
   if (file2) await writeFile(file2, BEFORE2, "utf8");
-  const missionId = randomUUID(), workflowId = randomUUID(), runId = randomUUID();
-  await db.insert(missions).values({ id: missionId, companyId, title: "Reconcile fixture", ownerAgentId: author, status: "active" });
-  await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "Reconcile fixture", stepsJson: [
-    { id: "produce", name: "Produce", agentId: author, dependencies: [],
-      conditionalDependencies: [{ stepId: "qa-check", when: "qa_request_changes", isBackEdge: true, maxIterations: 3 }] },
-    { id: "qa-check", name: "QA", agentId: verifier, dependencies: ["produce"] },
-  ] });
-  await db.insert(workflowRuns).values({ id: runId, companyId, missionId, workflowId, status: "running", triggeredBy: "test", dispatchAuthorityVersion: 1 });
-  const [producerIssue] = await db.insert(issues).values({ companyId, missionId, title: "Produce", status: "done", originKind: "workflow_execution" }).returning();
-  const [qaIssue] = await db.insert(issues).values({ companyId, missionId, title: "[QA] Check", status: "todo", originKind: "workflow_execution" }).returning();
-  const [producer] = await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "produce",
-    issueId: producerIssue!.id, status: "completed", completedAt: new Date(Date.now() - 2000) }).returning();
-  const [qa] = await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "qa-check", issueId: qaIssue!.id, status: "failed" }).returning();
-  await admittedProducer(db, { companyId, agentId: author, issueId: producerIssue!.id, stepRunId: producer!.id, heartbeatId: randomUUID() });
-  const wakeId = randomUUID(), heartbeatId = randomUUID();
-  await db.insert(agentWakeupRequests).values({ id: wakeId, companyId, agentId: verifier, source: "workflow.dispatch", workflowStepRunId: qa!.id });
-  await db.insert(heartbeatRuns).values({ id: heartbeatId, companyId, agentId: verifier, issueId: qaIssue!.id,
-    wakeupRequestId: wakeId, status: "succeeded", createdAt: new Date(Date.now() - 1000) });
-  await recordWorkflowValidationVerdict({ db, issue: qaIssue!, source: "workflow_api", verdict: "request_changes",
-    heartbeatRunId: heartbeatId, remediations: { items: [{ op: "string_replace" as const, file, find: "flawed", replace: "polished" },
-      ...(file2 ? [{ op: "string_replace" as const, file: file2, find: "rough", replace: "neat" }] : [])] } });
-  const [verdict] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.heartbeatRunId, heartbeatId));
-  await db.insert(issueWorkProducts).values({ companyId, issueId: producerIssue!.id, type: "file",
-    provider: "local_file", title: "report", status: "active", metadata: { path: file } });
-  if (file2) await db.insert(issueWorkProducts).values({ companyId, issueId: producerIssue!.id, type: "file",
-    provider: "local_file", title: "notes", status: "active", metadata: { path: file2 } });
-  return { companyId, missionId, runId, verifier, file, file2, fileOwnerRuntime, ownerLockWaits, producer: producer!, qa: qa!, qaIssue: qaIssue!,
-    verdictId: verdict!.id, verdictHeartbeatId: heartbeatId } as World;
+  const seeded = await seedInternalAdmissionWorld(db, dir, lockRoot,
+    { file, bytes: Buffer.from(BEFORE), find: "flawed", replace: "polished",
+      ...(file2 ? { second: { bytes: Buffer.from(BEFORE2), find: "rough", replace: "neat" } } : {}) });
+  fixtureClosers.add(seeded.close);
+  const u = seeded.unit;
+  return { companyId: u.companyId, missionId: u.missionId, runId: u.runId, verifier: u.verifierId,
+    file: u.file, file2: file2 ? path.join(path.dirname(u.file), "notes.md") : null,
+    fileOwnerRuntime, ownerLockWaits, producer: u.producer, qa: u.qa, qaIssue: u.qaIssue,
+    verdictId: u.verdictEventId, verdictHeartbeatId: u.verdictHeartbeatId } as World;
 }
 
 /**
@@ -163,7 +144,7 @@ async function seedLegacyRefireWake(w: World, mode: "queued" | "finished" | "pay
 
 describe("reconcileQaRemediationReservation", () => {
   beforeAll(async () => { owned = await createQaCorrectionTestDb(); }, 120000);
-  afterAll(async () => { for (const dir of tempDirs) await rm(dir, { recursive: true, force: true }); await owned?.close(); }, 120000);
+  afterAll(async () => { await Promise.all([...fixtureClosers].map(close => close())); for (const dir of tempDirs) await rm(dir, { recursive: true, force: true }); await owned?.close(); }, 120000);
 
   it("completes durably once; reentry recognizes the committed completion; no precommit wake execution", async () => {
     const w = await seedWorld();

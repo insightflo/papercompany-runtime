@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { agentWakeupRequests, agents, assets, heartbeatRuns, issues, issueAttachments, qualityActions, qualityEvidenceRefs, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { hashContract } from "../services/quality/contract.js";
@@ -24,9 +24,17 @@ import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-executi
 import { submitWorkflowVerdict } from "../services/workflow/agent-api.js";
 import { createQaCorrectionTestDb } from "./helpers/qa-correction-fixture.js";
 import { seedQualityFixture } from "./helpers/quality-fixture.js";
-import { reviewItemForAction, seedCurrentOutputScenario } from "./helpers/quality-proofs.js";
+import { reviewItemForAction } from "./helpers/quality-proofs.js";
 import { PYTHON } from "./helpers/qa-remediation-parent-death-harness.js";
 
+import { seedInternalQualityWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => {
+  const actual = await original<typeof import("../adapters/index.js")>();
+  return { ...actual, getServerAdapter: (kind: string) => kind === "codex_local"
+    ? { supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter } : actual.getServerAdapter(kind) };
+});
+const fixtureClosers = new Set<() => Promise<void>>();
+afterEach(async () => { await Promise.all([...fixtureClosers].map(close => close())); fixtureClosers.clear(); });
 const before = "old flawed draft\n", after = "old polished draft\n", uploadBytes = Buffer.from("{\"proof\":\"frozen\"}");
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 let owned: Awaited<ReturnType<typeof createQaCorrectionTestDb>>;
@@ -35,11 +43,12 @@ let root = "", storageRoot = "";
 
 async function prepared(withQuality: boolean) {
   const dir = await realpath(await mkdtemp(path.join(root, "world-")));
-  const file = path.join(dir, "report.md");
+  let file = path.join(dir, "report.md");
   await writeFile(file, before);
-  const world = await seedCurrentOutputScenario(owned.db, { companyId: quality.companyId,
-    authorAgentId: quality.authorAgentId, verifierAgentId: quality.verifierAgentId, artifactUrl: file,
-    remediations: { items: [{ op: "string_replace", file, find: "flawed", replace: "polished" }] } });
+  const world = await seedInternalQualityWorld(owned.db, dir, dir, { file,
+    bytes: Buffer.from(before), find: "flawed", replace: "polished",
+    existing: { companyId: quality.companyId, authorId: quality.authorAgentId, verifierId: quality.verifierAgentId } });
+  file = world.file; fixtureClosers.add(world.close);
   let binding: import("../services/workflow/control-flow/qa-remediation-quality-binding.js").QaRemediationQualityBinding | undefined;
   let scope: { actionId: string; bindingHash: string } | undefined;
   if (withQuality) {
@@ -61,7 +70,7 @@ async function prepared(withQuality: boolean) {
     binding = { kind: "quality_current_output", actionId, groupId: quality.groupId, policyVersionId: quality.policyVersionId,
       intentKey, targetHash: hashContract(target), effectHash: hashContract(effect), retryEnvelopeHash: hashContract(retryEnvelope),
       source: world.source, sourceAttemptHash: hashContract(world.source), canonicalBinding, reviewItemId,
-      verifierRunId: world.verdictHeartbeatId, verifierEpoch: 1,
+      verifierRunId: world.verdictHeartbeatId, verifierEpoch: world.verifierEpoch,
       fileHashes: [{ file, before: sha(before), after: sha(after) }], uploadedEvidence: uploaded, expiresAt };
     scope = { actionId, bindingHash: qaRemediationQualityBindingHash(binding) };
   }
@@ -77,13 +86,15 @@ async function prepared(withQuality: boolean) {
 }
 
 async function qualityRootWorld() {
-  const dir = await realpath(await mkdtemp(path.join(root, "root-world-"))), file = path.join(dir, "report.md");
+  const dir = await realpath(await mkdtemp(path.join(root, "root-world-")));
+  let file = path.join(dir, "report.md");
   const beforeBytes = Buffer.concat([Buffer.from([0xff]), Buffer.from(before)]), beforeText = beforeBytes.toString("utf8");
   const afterText = beforeText.replace("flawed", "polished");
   await writeFile(file, beforeBytes);
-  const world = await seedCurrentOutputScenario(owned.db, { companyId: quality.companyId,
-    authorAgentId: quality.authorAgentId, verifierAgentId: quality.verifierAgentId, artifactUrl: file,
-    remediations: { items: [{ op: "string_replace", file, find: "flawed", replace: "polished" }] } });
+  const world = await seedInternalQualityWorld(owned.db, dir, dir, { file,
+    bytes: beforeBytes, find: "flawed", replace: "polished",
+    existing: { companyId: quality.companyId, authorId: quality.authorAgentId, verifierId: quality.verifierAgentId } });
+  file = world.file; fixtureClosers.add(world.close);
   await owned.db.update(issues).set({ originKind: "workflow_execution", originId: world.workflowRunId, originRunId: world.workflowRunId }).where(eq(issues.id, world.qaIssueId));
   const actionId = randomUUID(), intentKey = `root-${actionId.slice(0, 8)}`;
   const target = { kind: "current_output" as const, source: world.source }, effect = { kind: "repair_supported_output" as const, target };
@@ -116,7 +127,7 @@ async function publicRoot(request: Parameters<typeof reconcileQaRemediationReser
 async function continueFromCompletionWake(w: Awaited<ReturnType<typeof qualityRootWorld>>, completion: { wakes: readonly { wakeupRequestId: string; agentId: string; issueId: string; stepRunId: string }[] }, notifications: ReturnType<typeof createReplacementRootNotifications>) {
   const wake = completion.wakes[0]!, [wakeRow] = await owned.db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.wakeupRequestId));
   expect(wakeRow).toMatchObject({ id: wake.wakeupRequestId, requestKind: "workflow_resume", agentId: wake.agentId, issueId: wake.issueId, workflowRunId: w.world.workflowRunId, workflowStepRunId: wake.stepRunId });
-  await drainReplacementRootNotifications(owned.db, notifications); await waitForHeartbeatExecutionsToDrain(owned.db);
+  await drainReplacementRootNotifications(owned.db, notifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db);
   const [run] = await owned.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wake.wakeupRequestId)); if (!run?.workflowStepRunId) throw new Error("queued workflow-resume heartbeat lacks its exact issue/step-run binding");
   expect(run).toMatchObject({ wakeupRequestId: wake.wakeupRequestId, agentId: wake.agentId, issueId: wake.issueId, workflowStepRunId: wake.stepRunId });
   const output = JSON.parse((run.resultJson as { stdout: string }).stdout) as { verdict: "pass" | "request_changes"; observed: string }; expect(run.status).toBe("succeeded"); expect(output).toMatchObject({ verdict: "pass", observed: w.afterText });
