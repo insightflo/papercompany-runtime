@@ -310,3 +310,18 @@ it.sequential("claims only the latest of 33 real corrections without applying th
     sql`(event_type='queue_run_started' OR reason='executor_owner_lease_claimed')`));
   expect(grants).toEqual([]); g.release();
 }, 120000);
+
+it("keeps a proofless held A queued while claiming same-agent B in one resume", async () => {
+  const w = await fixtures.world(), b = await queued(w), g = gate(w);
+  const [a] = await owned.db.insert(heartbeatRuns).values({ companyId: w.i.companyId, agentId: w.i.agentId,
+    status: "queued", invocationSource: "on_demand", contextSnapshot: { workflowRunId: w.i.workflowRunId },
+    createdAt: new Date(b.createdAt.getTime() - 1000) }).returning();
+  await heartbeatService(owned.db).resumeQueuedRuns(w.i.agentId);
+  expect(await g.entered()).toBe(b.id);
+  expect(await readRun(w, a!.id)).toMatchObject({ status: "queued", startedAt: null,
+    executorOwnerId: null, executionToken: null });
+  expect(calls(a!.id)).toHaveLength(0);
+  expect(calls(b.id)).toHaveLength(1);
+  expect(adapter).toHaveBeenCalledTimes(1);
+  g.release();
+}, 60000);

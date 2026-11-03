@@ -2,7 +2,7 @@ import { and, eq, inArray, is, or } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
-import { captureQaCorrectionExecutionIdentity, QaCorrectionClaimRejected, withQaCorrectionClaimRoot,
+import { captureQaCorrectionExecutionIdentity, isClaimDiscoveryHold, QaCorrectionClaimRejected, withQaCorrectionClaimRoot,
   withQaCorrectionExecutionRoot, type ExecutionBoundary, type QaCorrectionExecutionBox }
   from "./workflow/control-flow/qa-correction-claim-root.js";
 import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type QaRemediationSharedAdmissionRuntime }
@@ -252,7 +252,8 @@ export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: R
     if (isQaCorrectionRootOwnerRequired(error)
       || (is(deps.db, PgTransaction) && error instanceof QaCorrectionClaimRejected)) throw error;
     if (deps.sharedAdmission && error instanceof QaRemediationAdmissionHold) {
-      return { kind: isC5PreInvocationRollback(error, deps.db, captureQaCorrectionExecutionIdentity(run), "claim") ? "c5_held" : "c5_unknown" };
+      return { kind: (isClaimDiscoveryHold(error, deps.db, captureQaCorrectionExecutionIdentity(run))
+        || isC5PreInvocationRollback(error, deps.db, captureQaCorrectionExecutionIdentity(run), "claim")) ? "c5_held" : "c5_unknown" };
     }
     await deps.cancelRun(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
     return { kind: error instanceof QaCorrectionClaimRejected ? "correction_rejected" : "not_claimed" };

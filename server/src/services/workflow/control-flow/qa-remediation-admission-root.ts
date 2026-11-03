@@ -610,6 +610,10 @@ async function inventoryForRun(db: Db, run: Run): Promise<Inventory> {
   };
 }
 
+export async function hasPendingQaRemediationForRun(db: Db, run: Run): Promise<boolean> {
+  return (await inventoryForRun(db, run)).pending.length > 0;
+}
+
 async function inventory(db: Db, runs: readonly Run[]): Promise<Inventory> {
   const results: Inventory[] = [];
   for (const run of runs) results.push(await inventoryForRun(db, run));

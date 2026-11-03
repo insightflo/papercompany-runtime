@@ -1,5 +1,5 @@
 import { isDeepStrictEqual as same } from "node:util";
-import { and, asc, eq, inArray, is, or } from "drizzle-orm";
+import { and, asc, eq, inArray, is, or, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, issueWorkProducts, missions,
   workflowRecoveryAuthorities, workflowRuns, workflowStepRuns, workflowStepOutputBindings, type Db } from "@paperclipai/db";
@@ -12,7 +12,7 @@ import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission,
   type QaCorrectionExecutionScope, type QaCorrectionOriginalWakeIdentity, type QaCorrectionReplacementAuthority,
   type QaRemediationAdmissionContext, type QaRemediationSharedAdmissionRuntime }
   from "./qa-remediation-admission-root.js";
-import { discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
+import { hasPendingQaRemediationForRun, discoverQaRemediationWorkflowScope } from "./qa-remediation-admission-root.js";
 import { producerAttempt } from "../../work-products/producer-attempt.js";
 import { readAdmittedWorkflowIdentity } from "../../heartbeat-finalization/producer-identity.js";
 import { readWorkflowAttemptProof } from "../../heartbeat-finalization/workflow-attempt-proof.js";
@@ -36,6 +36,12 @@ const identity = (r: Run) => [r.id, r.companyId, r.agentId, r.issueId, r.wakeupR
   r.retryOfRunId, r.workflowStepRunId, r.workflowExecutionGeneration];
 const owner = (r: typeof issues.$inferSelect) => [r.id, r.executionRunId, r.checkoutRunId,
   r.executionAgentNameKey, r.executionLockedAt];
+
+const discoveryHolds = new WeakMap<object, { db: Db; identity: QaCorrectionExecutionIdentity }>();
+export function isClaimDiscoveryHold(error: unknown, db: Db, identity: QaCorrectionExecutionIdentity): boolean {
+  const proof = error instanceof QaRemediationAdmissionHold ? discoveryHolds.get(error) : undefined;
+  return proof?.db === db && same(proof.identity, identity);
+}
 
 export class QaCorrectionClaimRejected extends Error {
   constructor(cause: unknown) {
@@ -185,13 +191,24 @@ async function discoverExecutionScope(db: Db, run: Run,
   const origins = issueIds.length ? await db.select({ issueId: issues.id, runId: issues.originRunId })
     .from(issues).where(and(eq(issues.companyId, expected.companyId), inArray(issues.id, issueIds),
       eq(issues.originKind, "workflow_execution"))) : [];
-  if (origins.some(origin => !origin.runId)) throw new QaRemediationAdmissionHold("execution_issue_origin_unproven", []);
+
 
   const hasWorkflowHint = Boolean(expected.workflowStepRunId || expected.workflowExecutionGeneration !== null
     || contextStepRunId || contextRunId || contextGeneration !== null || wake?.workflowRunId || wake?.workflowStepRunId
     || wake?.workflowExecutionGeneration !== null && wake?.workflowExecutionGeneration !== undefined || wakeRef);
   if (!proof) {
-    if (hasWorkflowHint || relatedSteps.length || origins.length) {
+    const runIds = sorted([...relatedSteps.map(step => step.workflowRunId),
+      ...origins.flatMap(origin => origin.runId ? [origin.runId] : [])]);
+    const scopedRuns = runIds.length ? await db.select().from(workflowRuns).where(and(
+      eq(workflowRuns.companyId, expected.companyId), inArray(sql<string>`${workflowRuns.id}::text`, runIds))) : [];
+    let c5Pending = false;
+    for (const scopedRun of scopedRuns) c5Pending = await hasPendingQaRemediationForRun(db, scopedRun) || c5Pending;
+    const [authority] = scopedRuns.length ? await db.select({ id: workflowRecoveryAuthorities.id })
+      .from(workflowRecoveryAuthorities).where(and(eq(workflowRecoveryAuthorities.companyId, expected.companyId),
+        or(inArray(workflowRecoveryAuthorities.workflowRunId, scopedRuns.map(row => row.id)),
+          inArray(workflowRecoveryAuthorities.replacementRunId, scopedRuns.map(row => row.id))))).limit(1) : [];
+    if (hasWorkflowHint || scopedRuns.length !== runIds.length || c5Pending || authority
+      || relatedSteps.some(step => step.status === "held" || step.status === "blocked")) {
       throw new QaRemediationAdmissionHold("execution_attempt_scope_unproven", []);
     }
     const missionIds = sorted([contextMissionId, wake?.missionId].filter((id): id is string => !!id));
@@ -202,6 +219,8 @@ async function discoverExecutionScope(db: Db, run: Run,
       originalWake: wake ? captureOriginalWakeIdentity(wake) : null,
       resolvedAttempt: null, replacementAuthorities: Object.freeze([]) as readonly [] });
   }
+
+  if (origins.some(origin => !origin.runId)) throw new QaRemediationAdmissionHold("execution_issue_origin_unproven", []);
 
   if (!wake || wake.runId !== expected.heartbeatRunId || wake.companyId !== proof.companyId
     || proof.companyId !== expected.companyId || proof.agentId !== expected.agentId
@@ -551,7 +570,13 @@ export async function withQaCorrectionExecutionRoot<T>(db: Db, run: Run,
     throw error instanceof QaCorrectionClaimRejected ? error : new QaCorrectionClaimRejected(error);
   }
   const identity = captureQaCorrectionExecutionIdentity(run);
-  const initialScope = await discoverExecutionScope(db, run, input.phase);
+  let initialScope: QaCorrectionExecutionScope;
+  try { initialScope = await discoverExecutionScope(db, run, input.phase); }
+  catch (error) {
+    if (input.phase === "claim" && run.status === "queued" && !is(db, PgTransaction)
+      && error instanceof QaRemediationAdmissionHold) discoveryHolds.set(error, { db, identity });
+    throw error;
+  }
   if (l.ref && initialScope.kind === "unlinked") {
     throw new QaRemediationAdmissionHold("execution_correction_lineage_scope_unproven", []);
   }
