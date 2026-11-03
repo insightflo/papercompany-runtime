@@ -18,7 +18,7 @@ import { QA_REMEDIATION_COMPLETION_EVENT_TYPE } from "./qa-remediation-completio
 import { readQaCorrectionVerdict } from "./qa-correction-authority.js";
 import { computeDefectSignature } from "./knowledge-draft-capture.js";
 import { type QaCorrectionVerdictAuthority } from "./qa-correction-contract.js";
-import { readIssuedQaCorrection, type IssuedQaCorrection } from "./qa-correction-reader.js";
+import { createQaCorrectionInventoryReader, type IssuedQaCorrection } from "./qa-correction-reader.js";
 import { hashStructuredValue } from "../../issue-execution-cards/hash.js";
 import type { QaFileOwnerRuntime } from "./qa-remediation-runtime.js";
 import type { QaRemediationFileOwner, FileOwnerExit } from "./qa-remediation-file-owner.js";
@@ -521,10 +521,11 @@ async function inventoryForRun(db: Db, run: Run): Promise<Inventory> {
     return payload?.schemaVersion === "workflow.qa-correction.applied.v1";
   }).sort((a, b) => a.id.localeCompare(b.id));
   const issuedC02: C02IssuedProof[] = [];
+  const readIssued = createQaCorrectionInventoryReader(db, { companyId: run.companyId, workflowRunId: run.id });
   for (const row of c02Applications) {
     let issued: IssuedQaCorrection;
     try {
-      issued = await readIssuedQaCorrection(db, { companyId: run.companyId, workflowRunId: run.id, appliedEventId: row.id });
+      issued = await readIssued(row.id);
     } catch {
       throw hold("invalid_correction_application", [row.id]);
     }
