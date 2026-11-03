@@ -10,11 +10,12 @@
 //   이후의 completion hook(child_run_cancelled 부모 스텝 실패 → native 동기화)는 기존 경로다.
 //   불법 링크(스텝 행+무영수증 등)는 수리하지 않고 거부한다(0행).
 // [authority] 내구 레코드만이 권위(규칙 7/8). 경합은 busy, 알 수 없는 오류는 전파한다.
+import { isDeepStrictEqual } from "node:util";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { QaRemediationAdmissionHold } from "./control-flow/qa-remediation-admission-root.js";
-import { withChildCancellationAdmission, withLockedChildStartIdentity } from "./workflow-child-start-state.js";
+import { findChildStartIdentityForRun, withChildCancellationAdmission, withLockedChildStartIdentity } from "./workflow-child-start-state.js";
 import { isChildStartContention } from "./workflow-child-start-contention.js";
 import type { ChildStartIdentity } from "./workflow-child-start-state.js";
 
@@ -41,6 +42,8 @@ export async function claimDirectlyCancelledLinkedChildRun(
       sql`${workflowRuns.status} in ('pending', 'running')`,
     )).limit(1);
     if (!requested) return { outcome: "cancelled", rows: [] };
+    const observed = await findChildStartIdentityForRun(db, identity.childRunId);
+    if (!observed || !isDeepStrictEqual(observed.identity, identity)) return { outcome: "cancelled", rows: [] };
     const rows = await withChildCancellationAdmission({ db, identity, work: async (rootDb) => rootDb.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       const ctx = await withLockedChildStartIdentity(txDb, identity);

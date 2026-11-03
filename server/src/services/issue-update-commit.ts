@@ -1,6 +1,6 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests, heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, workflowRuns, workflowStepRuns, workflowRecoveryAuthorities, workflowTransitionEvents } from "@paperclipai/db";
 import { conflict } from "../errors.js";
 import { getProjectDefaultGoalId, syncIssueLabels, type IssueWriteDb } from "./issue-create-records.js";
 import { resolveNextIssueGoalId } from "./issue-goal-fallback.js";
@@ -11,9 +11,12 @@ import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.j
 import { closeLockedOwnerHumanSettlements, lockSourceOwnerHumanSettlement } from "./missions/mission-work-settlement.js";
 import { completeWorkflowIssueStepRunsAfterDone } from "./workflow/work-product-completion-gate.js";
 import type { WorkflowSyncSource } from "./workflow/workflow-sync-source.js";
+import { readWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
 import { freezeHeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
 import { createTerminalReleaseManifest, readTerminalReleaseManifestForSource, terminalReleaseMatchesRun,
   writeTerminalReleaseManifest, type TerminalReleaseManifest } from "./heartbeat-terminal-release-continuation.js";
+
+import { hasPendingQaRemediationForRun } from "./workflow/control-flow/qa-remediation-admission-root.js";
 
 type IssueRow = typeof issues.$inferSelect;
 type IssueUpdateCommitInput<T extends IssueRow> = {
@@ -48,6 +51,45 @@ Promise<TerminalOwnerRelease | null> {
   const workflowLinked = run.workflowStepRunId !== null || run.workflowExecutionGeneration !== null
     || run.executionScopeKind === "workflow_step" || issue.originKind === "workflow_execution";
   if (!workflowLinked) return null;
+  const related = await tx.select({ run: workflowRuns, step: workflowStepRuns }).from(workflowRuns)
+    .leftJoin(workflowStepRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(and(eq(workflowRuns.companyId, issue.companyId), or(eq(workflowStepRuns.issueId, issue.id),
+      ...(run.workflowStepRunId ? [eq(workflowStepRuns.id, run.workflowStepRunId)] : []),
+      ...(issue.originRunId ? [eq(sql<string>`${workflowRuns.id}::text`, issue.originRunId)] : []))));
+  const scopedRuns = [...new Map(related.map(row => [row.run.id, row.run])).values()];
+  if ((run.workflowStepRunId || issue.originRunId) && scopedRuns.length === 0)
+    return ownerReleaseHeld("legacy_workflow_scope_unproven");
+  if (run.workflowStepRunId && !related.some(row => row.step?.id === run.workflowStepRunId
+    && row.step.issueId === issue.id && row.step.executionGeneration === run.workflowExecutionGeneration))
+    return ownerReleaseHeld("legacy_workflow_attempt_unproven");
+  let strict = false;
+  for (const workflow of scopedRuns) strict = await hasPendingQaRemediationForRun(tx as unknown as Db, workflow) || strict;
+  const ids = scopedRuns.map(row => row.id);
+  const [authority] = ids.length ? await tx.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities)
+    .where(and(eq(workflowRecoveryAuthorities.companyId, issue.companyId), or(
+      inArray(workflowRecoveryAuthorities.workflowRunId, ids), inArray(workflowRecoveryAuthorities.replacementRunId, ids)))).limit(1) : [];
+  const [history] = ids.length ? await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+    .where(and(eq(workflowTransitionEvents.companyId, issue.companyId), inArray(workflowTransitionEvents.workflowRunId, ids),
+      inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_applied", "qa_remediation_completed"]))).limit(1) : [];
+  let modernActual = false;
+  if (run.workflowStepRunId && run.workflowExecutionGeneration !== null && run.wakeupRequestId
+    && run.executorOwnerId && run.executorOwnerLeaseEpoch !== null && run.executorOwnerLeaseToken && run.executionToken) {
+    const [originalWake] = await tx.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, issue.companyId)));
+    if (!originalWake) return ownerReleaseHeld("original_wake_missing");
+    let proof: ReturnType<typeof readWorkflowAttemptProof>;
+    try { proof = readWorkflowAttemptProof(originalWake); }
+    catch { return ownerReleaseHeld("original_attempt_scope_unproven"); }
+    if (originalWake.runId !== run.id || proof.issueId !== issue.id || proof.agentId !== run.agentId
+      || proof.stepRunId !== run.workflowStepRunId || proof.executionGeneration !== run.workflowExecutionGeneration)
+      return ownerReleaseHeld("original_attempt_scope_mismatch");
+    modernActual = true;
+  }
+  if (!strict && !authority && !history && !modernActual) {
+    if (run.agentId !== issue.assigneeAgentId || run.issueId !== null && run.issueId !== issue.id)
+      return ownerReleaseHeld("legacy_owner_scope_mismatch");
+    return null;
+  }
   if (!issue.missionId || !run.issueId || run.issueId !== issue.id || run.agentId !== issue.assigneeAgentId
     || !run.workflowStepRunId || run.workflowExecutionGeneration === null || !run.wakeupRequestId
     || issue.executionRunId !== null && issue.executionRunId !== run.id
@@ -143,7 +185,9 @@ export async function commitIssueUpdate<T extends IssueRow>({
       && (issueData.status === "done" || issueData.status === "cancelled")
       ? await lockSourceOwnerHumanSettlement(tx, { companyId: existing.companyId,
         missionId: existing.missionId, sourceIssueId: existing.id }) : null;
-    if (terminalOwnerRelease) await lockAndVerifyIssueOwnerSnapshot(tx, existing);
+    if (terminalOwnerRelease || (issueData.status === "done" && existing.status !== "done"
+      && (existing.executionRunId !== null || existing.checkoutRunId !== null)))
+      await lockAndVerifyIssueOwnerSnapshot(tx, existing);
     const updated = await tx
       .update(issues)
       .set(patch)
