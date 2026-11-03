@@ -213,7 +213,7 @@ import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-exe
 import { attemptFullSettlement } from "./heartbeat-finalization/settlement.js";
 import { createPauseExecutionObservation, finishPauseExecution } from "./heartbeat-pause-quiescence.js";
 import { observeQuiescenceResources } from "./heartbeat-finalization/quiescence-probe.js";
-import { createHeartbeatActualObservation, freezeHeartbeatActualDrainIdentity,
+import { createHeartbeatActualObservation, freezeHeartbeatActualDrainIdentity, isProvenNonC5WorkflowExecution,
   writeHeartbeatActualDrain, type HeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
 import { readWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
 import {
@@ -3555,6 +3555,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (!current || !sameHeartbeatExecutionAttempt(supplied, current)
       || supplied.invocationSource !== current.invocationSource
       || supplied.wakeupRequestId !== current.wakeupRequestId) return false;
+    if (frame && !frame.conflicted && !frame.ownerReleaseBlocked && !frame.actualDrainIdentity
+      && frame.finalizationVersion === 1 && sameHeartbeatExecutionAttempt(frame.run, current)
+      && (!frame.adapterInvocationAttempted || frame.actualCaptured)
+      && await isProvenNonC5WorkflowExecution(db, current)) return true;
     const scope = supplied.executionScopeKind;
     if (!NONWORKFLOW_EXECUTION_SCOPES.has(scope ?? "")
       || supplied.finalizationVersion !== 1 || current.finalizationVersion !== 1

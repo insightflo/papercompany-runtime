@@ -5,6 +5,8 @@ import { z } from "zod";
 import { agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, missions, workflowRuns,
   workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { workProductProducerSchema } from "@paperclipai/shared";
+import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
+import { readAdmittedWorkflowIdentity } from "./heartbeat-finalization/producer-identity.js";
 import { producerAttemptDetail } from "./work-products/producer-attempt.js";
 import { resolveWorkProductLocalFilePath } from "./work-products/producer-seal.js";
 import type { QaRemediationPreparation } from "./workflow/control-flow/qa-remediation-preparation-contract.js";
@@ -122,6 +124,20 @@ export async function freezeHeartbeatActualDrainIdentity(db: Pick<Db, "select">,
   const [current] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
   if (!current || !sameRun(current, run)) return null;
   return identityFromCurrent(db, current, workflowRunId);
+}
+
+export async function isProvenNonC5WorkflowExecution(db: Db, run: Heartbeat): Promise<boolean> {
+  const admitted = await readAdmittedWorkflowIdentity(db, run);
+  if (!admitted || !run.issueId || !run.wakeupRequestId) return false;
+  const context = run.contextSnapshot as Record<string, unknown> | null;
+  if ([[context?.workflowRunId, admitted.workflowRunId], [context?.workflowStepRunId, admitted.workflowStepRunId],
+    [context?.workflowExecutionGeneration, admitted.workflowExecutionGeneration]].some(([value, expected]) => value != null && value !== expected)) return false;
+  const [issue] = await db.select().from(issues).where(and(eq(issues.id, run.issueId), eq(issues.companyId, run.companyId)));
+  if (issue?.originKind !== "workflow_execution" || (issue.originRunId !== null && issue.originRunId !== admitted.workflowRunId)) return false;
+  const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
+  if (!wake || readQaCorrectionWakeRef(wake)) return false;
+  const { workflowRunHasC5AdmissionScope } = await import("./workflow/control-flow/qa-remediation-admission-root.js");
+  return !await workflowRunHasC5AdmissionScope(db, admitted.workflowRunId);
 }
 
 function matchesIdentity(run: Heartbeat, identity: HeartbeatActualDrainIdentity) {
