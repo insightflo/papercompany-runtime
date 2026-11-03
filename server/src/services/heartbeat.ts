@@ -8334,7 +8334,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           message,
         });
         let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
-        if (!c5Held && actual === null && errorCode === "adapter_failed") {
+        if (!c5Held && (actual === null || (actual.outcome === "rejected" && actual.error === err))
+        && errorCode === "adapter_failed") {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
           if (fb && shouldQueueRunFailureAdapterFallback({ run: failedRun, fallback: fb })) {
             const fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, failedRun, agent, new Date(), {
