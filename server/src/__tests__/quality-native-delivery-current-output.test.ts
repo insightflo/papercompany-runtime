@@ -1493,6 +1493,12 @@ runpy.run_path(sys.argv[1], run_name="__main__")
     expect(targetActualBeforePass!.executionEpoch).toEqual(expect.any(Number));
     expect(targetActualBeforePass!.startedAt!.getTime()).toBeGreaterThanOrEqual(exactWakeRow!.requestedAt.getTime());
     expect(exactWakeRow!.runId).toBe(targetActualBeforePass!.id);
+    expect(exactWakeRow!.qualityAcceptance).toMatchObject({
+      intentKey: target.intentKey, inputHash: target.seed.source.inputHash,
+      issueId: target.seed.qaIssueId, stepRunId: target.seed.qaStepRunId, workflowRunId: target.seed.workflowRunId,
+      generation: exactWake.executionGeneration, agentId: exactWake.agentId, attempt: 1,
+      heartbeatRunId: targetActualBeforePass!.id,
+    });
     expect(targetActualBeforePass!.wakeupRequestId).toBe(exactWakeRow!.id);
     const frozenQa = parseQaRemediationPreparation((await preparationRows(target))[0]!.payload).verdicts
       .find((verdict) => verdict.qa.stepRunId === target.seed.qaStepRunId)!;
