@@ -38,7 +38,7 @@ import {
   type QaRemediationPassResult,
   type TryQaRemediationInput,
 } from "./qa-remediation-contract.js";
-import { hasPendingQaRemediationForRun } from "./qa-remediation-admission-root.js";
+import { hasPendingQaRemediationForRun, workflowRunHasC5AdmissionScope } from "./qa-remediation-admission-root.js";
 import { currentReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
 import { captureMechanicalReworkPatterns, computeDefectSignature } from "./knowledge-draft-capture.js";
 import { loadLatestQaRemediations } from "../validation-verdict-ledger.js";
@@ -92,7 +92,8 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
   const { db, run } = input;
   const correction = await tryQaCorrectionFollowup(input);
   if (correction) return correction;
-  if (!currentReplacementRootNotifications(db) && !await directEntryHasC5Scope(input)) return legacyDirectPass(input);
+  if (!await directEntryHasC5Scope(input)
+    && (!currentReplacementRootNotifications(db) || !await workflowRunHasC5AdmissionScope(db, run.id))) return legacyDirectPass(input);
   const qaStepRunIds = input.rejectedQas.map((qa) => qa.qaRun?.id);
   if (!run.missionId || qaStepRunIds.length === 0 || qaStepRunIds.some((id) => !id)
     || new Set(qaStepRunIds).size !== qaStepRunIds.length) {

@@ -649,26 +649,17 @@ describeEP("loadLatestQaRemediations ledger loader", () => {
     const signature = computeDefectSignature(find, replace);
     const svc = knowledgePatternsService(db);
 
+    // 1회차 — 이벤트에 서명 기록, 카드는 없다.
     const fileA = path.join(tempRoot, "cap-a", "index.html");
     await writeArtifact(fileA, `<p>${find}</p>`);
     const seedA = await seedScenario(db, { remediations: remediationsFor(fileA, find, replace), artifactUrl: fileA });
     await runPass({ db, tempRoot }, seedA, async () => true);
-    const eventsA = await rootRemediationEvents({ db, tempRoot }, seedA, QA_REMEDIATION_COMPLETION_EVENT_TYPE);
+    const eventsA = await remediationEvents({ db, tempRoot }, seedA);
     expect(eventsA).toHaveLength(1);
+    expect((eventsA[0]!.payload as { signatures?: string[] }).signatures).toEqual([signature]);
     expect(await svc.search({ companyId: seedA.companyId, includeDrafts: true })).toHaveLength(0);
-    const legacyItems = remediationsFor(fileA, find, replace).items;
-    await db.insert(workflowTransitionEvents).values({
-      companyId: seedA.companyId, missionId: seedA.missionId, workflowRunId: seedA.workflowRunId,
-      workflowStepRunId: seedA.qa.id, issueId: seedA.qaIssueId, heartbeatRunId: seedA.verdictHeartbeatId,
-      eventType: QA_REMEDIATION_EVENT_TYPE, layer: "workflow_validation", decision: "mechanical_remediation_applied",
-      verdict: "request_changes", reason: "workflow_api", reasonCode: "qa_remediation",
-      idempotencyKey: remediationIdempotencyKey(seedA.companyId, seedA.qa.id, seedA.verdictEventId),
-      payload: { kind: "qa_remediation_applied", outcome: "applied", producerStepId: seedA.producer.stepId,
-        producerStepRunId: seedA.producer.id, producerIteration: seedA.producer.iterationIndex ?? 0,
-        qaStepId: seedA.qa.stepId, sourceVerdictEventId: seedA.verdictEventId, appliedAt: new Date().toISOString(),
-        items: legacyItems, signatures: [signature] },
-    });
 
+    // 2회차(같은 회사, 다른 미션/파일) — 동일 서명 draft 초안 1장.
     const fileB = path.join(tempRoot, "cap-b", "index.html");
     await writeArtifact(fileB, `<p>${find}</p>`);
     const seedB = await seedScenario(db, { companyId: seedA.companyId, remediations: remediationsFor(fileB, find, replace), artifactUrl: fileB });
@@ -679,30 +670,33 @@ describeEP("loadLatestQaRemediations ledger loader", () => {
     expect(drafts[0]!.status).toBe("draft");
     expect(drafts[0]!.defectSignature).toBe(signature);
     expect(drafts[0]!.kind).toBe("failure_mode");
-    expect(drafts[0]!.summary).toContain("2회 적용됐다");
+    // 기본 검색(초안 제외)에는 노출되지 않는다.
     expect(await svc.search({ companyId: seedA.companyId })).toHaveLength(0);
 
+    // 3회차 — 초안 중복 없음((company_id, defect_signature) 유일).
     const fileC = path.join(tempRoot, "cap-c", "index.html");
     await writeArtifact(fileC, `<p>${find}</p>`);
     const seedC = await seedScenario(db, { companyId: seedA.companyId, remediations: remediationsFor(fileC, find, replace), artifactUrl: fileC });
     await runPass({ db, tempRoot }, seedC, async () => true);
     expect(await svc.search({ companyId: seedA.companyId, includeDrafts: true })).toHaveLength(1);
 
-    const foreignCompanyId = randomUUID();
-    await db.insert(companies).values({ id: foreignCompanyId, name: `Foreign-${foreignCompanyId.slice(0, 8)}`, issuePrefix: `FX${foreignCompanyId.slice(0, 8)}` });
+    // 다른 결함 서명은 별도 카드 대상 — 1회차라 초안 없다.
     const fileD = path.join(tempRoot, "cap-d", "index.html");
-    await writeArtifact(fileD, `<p>${find}</p>`);
-    const seedD = await seedScenario(db, { companyId: foreignCompanyId, remediations: remediationsFor(fileD, find, replace), artifactUrl: fileD });
+    await writeArtifact(fileD, "<p>다른 결함 텍스트</p>");
+    const seedD = await seedScenario(db, { companyId: seedA.companyId, remediations: remediationsFor(fileD, "다른 결함 텍스트", "수정됨"), artifactUrl: fileD });
     await runPass({ db, tempRoot }, seedD, async () => true);
-    expect(await knowledgePatternsService(db).search({ companyId: foreignCompanyId, includeDrafts: true })).toHaveLength(0);
     expect(await svc.search({ companyId: seedA.companyId, includeDrafts: true })).toHaveLength(1);
 
+    // 사람 승인 — draft→active 전이 후 기본 검색에 노출. 재승인은 거부.
     const approved = await svc.approve({ companyId: seedA.companyId, id: drafts[0]!.id });
     expect(approved.status).toBe("active");
     const visible = await svc.search({ companyId: seedA.companyId });
     expect(visible).toHaveLength(1);
     expect(visible[0]!.id).toBe(drafts[0]!.id);
     await expect(svc.approve({ companyId: seedA.companyId, id: drafts[0]!.id })).rejects.toThrow(/draft not found/);
+    // 타회사 초안 승인 불가(회사 스코프).
+    const foreignCompanyId = randomUUID();
+    await db.insert(companies).values({ id: foreignCompanyId, name: `Foreign-${foreignCompanyId.slice(0, 8)}`, issuePrefix: `FX${foreignCompanyId.slice(0, 8)}` });
     const foreignDraft = await knowledgePatternsService(db).createAutoReworkDraft({
       companyId: foreignCompanyId,
       signature: computeDefectSignature("x", "y"),
