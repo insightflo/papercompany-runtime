@@ -9,6 +9,7 @@ import {
   missions, startEmbeddedPostgresTestDatabase, workflowDefinitions, workflowRuns,
   workflowStepRuns, workflowTransitionEvents, type Db, type EmbeddedPostgresTestDatabase,
 } from "@paperclipai/db";
+import { seedInternalAdmissionWorld } from "./qa-remediation-admission-public-fixture.js";
 import { admittedProducer } from "./admitted-producer.js";
 import { recordWorkflowValidationVerdict } from "../../services/workflow/validation-verdict-ledger.js";
 import {
@@ -52,10 +53,11 @@ export interface BackendLossFixture {
   dispose(): Promise<void>;
 }
 
-export async function openBackendLossFixture(): Promise<BackendLossFixture> {
+export async function openBackendLossFixture(options: { realProducer?: boolean } = {}): Promise<BackendLossFixture> {
   const postgres = await startEmbeddedPostgresTestDatabase("qa-remediation-backend-loss-");
   const clients = new Set<Db>();
   const workspaces = new Set<string>();
+  const fixtureClosers = new Set<() => Promise<void>>();
   let lockRootParent = "";
 
   const makeDb = (label: string): TestDb => {
@@ -83,6 +85,16 @@ export async function openBackendLossFixture(): Promise<BackendLossFixture> {
     workspaces.add(dir);
     const file = join(dir, "report.md");
     await writeFile(file, ROOT_BEFORE, { mode: 0o600 });
+    if (options.realProducer) {
+      const seeded = await seedInternalAdmissionWorld(db, dir, lockRoot,
+        { file, bytes: Buffer.from(ROOT_BEFORE), find: "before", replace: "after" });
+      fixtureClosers.add(seeded.close);
+      const u = seeded.unit;
+      return { companyId: u.companyId, missionId: u.missionId, runId: u.runId,
+        producerStepRunId: u.producer.id, qaStepRunId: u.qa.id, verifier: u.verifierId,
+        file: u.file, dir, verdictId: u.verdictEventId, heartbeatId: u.verdictHeartbeatId,
+        seedWakes: await wakeRows(db, u.companyId) };
+    }
     const companyId = randomUUID(), author = randomUUID(), verifier = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Backend loss proof", issuePrefix: `BL${companyId.slice(0, 8)}` });
     await db.insert(agents).values([{ id: author, companyId, name: "Producer" }, { id: verifier, companyId, name: "Verifier" }]);
@@ -123,6 +135,7 @@ export async function openBackendLossFixture(): Promise<BackendLossFixture> {
   };
 
   const dispose = async () => {
+    await Promise.all([...fixtureClosers].map(close => close()));
     const results = await Promise.allSettled([...clients].map((db) => db.$client.end({ timeout: 5 })));
     clients.clear();
     const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);

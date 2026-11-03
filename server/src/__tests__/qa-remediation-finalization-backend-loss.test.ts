@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createReplacementRootNotifications, withReplacementRootNotificationDb } from "../services/issue-assignment-wakeup.js";
 import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "../services/workflow/control-flow/qa-remediation-runtime.js";
 import { reconcileQaRemediationReservation } from "../services/workflow/control-flow/qa-remediation-reconcile.js";
@@ -13,6 +13,9 @@ import {
   type BackendLossFixture, type RootWorld, type TestDb,
 } from "./helpers/qa-remediation-backend-loss-fixture.js";
 
+import { executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(),
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter }) }));
 const PYTHON = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON ?? process.env.PYTHON
   ?? process.env.PATH?.split(delimiter).map((part) => join(part, "python3"))
     .find((candidate) => { try { accessSync(candidate, constants.X_OK); return true; } catch { return false; } });
@@ -103,7 +106,7 @@ describe("QA remediation recovery after backend loss during finalization", () =>
   afterEach(async () => { if (fixture) { await fixture.dispose(); fixture = undefined; } });
 
   it("preserves the published actual, holds unknown transaction outcome, then completes once on reentry", async () => {
-    fixture = await openBackendLossFixture();
+    fixture = await openBackendLossFixture({ realProducer: true });
     const target = await fixture.seedWorld(fixture.rootDb.db, "target");
     const gate = backendGate(fixture, target);
     await gate.install();

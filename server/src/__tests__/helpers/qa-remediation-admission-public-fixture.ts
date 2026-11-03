@@ -3,11 +3,11 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises
 import { isDeepStrictEqual } from "node:util";
 import os from "node:os";
 import path from "node:path";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { vi } from "vitest";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../../adapters/types.js";
 import {
-  agentWakeupRequests, agents, approvals, companies, heartbeatRuns, issueWorkProducts, issues, missions,
+  agentWakeupRequests, agents, approvals, companies, instanceSettings, heartbeatRuns, issueWorkProducts, issues, missions,
   toolDefinitions, workflowDefinitions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns,
   workflowTerminalDecisions, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
@@ -193,6 +193,7 @@ type AdmissionScenarioState = Omit<AdmissionScenario, "units" | "downstreamProgr
   readonly units: AdmissionUnitState[];
   readonly dispatchAuthorityVersion: number;
   downstreamProgress?: AdmissionDownstreamProgress;
+  internalSeed?: { file: string; bytes: Buffer; find: string; replace: string; second?: { bytes: Buffer; find: string; replace: string }; existing?: { companyId: string; authorId: string; verifierId: string } };
 };
 type AdmissionAdapterRegistration = {
   readonly kind: "producer" | "qa" | "downstream";
@@ -791,7 +792,11 @@ function sameStoredAttemptProof(proof: ReturnType<typeof readWorkflowAttemptProo
 }
 
 function admissionRemediations(state: AdmissionUnitState) {
-  return { items: [{ op: "string_replace" as const, file: state.file, find: "before", replace: "after" }] };
+  if (!state.scenario.internalSeed) return { items: [{ op: "string_replace" as const, file: state.file, find: "before", replace: "after" }] };
+  return { items: [{ op: "string_replace" as const, file: state.file, find: state.scenario.internalSeed?.find ?? "before", replace: state.scenario.internalSeed?.replace ?? "after" },
+    ...(state.scenario.internalSeed?.second ? [{ op: "string_replace" as const,
+      file: path.join(path.dirname(state.file), "notes.md"), find: state.scenario.internalSeed.second.find,
+      replace: state.scenario.internalSeed.second.replace }] : [])] };
 }
 
 async function classifyScenarioPreparations(db: Db, scenario: AdmissionScenarioState) {
@@ -887,12 +892,18 @@ function toAdmissionScenario(state: AdmissionScenarioState, qaCompletion: Admiss
     units: state.units.map(toAdmissionUnit), downstreamProgress: state.downstreamProgress, qaCompletion };
 }
 
-async function createAdmissionScenarioState(harness: AdmissionHarness, count: number): Promise<AdmissionScenarioState> {
-  const companyId = randomUUID(), missionId = randomUUID(), workflowId = randomUUID(), runId = randomUUID();
-  const authorId = randomUUID(), verifierId = randomUUID();
-  await harness.db.insert(companies).values({ id: companyId, name: "Admission public fixture",
+async function createAdmissionScenarioState(harness: AdmissionHarness, count: number, internalSeed?: AdmissionScenarioState["internalSeed"]): Promise<AdmissionScenarioState> {
+  const companyId = internalSeed?.existing?.companyId ?? randomUUID(), missionId = randomUUID(), workflowId = randomUUID(), runId = randomUUID();
+  const authorId = internalSeed?.existing?.authorId ?? randomUUID(), verifierId = internalSeed?.existing?.verifierId ?? randomUUID();
+  if (!internalSeed?.existing) await harness.db.insert(companies).values({ id: companyId, name: "Admission public fixture",
     issuePrefix: `AP${companyId.slice(0, 8)}`, workProductRoot: harness.root });
-  await harness.db.insert(agents).values([
+  if (internalSeed?.existing) {
+    await harness.db.update(companies).set({ workProductRoot: harness.root }).where(eq(companies.id, companyId));
+    await harness.db.update(agents).set({ status: "active", adapterType: "codex_local",
+      adapterConfig: { cwd: harness.root, promptTemplate: "internal admission" },
+      runtimeConfig: { heartbeat: { enabled: true, wakeOnDemand: true, maxConcurrentRuns: 2 } } })
+      .where(inArray(agents.id, [authorId, verifierId]));
+  } else await harness.db.insert(agents).values([
     { id: authorId, companyId, name: "Admission producer", status: "active", adapterType: "codex_local",
       adapterConfig: { cwd: harness.root, promptTemplate: "admission producer" },
       runtimeConfig: { heartbeat: { enabled: true, wakeOnDemand: true, maxConcurrentRuns: 2 } } },
@@ -907,7 +918,7 @@ async function createAdmissionScenarioState(harness: AdmissionHarness, count: nu
   await harness.db.insert(workflowRuns).values({ id: runId, companyId, missionId, workflowId,
     status: "running", triggeredBy: "test", dispatchAuthorityVersion: 1 });
   const scenario: AdmissionScenarioState = { companyId, missionId, workflowId, runId, authorId, verifierId,
-    dispatchAuthorityVersion: 1, units: [] };
+    dispatchAuthorityVersion: 1, units: [], ...(internalSeed ? { internalSeed } : {}) };
   for (let index = 0; index < count; index++) {
     const suffix = String.fromCharCode(65 + index);
     await createAdmissionUnit(harness, scenario, suffix);
@@ -919,7 +930,7 @@ async function createAdmissionScenarioState(harness: AdmissionHarness, count: nu
   }
   const first = scenario.units[0];
   if (!first) throw new Error("admission scenario requires a producer and QA step before its downstream work");
-  scenario.downstreamProgress = await addDownstreamProgressStep(harness, scenario, first.producer.stepId, first.qa.stepId);
+  if (!internalSeed) scenario.downstreamProgress = await addDownstreamProgressStep(harness, scenario, first.producer.stepId, first.qa.stepId);
   return scenario;
 }
 
@@ -1146,11 +1157,17 @@ async function createAdmissionUnit(harness: AdmissionHarness, scenario: Admissio
       await state.allowProduction.promise;
       await context.onSessionUpdate?.({ sessionId, sessionDisplayId: sessionId });
       await mkdir(path.dirname(file), { recursive: true });
-      await writeFile(file, beforeText, "utf8");
+      if (scenario.internalSeed) await writeFile(file, scenario.internalSeed.bytes);
+      else await writeFile(file, beforeText, "utf8");
       const [issue] = await db.select().from(issues).where(eq(issues.id, producerIssueId));
       if (!issue) throw new Error("admission producer issue disappeared");
       const actor = { actorType: "agent" as const, actorId: scenario.authorId, agentId: scenario.authorId, runId: context.runId };
       await registerWorkflowArtifact({ db, issue, actor, data: { path: file, type: "document", isPrimary: true } });
+      if (scenario.internalSeed?.second) {
+        const secondFile = path.join(path.dirname(file), "notes.md");
+        await writeFile(secondFile, scenario.internalSeed.second.bytes);
+        await registerWorkflowArtifact({ db, issue, actor, data: { path: secondFile, type: "document", isPrimary: false } });
+      }
       if (!(await registeredProducer(db, scenario.companyId, producerIssueId, context.runId))) {
         throw new Error("admission registered producer proof missing");
       }
@@ -1652,6 +1669,42 @@ export async function captureReplacementAdmissionFailureSnapshot(harness: Admiss
     expectedBlockingTransactionId: details.expectedBlockingTransactionId ?? null, rootPid: details.rootPid ?? null,
     units: unitSnapshots, workflowRuns: runs, replacementAuthorities: authorities, scopedPostgres,
     nativeUnionRecord, lifecycleCheckpoints: details.lifecycleCheckpoints?.slice(-64) ?? [], qaCommitBarriers };
+}
+
+export async function seedInternalAdmissionWorld(db: Db, root: string, lockRoot: string,
+  input: NonNullable<AdmissionScenarioState["internalSeed"]>) {
+  activeAdmissionDb = db;
+  await db.insert(instanceSettings).values({ singletonKey: "default", experimental: { enableHeartbeatFinalizationV1: true } })
+    .onConflictDoUpdate({ target: instanceSettings.singletonKey, set: { experimental: { enableHeartbeatFinalizationV1: true } } });
+  const harness: AdmissionHarness = { db, peer: db, root, lockRoot, close: async () => {} };
+  const state = await createAdmissionScenarioState(harness, 1, input);
+  const qaCompletion = createQaCompletionCommitReturnBarrier(harness, state.units);
+  try {
+    await runAdmissionUnitsActuals(harness, state.units, qaCompletion);
+    const unit = toAdmissionUnit(state.units[0]!);
+    await assertAdmissionActualDrained(db, unit);
+    return { unit, async close() { qaCompletion.releaseAll(); await waitForHeartbeatExecutionsToDrain(db, 60_000); } };
+  } catch (error) {
+    qaCompletion.restore(); qaCompletion.releaseAll();
+    await waitForHeartbeatExecutionsToDrain(db, 60_000);
+    throw error;
+  }
+}
+
+export async function seedInternalQualityWorld(db: Db, root: string, lockRoot: string,
+  input: NonNullable<AdmissionScenarioState["internalSeed"]>) {
+  const seeded = await seedInternalAdmissionWorld(db, root, lockRoot, input), u = seeded.unit;
+  const [qaActual] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, u.verdictHeartbeatId));
+  if (qaActual?.executionEpoch == null) throw new Error("internal QA actual epoch missing");
+  return { close: seeded.close, verifierEpoch: qaActual.executionEpoch, file: u.file, companyId: u.companyId, missionId: u.missionId,
+    workflowRunId: u.runId, producerStepRunId: u.producer.id, producerIssueId: u.producerIssueId,
+    qaStepRunId: u.qa.id, qaIssueId: u.qaIssue.id, verdictEventId: u.verdictEventId,
+    verdictHeartbeatId: u.verdictHeartbeatId, verifierAgentId: u.verifierId,
+    source: { companyId: u.companyId, issueId: u.producerIssueId, heartbeatRunId: u.producerHeartbeatRunId,
+      executionEpoch: u.producerHeartbeat.executionEpoch!, inputHash: hashStructuredValue(u.producerHeartbeat.contextSnapshot),
+      mission: { kind: "mission" as const, id: u.missionId }, workflow: { kind: "workflow_step" as const,
+        runId: u.runId, stepRunId: u.producer.id, generation: u.producer.executionGeneration,
+        dispatchAuthorityVersion: u.producerDrainIdentity.dispatchAuthorityVersion } } };
 }
 
 export async function createAdmissionScenario(harness: AdmissionHarness, options: { count?: number } = {}): Promise<AdmissionScenario> {

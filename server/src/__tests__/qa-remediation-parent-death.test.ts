@@ -4,7 +4,7 @@ import type { Readable } from "node:stream";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { workflowStepRuns, type Db } from "@paperclipai/db";
 import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "../services/workflow/control-flow/qa-remediation-runtime.js";
@@ -25,6 +25,10 @@ import {
   PYTHON, SERVER_ROOT, waitForBackendGone, waitForProcessExit, within,
 } from "./helpers/qa-remediation-parent-death-harness.js";
 
+import { executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(),
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter }) }));
+
 function requestOf(world: RootWorld) {
   return { companyId: world.companyId, missionId: world.missionId, workflowRunId: world.runId,
     producerStepRunId: world.producerStepRunId, qaStepRunIds: [world.qaStepRunId] };
@@ -39,7 +43,7 @@ async function rootCall(world: RootWorld, db: Db, runtime: QaFileOwnerRuntime) {
 
 describe.sequential("C5 owning Node parent death at native rename barriers", () => {
   it("preserves the prepared attempt and makes scoped progress/reentry after SIGKILL before and after real replace", async () => {
-    const fixture = await openBackendLossFixture();
+    const fixture = await openBackendLossFixture({ realProducer: true });
     try {
       for (const phase of ["before", "after"] as const) {
         const world = await fixture.seedWorld(fixture.rootDb.db, `parent-${phase}-${randomUUID().slice(0, 6)}`);

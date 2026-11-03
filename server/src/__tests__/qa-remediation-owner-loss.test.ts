@@ -4,7 +4,7 @@
 // immediately before os.replace; terminating the owning PostgreSQL backend must make the root kill and
 // observe that exact child before a later root continues the same durable preparation once.
 // [evidence] Real ephemeral PostgreSQL, real transaction/backend termination, real native helper and
-// os.replace barrier, exact child PID/signal, preserved preparation/completion/wake bindings, no heartbeat
+// os.replace barrier, exact child PID/signal, preserved preparation/completion/wake bindings, real producer heartbeat
 // execution, and a post-cancel byte fence. No filesystem or native-helper mock stands in for the effect.
 // [cleanup] The owned child is aborted in failure cleanup, the barrier socket and private temp tree close,
 // and the controller DB reservation is released before the fixture closes.
@@ -13,14 +13,17 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
 import {
   agentWakeupRequests, agents, companies, heartbeatRuns, issueWorkProducts, issues, missions,
   workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db,
 } from "@paperclipai/db";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
-import { admittedProducer } from "./helpers/admitted-producer.js";
+import { seedInternalAdmissionWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(),
+  getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter }) }));
+const fixtureClosers = new Set<() => Promise<void>>();
 import { createQaCorrectionTestDb } from "./helpers/qa-correction-fixture.js";
 import { parseQaRemediationCompletion } from "../services/workflow/control-flow/qa-remediation-completion.js";
 import { parseQaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
@@ -90,9 +93,6 @@ const observe = async <T>(label: string, deadlineMs: number, probe: () => Promis
 /** qa-remediation-reconcile.test.ts seedWorld 와 동일한 실제 세계(실제 PG 행 + 실제 파일). */
 async function seedWorld() {
   const db = owned.db;
-  const companyId = randomUUID(), author = randomUUID(), verifier = randomUUID();
-  await db.insert(companies).values({ id: companyId, name: "Owner-loss repro", issuePrefix: `OL${companyId.slice(0, 8)}` });
-  await db.insert(agents).values([{ id: author, companyId, name: "Producer" }, { id: verifier, companyId, name: "Verifier" }]);
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "qa-remediation-owner-loss-")));
   tempDirs.push(dir);
   const lockRoot = path.join(dir, ".locks");
@@ -100,36 +100,20 @@ async function seedWorld() {
   const fileOwnerRuntime = createQaFileOwnerRuntime({ qaFileOwnerLockRoot: lockRoot, qaFileOwnerPython: PYTHON! });
   const file = path.join(dir, "report.md");
   await writeFile(file, BEFORE, "utf8");
-  const missionId = randomUUID(), workflowId = randomUUID(), runId = randomUUID();
-  await db.insert(missions).values({ id: missionId, companyId, title: "Owner-loss fixture", ownerAgentId: author, status: "active" });
-  await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "Owner-loss fixture", stepsJson: [
-    { id: "produce", name: "Produce", agentId: author, dependencies: [],
-      conditionalDependencies: [{ stepId: "qa-check", when: "qa_request_changes", isBackEdge: true, maxIterations: 3 }] },
-    { id: "qa-check", name: "QA", agentId: verifier, dependencies: ["produce"] },
-  ] });
-  await db.insert(workflowRuns).values({ id: runId, companyId, missionId, workflowId, status: "running", triggeredBy: "test", dispatchAuthorityVersion: 1 });
-  const [producerIssue] = await db.insert(issues).values({ companyId, missionId, title: "Produce", status: "done", originKind: "workflow_execution" }).returning();
-  const [qaIssue] = await db.insert(issues).values({ companyId, missionId, title: "[QA] Check", status: "todo", originKind: "workflow_execution" }).returning();
-  const [producer] = await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "produce",
-    issueId: producerIssue!.id, status: "completed", completedAt: new Date(Date.now() - 2000) }).returning();
-  const [qa] = await db.insert(workflowStepRuns).values({ workflowRunId: runId, stepId: "qa-check", issueId: qaIssue!.id, status: "failed" }).returning();
-  await admittedProducer(db, { companyId, agentId: author, issueId: producerIssue!.id, stepRunId: producer!.id, heartbeatId: randomUUID() });
-  const wakeId = randomUUID(), heartbeatId = randomUUID();
-  await db.insert(agentWakeupRequests).values({ id: wakeId, companyId, agentId: verifier, source: "workflow.dispatch", workflowStepRunId: qa!.id });
-  await db.insert(heartbeatRuns).values({ id: heartbeatId, companyId, agentId: verifier, issueId: qaIssue!.id,
-    wakeupRequestId: wakeId, status: "succeeded", createdAt: new Date(Date.now() - 1000) });
-  await recordWorkflowValidationVerdict({ db, issue: qaIssue!, source: "workflow_api", verdict: "request_changes",
-    heartbeatRunId: heartbeatId, remediations: { items: [{ op: "string_replace", file, find: "flawed", replace: "polished" }] } });
-  const [verdict] = await db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.heartbeatRunId, heartbeatId));
-  await db.insert(issueWorkProducts).values({ companyId, issueId: producerIssue!.id, type: "file",
-    provider: "local_file", title: "report", status: "active", metadata: { path: file } });
-  return { companyId, missionId, runId, verifier, file, lockRoot, fileOwnerRuntime, producer: producer!, qa: qa!,
-    producerIssue: producerIssue!, qaIssue: qaIssue!, verdictId: verdict!.id, verdictHeartbeatId: heartbeatId } as World;
+  const seeded = await seedInternalAdmissionWorld(db, dir, lockRoot,
+    { file, bytes: Buffer.from(BEFORE), find: "flawed", replace: "polished" });
+  fixtureClosers.add(seeded.close);
+  const u = seeded.unit;
+  const [producerIssue] = await db.select().from(issues).where(eq(issues.id, u.producerIssueId));
+  return { companyId: u.companyId, missionId: u.missionId, runId: u.runId, verifier: u.verifierId,
+    file: u.file, lockRoot, fileOwnerRuntime, producer: u.producer, qa: u.qa,
+    producerIssue: producerIssue!, qaIssue: u.qaIssue, verdictId: u.verdictEventId, verdictHeartbeatId: u.verdictHeartbeatId } as World;
 }
 
 describe("qa-remediation owner loss during native IO (C5)", () => {
   beforeAll(async () => { owned = await createQaCorrectionTestDb(); }, 120000);
   afterAll(async () => {
+    await Promise.all([...fixtureClosers].map(close => close()));
     for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
     await owned?.close();
   }, 120000);
