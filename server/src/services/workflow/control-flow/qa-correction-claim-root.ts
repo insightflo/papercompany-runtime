@@ -70,9 +70,11 @@ export function captureQaCorrectionExecutionIdentity(run: Run): QaCorrectionExec
     || !Number.isSafeInteger(run.processLossRetryCount) || run.processLossRetryCount < 0) {
     throw new QaRemediationAdmissionHold("execution_identity_untyped", []);
   }
-  const ownerFields = [run.executionScopeKind, run.executionEpoch, run.executionToken, run.executorOwnerId,
+  // PLAN-QA reserves an attempt epoch before claim; the counter alone is not an owner capability.
+  const ownerFields = [run.executionScopeKind, run.executionToken, run.executorOwnerId,
     run.executorOwnerLeaseEpoch, run.executorOwnerLeaseToken];
-  if (ownerFields.some(value => value !== null) && ownerFields.some(value => value === null)) {
+  if (ownerFields.some(value => value !== null)
+    && (run.executionEpoch === null || ownerFields.some(value => value === null))) {
     throw new QaRemediationAdmissionHold("execution_owner_identity_untyped", []);
   }
   if (ownerFields.every(value => value === null) && ownerTimestamps.some(value => value !== null)) {
