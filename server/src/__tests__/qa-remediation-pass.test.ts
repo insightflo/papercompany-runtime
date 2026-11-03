@@ -515,11 +515,19 @@ import { QA_REMEDIATION_PREPARATION_EVENT_TYPE } from "../services/workflow/cont
 import type { QaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
 import { QA_REMEDIATION_EVENT_TYPE, remediationIdempotencyKey } from "../services/workflow/control-flow/qa-remediation-contract.js";
 
+import { afterEach, vi } from "vitest";
+import { seedInternalAdmissionWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => {
+  const actual = await original<typeof import("../adapters/index.js")>();
+  return { ...actual, getServerAdapter: (kind: string) => kind === "codex_local"
+    ? { supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter } : actual.getServerAdapter(kind) };
+});
+
 describeEP("C5 public pass contract", () => {
 type StepRun = typeof workflowStepRuns.$inferSelect;
 
-const PRODUCER = "produce";
-const QA = "qa-validate";
+const PRODUCER = "produce-A";
+const QA = "qa-A";
 const MAX_ITER = 2;
 
 function buildSteps(agentId: string) {
@@ -570,6 +578,7 @@ function makeQaRemediationPublicSyncTimeline(): QaRemediationPublicSyncTimeline 
 }
 
 interface Seed {
+  file: string;
   companyId: string;
   agentId: string;
   missionId: string;
@@ -582,101 +591,32 @@ interface Seed {
   verdictHeartbeatId: string;
 }
 
+const fixtureClosers = new Set<() => Promise<void>>();
+const fixtureTeams = new Map<string, { companyId: string; authorId: string; verifierId: string }>();
+afterEach(async () => { await Promise.all([...fixtureClosers].map(close => close())); fixtureClosers.clear(); }, 120_000);
 async function seedScenario(db: Db, opts: SeedOptions): Promise<Seed> {
-  const companyId = opts.companyId ?? randomUUID();
-  const timeline = opts.publicSyncTimeline;
-  const agentId = randomUUID();
-  const missionId = randomUUID();
-  if (!opts.companyId) {
-    await db.insert(companies).values({ id: companyId, name: `RemCo-${companyId.slice(0, 8)}`, issuePrefix: `RM${companyId.slice(0, 8)}`, requireBoardApprovalForNewAgents: false });
-  }
-  await db.insert(agents).values({ id: agentId, companyId, name: `worker-${agentId.slice(0, 8)}`, role: "writer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
-  await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: agentId, title: `remediation mission ${missionId.slice(0, 8)}`, status: "active" });
-
-  const producerIssueId = randomUUID();
-  const qaIssueId = randomUUID();
-  await db.insert(issues).values({ id: producerIssueId, companyId, missionId, title: "produce-report", description: "Produce the final report HTML.", status: "done", assigneeAgentId: agentId,
-    ...(timeline ? { startedAt: timeline.producerStartedAt, completedAt: timeline.producerCompletedAt } : {}) });
-  await db.insert(issues).values({ id: qaIssueId, companyId, missionId, title: "qa-validate", description: "Validate the report.", status: "done", assigneeAgentId: agentId,
-    ...(timeline ? { startedAt: timeline.qaStartedAt, completedAt: timeline.qaCompletedAt } : {}) });
-
-  if (opts.artifactUrl) {
-    await db.insert(issueWorkProducts).values({
-      companyId, issueId: producerIssueId, type: "file", provider: "local", title: "report", status: "active", url: opts.artifactUrl,
-    });
-  }
-
-  const steps = buildSteps(agentId);
-  const workflowId = randomUUID();
-  const runId = randomUUID();
-  await db.insert(workflowDefinitions).values({ id: workflowId, companyId, name: "remediation-wf", stepsJson: steps });
-  await db.insert(workflowRuns).values({ id: runId, companyId, workflowId, missionId, status: "running", triggeredBy: "test" });
-
-  const producerCompletedAt = timeline?.producerCompletedAt ?? new Date(Date.now() - 60_000);
-  const [producer] = await db.insert(workflowStepRuns).values({
-    workflowRunId: runId, stepId: PRODUCER, issueId: producerIssueId, status: "completed", iterationIndex: 0,
-    ...(timeline ? { startedAt: timeline.producerStartedAt, metadata: { graphWorkProductRequired: false } } : {}),
-    completedAt: producerCompletedAt,
-  }).returning();
-  const [qaRun] = await db.insert(workflowStepRuns).values({
-    workflowRunId: runId, stepId: QA, issueId: qaIssueId, status: "failed",
-    ...(timeline ? { startedAt: timeline.qaStartedAt, metadata: { graphWorkProductRequired: false } } : {}),
-    completedAt: timeline?.qaCompletedAt ?? new Date(Date.now() - 20_000),
-  }).returning();
-
-  // Official workflow_api verdict event bound to a heartbeat run scoped to the QA issue
-  // and joined (via wakeup) to this exact QA step run — mirrors production dispatch.
-  const wakeupId = randomUUID();
-  const verdictHeartbeatId = randomUUID();
-  await db.insert(agentWakeupRequests).values({ id: wakeupId, companyId, agentId, source: "workflow.dispatch", workflowStepRunId: qaRun.id });
-  const hbAt = timeline?.qaStartedAt ?? new Date(Date.now() - 25_000);
-  await db.insert(heartbeatRuns).values({
-    id: verdictHeartbeatId, companyId, agentId, issueId: qaIssueId, status: "succeeded",
-    wakeupRequestId: wakeupId, startedAt: hbAt, finishedAt: timeline?.verdictObservedAt ?? hbAt, createdAt: hbAt,
+  if (!opts.artifactUrl) throw new Error("C5 pass requires a producer artifact");
+  const item = (opts.remediations?.items as Array<{ find: string; replace: string }>)[0]!;
+  const existing = opts.companyId ? fixtureTeams.get(opts.companyId) : undefined;
+  if (opts.companyId && !existing) throw new Error("C5 pass team missing");
+  const seeded = await seedInternalAdmissionWorld(db, ownerLockRoot!, ownerLockRoot!, {
+    file: opts.artifactUrl, bytes: await readFile(opts.artifactUrl), find: item.find, replace: item.replace, existing,
   });
-  const [verdictEvent] = await db.insert(workflowTransitionEvents).values({
-    companyId, missionId, workflowRunId: runId, workflowStepRunId: qaRun.id, issueId: qaIssueId,
-    heartbeatRunId: verdictHeartbeatId, eventType: "workflow_validation_verdict", layer: "workflow_validation",
-    verdict: "request_changes", decision: "request_changes", reason: "workflow_api", reasonCode: "workflow_api",
-    idempotencyKey: `verdict:${qaRun.id}:${verdictHeartbeatId}`,
-    ...(timeline ? { createdAt: timeline.verdictObservedAt } : {}),
-    payload: {
-      kind: "workflow_validation_verdict",
-      workflowRunId: runId,
-      stepRunId: qaRun.id,
-      issueId: qaIssueId,
-      verdict: "request_changes",
-      reason: "internal term exposure in index.html",
-      ...(opts.remediations ? { remediations: opts.remediations } : {}),
-    },
-  }).returning({ id: workflowTransitionEvents.id });
-
-  if (opts.newerHeartbeatAfterVerdict) {
-    const newerWakeup = randomUUID();
-    const newerHb = randomUUID();
-    await db.insert(agentWakeupRequests).values({ id: newerWakeup, companyId, agentId, source: "workflow.dispatch", workflowStepRunId: qaRun.id });
-    await db.insert(heartbeatRuns).values({
-      id: newerHb, companyId, agentId, issueId: qaIssueId, status: "succeeded",
-      wakeupRequestId: newerWakeup, startedAt: new Date(), finishedAt: new Date(), createdAt: new Date(),
-    });
-  }
-
+  fixtureClosers.add(seeded.close);
+  const u = seeded.unit;
+  fixtureTeams.set(u.companyId, { companyId: u.companyId, authorId: u.authorId, verifierId: u.verifierId });
   for (let i = 0; i < (opts.priorRemediationEvents ?? 0); i += 1) {
     await db.insert(workflowTransitionEvents).values({
-      companyId, missionId, workflowRunId: runId, workflowStepRunId: qaRun.id, issueId: qaIssueId,
+      companyId: u.companyId, missionId: u.missionId, workflowRunId: u.runId, workflowStepRunId: u.qa.id, issueId: u.qaIssue.id,
       eventType: "qa_remediation_applied", layer: "workflow_validation",
       verdict: "request_changes", decision: "mechanical_remediation_applied", reason: "workflow_api", reasonCode: "qa_remediation",
-      idempotencyKey: `qa-remediation-applied:${companyId}:${qaRun.id}:prior-${i}`,
+      idempotencyKey: `qa-remediation-applied:${u.companyId}:${u.qa.id}:prior-${i}`,
       payload: { kind: "qa_remediation_applied", outcome: "applied" },
     });
   }
-
-  return {
-    companyId, agentId, missionId, workflowRunId: runId,
-    producer: producer!, qa: qaRun!,
-    producerIssueId, qaIssueId,
-    verdictEventId: verdictEvent!.id, verdictHeartbeatId,
-  };
+  return { file: u.file, companyId: u.companyId, agentId: u.authorId, missionId: u.missionId, workflowRunId: u.runId,
+    producer: u.producer, qa: u.qa, producerIssueId: u.producerIssueId, qaIssueId: u.qaIssue.id,
+    verdictEventId: u.verdictEventId, verdictHeartbeatId: u.verdictHeartbeatId };
 }
 
 interface Harness {
@@ -686,10 +626,12 @@ interface Harness {
 
 async function runPass(h: Harness, seed: Seed, refire: (qa: { stepId: string; stepRunId: string; issueId: string | null }) => Promise<boolean>) {
   const stepRuns = await h.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.workflowRunId));
+  const [run] = await h.db.select().from(workflowRuns).where(eq(workflowRuns.id, seed.workflowRunId));
+  const [definition] = await h.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
   await withQaCorrectionFollowupReconcile(h.db, seed.workflowRunId, () => applyBackEdgeReworkPass({
       db: h.db,
       run: { id: seed.workflowRunId, companyId: seed.companyId, status: "running", missionId: seed.missionId },
-      steps: buildSteps(seed.agentId) as Parameters<typeof applyBackEdgeReworkPass>[0]["steps"],
+      steps: definition!.stepsJson as Parameters<typeof applyBackEdgeReworkPass>[0]["steps"],
       stepRuns,
       predsByStepId: new Map([[QA, { status: "failed" as const, isQaGate: true, verdict: "request_changes" as const }]]),
       validationVerdictsByIssueId: new Map([[seed.qaIssueId, { observedAt: new Date() }]]),
@@ -801,10 +743,11 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
   });
 
   it("routes the public sync legacy branch through the guarded root and reuses one completion and wake on same-verdict reentry", async () => {
-    const artifactPath = path.join(tempRoot, "case1", "index.html");
+    let artifactPath = path.join(tempRoot, "case1", "index.html");
     await writeArtifact(artifactPath, "<html>내부 용어 leads/evidence.json 노출됨</html>");
     const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "leads/evidence.json", "선별 근거 요약"),
       publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
     const before = await reloadRuns({ db, tempRoot }, seed);
     const producerBefore = producerAttempt(before.producer);
 
@@ -858,11 +801,12 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
   });
 
   it("holds an unavailable native owner after preserving the durable preparation and producer attempt", async () => {
-    const artifactPath = path.join(tempRoot, "native-unavailable", "index.html");
+    let artifactPath = path.join(tempRoot, "native-unavailable", "index.html");
     await writeArtifact(artifactPath, "native unavailable findme");
     const seed = await seedScenario(db, { artifactUrl: artifactPath,
       remediations: remediationsFor(artifactPath, "findme", "fixed"),
       publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
     const before = await reloadRuns({ db, tempRoot }, seed);
     const producerBefore = producerAttempt(before.producer);
     const configuredPython = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
@@ -889,22 +833,24 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
     expect(await db.select().from(agentWakeupRequests).where(and(
       eq(agentWakeupRequests.companyId, seed.companyId), eq(agentWakeupRequests.idempotencyKey, wakeKey)))).toHaveLength(0);
 
-    const followupPath = path.join(tempRoot, "native-followup", "index.html");
+    let followupPath = path.join(tempRoot, "native-followup", "index.html");
     await writeArtifact(followupPath, "followup findme");
     const followupSeed = await seedScenario(db, { companyId: seed.companyId, artifactUrl: followupPath,
       remediations: remediationsFor(followupPath, "findme", "fixed"),
       publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    followupPath = followupSeed.file;
     await syncWorkflowRunStateWithOutcome(db, followupSeed.workflowRunId);
     expect(await rootRemediationEvents({ db, tempRoot }, followupSeed, QA_REMEDIATION_COMPLETION_EVENT_TYPE)).toHaveLength(1);
     expect(await knowledgePatternsService(db).search({ companyId: seed.companyId, includeDrafts: true })).toHaveLength(0);
   });
 
   it("holds malformed pending remediation history at the public root without resetting the producer or issuing another wake", async () => {
-    const artifactPath = path.join(tempRoot, "pending-legacy", "index.html");
+    let artifactPath = path.join(tempRoot, "pending-legacy", "index.html");
     await writeArtifact(artifactPath, "pending findme");
     const seed = await seedScenario(db, { artifactUrl: artifactPath,
       remediations: remediationsFor(artifactPath, "findme", "fixed"), priorRemediationEvents: 1,
       publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
     const before = await reloadRuns({ db, tempRoot }, seed);
     const producerBefore = producerAttempt(before.producer);
 
@@ -927,9 +873,10 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
   });
 
   it("re-evaluating the same root completion preserves reservation/completion/wake IDs and file hash", async () => {
-    const artifactPath = path.join(tempRoot, "case2", "index.html");
+    let artifactPath = path.join(tempRoot, "case2", "index.html");
     await writeArtifact(artifactPath, "term X appears once");
     const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "X", "Y") });
+    artifactPath = seed.file;
 
     await runPass({ db, tempRoot }, seed, async () => true);
     const preparationsAfterFirst = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE);
@@ -957,9 +904,10 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
   });
 
   it("does not let the legacy refire callback refuse or duplicate the root-owned QA wake", async () => {
-    const artifactPath = path.join(tempRoot, "case3", "index.html");
+    let artifactPath = path.join(tempRoot, "case3", "index.html");
     await writeArtifact(artifactPath, "findme once");
     const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "findme", "fixed") });
+    artifactPath = seed.file;
     const refireCalls: unknown[] = [];
 
     await runPass({ db, tempRoot }, seed, async (qa) => { refireCalls.push(qa); return false; });
@@ -974,9 +922,10 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
   });
 
   it("holds at the per-QA reservation cap instead of treating attempted history as producer rework permission", async () => {
-    const artifactPath = path.join(tempRoot, "case7", "index.html");
+    let artifactPath = path.join(tempRoot, "case7", "index.html");
     await writeArtifact(artifactPath, "cap findme");
     const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "cap findme", "x"), priorRemediationEvents: 3 });
+    artifactPath = seed.file;
 
     await expect(runPass({ db, tempRoot }, seed, async () => true)).rejects.toBeInstanceOf(QaRemediationWorkflowHoldError);
 
