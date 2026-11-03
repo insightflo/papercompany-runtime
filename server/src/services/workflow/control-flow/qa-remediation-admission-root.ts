@@ -1,7 +1,7 @@
-import { and, asc, eq, inArray, is } from "drizzle-orm";
+import { and, asc, eq, inArray, is, or, isNotNull } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { isDeepStrictEqual } from "node:util";
-import { agentWakeupRequests, missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns,
+import { agentWakeupRequests, heartbeatRuns, missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns,
   workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { replacementApprovalPayloadSchema, type ReplacementApprovalPayload }
   from "@paperclipai/shared/validators/workflow-replacement";
@@ -608,6 +608,22 @@ async function inventoryForRun(db: Db, run: Run): Promise<Inventory> {
     allTargets: sorted([...preparations.values()].flatMap(item => item.value.files.map(file => file.path))),
     hasHistory: relevant.length > 0,
   };
+}
+
+/** Only exact run evidence opts legacy sync into the shared transaction. */
+export async function workflowRunHasC5AdmissionScope(db: Db, runId: string): Promise<boolean> {
+  const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
+  if (!run) return true;
+  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities).where(and(
+    eq(workflowRecoveryAuthorities.companyId, run.companyId), or(eq(workflowRecoveryAuthorities.workflowRunId, runId), eq(workflowRecoveryAuthorities.replacementRunId, runId)))).limit(1);
+  const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, runId),
+    inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared"])) ).limit(1);
+  const [actual] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId)).where(and(
+    eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, runId), isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken))).limit(1);
+  const [held] = await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, runId), inArray(workflowStepRuns.status, ["held", "blocked"])) ).limit(1);
+  const inventory = await inventoryForRun(db, run);
+  return Boolean(authority || history || actual || held || inventory.pending.length);
 }
 
 export async function hasPendingQaRemediationForRun(db: Db, run: Run): Promise<boolean> {

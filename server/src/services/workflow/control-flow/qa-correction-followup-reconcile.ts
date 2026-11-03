@@ -38,7 +38,7 @@ import { readQaCorrectionDelivery, type CorrectionDeliveryInput } from "./qa-cor
 import { collectQaRemediationEligibility } from "./qa-remediation-qualification.js";
 import type { TryQaRemediationInput, QaRemediationPassResult } from "./qa-remediation-contract.js";
 import { createQaFileOwnerRuntime } from "./qa-remediation-runtime.js";
-import { withQaRemediationSharedAdmission, type QaRemediationAdmissionContext } from "./qa-remediation-admission-root.js";
+import { withQaRemediationSharedAdmission, workflowRunHasC5AdmissionScope, type QaRemediationAdmissionContext } from "./qa-remediation-admission-root.js";
 import {
   reconcileQaRemediationReservation,
   type QaRemediationReconcileRequest,
@@ -329,6 +329,7 @@ export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string
   const result = await withReplacementRootNotificationDb(db, notifications, async () => {
     for (let pass = 0; pass <= execution.steps.length + 1; pass++) {
       try {
+        if (!await workflowRunHasC5AdmissionScope(db, runId)) return await sync(db);
         return await withQaRemediationSharedAdmission({ db, runId, ownerRuntime,
           outerNotifications: notifications, resolutionMap: resolutions,
           bindResolutionMap: (attemptNotifications, map) => qaRemediationRootResolutions.set(attemptNotifications,
