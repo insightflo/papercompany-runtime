@@ -11,10 +11,11 @@
 // [ordering] §3.3: 잠금은 usage → group → action. 취소 tx 안에서 감사 행까지 저장하고,
 //   커밋 후에만 cancelRun 정리를 호출한다.
 
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
-  heartbeatRuns,
+  agentWakeupRequests, heartbeatRuns,
   qualityActionGroups,
   qualityActions,
   qualityPolicyUsage,
@@ -35,6 +36,7 @@ import { ensureCanonicalQualityExecution } from "./native-records.js";
 import { QUALITY_EXECUTE_STEP_ID } from "./native-definition.js";
 import { isAddendumWithdrawnForTarget } from "./rollback.js";
 import { applyCurrentOutputCorrection, readCurrentOutputEAdmission } from "./current-output.js";
+import { buildQualityWakeAcceptancePatch } from "./heartbeat-admission.js";
 import { parseQaCorrectionPreparationRow } from "../workflow/control-flow/qa-correction-authority.js";
 import { qaCorrectionAppliedKey } from "../workflow/control-flow/qa-correction-contract.js";
 import { acceptIssued, queueIssued, withQaCorrectionFollowupReconcile } from "../workflow/control-flow/qa-correction-followup-reconcile.js";
@@ -142,12 +144,24 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
       const correction = await applyCurrentOutputCorrection(db, parsed);
       if (correction.status === "source_preserved") return { status: "blocked", receiptId: null };
       if (correction.remediation?.outcome === "completed") {
-        const admission = await readCurrentOutputEAdmission(db, parsed, action);
-        if (admission.kind === "pending") return { status: "waiting", receiptId: admission.wakeupRequestId };
-        if (admission.kind === "admitted" && ["queued", "running", "succeeded"].includes(admission.actual.status)) {
-          return { status: "accepted", receiptId: admission.wakeupRequestId };
-        }
-        return { status: "blocked", receiptId: null };
+        return db.transaction(async tx => {
+          const admission = await readCurrentOutputEAdmission(tx, parsed);
+          if (admission.kind === "pending") return { status: "waiting" as const, receiptId: admission.wakeupRequestId };
+          if (admission.kind !== "admitted" || !["queued", "running", "succeeded"].includes(admission.actual.status))
+            return { status: "blocked" as const, receiptId: null };
+          const patch = await buildQualityWakeAcceptancePatch(tx, {
+            companyId: parsed.companyId, eAdmissionActionId: parsed.actionId, agentId: admission.wake.agentId,
+            issueId: admission.wake.issueId, workflowRunId: admission.wake.workflowRunId,
+            idempotencyKey: admission.wake.idempotencyKey, runId: admission.actual.id, acceptedAt: admission.actual.createdAt,
+          });
+          if (!patch) return { status: "blocked" as const, receiptId: null };
+          await tx.update(agentWakeupRequests).set(patch).where(and(eq(agentWakeupRequests.id, admission.wakeupRequestId),
+            eq(agentWakeupRequests.companyId, parsed.companyId), eq(agentWakeupRequests.runId, admission.actual.id),
+            isNull(agentWakeupRequests.qualityAcceptance)));
+          const [stored] = await tx.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, admission.wakeupRequestId));
+          return stored?.runId === admission.actual.id && isDeepStrictEqual(stored.qualityAcceptance, patch.qualityAcceptance)
+            ? { status: "accepted" as const, receiptId: admission.wakeupRequestId } : { status: "blocked" as const, receiptId: null };
+        });
       }
       if (correction.remediation && correction.remediation.outcome !== "not_applicable") {
         // Held, partial, and unknown effects stay scoped to E reentry; ordinary delivery cannot duplicate them.

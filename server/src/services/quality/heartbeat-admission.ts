@@ -239,12 +239,23 @@ export async function buildQualityWakeAcceptancePatch(
     idempotencyKey: string | null;
     runId: string;
     acceptedAt: Date;
+    eAdmissionActionId?: string;
   },
 ): Promise<Record<string, unknown> | null> {
   // [T8 bounded resubmission] PLAN-QA 재제출 키: 검토 원장의 예약 dispatch 기록으로만 수락 원문 작성.
   const planQaPatch = await buildPlanQaResubmissionAcceptancePatch(db, input);
   if (planQaPatch) return planQaPatch;
-  const parsed = parseQualityWakeKey(input.idempotencyKey);
+  let parsed = parseQualityWakeKey(input.idempotencyKey);
+  if (!parsed && input.eAdmissionActionId) {
+    const { readCurrentOutputEAdmission } = await import("./current-output.js");
+    const e = await readCurrentOutputEAdmission(db, { companyId: input.companyId, actionId: input.eAdmissionActionId });
+    if (e.kind !== "admitted" || !["queued", "running", "succeeded"].includes(e.actual.status)
+      || e.actual.id !== input.runId || e.wake.idempotencyKey !== input.idempotencyKey
+      || e.wake.agentId !== input.agentId || e.wake.issueId !== input.issueId || e.wake.workflowRunId !== input.workflowRunId) return null;
+    // E validates one canonical wake for this action; replay is the same first admission, not a new attempt.
+    parsed = { actionId: input.eAdmissionActionId, stepRunId: e.wake.workflowStepRunId!,
+      generation: e.wake.workflowExecutionGeneration!, attempt: 1 };
+  }
   if (!parsed) return null;
   const [action] = await db.select({ intentKey: qualityActions.intentKey, target: qualityActions.target })
     .from(qualityActions)
