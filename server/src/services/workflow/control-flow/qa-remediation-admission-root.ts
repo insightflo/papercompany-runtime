@@ -628,6 +628,8 @@ async function inventory(db: Db, runs: readonly Run[]): Promise<Inventory> {
   };
 }
 
+const lockedSourceSettlementContexts = new WeakMap<QaRemediationAdmissionContext, Db>();
+
 export async function unresolvedQaRemediationAdmissionPending(db: Db, context: QaRemediationAdmissionContext,
   executionRunId?: string): Promise<readonly string[]> {
   const unresolved: string[] = [];
@@ -638,6 +640,18 @@ export async function unresolvedQaRemediationAdmissionPending(db: Db, context: Q
       eq(workflowTransitionEvents.workflowRunId, item.preparation.workflowRunId),
       eq(workflowTransitionEvents.eventType, QA_REMEDIATION_COMPLETION_EVENT_TYPE),
       eq(workflowTransitionEvents.idempotencyKey, qaRemediationCompletionKey(item.preparation))));
+    // Only the exact root callback below owns mission/source locks; diagnostic callers cannot exempt pending.
+    if (rows.length === 0 && lockedSourceSettlementContexts.get(context) === db
+      && executionRunId === item.preparation.workflowRunId) {
+      const [replacement] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities)
+        .innerJoin(workflowRuns, eq(workflowRuns.id, workflowRecoveryAuthorities.workflowRunId))
+        .where(and(eq(workflowRecoveryAuthorities.companyId, item.preparation.companyId),
+          eq(workflowRuns.companyId, item.preparation.companyId), eq(workflowRuns.missionId, item.preparation.missionId),
+          eq(workflowRecoveryAuthorities.workflowRunId, executionRunId),
+          eq(workflowRecoveryAuthorities.recoveryKind, "replacement_from_start_v1"),
+          eq(workflowRecoveryAuthorities.status, "consumed"))).limit(1);
+      if (replacement) continue; // No completion/ACK/publication is invented; durable pending stays intact.
+    }
     if (rows.length !== 1 || !(await validateQaRemediationCompletionEvidence(db, rows[0]!, item.preparation)).ok) {
       unresolved.push(item.eventId);
     }
@@ -1039,6 +1053,7 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
             const lockedScope: RootScope = { target: lockedTarget!, source: lockedSource,
               authority: currentAuthorities[0] ?? null };
             const workContext = admissionContext(t, lockedScope, after.pending, lockedTarget!.id);
+            lockedSourceSettlementContexts.set(workContext, t);
 
             const notifications = createReplacementRootNotifications();
             privateNotificationState.current = notifications;

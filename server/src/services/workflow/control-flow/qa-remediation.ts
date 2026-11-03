@@ -107,6 +107,9 @@ export async function tryQaRemediationPass(input: TryQaRemediationInput): Promis
     if (rootResolution.created) await captureCompletedRemediationPatterns(input, rootResolution.completion);
     return { outcome: "waiting", detail: "guarded root completion and QA wake are durable; producer rework is withheld" };
   }
+  if (rootResolution?.outcome === "superseded_by_replacement") {
+    return { outcome: "waiting", detail: "consumed replacement preserves original completion without new publication or rework" };
+  }
   if (rootResolution?.outcome === "not_applicable") {
     const currentQualification = await collectQualifiableQaRemediations(input);
     if (currentQualification.status === "waiting") {

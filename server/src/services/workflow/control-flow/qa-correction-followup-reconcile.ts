@@ -58,9 +58,9 @@ export class QaRemediationReconcileRequired extends Error {
 }
 
 type QaRemediationRootResolution = Extract<QaRemediationReconcileResult,
-  { readonly outcome: "completed" | "not_applicable" }>;
+  { readonly outcome: "completed" | "not_applicable" | "superseded_by_replacement" }>;
 type QaRemediationRootHold = Exclude<QaRemediationReconcileResult,
-  { readonly outcome: "completed" | "not_applicable" }>;
+  { readonly outcome: "completed" | "not_applicable" | "superseded_by_replacement" }>;
 // Per-sync handoff only: the workflow loop consumes the typed root result on reentry; publication authority is re-read by reconcile.
 const qaRemediationRootResolutions = new WeakMap<ReplacementRootNotifications,
   Map<string, QaRemediationRootResolution>>();
@@ -353,7 +353,12 @@ export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string
           // The sync/savepoint has unwound. Re-derive authority and publish only with the configured native owner.
           const outcome = await reconcileQaRemediationReservation(db, error.request,
             createQaFileOwnerRuntime(loadConfig()));
-          if (outcome.outcome !== "completed" && outcome.outcome !== "not_applicable") {
+          if (outcome.outcome === "superseded_by_replacement") {
+            requireQaCorrection(outcome.companyId === error.request.companyId
+              && outcome.sourceRunId === error.request.workflowRunId, "scope");
+          }
+          if (outcome.outcome !== "completed" && outcome.outcome !== "not_applicable"
+            && outcome.outcome !== "superseded_by_replacement") {
             throw new QaRemediationWorkflowHoldError(outcome);
           }
           resolutions.set(qaRemediationResolutionKey(error.request, error.syncIdentity), outcome);

@@ -4,7 +4,7 @@
 import { and, eq, inArray, is } from "drizzle-orm";
 import { isDeepStrictEqual as same } from "node:util";
 import { PgTransaction } from "drizzle-orm/pg-core";
-import { agentWakeupRequests, issues, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, issues, missions, workflowRuns, workflowRecoveryAuthorities, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { hashQaCorrectionPayload } from "./qa-correction-contract.js";
 import { loadLatestQaRemediations } from "../validation-verdict-ledger.js";
 import { isLatestQaExecution } from "./qa-cap-acceptance.js";
@@ -59,6 +59,8 @@ export type QaRemediationReconcileResult =
   | { readonly outcome: "preparation_held"; readonly reason: QaRemediationPreparationHeldReason; readonly detail: string }
   | { readonly outcome: "not_applicable"; readonly detail: string }
   | { readonly outcome: "superseded"; readonly detail: string }
+  | { readonly outcome: "superseded_by_replacement"; readonly authorityId: string;
+      readonly sourceRunId: string; readonly companyId: string; readonly detail: string }
   | { readonly outcome: "publication_held"; readonly reason: QaRemediationPublicationHeldReason;
       readonly files: readonly QaRemediationFilePublication[]; readonly detail: string }
   | { readonly outcome: "publication_io_error"; readonly files: readonly QaRemediationFilePublication[]; readonly detail: string }
@@ -280,6 +282,18 @@ export async function reconcileQaRemediationReservation(db: Db,
       if (committed) return { outcome: "completed", completionEventId: committed.completionEventId,
         completion: committed.completion, created: false, publication: [], notifications: committed.notifications,
         detail: "exact committed completion recognized before latest QA qualification; original completion and pending wake identity reused" };
+    }
+    // Replacement consumption uses the same mission/source locks; committed history above remains reusable.
+    const [replacement] = await rawTx.select({ id: workflowRecoveryAuthorities.id })
+      .from(workflowRecoveryAuthorities).where(and(
+        eq(workflowRecoveryAuthorities.companyId, run.companyId),
+        eq(workflowRecoveryAuthorities.workflowRunId, run.id),
+        eq(workflowRecoveryAuthorities.recoveryKind, "replacement_from_start_v1"),
+        eq(workflowRecoveryAuthorities.status, "consumed"))).limit(1);
+    if (replacement) {
+      return { outcome: "superseded_by_replacement", authorityId: replacement.id,
+        sourceRunId: run.id, companyId: run.companyId,
+        detail: "consumed source replacement forbids new remediation publication" };
     }
     if (run.dispatchAuthorityVersion !== prepared.dispatchAuthorityVersion) {
       return { outcome: "held", reason: "authority_changed" as const,
