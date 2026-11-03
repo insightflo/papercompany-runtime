@@ -154,7 +154,7 @@ it("bulk cancel includes control-only pending intent and repeated cancel stays u
 it.each(["claim", "wake", "start"] as const)("invalidation commits on the second connection before %s resumes", async boundary => {
   const a = await work(await world()); await pause(a); await retain(a); const child = await queued(a);
   const reached = gate(), proceed = gate();
-  const realClaim = recovery.claimQueuedRunWithRecoveryGuard, realStart = recovery.executeHeartbeatWithRecoveryGuard;
+  const realClaim = recovery.claimQueuedRunWithRecoveryGuard, realStart = recovery.startHeartbeatWithC5ExecutionGuard;
   if (boundary !== "start") vi.spyOn(recovery, "claimQueuedRunWithRecoveryGuard").mockImplementation(async (deps, run) => {
     if (boundary === "claim" && run.id === child.id) { reached.release(); await proceed.promise; }
     return realClaim(boundary === "wake" ? { ...deps, recordQueueTransitionEvent: async input => {
@@ -162,9 +162,9 @@ it.each(["claim", "wake", "start"] as const)("invalidation commits on the second
       await deps.recordQueueTransitionEvent(input);
     } } : deps, run);
   });
-  else vi.spyOn(recovery, "executeHeartbeatWithRecoveryGuard").mockImplementation(async (connection, run, execute) => {
+  else vi.spyOn(recovery, "startHeartbeatWithC5ExecutionGuard").mockImplementation(async (connection, run, execute, sharedAdmission) => {
     if (run.id === child.id) { reached.release(); await proceed.promise; }
-    return realStart(connection, run, execute);
+    return realStart(connection, run, execute, sharedAdmission);
   });
   const queue = heartbeatService(db).resumeQueuedRuns(a.agentId);
   await reached.promise;
