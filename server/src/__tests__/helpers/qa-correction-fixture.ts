@@ -71,8 +71,8 @@ export async function seedQaCorrection(db: Db, mode: "registered_legacy" | "iden
     { id: "qa-check", name: "QA", agentId: verifier, dependencies: ["produce"] },
   ] });
   await db.insert(workflowRuns).values({ id: workflowRunId, companyId, missionId, workflowId, status: "running", triggeredBy: "test" });
-  const [producerIssue] = await db.insert(issues).values({ companyId, missionId, title: "Produce", status: "done", originKind: "workflow_execution" }).returning();
-  const [qaIssue] = await db.insert(issues).values({ companyId, missionId, title: "[QA] Check", status: "todo", originKind: "workflow_execution" }).returning();
+  const [producerIssue] = await db.insert(issues).values({ companyId, missionId, title: "Produce", status: "done", originKind: "workflow_execution", originRunId: workflowRunId }).returning();
+  const [qaIssue] = await db.insert(issues).values({ companyId, missionId, title: "[QA] Check", status: "todo", originKind: "workflow_execution", originRunId: workflowRunId }).returning();
   const [producer] = await db.insert(workflowStepRuns).values({ workflowRunId, stepId: "produce", issueId: producerIssue!.id,
     status: "completed", completedAt: new Date(Date.now() - 1000) }).returning();
   const [qa] = await db.insert(workflowStepRuns).values({ workflowRunId, stepId: "qa-check", issueId: qaIssue!.id, status: "failed" }).returning();

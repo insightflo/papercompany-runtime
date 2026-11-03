@@ -2,7 +2,11 @@ import { and, eq, inArray, is, or } from "drizzle-orm";
 import { agents, agentWakeupRequests, companies, heartbeatRuns, issues, missions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { isQaCorrectionRootOwnerRequired } from "./issue-assignment-wakeup.js";
-import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
+import { captureQaCorrectionExecutionIdentity, QaCorrectionClaimRejected, withQaCorrectionClaimRoot,
+  withQaCorrectionExecutionRoot, type ExecutionBoundary, type QaCorrectionExecutionBox }
+  from "./workflow/control-flow/qa-correction-claim-root.js";
+import { QaRemediationAdmissionHold, readC5NotInvokedProof, type QaRemediationSharedAdmissionRuntime }
+  from "./workflow/control-flow/qa-remediation-admission-root.js";
 import { conflict } from "../errors.js";
 import { budgetService } from "./budgets.js";
 import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
@@ -88,20 +92,37 @@ export async function assertHeartbeatRecoveryAdmission(db: Db, input: Scope) {
 }
 
 /** Claim and replacement admission serialize on the same mission/source-run locks. */
+async function claimWithinAdmission(t: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date,
+  pause: PauseChildAdmission | null) {
+  const [agent] = await t.select().from(agents).where(eq(agents.id, run.agentId));
+  if (!agent || ["paused", "terminated", "pending_approval"].includes(agent.status)) throw conflict("Cancelled because the agent is not invokable");
+  const context = record(run.contextSnapshot);
+  const block = await budgetService(t).getInvocationBlock(run.companyId, run.agentId, { issueId: text(context.issueId), projectId: text(context.projectId) });
+  if (block) throw conflict(block.reason);
+  const missionId = text(context.missionId);
+  if (missionId) await assertMissionRuntimeAcceptsWork(t, { companyId: run.companyId, missionId });
+  await assertCurrentPauseChild(t, run, pause);
+  return await claimQueuedHeartbeatRun(t, run, claimedAt);
+}
+
 async function guardedClaim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date) {
   let pause: PauseChildAdmission | null = null;
   return withQaCorrectionClaimRoot(db, run, async t => {
     pause = await preparePauseChildAdmission(t, run, missionId => assertHeartbeatRecoveryAdmission(t, { ...run, missionId }));
-  }, async t => {
-    const [agent] = await t.select().from(agents).where(eq(agents.id, run.agentId));
-    if (!agent || ["paused", "terminated", "pending_approval"].includes(agent.status)) throw conflict("Cancelled because the agent is not invokable");
-    const context = record(run.contextSnapshot);
-    const block = await budgetService(t).getInvocationBlock(run.companyId, run.agentId, { issueId: text(context.issueId), projectId: text(context.projectId) });
-    if (block) throw conflict(block.reason);
-    const missionId = text(context.missionId);
-    if (missionId) await assertMissionRuntimeAcceptsWork(t, { companyId: run.companyId, missionId });
-    await assertCurrentPauseChild(t, run, pause);
-    return claimQueuedHeartbeatRun(t, run, claimedAt);
+  }, async t => claimWithinAdmission(t, run, claimedAt, pause));
+}
+
+async function guardedC5Claim(db: Db, run: typeof heartbeatRuns.$inferSelect, claimedAt: Date,
+  sharedAdmission: QaRemediationSharedAdmissionRuntime): Promise<ExecutionBoundary<typeof heartbeatRuns.$inferSelect | null>> {
+  let pause: PauseChildAdmission | null = null;
+  return withQaCorrectionExecutionRoot(db, run, {
+    phase: "claim",
+    sharedAdmission,
+    admit: async (t, currentRun) => {
+      pause = await preparePauseChildAdmission(t, currentRun,
+        missionId => assertHeartbeatRecoveryAdmission(t, { ...currentRun, missionId }));
+    },
+    work: async (t, currentRun) => claimWithinAdmission(t, currentRun, claimedAt, pause),
   });
 }
 
@@ -146,14 +167,49 @@ export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof h
   return started.value.result;
 }
 
+/** Opt-in public adapter start: retain the existing heartbeat admission checks while
+ * returning C5's authenticated pre-invocation hold separately from started work.
+ */
+export async function startHeartbeatWithC5ExecutionGuard<T>(db: Db,
+  run: typeof heartbeatRuns.$inferSelect, execute: () => Promise<T>,
+  sharedAdmission: QaRemediationSharedAdmissionRuntime): Promise<ExecutionBoundary<QaCorrectionExecutionBox<T>>> {
+  let pause: PauseChildAdmission | null = null;
+  try {
+    return await withQaCorrectionExecutionRoot(db, run, {
+      phase: "adapter_start",
+      sharedAdmission,
+      admit: async (t, currentRun) => {
+        pause = await preparePauseChildAdmission(t, currentRun,
+          missionId => assertHeartbeatRecoveryAdmission(t, { ...currentRun, missionId }));
+      },
+      work: async (t, currentRun, _scope, _context, invokeOnce) => {
+        await assertCurrentPauseChild(t, currentRun, pause);
+        await recordOwnerHumanAdapterStart(t, currentRun);
+        const [current] = await t.select().from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.id, currentRun.id), eq(heartbeatRuns.companyId, currentRun.companyId))).for("share");
+        if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(currentRun)) {
+          throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });
+        }
+        return invokeOnce(execute);
+      },
+    });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error("heartbeat recovery admission failed", { cause: error });
+    throw Object.assign(failure, { code: "heartbeat_recovery_blocked" });
+  }
+}
+
 type Run = typeof heartbeatRuns.$inferSelect;
 export type ClaimOutcome =
   | { kind: "claimed"; run: Run }
   | { kind: "not_claimed" }
   | { kind: "root_deferred" }
-  | { kind: "correction_rejected" };
+  | { kind: "correction_rejected" }
+  | { kind: "c5_held" }
+  | { kind: "c5_unknown" };
 type ClaimEffects = {
   db: Db;
+  sharedAdmission?: QaRemediationSharedAdmissionRuntime;
   cancelRun: (id: string, reason: string, resumeQueue: false) => Promise<unknown>;
   recordQueueTransitionEvent: (event: Parameters<typeof import("./heartbeat.js").recordHeartbeatQueueTransitionEvent>[1]) => Promise<void>;
   publishLiveEvent: typeof import("./live-events.js").publishLiveEvent;
@@ -164,14 +220,26 @@ type ClaimEffects = {
 export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: Run): Promise<ClaimOutcome> {
   if (run.status !== "queued") return { kind: "claimed", run };
   const claimedAt = new Date();
-  let outcome: Awaited<ReturnType<typeof guardedClaim>>;
-  try { outcome = await guardedClaim(deps.db, run, claimedAt); }
+  let outcome: Awaited<ReturnType<typeof guardedClaim>> | ExecutionBoundary<Run | null>;
+  try {
+    outcome = deps.sharedAdmission
+      ? await guardedC5Claim(deps.db, run, claimedAt, deps.sharedAdmission)
+      : await guardedClaim(deps.db, run, claimedAt);
+  }
   catch (error) {
     if (isQaCorrectionRootOwnerRequired(error)
       || (is(deps.db, PgTransaction) && error instanceof QaCorrectionClaimRejected)) throw error;
+    if (deps.sharedAdmission && error instanceof QaRemediationAdmissionHold) return { kind: "c5_unknown" };
     await deps.cancelRun(run.id, error instanceof Error ? error.message : "Heartbeat claim refused", false);
     return { kind: error instanceof QaCorrectionClaimRejected ? "correction_rejected" : "not_claimed" };
   }
+  if (outcome.kind === "c5_held_not_invoked") {
+    try { readC5NotInvokedProof(outcome.proof, deps.db, captureQaCorrectionExecutionIdentity(run), "claim"); }
+    catch { return { kind: "c5_unknown" }; }
+    return { kind: "c5_held" };
+  }
+  if (outcome.kind === "root_deferred") return { kind: "root_deferred" };
+  if (outcome.kind === "not_claimed") return { kind: "not_claimed" };
   if (outcome.kind !== "performed") return outcome;
   const claimed = outcome.value;
   if (!claimed) return { kind: "not_claimed" };
@@ -210,36 +278,45 @@ export async function claimQueuedRunWithRecoveryGuard(deps: ClaimEffects, run: R
 }
 
 type QueueClaims = {
+  c5QueueOptIn: boolean;
   select: (slots: number, attempted: string[]) => Promise<Run[]>;
   promote: (slots: number) => Promise<Run[]>;
   claim: (run: Run) => Promise<ClaimOutcome>;
   publish: (run: Run) => void;
 };
-/** Caller holds the existing agent-start lock. Removed rejected rows, rather than a new limit, bound progress. */
+/** Caller holds the agent-start lock; finite C5 queue progress is limited to its explicit owner opt-in. */
 export async function claimAvailableHeartbeatRuns(deps: QueueClaims, slots: number): Promise<Run[]> {
   const claimed: Run[] = [], attempted = new Set<string>();
+  const c5QueueOptIn = deps.c5QueueOptIn;
   const take = async (runs: Run[]) => {
-    let rejected = false;
+    let retryQueue = false, uncertain = false;
     for (const run of runs) {
       if (attempted.has(run.id)) continue;
       attempted.add(run.id);
       const result = await deps.claim(run);
       if (result.kind === "claimed") claimed.push(result.run);
-      if (result.kind === "correction_rejected") rejected = true;
+      if (result.kind === "correction_rejected" || (c5QueueOptIn && result.kind === "c5_held")) retryQueue = true;
+      if (result.kind === "root_deferred" || result.kind === "c5_unknown"
+        || (c5QueueOptIn && result.kind === "not_claimed")
+        || (!c5QueueOptIn && result.kind === "c5_held")) {
+        uncertain = true;
+        break;
+      }
     }
-    return rejected;
+    return { retryQueue, uncertain };
   };
   let queued = await deps.select(slots, []);
   for (;;) {
-    const rejected = await take(queued);
-    if (claimed.length >= slots) break;
-    if (rejected) {
+    const queuedResult = await take(queued);
+    if (claimed.length >= slots || queuedResult.uncertain) break;
+    if (queuedResult.retryQueue) {
       queued = await deps.select(slots - claimed.length, [...attempted]);
       if (queued.length) continue;
     }
     const promoted = await deps.promote(slots - claimed.length);
     for (const run of promoted) deps.publish(run);
-    if (!await take(promoted) || claimed.length >= slots) break;
+    const promotedResult = await take(promoted);
+    if (claimed.length >= slots || promotedResult.uncertain || !promotedResult.retryQueue) break;
     queued = await deps.select(slots - claimed.length, [...attempted]);
   }
   return claimed;

@@ -189,6 +189,7 @@ type Cleanup = {
   requeueCoalescedWakeupsForFinishedRun: (db: Db, input: { companyId: string; runId: string }) => Promise<number>;
   finalizeAgentStatus: (agentId: string, outcome: Outcome) => Promise<void>;
   startNextQueuedRunForAgent: (agentId: string) => Promise<unknown>;
+  deferQueuePromotion?: boolean;
 };
 
 /** Existing executeRun finally ordering, with stop evidence after release and mandatory settlement.
@@ -215,5 +216,5 @@ export async function finishPauseExecution(deps: Cleanup, original: Run, observa
     }
     await deps.finalizeAgentStatus(original.agentId, run.status as Outcome).catch(() => undefined);
   }
-  await deps.startNextQueuedRunForAgent(original.agentId);
+  if (!deps.deferQueuePromotion) await deps.startNextQueuedRunForAgent(original.agentId);
 }

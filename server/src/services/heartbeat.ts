@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, is, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -17,6 +17,7 @@ import {
   companies,
   heartbeatRunEvents,
   heartbeatRuns,
+  workflowRuns,
   workflowTransitionEvents,
   documents,
   issueComments,
@@ -34,6 +35,7 @@ import {
 } from "@paperclipai/db";
 import { HttpError, conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { loadConfig } from "../config.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { createHeartbeatRunLog } from "./heartbeat-run-log.js";
@@ -195,7 +197,8 @@ import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetry
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
 import { preserveWorkflowAttemptProof, withoutWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
-import { assertHeartbeatRecoveryAdmission, claimQueuedRunWithRecoveryGuard, claimAvailableHeartbeatRuns, executeHeartbeatWithRecoveryGuard } from "./heartbeat-recovery-guard.js";
+import { assertHeartbeatRecoveryAdmission, claimQueuedRunWithRecoveryGuard, claimAvailableHeartbeatRuns,
+  executeHeartbeatWithRecoveryGuard, startHeartbeatWithC5ExecutionGuard } from "./heartbeat-recovery-guard.js";
 import { maybeRecordTerminalFinalization } from "./heartbeat-finalization/shadow-terminal-hook.js";
 import {
   SHUTDOWN_INTERRUPTED_ERROR_CODE,
@@ -207,7 +210,25 @@ import {
 import { OPERATOR_DECISION_WAKE_PREFIX } from "./operator-decision-continuation-store.js";
 import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 import { settleHeartbeatAfterExecution } from "./heartbeat-finalization/post-execution.js";
+import { attemptFullSettlement } from "./heartbeat-finalization/settlement.js";
 import { createPauseExecutionObservation, finishPauseExecution } from "./heartbeat-pause-quiescence.js";
+import { observeQuiescenceResources } from "./heartbeat-finalization/quiescence-probe.js";
+import { createHeartbeatActualObservation, freezeHeartbeatActualDrainIdentity,
+  writeHeartbeatActualDrain, type HeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
+import { readWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
+import {
+  acknowledgeTerminalReleaseObligation,
+  createTerminalReleaseManifest,
+  readReadyTerminalReleaseContinuation,
+  readTerminalReleaseAcknowledgment,
+  readTerminalReleaseManifest,
+  readTerminalReleaseManifestForSource,
+  terminalReleaseMatchesRun,
+  TERMINAL_RELEASE_EVENT_TYPE,
+  writeTerminalReleaseManifest,
+  type TerminalFollowup,
+} from "./heartbeat-terminal-release-continuation.js";
+import { readTerminalContinuationSource, settleTerminalContinuationFromQaSuccessor } from "./heartbeat-terminal-successor-settlement.js";
 import {
   assertIssueResumeScopeIdentity,
   recordResumeStaleResultRejected,
@@ -215,14 +236,146 @@ import {
 } from "./workflow/resume-scope-fence.js";
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
+
+type ActiveHeartbeatExecutionFrame = {
+  readonly run: typeof heartbeatRuns.$inferSelect;
+  readonly finalizationVersion: number | null;
+  adapterInvocationAttempted: boolean;
+  actualCaptured: boolean;
+  identityObserved: boolean;
+  actualDrainIdentity: HeartbeatActualDrainIdentity | null;
+  noActualInvocationConfirmed: boolean;
+  c5ExecutionOptedIn: boolean;
+  c5NotInvoked: { proof: C5NotInvokedProof; identity: QaCorrectionExecutionIdentity } | null;
+  c5TerminalWriterSnapshot: typeof heartbeatRuns.$inferSelect | null;
+  ownerReleaseBlocked: boolean;
+  conflicted: boolean;
+};
+
+type HeartbeatServiceOptions = {
+  qaCorrectionExecution?: { ownerRuntime: QaFileOwnerRuntime };
+};
+
+// A root Db keeps its explicitly supplied owner runtime across bare service recreation.
+// The WeakMap keys by the exact Db object and does not share execution contexts or roots.
+const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
+
+function bindHeartbeatC5OwnerRuntime(db: Db, explicit: QaFileOwnerRuntime | undefined) {
+  const bound = heartbeatC5OwnerRuntimeByDb.get(db);
+  if (explicit) {
+    if (bound && bound !== explicit) throw new Error("heartbeat_c5_owner_runtime_binding_conflict");
+    if (!bound) heartbeatC5OwnerRuntimeByDb.set(db, explicit);
+    return explicit;
+  }
+  if (bound) return bound;
+  const ownerRuntime = createQaFileOwnerRuntime(loadConfig());
+  heartbeatC5OwnerRuntimeByDb.set(db, ownerRuntime);
+  return ownerRuntime;
+}
+
+function createHeartbeatC5SharedAdmission(ownerRuntime: QaFileOwnerRuntime): QaRemediationSharedAdmissionRuntime {
+  const outerNotifications = createReplacementRootNotifications();
+  const resolutionMap = new Map<string, unknown>();
+  const rootResolutionMaps = new WeakMap<ReplacementRootNotifications, Map<string, unknown>>();
+  return {
+    ownerRuntime,
+    outerNotifications,
+    resolutionMap,
+    bindResolutionMap: (notifications, map) => rootResolutionMaps.set(notifications, map),
+    driftBudget: { corrections: 0 },
+  };
+}
+
+function mergeHeartbeatRootNotifications(target: ReplacementRootNotifications, source: ReplacementRootNotifications) {
+  for (const agentId of source.agentIds) target.agentIds.add(agentId);
+  for (const wakeupRequestId of source.correctionWakeupRequestIds) target.correctionWakeupRequestIds.add(wakeupRequestId);
+}
+
+class C5NotInvokedExecutionError extends Error {
+  readonly code = "c5_held_not_invoked";
+  constructor(readonly proof: C5NotInvokedProof) {
+    super("heartbeat adapter start held by pending QA remediation preparation");
+  }
+}
+
+// heartbeatService(db) is created by several control-plane callers. Share only live frames
+// for that exact Db object so cancellation can consult the active actual without persistence.
+const activeHeartbeatExecutionFramesByDb = new WeakMap<Db, Map<string, ActiveHeartbeatExecutionFrame>>();
+
+function activeHeartbeatExecutionFrames(db: Db) {
+  let frames = activeHeartbeatExecutionFramesByDb.get(db);
+  if (!frames) {
+    frames = new Map();
+    activeHeartbeatExecutionFramesByDb.set(db, frames);
+  }
+  return frames;
+}
+
+function sameHeartbeatExecutionAttempt(left: typeof heartbeatRuns.$inferSelect,
+  right: typeof heartbeatRuns.$inferSelect) {
+  return left.id === right.id && left.companyId === right.companyId && left.agentId === right.agentId
+    && left.issueId === right.issueId && left.wakeupRequestId === right.wakeupRequestId
+    && left.workflowStepRunId === right.workflowStepRunId
+    && left.workflowExecutionGeneration === right.workflowExecutionGeneration
+    && left.executionScopeKind === right.executionScopeKind && left.executionEpoch === right.executionEpoch
+    && left.executionToken === right.executionToken && left.executorOwnerId === right.executorOwnerId
+    && left.executorOwnerLeaseEpoch === right.executorOwnerLeaseEpoch
+    && left.executorOwnerLeaseToken === right.executorOwnerLeaseToken && left.retryOfRunId === right.retryOfRunId
+    && left.processLossRetryCount === right.processLossRetryCount;
+}
+
+function sameC5ExecutionIdentityBeforeOwnerRelease(expected: QaCorrectionExecutionIdentity,
+  current: QaCorrectionExecutionIdentity) {
+  const { executorOwnerReleasedAt: expectedReleasedAt, ...expectedAttempt } = expected;
+  const { executorOwnerReleasedAt: currentReleasedAt, ...currentAttempt } = current;
+  return expectedReleasedAt === null && currentReleasedAt instanceof Date
+    && Number.isFinite(currentReleasedAt.getTime()) && isDeepStrictEqual(expectedAttempt, currentAttempt);
+}
+
+const NONWORKFLOW_EXECUTION_SCOPES = new Set([
+  "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
+]);
+
+function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelect,
+  wake: typeof agentWakeupRequests.$inferSelect | null) {
+  if (wake?.workflowStepRunId && wake.workflowExecutionGeneration !== null) return "workflow_step";
+  if (run.issueId) return "issue_nonworkflow";
+  if (wake?.missionId) return "mission_nonworkflow";
+  if (run.invocationSource === "timer") return "timer";
+  if (run.invocationSource === "on_demand") return "manual_on_demand";
+  return "automation_nonworkflow";
+}
+
+function heartbeatActualIdentityMatchesRun(identity: HeartbeatActualDrainIdentity,
+  run: typeof heartbeatRuns.$inferSelect) {
+  return identity.heartbeatRunId === run.id && identity.companyId === run.companyId
+    && identity.issueId === run.issueId && identity.wakeupRequestId === run.wakeupRequestId
+    && identity.workflowStepRunId === run.workflowStepRunId
+    && identity.executionGeneration === run.workflowExecutionGeneration
+    && identity.executionScopeKind === run.executionScopeKind && identity.executionEpoch === run.executionEpoch
+    && identity.executionToken === run.executionToken && identity.executorOwnerId === run.executorOwnerId
+    && identity.ownerLeaseEpoch === run.executorOwnerLeaseEpoch
+    && identity.ownerLeaseToken === run.executorOwnerLeaseToken && identity.retryOfRunId === run.retryOfRunId
+    && identity.processLossRetryCount === run.processLossRetryCount;
+}
 import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
 import { isStoredOperatorDecisionWake, promoteStoredDeferredWakes } from "./heartbeat-stored-recovery-admission.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { withCorrectionDeliveryRoot, type CorrectionDeliveryInput, type CorrectionDeliveryResult } from "./workflow/control-flow/qa-correction-delivery-root.js";
 import { assertDeliveryInput, requireDelivery } from "./workflow/control-flow/qa-correction-delivery-receipt.js";
-import { currentReplacementRootNotifications, isQaCorrectionRootOwnerRequired, validateAndRegisterQaCorrectionRootDrain } from "./issue-assignment-wakeup.js";
-import { QaCorrectionClaimRejected, withQaCorrectionClaimRoot } from "./workflow/control-flow/qa-correction-claim-root.js";
+import { createReplacementRootNotifications, currentReplacementRootNotifications, isQaCorrectionRootOwnerRequired,
+  validateAndRegisterQaCorrectionRootDrain, withReplacementRootNotificationDb,
+  type ReplacementRootNotifications } from "./issue-assignment-wakeup.js";
+import {
+  captureQaCorrectionExecutionIdentity,
+  QaCorrectionClaimRejected,
+  withQaCorrectionClaimRoot,
+} from "./workflow/control-flow/qa-correction-claim-root.js";
+import { readC5NotInvokedProof, type C5NotInvokedProof, type QaCorrectionExecutionIdentity,
+  type QaRemediationSharedAdmissionRuntime }
+  from "./workflow/control-flow/qa-remediation-admission-root.js";
+import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import { createHeartbeatQueuedStaleRecovery } from "./heartbeat-queued-stale-recovery.js";
@@ -3284,7 +3437,8 @@ export async function setHeartbeatRunStatus(
   return updated;
 }
 
-export function heartbeatService(db: Db) {
+export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
+  const c5OwnerRuntime = bindHeartbeatC5OwnerRuntime(db, options.qaCorrectionExecution?.ownerRuntime);
   // [instant-advance v1.2] fire-and-forget 진행 모듈에 db 주입(미주입 요청은 no-op).
   configureInstantWorkflowAdvanceDb(db);
   const instanceSettings = instanceSettingsService(db);
@@ -3308,6 +3462,8 @@ export function heartbeatService(db: Db) {
     { requestedByActorId: "heartbeat-plan-rework", contextSource: "heartbeat_plan_rework" },
   );
   const activeRunExecutions = new Set<string>();
+  const terminalContinuationInflight = new Set<string>();
+  let terminalContinuationScanCursor: { createdAt: string; id: string } | null = null;
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
@@ -3389,6 +3545,41 @@ export function heartbeatService(db: Db) {
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+  }
+
+  async function positivelyClassifiesNonworkflowV1(
+    supplied: typeof heartbeatRuns.$inferSelect,
+    current: typeof heartbeatRuns.$inferSelect | null,
+    frame?: ActiveHeartbeatExecutionFrame,
+  ) {
+    if (!current || !sameHeartbeatExecutionAttempt(supplied, current)
+      || supplied.invocationSource !== current.invocationSource
+      || supplied.wakeupRequestId !== current.wakeupRequestId) return false;
+    const scope = supplied.executionScopeKind;
+    if (!NONWORKFLOW_EXECUTION_SCOPES.has(scope ?? "")
+      || supplied.finalizationVersion !== 1 || current.finalizationVersion !== 1
+      || supplied.workflowStepRunId !== null || supplied.workflowExecutionGeneration !== null
+      || current.workflowStepRunId !== null || current.workflowExecutionGeneration !== null) return false;
+    const attempts = frame ? [supplied, current, frame.run] : [supplied, current];
+    if (attempts.some(attempt => attempt.executionScopeKind !== scope || attempt.finalizationVersion !== 1
+      || attempt.workflowStepRunId !== null || attempt.workflowExecutionGeneration !== null
+      || attempt.invocationSource !== supplied.invocationSource || attempt.wakeupRequestId !== supplied.wakeupRequestId)) return false;
+    if (frame && (frame.conflicted || frame.ownerReleaseBlocked || frame.finalizationVersion !== 1
+      || !sameHeartbeatExecutionAttempt(frame.run, current) || frame.actualDrainIdentity
+      || (frame.adapterInvocationAttempted && !frame.actualCaptured))) return false;
+
+    let wake: typeof agentWakeupRequests.$inferSelect | null = null;
+    if (supplied.wakeupRequestId) {
+      [wake] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.id, supplied.wakeupRequestId),
+        eq(agentWakeupRequests.companyId, supplied.companyId),
+      )).limit(1);
+      if (!wake || wake.id !== supplied.wakeupRequestId || wake.companyId !== supplied.companyId
+        || wake.agentId !== supplied.agentId || wake.issueId !== supplied.issueId || wake.runId !== supplied.id
+        || wake.status === "coalesced" || wake.workflowRunId !== null || wake.workflowStepRunId !== null
+        || wake.workflowExecutionGeneration !== null) return false;
+    }
+    return producedExecutionScopeKind(supplied, wake) === scope;
   }
 
   async function ensureMissionOwnerActionForRequestChanges(input: {
@@ -4439,6 +4630,37 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  /** Fill only missing actual-result evidence on the same exact owner/attempt. */
+  async function preserveActualRunEvidence(run: typeof heartbeatRuns.$inferSelect,
+    evidence: Partial<Pick<typeof heartbeatRuns.$inferInsert,
+      | "exitCode" | "signal" | "usageJson" | "resultJson" | "sessionIdAfter"
+      | "stdoutExcerpt" | "stderrExcerpt" | "logBytes" | "logSha256" | "logCompressed">>): Promise<boolean> {
+    return db.transaction(async tx => {
+      const [current] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).for("no key update");
+      if (!current || current.agentId !== run.agentId || current.issueId !== run.issueId
+        || current.wakeupRequestId !== run.wakeupRequestId || current.workflowStepRunId !== run.workflowStepRunId
+        || current.workflowExecutionGeneration !== run.workflowExecutionGeneration
+        || current.executionScopeKind !== run.executionScopeKind || current.executionEpoch !== run.executionEpoch
+        || current.executionToken !== run.executionToken || current.executorOwnerId !== run.executorOwnerId
+        || current.executorOwnerLeaseEpoch !== run.executorOwnerLeaseEpoch
+        || current.executorOwnerLeaseToken !== run.executorOwnerLeaseToken || current.retryOfRunId !== run.retryOfRunId
+        || current.processLossRetryCount !== run.processLossRetryCount) return false;
+      const patch: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(evidence)) {
+        if (value === undefined) continue;
+        const existing = current[key as keyof typeof current];
+        if (existing === null || existing === undefined) {
+          if (value !== null) patch[key] = value;
+        } else if (!isDeepStrictEqual(existing, value)) return false;
+      }
+      if (Object.keys(patch).length === 0) return true;
+      const rows = await tx.update(heartbeatRuns).set({ ...patch, updatedAt: new Date() })
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).returning({ id: heartbeatRuns.id });
+      return rows.length === 1;
+    });
+  }
+
   async function setWakeupStatus(
     wakeupRequestId: string | null | undefined,
     status: string,
@@ -4639,8 +4861,10 @@ export function heartbeatService(db: Db) {
     return Number(count ?? 0);
   }
 
-  async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
-    if (is(db, PgTransaction)) {
+  async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect,
+    notificationSink?: ReplacementRootNotifications) {
+    const ownerRuntime = c5OwnerRuntime;
+    if (is(db, PgTransaction) && !ownerRuntime) {
       // Validate correction ancestry before registering; a savepoint cannot own execution.
       try {
         await withQaCorrectionClaimRoot(db, run,
@@ -4656,9 +4880,12 @@ export function heartbeatService(db: Db) {
       // Keep the durable row queued for the owning root drain or scheduler after commit.
       return { kind: "root_deferred" as const };
     }
-    return claimQueuedRunWithRecoveryGuard({
-      db, cancelRun: cancelRunInternal, recordQueueTransitionEvent, publishLiveEvent, setWakeupStatus,
+    const sharedAdmission = ownerRuntime ? createHeartbeatC5SharedAdmission(ownerRuntime) : undefined;
+    const result = await claimQueuedRunWithRecoveryGuard({
+      db, sharedAdmission, cancelRun: cancelRunInternal, recordQueueTransitionEvent, publishLiveEvent, setWakeupStatus,
     }, run);
+    if (sharedAdmission && notificationSink) mergeHeartbeatRootNotifications(notificationSink, sharedAdmission.outerNotifications);
+    return result;
   }
 
   async function pauseAgentForReauthRequired(
@@ -5341,6 +5568,41 @@ export function heartbeatService(db: Db) {
       reaped.push(...queuedRecovery.reapedRunIds);
     }
 
+    const continuationCursor = terminalContinuationScanCursor;
+    const continuationPredicate = continuationCursor
+      ? and(eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE), or(
+          gt(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
+          and(eq(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
+            gt(workflowTransitionEvents.id, continuationCursor.id)),
+        ))
+      : eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE);
+    const continuationRows = await db.select({ id: workflowTransitionEvents.id, createdAt: sql<string>`${workflowTransitionEvents.createdAt}::text` })
+      .from(workflowTransitionEvents).where(continuationPredicate)
+      .orderBy(asc(workflowTransitionEvents.createdAt), asc(workflowTransitionEvents.id)).limit(50);
+    if (continuationRows.length === 0) {
+      terminalContinuationScanCursor = null;
+    } else {
+      const last = continuationRows[continuationRows.length - 1]!;
+      terminalContinuationScanCursor = { createdAt: last.createdAt, id: last.id };
+      for (const row of continuationRows) {
+        if (terminalContinuationInflight.has(row.id)) continue;
+        const manifest = await readTerminalReleaseManifest(db, row.id);
+        if (manifest.kind !== "found") {
+          logger.warn({ continuationEventId: row.id, reason: manifest.reason },
+            "terminal release reaper left malformed continuation held");
+          continue;
+        }
+        const execution = runTerminalReleaseContinuation(row.id).then(result => {
+          if (result.kind === "held") logger.warn({ continuationEventId: row.id, reason: result.reason },
+            "terminal release reaper left continuation pending");
+        }).catch(error => {
+          logger.warn({ err: error, continuationEventId: row.id },
+            "terminal release reaper continuation failed; durable obligation remains pending");
+        });
+        trackHeartbeatExecution(db, execution);
+      }
+    }
+
     if (reaped.length > 0) {
       logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
     }
@@ -5721,7 +5983,9 @@ export function heartbeatService(db: Db) {
   }
 
   async function startNextQueuedRunForAgent(agentId: string) {
-    return withAgentStartLock(agentId, async () => {
+    const c5QueueOptIn = Boolean(c5OwnerRuntime);
+    const c5Notifications = c5QueueOptIn ? createReplacementRootNotifications() : null;
+    const claimedRuns = await withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
       if (!agent) return [];
       if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
@@ -5732,17 +5996,23 @@ export function heartbeatService(db: Db) {
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
+      const queuedSnapshot = c5QueueOptIn
+        ? await db.select().from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+          .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
+        : null;
       const claimedRuns = await claimAvailableHeartbeatRuns({
-        select: (slots, attempted) => db.select().from(heartbeatRuns)
-          .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued"),
-            attempted.length ? not(inArray(heartbeatRuns.id, attempted)) : undefined))
-          .orderBy(asc(heartbeatRuns.createdAt)).limit(slots),
-        claim: claimQueuedRun,
+        c5QueueOptIn,
+        select: (slots, attempted) => queuedSnapshot
+          ? Promise.resolve(queuedSnapshot.filter(run => !attempted.includes(run.id)).slice(0, slots))
+          : db.select().from(heartbeatRuns)
+            .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued"),
+              attempted.length ? not(inArray(heartbeatRuns.id, attempted)) : undefined))
+            .orderBy(asc(heartbeatRuns.createdAt)).limit(slots),
+        claim: run => claimQueuedRun(run, c5Notifications ?? undefined),
         promote: slots => promoteQueuedWakeupRequestsForAgent(followupQueueDeps, agent, slots),
         publish: publishQueuedRun,
       }, availableSlots);
-
-      if (claimedRuns.length === 0) return [];
 
       for (const claimedRun of claimedRuns) {
         const execution = executeRun(claimedRun.id).catch((err) => {
@@ -5752,6 +6022,8 @@ export function heartbeatService(db: Db) {
       }
       return claimedRuns;
     });
+    if (c5Notifications) await drainC5RootNotifications(c5Notifications);
+    return claimedRuns;
   }
 
   const followupPromotionDeps: HeartbeatFollowupPromotionDeps = {
@@ -5849,6 +6121,19 @@ export function heartbeatService(db: Db) {
     if (resumeQueue) await startNextQueuedRunForAgent(result.run.agentId);
   }
 
+  async function drainC5RootNotifications(notifications: ReplacementRootNotifications) {
+    for (const wakeupRequestId of [...notifications.correctionWakeupRequestIds].sort()) {
+      try { await deliverStoredQaCorrectionWake(wakeupRequestId, "public_callback", true); }
+      catch (error) {
+        logger.warn({ err: error, wakeupRequestId }, "committed C5 correction wake notification remains undrained");
+      }
+    }
+    for (const agentId of [...notifications.agentIds].sort()) {
+      try { await resumeQueuedRuns(agentId); }
+      catch (error) { logger.warn({ err: error, agentId }, "committed C5 queue notification remains undrained"); }
+    }
+  }
+
   function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
     publishLiveEvent({
       companyId: run.companyId, type: "heartbeat.run.queued",
@@ -5863,13 +6148,253 @@ export function heartbeatService(db: Db) {
     if (run.status !== "queued" && run.status !== "running") return;
 
     if (run.status === "queued") {
-      const outcome = await claimQueuedRun(run);
+      const claimNotifications = c5OwnerRuntime ? createReplacementRootNotifications() : null;
+      const outcome = await claimQueuedRun(run, claimNotifications ?? undefined);
       if (outcome.kind !== "claimed") return;
       run = outcome.run;
+      // executeRun's queued path is outside the agent-start lock; the claim root has
+      // returned only after its native owner closed, so reentry cannot await itself.
+      if (claimNotifications) await drainC5RootNotifications(claimNotifications);
     }
 
     activeRunExecutions.add(run.id);
+    const executionFrames = activeHeartbeatExecutionFrames(db);
+    const previousExecutionFrame = executionFrames.get(run.id);
+    const executionFrame: ActiveHeartbeatExecutionFrame = {
+      run,
+      finalizationVersion: run.finalizationVersion ?? null,
+      adapterInvocationAttempted: false,
+      actualCaptured: false,
+      identityObserved: false,
+      actualDrainIdentity: null,
+      noActualInvocationConfirmed: false,
+      c5ExecutionOptedIn: c5OwnerRuntime !== undefined,
+      c5NotInvoked: null,
+      c5TerminalWriterSnapshot: null,
+      ownerReleaseBlocked: false,
+      conflicted: Boolean(previousExecutionFrame),
+    };
+    if (previousExecutionFrame) previousExecutionFrame.conflicted = true;
+    executionFrames.set(run.id, executionFrame);
+    const removeExecutionFrame = () => {
+      if (executionFrames.get(run.id) === executionFrame) executionFrames.delete(run.id);
+      if (executionFrames.size === 0) activeHeartbeatExecutionFramesByDb.delete(db);
+    };
     const pauseExecution = createPauseExecutionObservation();
+    const actualObservation = createHeartbeatActualObservation<AdapterExecutionResult>();
+    let c5RootNotifications: ReplacementRootNotifications | null = null;
+    let c5RootSettlementConfirmed = false;
+    const cleanupObservation = { releaseCalled: false, releaseSucceeded: false,
+      settlementCalled: false, settlementSucceeded: false };
+    let actualDrainIdentity: HeartbeatActualDrainIdentity | null = null;
+    let actualEvidencePreserved = true;
+    let terminalReleaseOptedIn = false;
+    let terminalContinuationEventId: string | null = null;
+    let unresolvedTerminalReleaseHoldReason: string | null = null;
+    const holdOwnerRelease = (reason: string) => {
+      executionFrame.ownerReleaseBlocked = true;
+      unresolvedTerminalReleaseHoldReason = reason;
+      return { kind: "held" as const, reason };
+    };
+    const deferOwnerRelease = (reason: string) => {
+      executionFrame.ownerReleaseBlocked = true;
+      return { kind: "deferred" as const, reason };
+    };
+    const releaseC5HeldIssueOwner = async (finished: typeof heartbeatRuns.$inferSelect) => {
+      const held = executionFrame.c5NotInvoked;
+      const writerSnapshot = executionFrame.c5TerminalWriterSnapshot;
+      if (!held || !writerSnapshot || finished !== writerSnapshot) return false;
+      return db.transaction(async tx => {
+        const [current] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, finished.id), eq(heartbeatRuns.companyId, finished.companyId),
+        )).for("no key update");
+        if (!current || !sameHeartbeatExecutionAttempt(executionFrame.run, current)
+          || current.status !== "failed" || current.errorCode !== "c5_held_not_invoked"
+          || !executionFrame.c5ExecutionOptedIn || executionFrame.conflicted
+          || executionFrame.adapterInvocationAttempted || executionFrame.actualCaptured
+          || actualObservation.wasInvoked() || executionFrame.c5NotInvoked?.proof !== held.proof
+          || executionFrame.run.status !== "running" || writerSnapshot.status !== "failed"
+          || writerSnapshot.errorCode !== "c5_held_not_invoked"
+          || writerSnapshot.finalizationVersion !== executionFrame.finalizationVersion
+          || !sameHeartbeatExecutionAttempt(executionFrame.run, writerSnapshot)) return false;
+
+        let proofBinding: ReturnType<typeof readC5NotInvokedProof>;
+        let writerIdentity: QaCorrectionExecutionIdentity;
+        let currentIdentity: QaCorrectionExecutionIdentity;
+        try {
+          proofBinding = readC5NotInvokedProof(held.proof, db, held.identity, "adapter_start");
+          writerIdentity = captureQaCorrectionExecutionIdentity(writerSnapshot);
+          currentIdentity = captureQaCorrectionExecutionIdentity(current);
+        } catch {
+          return false;
+        }
+        if (!isDeepStrictEqual(proofBinding.identity, held.identity)
+          || !isDeepStrictEqual(held.identity, writerIdentity)) return false;
+
+        if (current.finalizationVersion === 1) {
+          const source = "heartbeat_status:failed:c5_held_not_invoked";
+          if (executionFrame.finalizationVersion !== 1 || writerSnapshot.finalizationVersion !== 1
+            || held.identity.executorOwnerReleasedAt !== null || writerSnapshot.executorOwnerReleasedAt !== null
+            || !sameC5ExecutionIdentityBeforeOwnerRelease(held.identity, currentIdentity)
+            || current.terminalOutcome !== "failed" || current.terminalDecisionSource !== source
+            || !(current.terminalDecidedAt instanceof Date) || !Number.isFinite(current.terminalDecidedAt.getTime())) {
+            return false;
+          }
+          const terminalEvents = await tx.select().from(workflowTransitionEvents).where(and(
+            eq(workflowTransitionEvents.companyId, current.companyId),
+            eq(workflowTransitionEvents.idempotencyKey, "terminal-outcome:" + current.id),
+          ));
+          if (terminalEvents.length !== 1) return false;
+          const [event] = terminalEvents;
+          if (!event || event.workflowRunId !== null || event.companyId !== current.companyId
+            || event.workflowStepRunId !== current.workflowStepRunId || event.issueId !== current.issueId
+            || event.wakeupRequestId !== current.wakeupRequestId || event.heartbeatRunId !== current.id
+            || event.executionGeneration !== current.workflowExecutionGeneration
+            || event.executorOwnerId !== current.executorOwnerId
+            || event.eventType !== "workflow_authority_transition" || event.layer !== "workflow_authority"
+            || event.decision !== "shadow_write" || event.reason !== "terminal_outcome_decided"
+            || event.reasonCode !== "terminal_outcome_decided"
+            || event.idempotencyKey !== "terminal-outcome:" + current.id
+            || !isDeepStrictEqual(event.payload, {
+              version: 1,
+              transition: "terminal_outcome_decided",
+              executionEpoch: current.executionEpoch,
+              executionToken: current.executionToken,
+              ownerLeaseEpoch: current.executorOwnerLeaseEpoch,
+              ownerLeaseToken: current.executorOwnerLeaseToken,
+              outcome: "failed",
+              source,
+            })) return false;
+        } else if (current.finalizationVersion !== executionFrame.finalizationVersion
+          || writerSnapshot.finalizationVersion !== executionFrame.finalizationVersion
+          || !isDeepStrictEqual(held.identity, currentIdentity)) {
+          return false;
+        }
+        if (!current.issueId) return true;
+        const [issue] = await tx.select().from(issues).where(and(
+          eq(issues.id, current.issueId), eq(issues.companyId, current.companyId),
+        )).for("update");
+        if (!issue || issue.assigneeAgentId !== current.agentId
+          || (issue.executionRunId !== current.id && issue.checkoutRunId !== current.id)
+          || (issue.executionRunId !== null && issue.executionRunId !== current.id)
+          || (issue.checkoutRunId !== null && issue.checkoutRunId !== current.id)) return false;
+        const ownerConditions = [
+          eq(issues.id, issue.id), eq(issues.companyId, issue.companyId), eq(issues.assigneeAgentId, current.agentId),
+          issue.executionRunId === null ? isNull(issues.executionRunId) : eq(issues.executionRunId, current.id),
+          issue.checkoutRunId === null ? isNull(issues.checkoutRunId) : eq(issues.checkoutRunId, current.id),
+        ];
+        const released = await tx.update(issues).set({
+          executionRunId: null, checkoutRunId: null, executionAgentNameKey: null,
+          executionLockedAt: null, updatedAt: new Date(),
+        }).where(and(...ownerConditions)).returning({ id: issues.id });
+        return released.length === 1;
+      });
+    };
+    const releaseFinishedRun = async (finished: typeof heartbeatRuns.$inferSelect): Promise<
+      { kind: "legacy" | "terminal" | "deferred" | "held"; reason?: string }
+    > => {
+      const actual = await actualObservation.awaitSettled();
+      let current: typeof heartbeatRuns.$inferSelect | null = null;
+      try {
+        current = await getRun(finished.id);
+      } catch (error) {
+        logger.warn({ err: error, runId: finished.id }, "finished heartbeat identity could not be reread");
+      }
+      const expectsV1 = executionFrame.finalizationVersion === 1 || finished.finalizationVersion === 1
+        || current?.finalizationVersion === 1;
+      const hasCapturedTerminalWriter = Boolean(actual && actualDrainIdentity);
+      if (!current && (expectsV1 || hasCapturedTerminalWriter)) {
+        return holdOwnerRelease("durable_attempt_unreadable");
+      }
+      if (current && !sameHeartbeatExecutionAttempt(finished, current)
+        && (expectsV1 || actualDrainIdentity || hasCapturedTerminalWriter)) {
+        return holdOwnerRelease("durable_attempt_mismatch");
+      }
+      if ((expectsV1 || actualDrainIdentity || hasCapturedTerminalWriter) && executionFrame.conflicted) {
+        return holdOwnerRelease("active_execution_frame_conflicted");
+      }
+      if (executionFrame.c5NotInvoked) {
+        const held = executionFrame.c5NotInvoked;
+        const writerSnapshot = executionFrame.c5TerminalWriterSnapshot;
+        let writerIdentityMatches = false;
+        try {
+          writerIdentityMatches = !!writerSnapshot
+            && isDeepStrictEqual(held.identity, captureQaCorrectionExecutionIdentity(writerSnapshot));
+        } catch {
+          writerIdentityMatches = false;
+        }
+        if (!executionFrame.c5ExecutionOptedIn || executionFrame.conflicted || actual
+          || executionFrame.adapterInvocationAttempted || executionFrame.actualCaptured
+          || actualObservation.wasInvoked() || !writerSnapshot || finished !== writerSnapshot
+          || executionFrame.run.status !== "running" || writerSnapshot.status !== "failed"
+          || writerSnapshot.errorCode !== "c5_held_not_invoked"
+          || writerSnapshot.finalizationVersion !== executionFrame.finalizationVersion
+          || !sameHeartbeatExecutionAttempt(executionFrame.run, writerSnapshot)
+          || !writerIdentityMatches || !current || !sameHeartbeatExecutionAttempt(executionFrame.run, current)) {
+          return holdOwnerRelease("c5_not_invoked_closure_unproven");
+        }
+        if (!await releaseC5HeldIssueOwner(finished)) return holdOwnerRelease("c5_issue_owner_release_unproven");
+        executionFrame.noActualInvocationConfirmed = true;
+        return { kind: "legacy" };
+      }
+      if (executionFrame.c5ExecutionOptedIn && !actual && !executionFrame.adapterInvocationAttempted) {
+        return holdOwnerRelease("adapter_start_outcome_unproven");
+      }
+      const positivelyNonworkflow = expectsV1 && current
+        ? await positivelyClassifiesNonworkflowV1(finished, current, executionFrame).catch(() => false)
+        : false;
+      if (actual && actualDrainIdentity) {
+        if (!sameHeartbeatExecutionAttempt(executionFrame.run, finished)
+          || !heartbeatActualIdentityMatchesRun(actualDrainIdentity, finished)) {
+          return holdOwnerRelease("frozen_actual_run_mismatch");
+        }
+        executionFrame.actualCaptured = true;
+        executionFrame.actualDrainIdentity = actualDrainIdentity;
+        terminalReleaseOptedIn = true;
+        try {
+          const release = await releaseIssueExecutionAndPromote(finished, { terminalSource: actualDrainIdentity });
+          if (release?.kind === "release_committed_followup_pending") {
+            terminalContinuationEventId = release.continuationEventId;
+            unresolvedTerminalReleaseHoldReason = null;
+          } else {
+            const reason = release?.reason ?? "release_result_missing";
+            logger.warn({ runId: finished.id, reason },
+              "terminal heartbeat issue release remains unproven; actual drain receipt is withheld");
+            return holdOwnerRelease(reason);
+          }
+        } catch (error) {
+          logger.warn({ err: error, runId: finished.id },
+            "terminal heartbeat issue release remains unproven; actual drain receipt is withheld");
+          return holdOwnerRelease("terminal_issue_release_failed");
+        }
+        return { kind: "terminal" };
+      }
+      if (expectsV1 && executionFrame.adapterInvocationAttempted && !positivelyNonworkflow) {
+        return holdOwnerRelease("terminal_actual_or_workflow_identity_unobserved");
+      }
+      if (!actual && !executionFrame.adapterInvocationAttempted) {
+        if (expectsV1 && !positivelyNonworkflow
+          && (!executionFrame.identityObserved || !actualDrainIdentity)) {
+          return holdOwnerRelease("terminal_identity_missing_before_actual");
+        }
+        if (expectsV1 && !positivelyNonworkflow && actualDrainIdentity
+          && !heartbeatActualIdentityMatchesRun(actualDrainIdentity, finished)) {
+          return holdOwnerRelease("terminal_identity_attempt_mismatch_before_actual");
+        }
+        executionFrame.noActualInvocationConfirmed = true;
+      }
+      if (!actualDrainIdentity || !actual) {
+        const release = await releaseIssueExecutionAndPromote(finished);
+        if (release && "kind" in release) {
+          if (release.kind === "release_deferred") return deferOwnerRelease(release.reason);
+          if (release.kind === "release_held" || release.kind === "release_unproven") {
+            return holdOwnerRelease(release.reason);
+          }
+        }
+      }
+      if (!actual && executionFrame.noActualInvocationConfirmed) executionFrame.ownerReleaseBlocked = false;
+      return { kind: "legacy" };
+    };
 
     try {
     const agent = await getAgent(run.agentId);
@@ -5884,7 +6409,7 @@ export function heartbeatService(db: Db) {
         error: "Agent not found",
       });
       const failedRun = await getRun(runId);
-      if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
+      if (failedRun) await releaseFinishedRun(failedRun);
       return;
     }
 
@@ -6694,6 +7219,67 @@ export function heartbeatService(db: Db) {
         seq++;
       },
     });
+    let earlySessionIdAfter: string | null = null;
+    let canonicalActualTerminalEvidence: Partial<Pick<typeof heartbeatRuns.$inferInsert,
+      | "exitCode" | "signal" | "usageJson" | "resultJson" | "sessionIdAfter"
+      | "stdoutExcerpt" | "stderrExcerpt" | "logBytes" | "logSha256" | "logCompressed">> | null = null;
+    const buildCanonicalActualTerminalEvidence = async (input: {
+      result: AdapterExecutionResult;
+      nextSessionState: ReturnType<typeof resolveNextSessionState>;
+      persistedSessionIdAfter: string | null;
+      logSummary: Awaited<ReturnType<typeof runLog.finalize>>;
+    }) => {
+      const { result, nextSessionState, persistedSessionIdAfter, logSummary } = input;
+      const rawUsage = normalizeUsageTotals(result.usage);
+      const sessionUsageResolution = await resolveNormalizedUsageForSession({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        runId: run.id,
+        sessionId: nextSessionState.displayId ?? nextSessionState.legacySessionId,
+        rawUsage,
+      });
+      const normalizedUsage = sessionUsageResolution.normalizedUsage;
+      const usageJson = normalizedUsage || result.costUsd != null
+        ? ({
+            ...(normalizedUsage ?? {}),
+            ...(rawUsage ? {
+              rawInputTokens: rawUsage.inputTokens,
+              rawCachedInputTokens: rawUsage.cachedInputTokens,
+              rawOutputTokens: rawUsage.outputTokens,
+            } : {}),
+            ...(sessionUsageResolution.derivedFromSessionTotals ? { usageSource: "session_delta" } : {}),
+            ...(persistedSessionIdAfter ? { persistedSessionId: persistedSessionIdAfter } : {}),
+            sessionReused: runtimeForAdapter.sessionId != null || runtimeForAdapter.sessionDisplayId != null,
+            taskSessionReused: taskSessionForRun != null,
+            freshSession: runtimeForAdapter.sessionId == null && runtimeForAdapter.sessionDisplayId == null,
+            sessionRotated: issueScopedRawSessionResume.rotate || sessionCompaction?.rotate === true,
+            sessionRotationReason: issueScopedRawSessionResume.rotate
+              ? issueScopedRawSessionResume.reason
+              : sessionCompaction?.reason ?? null,
+            provider: readNonEmptyString(result.provider) ?? "unknown",
+            biller: resolveLedgerBiller(result),
+            model: readNonEmptyString(result.model) ?? "unknown",
+            ...(result.costUsd != null ? { costUsd: result.costUsd } : {}),
+            billingType: normalizeLedgerBillingType(result.billingType),
+          } as Record<string, unknown>)
+        : null;
+      return {
+        normalizedUsage,
+        usageJson,
+        terminalEvidence: {
+          exitCode: result.exitCode,
+          signal: result.signal,
+          usageJson,
+          resultJson: capHeartbeatRunResultJsonForStorage(result.resultJson),
+          sessionIdAfter: persistedSessionIdAfter,
+          stdoutExcerpt: runLog.stdoutExcerpt,
+          stderrExcerpt: runLog.stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+        },
+      };
+    };
     try {
       const startedAt = run.startedAt ?? new Date();
       const runningWithSession = await db
@@ -6794,7 +7380,6 @@ export function heartbeatService(db: Db) {
         }
       }
       let earlySessionUpdate: AdapterSessionUpdate | null = null;
-      let earlySessionIdAfter: string | null = null;
       const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
         if (meta.env && secretKeys.size > 0) {
           for (const key of secretKeys) {
@@ -7108,6 +7693,14 @@ export function heartbeatService(db: Db) {
       //   code=fenced_effect_replay_skipped 예외로 실패 종결한다. 일시 재시도·fallback
       //   큐잉은 errorCode==='adapter_failed' 조건이므로 이 코드에서 자동 억제된다.
       let adapterProcessStarted = false;
+      try {
+        actualDrainIdentity = await freezeHeartbeatActualDrainIdentity(db, run, context);
+      } catch (identityErr) {
+        logger.warn({ err: identityErr, runId: run.id }, "heartbeat actual-drain identity could not be frozen");
+      } finally {
+        executionFrame.identityObserved = true;
+        executionFrame.actualDrainIdentity = actualDrainIdentity;
+      }
       const fencedAdapterExecution = await executeFencedEffect(db, {
         companyId: agent.companyId,
         effectKind: HEARTBEAT_ADAPTER_EXECUTE_EFFECT_KIND,
@@ -7138,8 +7731,10 @@ export function heartbeatService(db: Db) {
           provider: readNonEmptyString(runtimeConfig.provider) ?? null,
         },
         attemptRunId: run.id,
-        execute: () => executeHeartbeatWithRecoveryGuard(db, run, () => pauseExecution.execute(run, () =>
-          adapter.execute({
+        execute: () => {
+          const executeActual = () => pauseExecution.execute(run, () => {
+          executionFrame.adapterInvocationAttempted = true;
+          const actualPromise = actualObservation.invoke(() => adapter.execute({
             runId: run.id,
             agent: { ...agent, adapterConfig: runtimeConfig },
             runtime: runtimeForAdapter,
@@ -7153,7 +7748,42 @@ export function heartbeatService(db: Db) {
               await persistRunProcessMetadata(run.id, meta);
             },
             authToken: authToken ?? undefined,
-          }))),
+          }));
+          executionFrame.actualCaptured = actualObservation.wasInvoked();
+          return actualPromise;
+          });
+          const ownerRuntime = c5OwnerRuntime;
+          if (!ownerRuntime) return executeHeartbeatWithRecoveryGuard(db, run, executeActual);
+          return (async () => {
+            const outerNotifications = createReplacementRootNotifications();
+            const resolutionMap = new Map<string, unknown>();
+            const rootResolutionMaps = new WeakMap<ReplacementRootNotifications, Map<string, unknown>>();
+            const sharedAdmission: QaRemediationSharedAdmissionRuntime = {
+              ownerRuntime,
+              outerNotifications,
+              resolutionMap,
+              bindResolutionMap: (notifications, map) => rootResolutionMaps.set(notifications, map),
+              driftBudget: { corrections: 0 },
+            };
+            c5RootNotifications = outerNotifications;
+          const started = await withReplacementRootNotificationDb(db, outerNotifications, async () => {
+            const identity = captureQaCorrectionExecutionIdentity(run);
+            const boundary = await startHeartbeatWithC5ExecutionGuard(db, run, executeActual, sharedAdmission);
+            return { boundary, identity };
+          });
+          c5RootSettlementConfirmed = true;
+          const { boundary, identity } = started;
+          if (boundary.kind === "c5_held_not_invoked") {
+            const binding = readC5NotInvokedProof(boundary.proof, db, identity, "adapter_start");
+            executionFrame.c5NotInvoked = { proof: boundary.proof, identity: binding.identity };
+            throw new C5NotInvokedExecutionError(boundary.proof);
+          }
+          if (boundary.kind !== "performed") {
+            throw Object.assign(conflict("heartbeat_execution_deferred"), { code: "heartbeat_recovery_blocked" });
+          }
+          return boundary.value.result;
+          })();
+        },
       });
       if (fencedAdapterExecution.outcome === "skipped_replay") {
         throw Object.assign(
@@ -7255,16 +7885,6 @@ export function heartbeatService(db: Db) {
           );
         }
       }
-      const rawUsage = normalizeUsageTotals(adapterResult.usage);
-      const sessionUsageResolution = await resolveNormalizedUsageForSession({
-        companyId: agent.companyId,
-        agentId: agent.id,
-        runId: run.id,
-        sessionId: nextSessionState.displayId ?? nextSessionState.legacySessionId,
-        rawUsage,
-      });
-      const normalizedUsage = sessionUsageResolution.normalizedUsage;
-
       let outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
       const latestRun = await getRun(run.id);
       const latestTerminalRun = latestRun && isTerminalHeartbeatRunStatus(latestRun.status) ? latestRun : null;
@@ -7295,6 +7915,14 @@ export function heartbeatService(db: Db) {
           : null;
 
       const logSummary = await runLog.finalize();
+      const canonicalEvidence = await buildCanonicalActualTerminalEvidence({
+        result: adapterResult,
+        nextSessionState,
+        persistedSessionIdAfter,
+        logSummary,
+      });
+      canonicalActualTerminalEvidence = canonicalEvidence.terminalEvidence;
+      const { normalizedUsage, usageJson } = canonicalEvidence;
 
       const status =
         outcome === "succeeded"
@@ -7304,34 +7932,6 @@ export function heartbeatService(db: Db) {
             : outcome === "timed_out"
               ? "timed_out"
               : "failed";
-
-      const usageJson =
-        normalizedUsage || adapterResult.costUsd != null
-          ? ({
-              ...(normalizedUsage ?? {}),
-              ...(rawUsage ? {
-                rawInputTokens: rawUsage.inputTokens,
-                rawCachedInputTokens: rawUsage.cachedInputTokens,
-                rawOutputTokens: rawUsage.outputTokens,
-              } : {}),
-              ...(sessionUsageResolution.derivedFromSessionTotals ? { usageSource: "session_delta" } : {}),
-              ...((persistedSessionIdAfter)
-                ? { persistedSessionId: persistedSessionIdAfter }
-                : {}),
-              sessionReused: runtimeForAdapter.sessionId != null || runtimeForAdapter.sessionDisplayId != null,
-              taskSessionReused: taskSessionForRun != null,
-              freshSession: runtimeForAdapter.sessionId == null && runtimeForAdapter.sessionDisplayId == null,
-              sessionRotated: issueScopedRawSessionResume.rotate || sessionCompaction?.rotate === true,
-              sessionRotationReason: issueScopedRawSessionResume.rotate
-                ? issueScopedRawSessionResume.reason
-                : sessionCompaction?.reason ?? null,
-              provider: readNonEmptyString(adapterResult.provider) ?? "unknown",
-              biller: resolveLedgerBiller(adapterResult),
-              model: readNonEmptyString(adapterResult.model) ?? "unknown",
-              ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
-              billingType: normalizeLedgerBillingType(adapterResult.billingType),
-            } as Record<string, unknown>)
-          : null;
 
         if (codexAuthAutoBlock) {
           try {
@@ -7434,18 +8034,7 @@ export function heartbeatService(db: Db) {
       // Backfill those so externally-terminalized runs keep their evidence
       // (usage accounting, session lineage, log integrity) instead of landing
       // terminal with every evidence column null.
-      const terminalEvidence = {
-        exitCode: adapterResult.exitCode,
-        signal: adapterResult.signal,
-        usageJson,
-        resultJson: capHeartbeatRunResultJsonForStorage(adapterResult.resultJson),
-        sessionIdAfter: persistedSessionIdAfter,
-        stdoutExcerpt: runLog.stdoutExcerpt,
-        stderrExcerpt: runLog.stderrExcerpt,
-        logBytes: logSummary?.bytes,
-        logSha256: logSummary?.sha256,
-        logCompressed: logSummary?.compressed ?? false,
-      };
+      const terminalEvidence = canonicalEvidence.terminalEvidence;
       const finalizedRun = latestTerminalRun
         ? await backfillTerminalRunEvidence(run.id, terminalEvidence)
         : await setRunStatus(run.id, status, {
@@ -7653,14 +8242,25 @@ export function heartbeatService(db: Db) {
           }
         }
         if (!queuedAdapterFallbackRun && !transientAdapterRetryQueued) {
-          await releaseIssueExecutionAndPromote(finalizedRun);
+          const releaseDisposition = await releaseFinishedRun(finalizedRun);
           // [instant-advance v1.2] 런 종결+이슈 정산 커밋 후 즉시 진행. fallback/retry 재큐 시엔 스텝이
           // 아직 미종결(재시도 런이 완료 시점에 훅 발화)이라 스킵한다.
-          fireInstantWorkflowAdvanceForTerminalRun(finalizedRun);
+          if (releaseDisposition.kind === "legacy") fireInstantWorkflowAdvanceForTerminalRun(finalizedRun);
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
     } catch (err) {
+      // The transaction/guard can reject before the adapter Promise settles. Wait only for
+      // the actual Promise captured at adapter.execute; an uninvoked adapter stays unknown.
+      const actual = await actualObservation.awaitSettled();
+      const c5Held = err instanceof C5NotInvokedExecutionError
+        && executionFrame.c5NotInvoked?.proof === err.proof;
+      if (executionFrame.c5ExecutionOptedIn && !c5Held && actual === null
+        && !executionFrame.adapterInvocationAttempted) {
+        executionFrame.ownerReleaseBlocked = true;
+        logger.warn({ err, runId }, "opt-in heartbeat adapter start remains held without authenticated no-invocation proof");
+        return;
+      }
       const message = redactCurrentUserText(
         err instanceof Error ? err.message : "Unknown adapter failure",
         await getCurrentUserRedactionOptions(),
@@ -7670,20 +8270,56 @@ export function heartbeatService(db: Db) {
 
       const logSummary = await runLog.finalizeAfterError();
 
+      if (actual?.outcome === "fulfilled") {
+        const result = actual.value;
+        const nextSessionState = resolveNextSessionState({
+          codec: sessionCodec,
+          adapterResult: result,
+          previousParams: previousSessionParams,
+          previousDisplayId: runtimeForAdapter.sessionDisplayId,
+          previousLegacySessionId: runtimeForAdapter.sessionId,
+        });
+        const persistedSessionIdAfter = nextSessionState.displayId
+          ?? nextSessionState.legacySessionId
+          ?? earlySessionIdAfter
+          ?? null;
+        const terminalEvidence = canonicalActualTerminalEvidence ?? (await buildCanonicalActualTerminalEvidence({
+          result,
+          nextSessionState,
+          persistedSessionIdAfter,
+          logSummary,
+        })).terminalEvidence;
+        canonicalActualTerminalEvidence = terminalEvidence;
+        actualEvidencePreserved = await preserveActualRunEvidence(run, terminalEvidence).catch(() => false);
+        if (!actualEvidencePreserved) {
+          logger.warn({ runId }, "actual adapter result evidence conflicted with the existing heartbeat record; preserved existing values");
+        }
+        // Keep the guard error diagnostic and settle running→failed, while retaining the
+        // returned actual evidence and skipping fallback/retry/session restoration below.
+      }
+
       const failedRun = await setRunStatus(run.id, "failed", {
         error: message,
         errorCode,
         finishedAt: new Date(),
-        stdoutExcerpt: runLog.stdoutExcerpt,
-        stderrExcerpt: runLog.stderrExcerpt,
-        logBytes: logSummary?.bytes,
-        logSha256: logSummary?.sha256,
-        logCompressed: logSummary?.compressed ?? false,
+        ...(actual?.outcome === "fulfilled" ? {} : {
+          stdoutExcerpt: runLog.stdoutExcerpt,
+          stderrExcerpt: runLog.stderrExcerpt,
+          logBytes: logSummary?.bytes,
+          logSha256: logSummary?.sha256,
+          logCompressed: logSummary?.compressed ?? false,
+        }),
       }, { expectedStatuses: ["running"] });
+
+      if (c5Held && failedRun?.status === "failed" && failedRun.errorCode === "c5_held_not_invoked"
+        && executionFrame.run.status === "running"
+        && sameHeartbeatExecutionAttempt(executionFrame.run, failedRun)) {
+        executionFrame.c5TerminalWriterSnapshot = failedRun;
+      }
 
       if (failedRun) {
         await failWakeupForFailedHeartbeat(db, failedRun);
-        await finalizeHermesChatRun(db, failedRun.id).catch((finalizeErr) => {
+        if (!c5Held) await finalizeHermesChatRun(db, failedRun.id).catch((finalizeErr) => {
           logger.warn({ err: finalizeErr, runId: failedRun.id }, "failed to finalize Hermes chat failure response");
         });
         await appendRunEvent(failedRun, seq++, {
@@ -7693,7 +8329,7 @@ export function heartbeatService(db: Db) {
           message,
         });
         let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
-        if (errorCode === "adapter_failed") {
+        if (!c5Held && actual === null && errorCode === "adapter_failed") {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
           if (fb && shouldQueueRunFailureAdapterFallback({ run: failedRun, fallback: fb })) {
             const fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, failedRun, agent, new Date(), {
@@ -7734,46 +8370,50 @@ export function heartbeatService(db: Db) {
             });
           }
         }
-        if (missionAgentRuntimeForRun) {
+        if (!c5Held && missionAgentRuntimeForRun) {
           await completeMissionAgentRuntimeRun(db, {
             runtimeId: missionAgentRuntimeForRun.runtime.id,
             status: "failed",
-            sessionId: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null,
+            sessionId: actual?.outcome === "fulfilled"
+              ? readNonEmptyString(actual.value.sessionDisplayId) ?? readNonEmptyString(actual.value.sessionId) ?? null
+              : actual === null ? runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId ?? null : null,
             error: message,
           }).catch((runtimeErr) => {
             logger.warn({ err: runtimeErr, runId, agentId: agent.id }, "failed to mark mission runtime failed");
           });
         }
         if (!queuedAdapterFallbackRun) {
-          await releaseIssueExecutionAndPromote(failedRun);
+          const releaseDisposition = await releaseFinishedRun(failedRun);
           // [instant-advance v1.2] 실패도 진행 트리거 — 실패 정산(이슈 blocked/스텝 failed) 커밋 후 즉시 재평가.
-          fireInstantWorkflowAdvanceForTerminalRun(failedRun);
+          if (!c5Held && releaseDisposition.kind === "legacy") fireInstantWorkflowAdvanceForTerminalRun(failedRun);
         }
 
-        await updateRuntimeState(agent, failedRun, {
-          exitCode: null,
-          signal: null,
-          timedOut: false,
-          errorMessage: message,
-        }, {
-          legacySessionId: runtimeForAdapter.sessionId,
-        });
-
-        if (effectiveTaskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
-            taskKey: effectiveTaskKey,
-            sessionParamsJson: previousSessionParams,
-            sessionDisplayId: previousSessionDisplayId,
-            lastRunId: failedRun.id,
-            lastError: message,
+        if (!c5Held && actual === null) {
+          await updateRuntimeState(agent, failedRun, {
+            exitCode: null,
+            signal: null,
+            timedOut: false,
+            errorMessage: message,
+          }, {
+            legacySessionId: runtimeForAdapter.sessionId,
           });
+
+          if (effectiveTaskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
+            await upsertTaskSession({
+              companyId: agent.companyId,
+              agentId: agent.id,
+              adapterType: agent.adapterType,
+              taskKey: effectiveTaskKey,
+              sessionParamsJson: previousSessionParams,
+              sessionDisplayId: previousSessionDisplayId,
+              lastRunId: failedRun.id,
+              lastError: message,
+            });
+          }
         }
       }
 
-      await finalizeAgentStatus(agent.id, "failed");
+      if (!c5Held) await finalizeAgentStatus(agent.id, "failed");
     }
     } catch (outerErr) {
           // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
@@ -7833,25 +8473,312 @@ export function heartbeatService(db: Db) {
               level: "error",
               message,
             }).catch(() => undefined);
-            await releaseIssueExecutionAndPromote(failedRun).catch(() => undefined);
+            const releaseInput = executionFrame.c5NotInvoked
+              ? executionFrame.c5TerminalWriterSnapshot ?? failedRun
+              : failedRun;
+            const releaseDisposition = await releaseFinishedRun(releaseInput)
+              .catch(() => holdOwnerRelease("release_finished_run_failed"));
             // [instant-advance v1.2] setup 실패 확정 후에도 워크플로우 런이면 즉시 재평가(실패 스텝 처리 촉진).
-            fireInstantWorkflowAdvanceForTerminalRun(failedRun);
+            if (!executionFrame.c5NotInvoked && releaseDisposition.kind === "legacy") {
+              fireInstantWorkflowAdvanceForTerminalRun(failedRun);
+            }
           }
           // Ensure the agent is not left stuck in "running" if the inner catch handler's
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
           await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
         } finally {
-          await finishPauseExecution({
-            db, releaseRuntimeServicesForRun, activeRunExecutions, getRun, settleHeartbeatAfterExecution,
-            requeueCoalescedWakeupsForFinishedRun, finalizeAgentStatus, startNextQueuedRunForAgent,
-          }, run, pauseExecution);
+          if (actualDrainIdentity && (terminalReleaseOptedIn || unresolvedTerminalReleaseHoldReason)
+            && !terminalContinuationEventId) {
+            const existing = await readTerminalReleaseManifestForSource(db, actualDrainIdentity, run.agentId).catch(error => {
+              logger.warn({ err: error, runId: run.id }, "terminal release manifest reentry could not be read");
+              return null;
+            });
+            if (existing?.kind === "found") {
+              terminalContinuationEventId = existing.eventId;
+              terminalReleaseOptedIn = true;
+              unresolvedTerminalReleaseHoldReason = null;
+            }
+            else if (existing?.kind === "held") logger.warn({ runId: run.id, reason: existing.reason },
+              "terminal release manifest remains held before actual cleanup");
+          }
+          try {
+            await finishPauseExecution({
+            db,
+            releaseRuntimeServicesForRun: async id => {
+              cleanupObservation.releaseCalled = true;
+              try {
+                await releaseRuntimeServicesForRun(id);
+                cleanupObservation.releaseSucceeded = true;
+              } catch (error) {
+                logger.warn({ err: error, runId: id }, "actual-drain runtime-service release failed");
+                throw error;
+              }
+            },
+            activeRunExecutions, getRun,
+            deferQueuePromotion: terminalReleaseOptedIn
+              || (executionFrame.ownerReleaseBlocked
+                && !(executionFrame.c5ExecutionOptedIn && executionFrame.c5NotInvoked
+                  && executionFrame.noActualInvocationConfirmed)),
+            settleHeartbeatAfterExecution: async (settleDb, settledRun, now) => {
+              cleanupObservation.settlementCalled = true;
+              try {
+                const actual = await actualObservation.awaitSettled();
+                if (unresolvedTerminalReleaseHoldReason) {
+                  throw new Error(`heartbeat_issue_release_unresolved:${unresolvedTerminalReleaseHoldReason}`);
+                }
+                if (executionFrame.c5NotInvoked) {
+                  if (!executionFrame.noActualInvocationConfirmed || executionFrame.ownerReleaseBlocked
+                    || !cleanupObservation.releaseSucceeded || actual !== null || executionFrame.adapterInvocationAttempted) {
+                    throw new Error("c5_no_invocation_cleanup_or_owner_release_unproven");
+                  }
+                  const current = await getRun(settledRun.id);
+                  if (!current || !sameHeartbeatExecutionAttempt(executionFrame.run, current)
+                    || current.status !== "failed" || current.errorCode !== "c5_held_not_invoked") {
+                    throw new Error("c5_no_invocation_terminal_attempt_unproven");
+                  }
+                  const settlement = await attemptFullSettlement(settleDb, current, now);
+                  if (settlement !== "settled" && settlement !== "not_ready") {
+                    throw new Error(`c5 no-invocation settlement was blocked: ${settlement}`);
+                  }
+                  if (settlement === "settled") {
+                    const durableRun = await getRun(current.id);
+                    if (!durableRun || !sameHeartbeatExecutionAttempt(current, durableRun)
+                      || durableRun.finalizationVersion !== 1 || !durableRun.settledAt) {
+                      throw new Error("c5 no-invocation settlement is not durable for its exact attempt");
+                    }
+                  }
+                } else if (actualDrainIdentity && actual !== null) {
+                  const identity = actualDrainIdentity;
+                  const matchesFrozenAttempt = (candidate: typeof heartbeatRuns.$inferSelect) =>
+                    candidate.id === identity.heartbeatRunId && candidate.companyId === identity.companyId
+                    && candidate.issueId === identity.issueId && candidate.wakeupRequestId === identity.wakeupRequestId
+                    && candidate.workflowStepRunId === identity.workflowStepRunId
+                    && candidate.workflowExecutionGeneration === identity.executionGeneration
+                    && candidate.executionScopeKind === identity.executionScopeKind
+                    && candidate.executionEpoch === identity.executionEpoch && candidate.executionToken === identity.executionToken
+                    && candidate.executorOwnerId === identity.executorOwnerId
+                    && candidate.executorOwnerLeaseEpoch === identity.ownerLeaseEpoch
+                    && candidate.executorOwnerLeaseToken === identity.ownerLeaseToken
+                    && candidate.retryOfRunId === identity.retryOfRunId
+                    && candidate.processLossRetryCount === identity.processLossRetryCount;
+                  if (!matchesFrozenAttempt(settledRun)) {
+                    throw new Error("heartbeat actual-drain settlement attempt no longer matches its frozen identity");
+                  }
+                  if (terminalReleaseOptedIn && !terminalContinuationEventId) {
+                    throw new Error("terminal_release_manifest_not_committed_before_settlement");
+                  }
+                  const settlement = await attemptFullSettlement(settleDb, settledRun, now,
+                    terminalReleaseOptedIn ? terminalContinuationEventId! : undefined);
+                  if (settlement !== "settled" && settlement !== "not_ready") {
+                    throw new Error(`heartbeat actual-drain settlement was blocked: ${settlement}`);
+                  }
+                  const durableRun = await getRun(settledRun.id);
+                  if (!durableRun || !matchesFrozenAttempt(durableRun) || durableRun.finalizationVersion !== 1
+                    || !durableRun.settledAt) {
+                    throw new Error(`heartbeat actual-drain settlement is not durable for its exact attempt: ${settlement}`);
+                  }
+                } else if ((executionFrame.finalizationVersion === 1 || settledRun.finalizationVersion === 1)
+                  && executionFrame.adapterInvocationAttempted) {
+                  const current = await getRun(settledRun.id).catch(() => null);
+                  const nonworkflow = actual !== null && await positivelyClassifiesNonworkflowV1(
+                    settledRun, current, executionFrame,
+                  ).catch(() => false);
+                  if (!nonworkflow) throw new Error("heartbeat_actual_or_workflow_identity_unobserved");
+                  await settleHeartbeatAfterExecution(settleDb, settledRun, now);
+                } else {
+                  await settleHeartbeatAfterExecution(settleDb, settledRun, now);
+                }
+                cleanupObservation.settlementSucceeded = true;
+              } catch (error) {
+                logger.warn({ err: error, runId: settledRun.id }, "actual-drain heartbeat settlement failed");
+                throw error;
+              }
+            },
+              requeueCoalescedWakeupsForFinishedRun: (settleDb, input) =>
+                unresolvedTerminalReleaseHoldReason || executionFrame.c5NotInvoked
+                  ? Promise.resolve(0) : requeueCoalescedWakeupsForFinishedRun(settleDb, input),
+              finalizeAgentStatus: executionFrame.c5NotInvoked ? async () => undefined : finalizeAgentStatus,
+              startNextQueuedRunForAgent,
+            }, run, pauseExecution);
+          } finally {
+            removeExecutionFrame();
+          }
         }
+    const actual = await actualObservation.awaitSettled();
+    if (actual && actualDrainIdentity) {
+      if (unresolvedTerminalReleaseHoldReason) {
+        logger.warn({ runId: run.id, reason: unresolvedTerminalReleaseHoldReason },
+          "held terminal issue release prevents actual-drain receipt and workflow progress");
+      } else {
+      let resources: Record<string, boolean> = {};
+      try {
+        const current = await getRun(run.id);
+        if (current) {
+          resources = await observeQuiescenceResources(db, current);
+          const tracked = runningProcesses.get(run.id);
+          let knownChildAlive = Boolean(tracked && tracked.child.exitCode === null && tracked.child.signalCode === null);
+          if (current.processPid !== null) {
+            try {
+              process.kill(current.processPid, 0);
+              knownChildAlive = true;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ESRCH") knownChildAlive = true;
+            }
+          }
+          if (knownChildAlive) resources = { ...resources, knownChildAlive: false };
+        }
+      } catch (resourceErr) {
+        logger.warn({ err: resourceErr, runId: run.id }, "actual-drain cleanup resource observation failed");
+      }
+      try {
+        const drainActual = (terminalReleaseOptedIn && !terminalContinuationEventId)
+          || (actual.outcome === "fulfilled" && !actualEvidencePreserved) ? null : actual;
+        const recorded = await writeHeartbeatActualDrain(db, actualDrainIdentity, drainActual, {
+          ...cleanupObservation, resources,
+        });
+        if ((recorded.outcome === "written" || recorded.outcome === "existing") && terminalReleaseOptedIn) {
+          if (!terminalContinuationEventId) {
+            logger.warn({ runId: run.id, reason: "terminal_release_manifest_missing" },
+              "terminal actual drain is durable but its continuation event is unavailable");
+          } else {
+            const continuation = await runTerminalReleaseContinuation(terminalContinuationEventId);
+            if (continuation.kind !== "complete") logger.warn({ runId: run.id,
+              continuationEventId: terminalContinuationEventId, reason: continuation.reason },
+            "terminal heartbeat followup remains durably pending after actual drain");
+          }
+        } else if ((recorded.outcome === "written" || recorded.outcome === "existing") && actual.outcome === "fulfilled") {
+          try {
+            const { syncWorkflowRunState } = await import("./workflow/dag-engine.js");
+            await syncWorkflowRunState(db, actualDrainIdentity.workflowRunId, "heartbeat_promotion", { requireRunning: true });
+          } catch (syncErr) {
+            logger.warn({ err: syncErr, runId: run.id, workflowRunId: actualDrainIdentity.workflowRunId },
+              "heartbeat actual-drain workflow re-evaluation failed; durable evidence remains available");
+          }
+        } else if (recorded.outcome === "held") {
+          logger.warn({ runId: run.id, reason: recorded.reason }, "heartbeat actual-drain evidence remains held");
+        }
+      } catch (recordErr) {
+        logger.warn({ err: recordErr, runId: run.id }, "heartbeat actual-drain evidence was not recorded");
+      }
+      }
+    }
+    if (c5RootSettlementConfirmed && c5RootNotifications) await drainC5RootNotifications(c5RootNotifications);
   }
 
+  type TerminalIssueReleaseResult = { kind: "release_committed_followup_pending"; continuationEventId: string }
+    | { kind: "release_unproven" | "release_deferred" | "release_held"; reason: string };
+  async function holdLegacyReleaseForActiveTerminalFrame(run: typeof heartbeatRuns.$inferSelect):
+    Promise<TerminalIssueReleaseResult | null> {
+    const frame = activeHeartbeatExecutionFramesByDb.get(db)?.get(run.id);
+    const blockOwnerRelease = (kind: "release_deferred" | "release_held", reason: string): TerminalIssueReleaseResult => {
+      if (frame) frame.ownerReleaseBlocked = true;
+      return { kind, reason };
+    };
+    let current: typeof heartbeatRuns.$inferSelect | null = null;
+    try {
+      current = await getRun(run.id);
+    } catch (error) {
+      logger.warn({ err: error, runId: run.id }, "legacy issue release could not reread its heartbeat identity");
+      return run.finalizationVersion === 1 || frame?.finalizationVersion === 1 || frame?.actualDrainIdentity
+        ? blockOwnerRelease("release_held", "durable_attempt_unreadable")
+        : null;
+    }
+    const expectedV1 = run.finalizationVersion === 1 || current?.finalizationVersion === 1 || frame?.finalizationVersion === 1;
+    if (!current) {
+      return expectedV1 || frame?.actualDrainIdentity
+        ? blockOwnerRelease("release_held", "durable_attempt_missing") : null;
+    }
+    if (frame?.actualDrainIdentity) {
+      if (frame.conflicted || !sameHeartbeatExecutionAttempt(frame.run, current)
+        || !sameHeartbeatExecutionAttempt(run, current)
+        || !heartbeatActualIdentityMatchesRun(frame.actualDrainIdentity, current)) {
+        return blockOwnerRelease("release_held", "active_frame_frozen_identity_mismatch");
+      }
+      if (frame.noActualInvocationConfirmed && !frame.adapterInvocationAttempted && !frame.actualCaptured) return null;
+      return blockOwnerRelease("release_deferred", frame.actualCaptured
+        ? "active_terminal_actual_owns_release" : "active_terminal_actual_invocation_pending");
+    }
+    if (!expectedV1) return null;
+    if (await positivelyClassifiesNonworkflowV1(run, current, frame).catch(() => false)) return null;
+    if (!frame) return blockOwnerRelease("release_held", "active_terminal_frame_unobserved");
+    if (frame.conflicted || !sameHeartbeatExecutionAttempt(frame.run, current)
+      || !sameHeartbeatExecutionAttempt(run, current)) {
+      return blockOwnerRelease("release_held", "active_frame_attempt_mismatch");
+    }
+    if (frame.noActualInvocationConfirmed && !frame.adapterInvocationAttempted && !frame.actualCaptured) return null;
+    const identity = frame.actualDrainIdentity;
+    if (frame.identityObserved && !identity) {
+      return blockOwnerRelease("release_held", "active_terminal_identity_missing");
+    }
+    if (identity && !heartbeatActualIdentityMatchesRun(identity, current)) {
+      return blockOwnerRelease("release_held", "active_frame_frozen_identity_mismatch");
+    }
+    if (frame.actualCaptured) {
+      return identity
+        ? blockOwnerRelease("release_deferred", "active_terminal_actual_owns_release")
+        : blockOwnerRelease("release_held", "active_terminal_actual_identity_unobserved");
+    }
+    if (frame.adapterInvocationAttempted) {
+      return blockOwnerRelease("release_held", "active_terminal_actual_capture_unobserved");
+    }
+    return blockOwnerRelease("release_deferred", "active_terminal_actual_invocation_pending");
+  }
+  function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect,
+    options: { readonly skipLocked?: boolean; readonly resumeQueue?: boolean; readonly terminalSource: HeartbeatActualDrainIdentity }):
+    Promise<TerminalIssueReleaseResult>;
+  function releaseIssueExecutionAndPromote(run: typeof heartbeatRuns.$inferSelect,
+    options?: { readonly skipLocked?: boolean; readonly resumeQueue?: boolean }): Promise<void | TerminalIssueReleaseResult>;
   async function releaseIssueExecutionAndPromote(
     run: typeof heartbeatRuns.$inferSelect,
-    options: { readonly skipLocked?: boolean; readonly resumeQueue?: boolean } = {},
-  ) {
+    options: { readonly skipLocked?: boolean; readonly resumeQueue?: boolean;
+      readonly terminalSource?: HeartbeatActualDrainIdentity } = {},
+  ): Promise<void | TerminalIssueReleaseResult> {
+    const terminalSource = options.terminalSource;
+    if (!terminalSource) {
+      const disposition = await holdLegacyReleaseForActiveTerminalFrame(run);
+      if (disposition) return disposition;
+    }
+    const terminalProspective = terminalSource ? createTerminalReleaseManifest(terminalSource, run.agentId, [
+      { stage: "issue_promotion", action: { kind: "promote_issue_wakes", companyId: terminalSource.companyId,
+        issueId: terminalSource.issueId } },
+      { stage: "issue_promotion", action: { kind: "promote_agent_queue", companyId: terminalSource.companyId,
+        agentId: run.agentId } },
+      { stage: "workflow_evidence_sync", action: { kind: "sync_issue", companyId: terminalSource.companyId,
+        issueId: terminalSource.issueId } },
+      { stage: "workflow_evidence_sync", action: { kind: "reevaluate_source" } },
+    ]) : null;
+    let terminalContinuationEventId: string | null = null;
+    let terminalReleaseCommitEligible = false;
+    if (terminalSource) {
+      if (!terminalProspective || !terminalReleaseMatchesRun(terminalProspective.source, run)) {
+        return { kind: "release_unproven", reason: "frozen_actual_run_mismatch" };
+      }
+      const prior = await readTerminalReleaseManifestForSource(db, terminalSource, run.agentId);
+      if (prior.kind === "found") {
+        const retained = await db.transaction(async tx => {
+          const [lockedRun] = await tx.select().from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, terminalSource.heartbeatRunId), eq(heartbeatRuns.companyId, terminalSource.companyId),
+          )).for("key share");
+          const [lockedIssue] = await tx.select().from(issues).where(and(
+            eq(issues.id, terminalSource.issueId), eq(issues.companyId, terminalSource.companyId),
+          )).for("update");
+          const current = await readTerminalReleaseManifestForSource(tx, terminalSource, run.agentId);
+          if (!lockedRun || !lockedIssue || lockedIssue.missionId !== terminalSource.missionId
+            || !terminalReleaseMatchesRun(prior.manifest.source, lockedRun)
+            || current.kind !== "found" || current.eventId !== prior.eventId
+            || lockedIssue.executionRunId === terminalSource.heartbeatRunId
+            || lockedIssue.checkoutRunId === terminalSource.heartbeatRunId) {
+            return { kind: "held" as const, reason: "terminal_release_reentry_owner_or_source_changed" };
+          }
+          // The accepted event proves the original owner-clear commit. A later owner is retained verbatim.
+          return { kind: "found" as const, eventId: current.eventId };
+        });
+        return retained.kind === "found"
+          ? { kind: "release_committed_followup_pending", continuationEventId: retained.eventId }
+          : { kind: "release_unproven", reason: retained.reason };
+      }
+      if (prior.kind === "held") return { kind: "release_unproven", reason: prior.reason };
+    }
     const postTransactionWorkflowIssueSyncIssueIds = new Set<string>();
     const queuePostTransactionWorkflowIssueSync = (issueId: string | null | undefined) => {
       if (issueId) postTransactionWorkflowIssueSyncIssueIds.add(issueId);
@@ -7948,16 +8875,37 @@ export function heartbeatService(db: Db) {
         })
         .from(issues)
         .where(
-          and(
-            eq(issues.companyId, run.companyId),
-            run.issueId
+          terminalSource
+            ? and(eq(issues.companyId, terminalSource.companyId), eq(issues.id, terminalSource.issueId))
+            : and(eq(issues.companyId, run.companyId), run.issueId
               ? or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id), eq(issues.id, run.issueId))
-              : or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id)),
-          ),
+              : or(eq(issues.executionRunId, run.id), eq(issues.checkoutRunId, run.id))),
         )
         .then((rows) => rows[0] ?? null);
 
       if (!issue) return;
+
+      if (terminalSource) {
+        const prior = await readTerminalReleaseManifestForSource(tx, terminalSource, run.agentId);
+        if (prior.kind === "found") {
+          terminalContinuationEventId = prior.eventId;
+          return null;
+        }
+        if (prior.kind === "held") throw new Error(`terminal_release_manifest_reentry_held:${prior.reason}`);
+        const [lockedRun] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, terminalSource.heartbeatRunId), eq(heartbeatRuns.companyId, terminalSource.companyId),
+        )).for("key share");
+        if (!lockedRun || !terminalProspective || !terminalReleaseMatchesRun(terminalProspective.source, lockedRun)
+          || issue.id !== terminalSource.issueId || issue.companyId !== terminalSource.companyId
+          || (issue.executionRunId !== run.id && issue.checkoutRunId !== run.id)
+          || (issue.executionRunId !== null && issue.executionRunId !== run.id)
+          || (issue.checkoutRunId !== null && issue.checkoutRunId !== run.id)) {
+          throw new Error("terminal_release_exact_issue_owner_unproven");
+        }
+        terminalReleaseCommitEligible = true;
+      }
+
+      try {
 
       const runAgent = await tx
         .select({
@@ -8887,6 +9835,8 @@ export function heartbeatService(db: Db) {
         })
         .where(eq(issues.id, issue.id));
 
+      if (terminalSource) return { promotedRun: null };
+
       // Bounded iterations and wall-clock keep a reinserting deferred wake from blocking recovery.
       const deferredPromotionBudget = {
         maxIterations: 50,
@@ -8932,7 +9882,55 @@ export function heartbeatService(db: Db) {
 
         return promoteDeferredWakeupRequest(followupPromotionDeps, tx, { deferred, deferredAgent, issue });
       }
+      } finally {
+        if (terminalSource && terminalReleaseCommitEligible) {
+          if (postTransactionDelegatedArtifactHandbacks.length > 0) {
+            throw new Error("terminal_release_unmodeled_delegated_handback");
+          }
+          if ([...postTransactionWorkflowIssueSyncIssueIds].some(issueId => issueId !== terminalSource.issueId)) {
+            throw new Error("terminal_release_unmodeled_issue_sync");
+          }
+          if (postTransactionUnblockCompletions.some(entry => entry.companyId !== terminalSource.companyId
+            || entry.issueId !== terminalSource.issueId || entry.agentId !== run.agentId)) {
+            throw new Error("terminal_release_unmodeled_unblock_handback");
+          }
+          if (postTransactionMissingEvidenceRedispatches.some(entry => entry.companyId !== terminalSource.companyId
+            || entry.issueId !== terminalSource.issueId || entry.agentId !== run.agentId
+            || entry.missionId !== terminalSource.missionId || !Number.isSafeInteger(entry.attempt)
+            || entry.attempt < 0 || entry.requiredAction.length > 120)) {
+            throw new Error("terminal_release_unmodeled_missing_evidence");
+          }
+          const [releasedIssue] = await tx.select({ executionRunId: issues.executionRunId,
+            checkoutRunId: issues.checkoutRunId }).from(issues).where(and(
+            eq(issues.id, terminalSource.issueId), eq(issues.companyId, terminalSource.companyId),
+          ));
+          if (!releasedIssue || releasedIssue.executionRunId !== null || releasedIssue.checkoutRunId !== null) {
+            throw new Error("terminal_release_issue_owner_not_released_exactly");
+          }
+          const obligations: Array<{ stage: "issue_promotion" | "workflow_evidence_sync"; action: TerminalFollowup }> = [
+            { stage: "issue_promotion", action: { kind: "promote_issue_wakes", companyId: terminalSource.companyId, issueId: terminalSource.issueId } },
+            { stage: "workflow_evidence_sync", action: { kind: "sync_issue", companyId: terminalSource.companyId, issueId: terminalSource.issueId } },
+          ];
+          for (const entry of postTransactionUnblockCompletions) obligations.push({ stage: "workflow_evidence_sync",
+            action: { kind: "unblock_handback", companyId: entry.companyId, issueId: entry.issueId, agentId: entry.agentId } });
+          for (const entry of postTransactionMissingEvidenceRedispatches) obligations.push({ stage: "workflow_evidence_sync",
+            action: { kind: "missing_evidence", companyId: entry.companyId, issueId: entry.issueId,
+              agentId: entry.agentId, missionId: entry.missionId, attempt: entry.attempt, requiredAction: entry.requiredAction } });
+          obligations.push({ stage: "issue_promotion", action: { kind: "promote_agent_queue",
+            companyId: terminalSource.companyId, agentId: run.agentId } });
+          obligations.push({ stage: "workflow_evidence_sync", action: { kind: "reevaluate_source" } });
+          const manifest = createTerminalReleaseManifest(terminalSource, run.agentId, obligations);
+          const written = await writeTerminalReleaseManifest(tx, manifest);
+          terminalContinuationEventId = written.eventId;
+        }
+      }
     });
+
+    if (terminalSource) {
+      return terminalContinuationEventId
+        ? { kind: "release_committed_followup_pending", continuationEventId: terminalContinuationEventId }
+        : { kind: "release_unproven", reason: "exact_issue_release_or_manifest_unproven" };
+    }
 
     const transactionObject =
       !!transactionResult && typeof transactionResult === "object" ? transactionResult : null;
@@ -9131,6 +10129,337 @@ export function heartbeatService(db: Db) {
     publishQueuedRun(promotedRun);
 
     if (options.resumeQueue !== false) await startNextQueuedRunForAgent(promotedRun.agentId);
+  }
+
+  async function promoteTerminalIssueWake(eventId: string, action: Extract<TerminalFollowup, { kind: "promote_issue_wakes" }>) {
+    const initial = await readTerminalContinuationSource(eventId, db);
+    if (initial.kind !== "ready" || initial.manifest.source.issueId !== action.issueId
+      || initial.manifest.source.companyId !== action.companyId) {
+      return { kind: "held" as const, reason: initial.kind === "held" ? initial.reason : "terminal_issue_promotion_scope_mismatch" };
+    }
+    const existingPromotions = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, action.companyId), eq(agentWakeupRequests.issueId, action.issueId),
+      eq(agentWakeupRequests.reason, "issue_execution_promoted"), isNotNull(agentWakeupRequests.runId),
+    ));
+    for (const wake of existingPromotions) {
+      const [linked] = await db.select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId,
+        agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, wakeupRequestId: heartbeatRuns.wakeupRequestId })
+        .from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+      if (linked && linked.companyId === action.companyId && linked.issueId === action.issueId
+        && linked.wakeupRequestId === wake.id && linked.agentId === wake.agentId) return { kind: "ready" as const };
+    }
+    const result = await withTxTimeout(db, async tx => {
+      const [issue] = await tx.select().from(issues).where(and(
+        eq(issues.id, action.issueId), eq(issues.companyId, action.companyId),
+      )).for("update");
+      if (!issue || issue.missionId !== initial.manifest.source.missionId
+        || (issue.executionRunId !== null && issue.executionRunId !== initial.manifest.source.heartbeatRunId)
+        || (issue.checkoutRunId !== null && issue.checkoutRunId !== initial.manifest.source.heartbeatRunId)) {
+        return { kind: "held" as const, reason: "terminal_issue_promotion_owner_or_scope_changed" };
+      }
+      const candidate = await selectDeferredWakeupRequest(tx, issue);
+      if (!candidate) {
+        const remaining = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.companyId, action.companyId), eq(agentWakeupRequests.issueId, action.issueId),
+          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        )).limit(1);
+        return remaining.length ? { kind: "held" as const, reason: "terminal_issue_deferred_wake_not_selected" }
+          : { kind: "ready" as const };
+      }
+      const { request, agent } = candidate;
+      if (isStoredOperatorDecisionWake(request, DEFERRED_WAKE_CONTEXT_KEY)) {
+        return { kind: "operator" as const, wakeupRequestId: request.id };
+      }
+      if (readQaCorrectionWakeRef(request)) return { kind: "correction" as const, wakeupRequestId: request.id };
+      if (!agent || agent.companyId !== action.companyId || agent.status === "paused"
+        || agent.status === "terminated" || agent.status === "pending_approval") {
+        await failFollowupWake(tx, request.id, "Deferred wake could not be promoted: agent is not invokable");
+        return { kind: "failed" as const, wakeupRequestId: request.id };
+      }
+      const promoted = await promoteDeferredWakeupRequest(followupPromotionDeps, tx, { deferred: request, deferredAgent: agent, issue });
+      return { kind: "promoted" as const, wakeupRequestId: request.id, runId: promoted.id };
+    }, { label: "heartbeat:terminal-issue-promotion" });
+    if (result.kind === "held") return result;
+    if (result.kind === "correction") {
+      const delivery = await connectCorrectionDelivery({ wakeupRequestId: result.wakeupRequestId }, "public_callback");
+      if (!delivery.run) return { kind: "held" as const, reason: "terminal_correction_delivery_not_durable" };
+    }
+    const wakeupRequestId = "wakeupRequestId" in result ? result.wakeupRequestId : null;
+    if (wakeupRequestId) {
+      const [wake] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.id, wakeupRequestId), eq(agentWakeupRequests.companyId, action.companyId),
+      ));
+      if (!wake || wake.issueId !== action.issueId) return { kind: "held" as const, reason: "terminal_issue_wake_reread_failed" };
+      if (result.kind === "operator" && (wake.status !== "deferred_issue_execution" || wake.runId !== null)) {
+        return { kind: "held" as const, reason: "terminal_operator_wake_changed" };
+      }
+      if (result.kind === "failed" && wake.status !== "failed") return { kind: "held" as const, reason: "terminal_failed_wake_not_durable" };
+      if (result.kind === "promoted" || result.kind === "correction") {
+        const [linked] = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, wake.runId ?? ""), eq(heartbeatRuns.companyId, action.companyId),
+        ));
+        if (!linked || linked.wakeupRequestId !== wake.id || linked.issueId !== action.issueId || wake.runId !== linked.id) {
+          return { kind: "held" as const, reason: "terminal_issue_promotion_link_not_durable" };
+        }
+      }
+    }
+    return { kind: "ready" as const };
+  }
+
+  async function runTerminalReleaseContinuation(eventId: string): Promise<{ kind: "complete" } | { kind: "held"; reason: string }> {
+    if (terminalContinuationInflight.has(eventId)) return { kind: "held", reason: "terminal_continuation_already_inflight" };
+    terminalContinuationInflight.add(eventId);
+    try {
+      return await drainTerminalReleaseContinuation(db, eventId);
+    } finally {
+      terminalContinuationInflight.delete(eventId);
+    }
+  }
+
+  type TerminalQualityRead = { kind: "not_applicable" } | { kind: "ready" } | { kind: "held"; reason: string };
+  async function readExactTerminalQualityCompletion(source: {
+    companyId: string; missionId: string; workflowRunId: string; dispatchAuthorityVersion: number;
+    workflowStepRunId: string; stepId: string; issueId: string; executionGeneration: number;
+    retryCount: number; iterationIndex: number;
+  }): Promise<TerminalQualityRead> {
+    const { QA_REMEDIATION_PREPARATION_EVENT_TYPE, QA_REMEDIATION_PREPARATION_SCHEMA_VERSION_V3,
+      parseQaRemediationPreparation, qaRemediationPreparationKey } = await import("./workflow/control-flow/qa-remediation-preparation-contract.js");
+    const rows = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, source.companyId),
+      eq(workflowTransitionEvents.workflowRunId, source.workflowRunId),
+      eq(workflowTransitionEvents.workflowStepRunId, source.workflowStepRunId),
+      eq(workflowTransitionEvents.eventType, QA_REMEDIATION_PREPARATION_EVENT_TYPE),
+    ));
+    if (rows.length === 0) return { kind: "not_applicable" };
+    const candidates: Array<{ row: typeof workflowTransitionEvents.$inferSelect;
+      preparation: ReturnType<typeof parseQaRemediationPreparation> }> = [];
+    for (const row of rows) {
+      let preparation: ReturnType<typeof parseQaRemediationPreparation>;
+      try { preparation = parseQaRemediationPreparation(row.payload); }
+      catch { return { kind: "held", reason: "quality_reservation_malformed" }; }
+      if (row.id !== preparation.preparationId || row.companyId !== preparation.companyId
+        || row.missionId !== preparation.missionId || row.workflowRunId !== preparation.workflowRunId
+        || row.workflowStepRunId !== preparation.producer.stepRunId || row.issueId !== preparation.producer.issueId
+        || row.executionGeneration !== preparation.producer.executionGeneration
+        || row.idempotencyKey !== qaRemediationPreparationKey(preparation)) {
+        return { kind: "held", reason: "quality_reservation_row_binding_mismatch" };
+      }
+      if (preparation.companyId === source.companyId && preparation.missionId === source.missionId
+        && preparation.workflowRunId === source.workflowRunId
+        && preparation.dispatchAuthorityVersion === source.dispatchAuthorityVersion
+        && preparation.producer.stepRunId === source.workflowStepRunId && preparation.producer.stepId === source.stepId
+        && preparation.producer.issueId === source.issueId
+        && preparation.producer.executionGeneration === source.executionGeneration
+        && preparation.producer.retryCount === source.retryCount
+        && preparation.producer.iterationIndex === source.iterationIndex) candidates.push({ row, preparation });
+    }
+    if (candidates.length === 0) return { kind: "not_applicable" };
+    if (candidates.length !== 1) return { kind: "held", reason: "quality_reservation_exact_source_ambiguous" };
+    const { row, preparation } = candidates[0]!;
+    if (preparation.schemaVersion !== QA_REMEDIATION_PREPARATION_SCHEMA_VERSION_V3) return { kind: "not_applicable" };
+
+    const { classifyQualityActionHistory } = await import("./workflow/control-flow/qa-remediation-quality-history.js");
+    const classified = await db.transaction(tx => classifyQualityActionHistory(tx, {
+      companyId: preparation.companyId, missionId: preparation.missionId, workflowRunId: preparation.workflowRunId,
+      producerStepRunId: preparation.producer.stepRunId,
+      qaStepRunIds: preparation.verdicts.map(verdict => verdict.qa.stepRunId),
+      qualityActionId: preparation.qualityBinding.actionId,
+    }));
+    if (!classified || "detail" in classified || classified.row.id !== row.id
+      || !isDeepStrictEqual(classified.preparation, preparation)) {
+      return { kind: "held", reason: "quality_reservation_exact_readback_failed" };
+    }
+
+    const { qaRemediationCompletionKey, validateQaRemediationCompletionEvidence } =
+      await import("./workflow/control-flow/qa-remediation-completion-evidence.js");
+    const { QA_REMEDIATION_COMPLETION_EVENT_TYPE } = await import("./workflow/control-flow/qa-remediation-completion.js");
+    const completions = await db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, source.companyId),
+      eq(workflowTransitionEvents.workflowRunId, source.workflowRunId),
+      eq(workflowTransitionEvents.workflowStepRunId, source.workflowStepRunId),
+      eq(workflowTransitionEvents.eventType, QA_REMEDIATION_COMPLETION_EVENT_TYPE),
+      eq(workflowTransitionEvents.idempotencyKey, qaRemediationCompletionKey(preparation)),
+    ));
+    if (completions.length !== 1) return { kind: "held", reason: "quality_completion_missing_or_ambiguous" };
+    const completion = await validateQaRemediationCompletionEvidence(db, completions[0]!, preparation);
+    if (!completion.ok || completion.completion.schemaVersion !== "workflow.qa-remediation.complete.v3"
+      || !completion.completion.qualityUseEvidenceRefId || completion.completion.wakes.length === 0) {
+      return { kind: "held", reason: completion.ok ? "quality_completion_not_v3" : `quality_completion_${completion.reason}` };
+    }
+    return { kind: "ready" };
+  }
+
+  function safeTypedQualityHold(error: unknown): { outcome: string; reason?: string } | null {
+    if (!error || typeof error !== "object" || !("result" in error)) return null;
+    const result = (error as { result?: unknown }).result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+    const fields = result as Record<string, unknown>;
+    const safe = (value: unknown) => typeof value === "string" && /^[a-z0-9_:-]{1,96}$/.test(value) ? value : undefined;
+    const outcome = safe(fields.outcome), reason = safe(fields.reason);
+    return outcome ? { outcome, ...(reason ? { reason } : {}) } : null;
+  }
+
+  async function drainTerminalReleaseContinuation(db: Db, eventId: string): Promise<{ kind: "complete" } | { kind: "held"; reason: string }> {
+    const loaded = await readTerminalReleaseManifest(db, eventId);
+    if (loaded.kind !== "found") return loaded;
+    const ready = await readReadyTerminalReleaseContinuation(db, eventId);
+    if (ready.kind !== "ready") return ready;
+    let sourceRead = await readTerminalContinuationSource(eventId, db);
+    if (sourceRead.kind !== "ready") {
+      if (sourceRead.kind === "held" && sourceRead.reason === "terminal_continuation_source_or_authority_changed") {
+        return settleTerminalContinuationFromQaSuccessor(db, eventId);
+      }
+      return sourceRead;
+    }
+    for (const obligation of loaded.manifest.obligations) {
+      const prior = await readTerminalReleaseAcknowledgment(db, eventId, obligation.effectKey);
+      if (prior.kind === "acknowledged") continue;
+      if (prior.kind === "held") return prior;
+      sourceRead = await readTerminalContinuationSource(eventId, db);
+      if (sourceRead.kind !== "ready") {
+        if (sourceRead.kind === "held" && sourceRead.reason === "terminal_continuation_source_or_authority_changed") {
+          return settleTerminalContinuationFromQaSuccessor(db, eventId);
+        }
+        return sourceRead;
+      }
+      const { action } = obligation;
+      let effect: { kind: "ready" } | { kind: "held"; reason: string } = { kind: "ready" };
+      if (action.kind === "promote_issue_wakes") {
+        effect = await promoteTerminalIssueWake(eventId, action);
+      } else if (action.kind === "promote_agent_queue") {
+        if (action.companyId !== sourceRead.manifest.source.companyId || action.agentId !== sourceRead.manifest.source.agentId) {
+          effect = { kind: "held", reason: "terminal_queue_promotion_scope_mismatch" };
+        } else {
+          await startNextQueuedRunForAgent(action.agentId);
+          const queuedRuns = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, action.companyId), eq(heartbeatRuns.agentId, action.agentId),
+            eq(heartbeatRuns.status, "queued"),
+          )).limit(1);
+          const queuedWakes = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, action.companyId), eq(agentWakeupRequests.agentId, action.agentId),
+            eq(agentWakeupRequests.status, "queued"),
+          )).limit(1);
+          if (queuedRuns.length || queuedWakes.length) effect = { kind: "held", reason: "terminal_agent_queue_still_pending" };
+        }
+      } else if (action.kind === "sync_issue") {
+        if (action.companyId !== sourceRead.manifest.source.companyId || action.issueId !== sourceRead.manifest.source.issueId) {
+          effect = { kind: "held", reason: "terminal_issue_sync_scope_mismatch" };
+        } else {
+          const quality = await readExactTerminalQualityCompletion(sourceRead.manifest.source);
+          if (quality.kind === "held") {
+            logger.warn({ companyId: sourceRead.manifest.source.companyId, missionId: sourceRead.manifest.source.missionId,
+              workflowRunId: sourceRead.manifest.source.workflowRunId,
+              workflowStepRunId: sourceRead.manifest.source.workflowStepRunId,
+              heartbeatRunId: sourceRead.manifest.source.heartbeatRunId, issueId: action.issueId, reason: quality.reason },
+            "terminal Quality continuation held; sync_issue obligation remains pending");
+            effect = quality;
+          } else if (quality.kind === "not_applicable") {
+            const { workflowService } = await import("./workflow/engine.js");
+            try { await workflowService.syncRunStatusForIssue(db, action.issueId, "heartbeat_promotion"); }
+            catch (error) {
+              const typed = safeTypedQualityHold(error);
+              if (!typed) throw error;
+              logger.warn({ companyId: sourceRead.manifest.source.companyId, missionId: sourceRead.manifest.source.missionId,
+                workflowRunId: sourceRead.manifest.source.workflowRunId,
+                workflowStepRunId: sourceRead.manifest.source.workflowStepRunId,
+                heartbeatRunId: sourceRead.manifest.source.heartbeatRunId, issueId: action.issueId, typedHold: typed },
+              "terminal workflow sync returned a typed Quality hold; sync_issue obligation remains pending");
+              effect = { kind: "held", reason: `terminal_workflow_sync_${typed.outcome}${typed.reason ? `_${typed.reason}` : ""}` };
+            }
+          }
+        }
+      } else if (action.kind === "unblock_handback") {
+        if (action.companyId !== sourceRead.manifest.source.companyId || action.issueId !== sourceRead.manifest.source.issueId
+          || action.agentId !== sourceRead.manifest.source.agentId) effect = { kind: "held", reason: "terminal_unblock_scope_mismatch" };
+        else {
+          const { completeUnblockActionWithSourceHandback } = await import("./missions/owner-action-completion.js");
+          await completeUnblockActionWithSourceHandback(db, { unblockIssueId: action.issueId, companyId: action.companyId,
+            actor: { agentId: action.agentId }, workflowSyncSource: "heartbeat_promotion" });
+          const [issue] = await db.select({ status: issues.status }).from(issues).where(and(
+            eq(issues.id, action.issueId), eq(issues.companyId, action.companyId),
+          ));
+          if (issue?.status !== "done") effect = { kind: "held", reason: "terminal_unblock_handback_not_durable" };
+        }
+      } else if (action.kind === "missing_evidence") {
+        if (action.companyId !== sourceRead.manifest.source.companyId || action.issueId !== sourceRead.manifest.source.issueId
+          || action.agentId !== sourceRead.manifest.source.agentId || action.missionId !== sourceRead.manifest.source.missionId) {
+          effect = { kind: "held", reason: "terminal_missing_evidence_scope_mismatch" };
+        } else if (action.attempt > 2) {
+          const requestKey = `missing-evidence:${action.issueId}`;
+          const requestHash = createHash("sha256").update(JSON.stringify({ requestKey, issueId: action.issueId,
+            requiredAction: action.requiredAction }), "utf8").digest("hex");
+          await db.insert(operatorDecisions).values({ companyId: action.companyId, requestKey, requestHash,
+            schemaVersion: 1, status: "pending", priority: "high", interactionType: "single_select",
+            title: "Completion evidence missing after successful runs", description: action.requiredAction,
+            sourceType: "issue", sourceId: action.issueId, sourceContext: { missionId: null,
+              workflowId: null, workflowRunId: null, artifactRefs: [] },
+            issueId: action.issueId, requestedByAgentId: action.agentId,
+            definition: { options: [{ id: "redispatch-once", label: "Re-dispatch once more",
+              description: "Queue one more execution attempt for the assignee.", facts: [{ label: "Required action",
+                value: action.requiredAction, status: "known" }, { label: "Attempts already made", value: String(action.attempt), status: "known" }], evidenceRefs: [] },
+              { id: "block-issue", label: "Block the issue", description: "Keep the issue blocked until a human unblocks it.",
+                facts: [{ label: "Required action", value: action.requiredAction, status: "known" }], evidenceRefs: [] },
+              { id: "cancel-issue", label: "Cancel the issue", description: "Cancel the issue as unfinishable.",
+                facts: [{ label: "Required action", value: action.requiredAction, status: "known" }], evidenceRefs: [] }],
+              actions: [{ id: "apply", label: "Apply selected option", outcome: "submit", tone: "primary", requiresSelection: true }],
+              selection: { min: 1, max: 1 }, comment: { mode: "optional", label: null, placeholder: null, maxLength: 2000 },
+              approvedScope: [], forbiddenScope: [], humanReview: { schemaVersion: "human-review-v1",
+                decisionSubject: `Issue ${action.issueId} repeatedly finished runs without registering the required completion evidence`,
+                evidence: [], interpretation: `The assignee succeeded ${action.attempt} runs but registered none of the required work products. Auto re-dispatch stopped after the budget (2).`,
+                impact: { ifApproved: "The selected option is applied by an operator-driven flow.",
+                  ifRejected: "The issue stays as-is (not auto-completed) until a human acts.",
+                  ifWrong: "A wrong option could cancel or block work that only needed a different evidence format." },
+                unresolvedFacts: ["Why the assignee does not register the required work product"],
+                questions: ["Is the required evidence list still accurate for this issue?"],
+                recommendedNextStep: action.requiredAction, requiredReviewer: "operator" } },
+          }).onConflictDoNothing({ target: [operatorDecisions.companyId, operatorDecisions.requestKey] });
+          const cards = await db.select().from(operatorDecisions).where(and(
+            eq(operatorDecisions.companyId, action.companyId), eq(operatorDecisions.requestKey, requestKey),
+          ));
+          if (cards.length !== 1 || cards[0]!.requestHash !== requestHash || cards[0]!.issueId !== action.issueId
+            || cards[0]!.requestedByAgentId !== action.agentId) effect = { kind: "held", reason: "terminal_missing_evidence_card_not_durable" };
+        } else {
+          const { hasLiveWakeCoverage } = await import("./missions/qa-rework-cap-oversight-wake.js");
+          let covered = await hasLiveWakeCoverage(db, action.companyId, action.issueId);
+          if (!covered) {
+            await enqueueWakeup(action.agentId, { reason: "missing_evidence_redispatch",
+              triggerDetail: "closeout evidence missing after successful run", contextSnapshot: {
+                issueId: action.issueId, ...(action.missionId ? { missionId: action.missionId } : {}),
+                requiredAction: action.requiredAction, attempt: action.attempt,
+              }, source: "on_demand", requestedByActorType: "system", requestedByActorId: "heartbeat",
+              idempotencyKey: `missing-evidence-redispatch:${action.issueId}:${action.attempt}` });
+            covered = await hasLiveWakeCoverage(db, action.companyId, action.issueId);
+          }
+          const exactWake = await db.select().from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, action.companyId),
+            eq(agentWakeupRequests.idempotencyKey, `missing-evidence-redispatch:${action.issueId}:${action.attempt}`),
+          ));
+          if (!covered && (exactWake.length !== 1 || exactWake[0]!.agentId !== action.agentId
+            || exactWake[0]!.issueId !== action.issueId || exactWake[0]!.missionId !== action.missionId)) {
+            effect = { kind: "held", reason: "terminal_missing_evidence_wake_not_durable" };
+          }
+        }
+      } else if (action.kind === "reevaluate_source") {
+        const { syncWorkflowRunStateWithOutcome } = await import("./workflow/dag-engine.js");
+        const outcome = await syncWorkflowRunStateWithOutcome(db, sourceRead.manifest.source.workflowRunId,
+          "heartbeat_promotion", { requireRunning: true });
+        if (outcome.kind === "busy") effect = { kind: "held", reason: "terminal_source_reevaluation_busy" };
+      }
+      if (effect.kind === "held") return effect;
+      sourceRead = await readTerminalContinuationSource(eventId, db);
+      if (sourceRead.kind !== "ready") {
+        if (sourceRead.kind === "held" && sourceRead.reason === "terminal_continuation_source_or_authority_changed") {
+          return settleTerminalContinuationFromQaSuccessor(db, eventId);
+        }
+        return sourceRead;
+      }
+      const acknowledged = await acknowledgeTerminalReleaseObligation(db, eventId, obligation.effectKey);
+      if (acknowledged.kind === "held") return acknowledged;
+      const reread = await readTerminalReleaseAcknowledgment(db, eventId, obligation.effectKey);
+      if (reread.kind !== "acknowledged") return { kind: "held", reason: reread.kind === "held"
+        ? reread.reason : "terminal_obligation_ack_not_durable" };
+    }
+    return { kind: "complete" };
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}) {
@@ -10092,6 +11421,10 @@ export function heartbeatService(db: Db) {
     reportRunActivity: clearDetachedRunWarning,
 
     reapOrphanedRuns,
+
+    // Exact durable recovery entrypoint: the manifest, actual-drain receipt and current source are
+    // revalidated before any existing writer can run; this does not grant execution authority.
+    recoverTerminalReleaseContinuation: runTerminalReleaseContinuation,
 
     markRunsShutdownInterrupted,
 

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { CorrectionDeliveryInput } from "./workflow/control-flow/qa-correction-delivery-root.js";
@@ -32,14 +33,22 @@ export type ReplacementRootNotifications = {
 };
 
 // Exact DB identity carries notifications only; it does not establish execution authority.
-const rootNotifications = new WeakMap<Db, ReplacementRootNotifications>();
+type ReplacementRootNotificationBinding = {
+  readonly notifications: ReplacementRootNotifications;
+  active: boolean;
+};
+
+type ReplacementRootNotificationContext = ReadonlyMap<Db, ReplacementRootNotificationBinding>;
+
+const rootNotificationContext = new AsyncLocalStorage<ReplacementRootNotificationContext>();
 
 export function createReplacementRootNotifications(): ReplacementRootNotifications {
   return { agentIds: new Set<string>(), correctionWakeupRequestIds: new Set<string>() };
 }
 
 export function currentReplacementRootNotifications(actualDb: Db): ReplacementRootNotifications | null {
-  return rootNotifications.get(actualDb) ?? null;
+  const binding = rootNotificationContext.getStore()?.get(actualDb);
+  return binding?.active ? binding.notifications : null;
 }
 
 export function registerQaCorrectionRootDrain(actualDb: Db, agentId: string): void {
@@ -72,14 +81,16 @@ export async function withReplacementRootNotificationDb<T>(
   notifications: ReplacementRootNotifications,
   work: () => Promise<T>,
 ): Promise<T> {
-  const previous = rootNotifications.get(actualDb);
-  rootNotifications.set(actualDb, notifications);
-  try {
-    return await work();
-  } finally {
-    if (previous) rootNotifications.set(actualDb, previous);
-    else rootNotifications.delete(actualDb);
-  }
+  const context = new Map<Db, ReplacementRootNotificationBinding>(rootNotificationContext.getStore() ?? []);
+  const binding: ReplacementRootNotificationBinding = { notifications, active: true };
+  context.set(actualDb, binding);
+  return rootNotificationContext.run(context, async () => {
+    try {
+      return await work();
+    } finally {
+      binding.active = false;
+    }
+  });
 }
 
 type WakeupTriggerDetail = "manual" | "ping" | "callback" | "system";

@@ -3,7 +3,8 @@
 // [purpose] T4 실제 실행 수락·취소. deliverQualityIntent 는 정식 binding(T3)을 얻어
 //   기존 native 경로(legacy: dag-engine wakeExistingWorkflowStepIssue → queueIssueAssignmentWakeup
 //   → heartbeat.wakeup → adapter.execute, C03: 발급된 동일 요청의 root 전달)로 연결하고, admission tx 가
-//   기록한 qualityAcceptance 또는 C03 전달 영수증을 수락 증거로 읽는다. 통신 재전송은 같은 attempt,
+//   기록한 qualityAcceptance, C03 전달 영수증, 또는 E의 reciprocal wake/run admission을 읽는다.
+//   통신 재전송은 같은 attempt,
 //   새 기술 시도는 기존 step retry tx 의 유한 예약 후 새 키다(이 파일은 새 기술 시도를
 //   스스로 만들지 않는다). 취소는 intent 차단을 먼저 저장한 뒤 기존 cancelRun 정리를
 //   호출하고 요청과 확인을 구분한다.
@@ -33,7 +34,7 @@ import { buildCompanyWorkflowExecutionSteps } from '../workflow/company-executio
 import { ensureCanonicalQualityExecution } from "./native-records.js";
 import { QUALITY_EXECUTE_STEP_ID } from "./native-definition.js";
 import { isAddendumWithdrawnForTarget } from "./rollback.js";
-import { applyCurrentOutputCorrection } from "./current-output.js";
+import { applyCurrentOutputCorrection, readCurrentOutputEAdmission } from "./current-output.js";
 import { parseQaCorrectionPreparationRow } from "../workflow/control-flow/qa-correction-authority.js";
 import { qaCorrectionAppliedKey } from "../workflow/control-flow/qa-correction-contract.js";
 import { acceptIssued, queueIssued, withQaCorrectionFollowupReconcile } from "../workflow/control-flow/qa-correction-followup-reconcile.js";
@@ -92,14 +93,19 @@ async function readQualityCorrectionInputs(db: Db, key: QualityKey) {
   return { p, appliedEventId: applied.id, inputs };
 }
 
-/** Cancellation keeps its existing cleanup, including C03 runs without a separate quality wake. */
+/** Cancellation keeps its existing cleanup and adds the exact admitted E actual, including terminal readback. */
 async function qualityHeartbeatRuns(db: Db, action: ActionRow, latestFirst = false) {
   const key = { companyId: action.companyId, actionId: action.id };
   const rows = await qualityAttemptRows(db, { ...key, stepRunId: action.canonicalBinding!.stepRunId });
   const issued = action.kind === "current_output" ? await readQualityCorrectionInputs(db, key) : null;
   const deliveries = issued ? await Promise.all(issued.inputs.map(input => readQaCorrectionDelivery(db, input))) : [];
-  const ids = [...rows.filter(row => row.qualityAcceptance && row.runId).map(row => row.runId!),
-    ...deliveries.flatMap(delivery => delivery ? [delivery.heartbeatRunId] : [])];
+  const eAdmission = action.kind === "current_output"
+    ? await readCurrentOutputEAdmission(db, key, action) : { kind: "none" as const };
+  const ids = [...new Set([
+    ...rows.filter(row => row.qualityAcceptance && row.runId).map(row => row.runId!),
+    ...deliveries.flatMap(delivery => delivery ? [delivery.heartbeatRunId] : []),
+    ...(eAdmission.kind === "admitted" ? [eAdmission.actual.id] : []),
+  ])];
   if (!ids.length) return [];
   return db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.companyId, key.companyId), inArray(heartbeatRuns.id, ids)))
@@ -108,8 +114,8 @@ async function qualityHeartbeatRuns(db: Db, action: ActionRow, latestFirst = fal
 
 /**
  * quality intent 를 실제 native 경로로 전달한다.
- * - accepted: admission 수락 원문 또는 C03 전달 영수증(현재 B의 검사 완료를 뜻하지 않는다).
- * - waiting: 대기열에 살아 있으나 아직 수락되지 않은 경우(deferred·paused 대기).
+ * - accepted: ordinary admission, C03 delivery evidence, or exact E wake/run admission (not QA PASS).
+ * - waiting: E has the exact committed pending wake but no linked heartbeat actual yet.
  * - blocked: 거절(정책·취소·한도·정의 불변 위반). 새 기술 시도는 retry 경로 소관이다.
  */
 export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ status: "accepted" | "waiting" | "blocked"; receiptId: string | null }> {
@@ -135,11 +141,23 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
     if (action.kind === "current_output") {
       const correction = await applyCurrentOutputCorrection(db, parsed);
       if (correction.status === "source_preserved") return { status: "blocked", receiptId: null };
+      if (correction.remediation?.outcome === "completed") {
+        const admission = await readCurrentOutputEAdmission(db, parsed, action);
+        if (admission.kind === "pending") return { status: "waiting", receiptId: admission.wakeupRequestId };
+        if (admission.kind === "admitted" && ["queued", "running", "succeeded"].includes(admission.actual.status)) {
+          return { status: "accepted", receiptId: admission.wakeupRequestId };
+        }
+        return { status: "blocked", receiptId: null };
+      }
+      if (correction.remediation && correction.remediation.outcome !== "not_applicable") {
+        // Held, partial, and unknown effects stay scoped to E reentry; ordinary delivery cannot duplicate them.
+        return { status: "blocked", receiptId: null };
+      }
       if (correction.status === "verification_pending") {
         const issued = await readQualityCorrectionInputs(db, parsed);
         if (issued) {
           const { p, appliedEventId, inputs } = issued;
-          await withQaCorrectionFollowupReconcile(db, p.workflowRunId, () => acceptIssued(db, p, appliedEventId));
+          await withQaCorrectionFollowupReconcile(db, p.workflowRunId, rootDb => acceptIssued(rootDb, p, appliedEventId));
           // A delivery receipt accepts B's request; only the official consumption reader can certify B's QA.
           const outcomes = await Promise.all(inputs.map(async input => {
             const delivered = await readQaCorrectionDelivery(db, input);
@@ -153,6 +171,7 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
             ?? outcomes[0] ?? { status: "blocked", receiptId: null };
         }
       }
+      if (correction.remediation?.outcome !== "not_applicable") return { status: "blocked", receiptId: null };
     }
     await ensureCanonicalQualityExecution(db, parsed); // 실행 직전 정의 해시 재검증 포함(T3)
   } catch (error) {

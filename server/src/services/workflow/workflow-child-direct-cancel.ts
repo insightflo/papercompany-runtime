@@ -13,7 +13,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { withLockedChildStartIdentity } from "./workflow-child-start-state.js";
+import { QaRemediationAdmissionHold } from "./control-flow/qa-remediation-admission-root.js";
+import { withChildCancellationAdmission, withLockedChildStartIdentity } from "./workflow-child-start-state.js";
 import { isChildStartContention } from "./workflow-child-start-contention.js";
 import type { ChildStartIdentity } from "./workflow-child-start-state.js";
 
@@ -34,7 +35,13 @@ export async function claimDirectlyCancelledLinkedChildRun(
   // [D2] 구세대 신원은 잠금 전에 거부한다(fail-closed — 세대는 신원 확인이지 능력이 아니다).
   if (identity.generation !== 1) return { outcome: "cancelled", rows: [] };
   try {
-    const rows = await db.transaction(async (tx) => {
+    const [requested] = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+      eq(workflowRuns.id, identity.childRunId),
+      eq(workflowRuns.companyId, identity.companyId),
+      sql`${workflowRuns.status} in ('pending', 'running')`,
+    )).limit(1);
+    if (!requested) return { outcome: "cancelled", rows: [] };
+    const rows = await withChildCancellationAdmission({ db, identity, work: async (rootDb) => rootDb.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       const ctx = await withLockedChildStartIdentity(txDb, identity);
       if (!ctx) return [];
@@ -80,10 +87,13 @@ export async function claimDirectlyCancelledLinkedChildRun(
               and workflow_runs.status in ('pending', 'running'))`,
         ))
         .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
-    });
+    }),
+  });
     return { outcome: "cancelled", rows };
   } catch (error) {
     // [설계 §3] 구조화 경합만 busy — 성공 보고 없이 기존 호출 계약을 유지한다.
+    // C5 admission HOLD carries authority/actual uncertainty even when its cause is a DB error.
+    if (error instanceof QaRemediationAdmissionHold) throw error;
     if (isChildStartContention(error)) return { outcome: "busy" };
     throw error;
   }

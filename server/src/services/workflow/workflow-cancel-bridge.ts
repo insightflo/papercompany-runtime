@@ -10,14 +10,19 @@
 //     무변환 거부다.
 // [authority] 내구 레코드만이 권위(규칙 7/8). 최종 변이의 WHERE 가 잠금/시점 이후 신원을
 //   재평가하며, 감사 기록은 실행 권위가 없다.
-import { and, eq, sql, type SQL } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
+import { and, eq, is, sql, type SQL } from "drizzle-orm";
+import { alias, PgTransaction } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepInvocations, workflowStepRuns } from "@paperclipai/db";
 import { logActivity } from "../activity-log.js";
+import { loadConfig } from "../../config.js";
+import { readQaRemediationActualDrain } from "../heartbeat-actual-drain.js";
+import { createReplacementRootNotifications } from "../issue-assignment-wakeup.js";
 import { discoverWorkflowChildStart } from "./workflow-child-discovery.js";
 import { claimDirectlyCancelledLinkedChildRun } from "./workflow-child-direct-cancel.js";
 import { claimCancelledChildRunWithParentFence } from "./workflow-child-start-state.js";
+import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission } from "./control-flow/qa-remediation-admission-root.js";
+import { createQaFileOwnerRuntime } from "./control-flow/qa-remediation-runtime.js";
 import {
   baseIdPredicate,
   currentPredicate,
@@ -26,6 +31,7 @@ import {
 } from "./workflow-child-start-predicates.js";
 
 const WORKFLOW_RUN_TERMINAL_STATUSES_SQL = sql`('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`;
+const isTerminalRun = (status: string) => ["completed", "cancelled", "aborted", "failed", "timed-out"].includes(status);
 
 export type CancelledRunRef = { id: string; companyId: string; missionId: string | null };
 
@@ -89,27 +95,62 @@ export async function cancelWorkflowRunWithChildFence(
   if (discovery.kind === "invalid-child") {
     return { rows: [], refusedInvalidReason: discovery.reason };
   }
-  // plain — 자식 표지/참조가 하나라도 있으면 이 문장은 0행이다(명시적 no-child 가드).
-  const rows = await db
-    .update(workflowRuns)
-    .set({
-      status: "cancelled",
-      completedAt: new Date(),
-      childStartToken: null,
-      childStartLeaseExpiresAt: null,
-    })
-    .where(and(
-      eq(workflowRuns.id, input.runId),
-      eq(workflowRuns.companyId, input.companyId),
-      sql`${workflowRuns.status} not in ${WORKFLOW_RUN_TERMINAL_STATUSES_SQL}`,
-      sql`${workflowRuns.triggeredBy} <> 'workflow-step'`,
-      sql`${workflowRuns.parentRunId} is null`,
-      sql`${workflowRuns.parentStepRunId} is null`,
-      sql`not exists (
-        select 1 from workflow_step_invocations wcb_i where wcb_i.child_run_id = ${workflowRuns.id})`,
-    ))
-    .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
-  return { rows };
+  if (discovery.kind === "missing") return { rows: [] };
+  // Preserve the existing no-op boundary before native admission: wrong-company, missing, and terminal runs cannot write.
+  const [requested] = await db.select({ status: workflowRuns.status }).from(workflowRuns).where(and(
+    eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId),
+  )).limit(1);
+  if (!requested || isTerminalRun(requested.status)) return { rows: [] };
+  if (is(db, PgTransaction)) throw new QaRemediationAdmissionHold("cancel_transaction_root_required", []);
+
+  return withQaRemediationSharedAdmission({
+    db, runId: input.runId, ownerRuntime: createQaFileOwnerRuntime(loadConfig()),
+    outerNotifications: createReplacementRootNotifications(), resolutionMap: new Map(), bindResolutionMap: () => {},
+    driftBudget: { corrections: 0 },
+    work: async (rootDb, context) => {
+      const [current] = await rootDb.select().from(workflowRuns).where(and(
+        eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId),
+      )).limit(1);
+      if (!current || isTerminalRun(current.status)) return { rows: [] };
+      if (!Number.isSafeInteger(current.dispatchAuthorityVersion) || current.dispatchAuthorityVersion < 0
+        || (context.pending.length > 0 && !current.missionId)) {
+        throw new QaRemediationAdmissionHold("cancel_target_scope_unproven", context.pending.map(item => item.eventId));
+      }
+      const freshChild = await discoverWorkflowChildStart(rootDb, input.runId);
+      if (freshChild.kind === "missing") return { rows: [] };
+      if (freshChild.kind !== "plain") {
+        throw new QaRemediationAdmissionHold("cancel_child_scope_changed", context.pending.map(item => item.eventId));
+      }
+      for (const { eventId, preparation } of context.pending) {
+        const [scope] = await rootDb.select({ companyId: workflowRuns.companyId, missionId: workflowRuns.missionId,
+          dispatchAuthorityVersion: workflowRuns.dispatchAuthorityVersion }).from(workflowRuns).where(and(
+          eq(workflowRuns.id, preparation.workflowRunId), eq(workflowRuns.companyId, preparation.companyId),
+        )).limit(1);
+        if (!scope?.missionId || !Number.isSafeInteger(scope.dispatchAuthorityVersion)
+          || scope.missionId !== preparation.missionId || scope.dispatchAuthorityVersion !== preparation.dispatchAuthorityVersion) {
+          throw new QaRemediationAdmissionHold("cancel_pending_scope_unproven", [eventId]);
+        }
+        const [producer] = await rootDb.select().from(workflowStepRuns).where(and(
+          eq(workflowStepRuns.id, preparation.producer.stepRunId), eq(workflowStepRuns.workflowRunId, preparation.workflowRunId),
+        )).limit(1);
+        if (!producer) throw new QaRemediationAdmissionHold("cancel_actual_drain_producer_missing", [eventId]);
+        const drain = await readQaRemediationActualDrain(rootDb, preparation, producer);
+        if (drain.kind !== "proven") {
+          throw new QaRemediationAdmissionHold("cancel_actual_drain_unproven", [eventId], new Error(drain.reason));
+        }
+      }
+      // Keep the original company/nonterminal/no-child conditional UPDATE as the final write fence.
+      const rows = await rootDb.update(workflowRuns).set({ status: "cancelled", completedAt: new Date(),
+        childStartToken: null, childStartLeaseExpiresAt: null }).where(and(
+        eq(workflowRuns.id, input.runId), eq(workflowRuns.companyId, input.companyId),
+        sql`${workflowRuns.status} not in ${WORKFLOW_RUN_TERMINAL_STATUSES_SQL}`,
+        sql`${workflowRuns.triggeredBy} <> 'workflow-step'`, sql`${workflowRuns.parentRunId} is null`,
+        sql`${workflowRuns.parentStepRunId} is null`,
+        sql`not exists (select 1 from workflow_step_invocations wcb_i where wcb_i.child_run_id = ${workflowRuns.id})`,
+      )).returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
+      return { rows };
+    },
+  });
 }
 
 /**

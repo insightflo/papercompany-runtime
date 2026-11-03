@@ -3,7 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { isDeepStrictEqual as same } from "node:util";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, issues, issueWorkProducts, workflowStepRuns,
-  workflowStepOutputBindings, workflowTransitionEvents } from "@paperclipai/db";
+  workflowStepOutputBindings, workflowTransitionEvents, workflowRuns } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
 import { qaCorrectionConsumptionSchema, qaCorrectionConsumptionKey } from "./control-flow/qa-correction-contract.js";
@@ -18,6 +18,7 @@ import type {
   WorkflowVerdictFinding,
 } from "@paperclipai/shared";
 import type { WorkflowValidationLedgerResult } from "./validation-verdict-ledger.js";
+import { proveReservedEOfficialAttempt } from "./workflow-verdict-e-selection.js";
 
 type ResolveContext = typeof import("./validation-verdict-ledger.js").resolveWorkflowValidationContext;
 type WorkflowValidationDb = Pick<Db, "select" | "insert">;
@@ -127,6 +128,7 @@ export async function recordWorkflowValidationVerdict(input: {
   readonly remediations?: WorkflowQaRemediations | null;
 }, resolveWorkflowValidationContext: ResolveContext, correction?: CorrectionWrite): Promise<WorkflowValidationLedgerResult> {
   const context = await resolveWorkflowValidationContext(input.db, input.issue, { mode: "record" });
+  const ordinaryAttempt = correction ? null : await proveReservedEOfficialAttempt(input, context);
   if (!context.isCandidate || !context.workflowRunId || !context.workflowStepRunId) {
     return { ...context, satisfied: false, verdict: null, insufficientEvidence: false, insufficientEvidenceReason: null };
   }
@@ -168,7 +170,6 @@ export async function recordWorkflowValidationVerdict(input: {
   const sourceKey = input.heartbeatRunId
     ? `run:${input.heartbeatRunId}`
     : `text:${hashText(input.sourceText ?? input.verdict)}`;
-
   const at = new Date();
   const idempotencyKey = `workflow-validation-verdict:${input.issue.companyId}:${input.issue.id}:${context.workflowStepRunId}:${sourceKey}`;
   const insert = input.db.insert(workflowTransitionEvents).values({
@@ -188,9 +189,20 @@ export async function recordWorkflowValidationVerdict(input: {
     payload,
     ...(correction ? { wakeupRequestId: correction.actor.wakeupRequestId,
       executionGeneration: correction.selected.followup.target.executionGeneration, createdAt: at } : {}),
+    ...(ordinaryAttempt ? { wakeupRequestId: ordinaryAttempt.wakeupRequestId,
+      executionGeneration: ordinaryAttempt.executionGeneration } : {}),
   }).onConflictDoNothing();
   let verdict = input.verdict;
-  if (!correction) await insert;
+  if (!correction && ordinaryAttempt) {
+    const [inserted] = await insert.returning();
+    const [stored] = inserted ? [inserted] : await input.db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, input.issue.companyId), eq(workflowTransitionEvents.idempotencyKey, idempotencyKey)));
+    requireWrite(stored && stored.workflowRunId === context.workflowRunId
+      && stored.workflowStepRunId === context.workflowStepRunId && stored.issueId === input.issue.id
+      && stored.heartbeatRunId === input.heartbeatRunId && stored.verdict === input.verdict
+      && stored.wakeupRequestId === ordinaryAttempt.wakeupRequestId
+      && stored.executionGeneration === ordinaryAttempt.executionGeneration);
+  } else if (!correction) await insert;
   else {
     const [inserted] = await insert.returning();
     const [stored] = inserted ? [inserted] : await input.db.select().from(workflowTransitionEvents).where(and(
