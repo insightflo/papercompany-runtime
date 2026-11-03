@@ -10213,7 +10213,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function runTerminalReleaseContinuation(eventId: string): Promise<{ kind: "complete" } | { kind: "held"; reason: string }> {
-    if (terminalContinuationInflight.has(eventId)) return { kind: "held", reason: "terminal_continuation_already_inflight" };
+    if (terminalContinuationInflight.has(eventId)) {
+      const source = await readTerminalContinuationSource(eventId, db).catch(() => null);
+      if (source?.kind === "held" && source.reason === "terminal_continuation_replacement_owner_changed") return source;
+      return { kind: "held", reason: "terminal_continuation_already_inflight" };
+    }
     terminalContinuationInflight.add(eventId);
     try {
       return await drainTerminalReleaseContinuation(db, eventId);
