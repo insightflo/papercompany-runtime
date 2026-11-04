@@ -1,6 +1,8 @@
 import { parse as parseYaml } from "yaml";
 import { parseDependencies } from "./workflow-graph-dependencies.js";
 import { normalizeGraphRunStatus } from "./workflow-graph-run-status.js";
+import { normalizeGraphEdgeKind } from "./workflow-graph-edge-kind.js";
+export { normalizeGraphEdgeKind } from "./workflow-graph-edge-kind.js";
 export { normalizeGraphRunStatus } from "./workflow-graph-run-status.js";
 export { parseDependencies } from "./workflow-graph-dependencies.js";
 import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
@@ -1174,11 +1176,6 @@ function normalizeWorkProducts(value: unknown): WorkflowGraphWorkProduct[] {
   });
 }
 
-export function normalizeGraphEdgeKind(value: unknown): WorkflowGraphEdgeKind {
-  const kind = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (kind === "conditional" || kind === "failure" || kind === "early-stop") return kind;
-  return "normal";
-}
 
 function readGraphEdgeMetadata(step: WorkflowGraphStep, sourceId: string): WorkflowGraphEdgeMetadata {
   const record = step.graphEdgeMetadata && typeof step.graphEdgeMetadata === "object"
