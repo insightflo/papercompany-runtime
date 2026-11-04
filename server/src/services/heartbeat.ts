@@ -53,7 +53,7 @@ import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./h
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
-import { resolveAdapterFallbackThinking, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
+import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
@@ -428,7 +428,6 @@ const DETACHED_GRACE_SEC = 5;
 // (run 자체는 longevity cap 에 따라 별도 회수 — 여기서는 agent 가시성만 교정.)
 const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
-const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 
 function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
   if (!description) return null;
@@ -2306,40 +2305,6 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
 }
 
 
-function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
-  const adapterConfig = parseObject(adapterConfigRaw);
-  const fallback = parseObject(adapterConfig.fallback);
-  const command =
-    readNonEmptyString(adapterConfig.fallbackCommand) ??
-    readNonEmptyString(fallback.command);
-  if (!command) return null;
-  const provider = readNonEmptyString(fallback.provider) ?? undefined;
-  const model = readNonEmptyString(fallback.model) ?? undefined;
-  const thinking = readNonEmptyString(fallback.thinking) ?? undefined;
-  const rawThinkingLadder = Array.isArray(fallback.thinkingLadder) ? fallback.thinkingLadder : [];
-  const thinkingLadder = rawThinkingLadder
-    .map((value) => readNonEmptyString(value))
-    .filter((value): value is string => Boolean(value));
-
-  const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
-  const triggers = rawTriggers
-    .map((value) => readNonEmptyString(value))
-    .filter((value): value is string => Boolean(value));
-  const maxAttempts = Math.max(
-    1,
-    Math.floor(asNumber(fallback.maxAttempts ?? adapterConfig.fallbackMaxAttempts, DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS)),
-  );
-
-  return {
-    command,
-    provider,
-    model,
-    thinking,
-    thinkingLadder,
-    triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
-    maxAttempts,
-  };
-}
 
 function shouldApplyAdapterFallbackConfig(input: {
   run: typeof heartbeatRuns.$inferSelect;

@@ -1,3 +1,8 @@
+import { asNumber, parseObject } from "../adapters/utils.js";
+import { readNonEmptyString } from "./heartbeat-run-context.js";
+
+const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
+
 export type AdapterFallbackConfig = {
   command: string;
   provider?: string;
@@ -24,4 +29,39 @@ export function resolveAdapterFallbackThinking(
   if (config.thinkingLadder.length === 0) return config.thinking;
   const index = Math.min(Math.max(attempt - 1, 0), config.thinkingLadder.length - 1);
   return config.thinkingLadder[index];
+}
+
+export function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
+  const adapterConfig = parseObject(adapterConfigRaw);
+  const fallback = parseObject(adapterConfig.fallback);
+  const command =
+    readNonEmptyString(adapterConfig.fallbackCommand) ??
+    readNonEmptyString(fallback.command);
+  if (!command) return null;
+  const provider = readNonEmptyString(fallback.provider) ?? undefined;
+  const model = readNonEmptyString(fallback.model) ?? undefined;
+  const thinking = readNonEmptyString(fallback.thinking) ?? undefined;
+  const rawThinkingLadder = Array.isArray(fallback.thinkingLadder) ? fallback.thinkingLadder : [];
+  const thinkingLadder = rawThinkingLadder
+    .map((value) => readNonEmptyString(value))
+    .filter((value): value is string => Boolean(value));
+
+  const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
+  const triggers = rawTriggers
+    .map((value) => readNonEmptyString(value))
+    .filter((value): value is string => Boolean(value));
+  const maxAttempts = Math.max(
+    1,
+    Math.floor(asNumber(fallback.maxAttempts ?? adapterConfig.fallbackMaxAttempts, DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS)),
+  );
+
+  return {
+    command,
+    provider,
+    model,
+    thinking,
+    thinkingLadder,
+    triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
+    maxAttempts,
+  };
 }
