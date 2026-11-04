@@ -41,7 +41,7 @@ import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type Work
 import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
-import { buildStepRunMap } from "./dag-step-observation.js";
+import { buildStepRunMap, toConditionalStepObservation } from "./dag-step-observation.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -109,7 +109,6 @@ import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from
 import {
   reviveConditionalSkip,
   settleConditionalSkip,
-  type ConditionalStepObservation,
 } from "./conditional-skip-settlement.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
@@ -1635,20 +1634,6 @@ function buildPredFactsMap(
   return facts;
 }
 
-function toConditionalStepObservation(row: typeof workflowStepRuns.$inferSelect): ConditionalStepObservation {
-  return {
-    id: row.id,
-    workflowRunId: row.workflowRunId,
-    stepId: row.stepId,
-    status: row.status,
-    issueId: row.issueId,
-    startedAt: row.startedAt,
-    lastDispatchAttemptAt: row.lastDispatchAttemptAt,
-    dispatchReadyAt: row.dispatchReadyAt,
-    executionGeneration: row.executionGeneration,
-    metadata: row.metadata,
-  };
-}
 
 function findRunnableSteps(
   steps: WorkflowStep[],
