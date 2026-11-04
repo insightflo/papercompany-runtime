@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { prioritizeProjectWorkspaceCandidatesForRun } from "./heartbeat-workspace-priority.js";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
@@ -1203,23 +1204,7 @@ export type ResolvedWorkspaceForRun = {
   warnings: string[];
 };
 
-type ProjectWorkspaceCandidate = {
-  id: string;
-  cwd?: string | null;
-  repoUrl?: string | null;
-  repoRef?: string | null;
-  projectId?: string | null;
-};
-
-export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWorkspaceCandidate>(
-  rows: T[],
-  preferredWorkspaceId: string | null | undefined,
-): T[] {
-  if (!preferredWorkspaceId) return rows;
-  const preferredIndex = rows.findIndex((row) => row.id === preferredWorkspaceId);
-  if (preferredIndex <= 0) return rows;
-  return [rows[preferredIndex]!, ...rows.slice(0, preferredIndex), ...rows.slice(preferredIndex + 1)];
-}
+export { prioritizeProjectWorkspaceCandidatesForRun };
 
 /**
  * [instant-advance v1.2] 종말 확정된 런이 워크플로우 런에 속하면(contextSnapshot.workflowRunId)
