@@ -73,6 +73,7 @@ async function seedWorld(db: Db, dir: string, label: string, opts: { readonlyCon
   await db.insert(workflowTerminalDecisions).values({ companyId: u.companyId, workflowRunId: u.runId,
     decidedAuthorityVersion: run!.dispatchAuthorityVersion, decision: "failed", policyCause: "recovery_deadline_hard",
     discoveryPath: "test-seed", origin: "deadlock_reconciler", reason: "existing-run resume after actual producer cleanup" });
+  await seeded.close(); // Finish the original QA actual while its pre-resume generation is still current.
   // Native publication uses atomic rename, so deny directory writes as well as direct file writes.
   if (opts.readonlyContent) { await chmod(u.file, 0o444); await chmod(dirname(u.file), 0o555); }
   const originalProducts = await db.select({ id: issueWorkProducts.id, url: issueWorkProducts.url, status: issueWorkProducts.status, metadata: issueWorkProducts.metadata })
