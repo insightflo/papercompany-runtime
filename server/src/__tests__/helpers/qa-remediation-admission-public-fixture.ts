@@ -193,7 +193,7 @@ type AdmissionScenarioState = Omit<AdmissionScenario, "units" | "downstreamProgr
   readonly units: AdmissionUnitState[];
   readonly dispatchAuthorityVersion: number;
   downstreamProgress?: AdmissionDownstreamProgress;
-  internalSeed?: { file: string; bytes: Buffer; find: string; replace: string; second?: { bytes: Buffer; find: string; replace: string }; existing?: { companyId: string; authorId: string; verifierId: string } };
+  internalSeed?: { file: string; bytes: Buffer; find: string; replace: string; replacements?: ReadonlyArray<{ find: string; replace: string }>; products?: ReadonlyArray<{ name: string; bytes: Buffer }>; second?: { bytes: Buffer; find: string; replace: string }; existing?: { companyId: string; authorId: string; verifierId: string } };
 };
 type AdmissionAdapterRegistration = {
   readonly kind: "producer" | "qa" | "downstream";
@@ -793,6 +793,7 @@ function sameStoredAttemptProof(proof: ReturnType<typeof readWorkflowAttemptProo
 
 function admissionRemediations(state: AdmissionUnitState) {
   if (!state.scenario.internalSeed) return { items: [{ op: "string_replace" as const, file: state.file, find: "before", replace: "after" }] };
+  if (state.scenario.internalSeed.replacements) return { items: state.scenario.internalSeed.replacements.map(item => ({ op: "string_replace" as const, file: state.file, ...item })) };
   return { items: [{ op: "string_replace" as const, file: state.file, find: state.scenario.internalSeed?.find ?? "before", replace: state.scenario.internalSeed?.replace ?? "after" },
     ...(state.scenario.internalSeed?.second ? [{ op: "string_replace" as const,
       file: path.join(path.dirname(state.file), "notes.md"), find: state.scenario.internalSeed.second.find,
@@ -1167,6 +1168,11 @@ async function createAdmissionUnit(harness: AdmissionHarness, scenario: Admissio
         const secondFile = path.join(path.dirname(file), "notes.md");
         await writeFile(secondFile, scenario.internalSeed.second.bytes);
         await registerWorkflowArtifact({ db, issue, actor, data: { path: secondFile, type: "document", isPrimary: false } });
+      }
+      for (const product of scenario.internalSeed?.products ?? []) {
+        const productFile = path.join(path.dirname(file), product.name);
+        await writeFile(productFile, product.bytes);
+        await registerWorkflowArtifact({ db, issue, actor, data: { path: productFile, type: "document", isPrimary: false } });
       }
       if (!(await registeredProducer(db, scenario.companyId, producerIssueId, context.runId))) {
         throw new Error("admission registered producer proof missing");

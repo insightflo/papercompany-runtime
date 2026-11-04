@@ -1,9 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, missions, workflowRuns,
-  workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+  workflowStepRuns, workflowTransitionEvents, workflowRecoveryAuthorities, type Db } from "@paperclipai/db";
 import { workProductProducerSchema } from "@paperclipai/shared";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
 import { readAdmittedWorkflowIdentity } from "./heartbeat-finalization/producer-identity.js";
@@ -87,7 +88,7 @@ function readContextId(context: unknown, name: string) {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-async function identityFromCurrent(db: Pick<Db, "select">, heartbeat: Heartbeat, workflowRunId: string): Promise<HeartbeatActualDrainIdentity | null> {
+async function identityFromCurrent(db: Pick<Db, "select">, heartbeat: Heartbeat, workflowRunId: string, resumed?: { generation: number; version: number }): Promise<HeartbeatActualDrainIdentity | null> {
   if (!heartbeat.wakeupRequestId || !heartbeat.issueId || !heartbeat.workflowStepRunId
     || heartbeat.workflowExecutionGeneration === null || !heartbeat.startedAt || !heartbeat.executionScopeKind
     || heartbeat.executionEpoch === null || !heartbeat.executionToken || !heartbeat.executorOwnerId
@@ -100,12 +101,12 @@ async function identityFromCurrent(db: Pick<Db, "select">, heartbeat: Heartbeat,
     || wake.workflowStepRunId !== step.id || wake.workflowExecutionGeneration !== heartbeat.workflowExecutionGeneration
     || wake.runId !== heartbeat.id || wake.status === "coalesced"
     || step.workflowRunId !== workflowRunId || step.issueId !== heartbeat.issueId
-    || step.executionGeneration !== heartbeat.workflowExecutionGeneration || run.companyId !== heartbeat.companyId
+    || (resumed?.generation ?? step.executionGeneration) !== heartbeat.workflowExecutionGeneration || run.companyId !== heartbeat.companyId
     || run.missionId !== wake.missionId || run.missionId === null || step.retryCount === null || step.iterationIndex === null) return null;
-  const attempt = await producerAttemptDetail(db, heartbeat, step);
+  const attempt = await producerAttemptDetail(db, heartbeat, resumed ? { ...step, executionGeneration: resumed.generation } : step);
   if (attempt.retryCount !== step.retryCount || attempt.iterationIndex !== step.iterationIndex) return null;
   return identitySchema.parse({ companyId: heartbeat.companyId, missionId: run.missionId,
-    workflowRunId: run.id, dispatchAuthorityVersion: run.dispatchAuthorityVersion,
+    workflowRunId: run.id, dispatchAuthorityVersion: resumed?.version ?? run.dispatchAuthorityVersion,
     workflowStepRunId: step.id, stepId: step.stepId, issueId: step.issueId,
     heartbeatRunId: heartbeat.id, wakeupRequestId: wake.id, executionGeneration: heartbeat.workflowExecutionGeneration,
     retryCount: attempt.retryCount, iterationIndex: attempt.iterationIndex,
@@ -249,24 +250,48 @@ export async function readQaRemediationActualDrain(db: Pick<Db, "select">, prepa
   if (matched.some(rows => rows.length !== 1)) return hold("active_target_registration_missing_or_ambiguous");
   let actualHeartbeatId: string | null = null;
   const owners: Heartbeat[] = [];
+  let resumed: { generation: number; version: number } | undefined;
   for (const product of matched.flat()) {
     if (!product.createdByRunId || !["local", "local_file"].includes(product.provider)) return hold("target_owner_or_provider_missing");
     const parsed = workProductProducerSchema.safeParse(product.metadata?.workflowProducer);
+    // A consumed same-run resume advances the fence, not the immutable producer actual.
+    // Reuse its original receipt only after the one-generation authority and byte seal agree.
+    if (parsed.success && parsed.data.executionGeneration !== preparation.producer.executionGeneration) {
+      const generation = parsed.data.executionGeneration;
+      const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, preparation.workflowRunId));
+      const authorities = await db.select().from(workflowRecoveryAuthorities).where(and(
+        eq(workflowRecoveryAuthorities.companyId, preparation.companyId),
+        eq(workflowRecoveryAuthorities.workflowRunId, preparation.workflowRunId),
+        eq(workflowRecoveryAuthorities.resultingAuthorityVersion, preparation.dispatchAuthorityVersion)));
+      const authority = authorities[0];
+      if (generation + 1 !== producer.executionGeneration || !run || run.companyId !== preparation.companyId
+        || run.missionId !== preparation.missionId || run.status !== "running" || producer.status !== "completed"
+        || run.dispatchAuthorityVersion !== preparation.dispatchAuthorityVersion || authorities.length !== 1
+        || !authority || authority.recoveryKind !== "manual_resume" || authority.status !== "consumed"
+        || !authority.consumedAt || authority.replacementRunId !== null
+        || authority.targetAuthorityVersion + 1 !== authority.resultingAuthorityVersion) return hold("resume_actual_authority_unproven");
+      const bytes = await readFile(resolveWorkProductLocalFilePath(product)!).catch(() => null);
+      if (!bytes || parsed.data.byteSize !== bytes.length || !parsed.data.sha256
+        || parsed.data.sha256 !== createHash("sha256").update(bytes).digest("hex")) return hold("resume_actual_product_hash_mismatch");
+      const original = { generation, version: authority.targetAuthorityVersion };
+      if (resumed && !isDeepStrictEqual(resumed, original)) return hold("resume_actual_identity_ambiguous");
+      resumed = original;
+    }
     if (!parsed.success || parsed.data.companyId !== preparation.companyId || parsed.data.missionId !== preparation.missionId
       || parsed.data.workflowRunId !== preparation.workflowRunId || parsed.data.stepRunId !== preparation.producer.stepRunId
-      || parsed.data.stepId !== preparation.producer.stepId || parsed.data.executionGeneration !== preparation.producer.executionGeneration
+      || parsed.data.stepId !== preparation.producer.stepId || parsed.data.executionGeneration !== (resumed?.generation ?? preparation.producer.executionGeneration)
       || parsed.data.retryCount !== preparation.producer.retryCount || parsed.data.iterationIndex !== preparation.producer.iterationIndex
       || parsed.data.heartbeatRunId !== product.createdByRunId) return hold("target_provenance_malformed_or_mismatched");
     if (actualHeartbeatId && actualHeartbeatId !== product.createdByRunId) return hold("targets_have_multiple_actual_owners");
     actualHeartbeatId = product.createdByRunId;
     const [heartbeat] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, actualHeartbeatId),
       eq(heartbeatRuns.companyId, preparation.companyId)));
-    if (!heartbeat || heartbeat.workflowStepRunId !== producer.id
-      || heartbeat.workflowExecutionGeneration !== producer.executionGeneration) return hold("target_actual_attempt_mismatch");
+    if (!heartbeat || (resumed && heartbeat.status !== "succeeded") || heartbeat.workflowStepRunId !== producer.id
+      || heartbeat.workflowExecutionGeneration !== (resumed?.generation ?? producer.executionGeneration)) return hold("target_actual_attempt_mismatch");
     owners.push(heartbeat);
   }
   if (!actualHeartbeatId || !owners.length) return hold("actual_owner_unavailable");
-  const identity = await identityFromCurrent(db, owners[0]!, preparation.workflowRunId).catch(() => null);
+  const identity = await identityFromCurrent(db, owners[0]!, preparation.workflowRunId, resumed).catch(() => null);
   if (!identity || identity.missionId !== preparation.missionId || identity.workflowStepRunId !== producer.id
     || identity.stepId !== producer.stepId || identity.retryCount !== preparation.producer.retryCount
     || identity.iterationIndex !== preparation.producer.iterationIndex) return hold("actual_identity_unproven");
