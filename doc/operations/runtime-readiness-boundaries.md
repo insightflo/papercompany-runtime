@@ -107,3 +107,10 @@ commands before/after. Static source counts do not establish discovered tests.
 No extraction or new runtime state follows from these inputs. Each later change
 must retain its own approved file limit and run the corresponding before/after
 behavioral tests; an unverified prerequisite is not treated as an accepted one.
+
+The T10c local decision is to leave the small text/JSON metrics response in
+its existing route: HTTP observation and threshold monitoring are already
+separate modules. Reassess response extraction when DB collection and freshness
+are defined. Backup extraction remains pending 1A/1B evidence, and shutdown
+extraction remains pending 2B acceptance; these are not claims of deployment or
+mission completion.
