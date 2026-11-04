@@ -25,7 +25,7 @@ import {
   workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
-import { qualityKeySchema, qualityPolicySchema, retryEnvelopeSchema, type QualityKey } from "@paperclipai/shared";
+import { qualityKeySchema, qualityPolicySchema, qualityTargetSchema, retryEnvelopeSchema, type QualityKey } from "@paperclipai/shared";
 import { parseEvidence } from "./contract.js";
 import { HttpError, notFound } from "../../errors.js";
 import { insertActivityRecord } from "../activity-log-records.js";
@@ -36,6 +36,7 @@ import { ensureCanonicalQualityExecution } from "./native-records.js";
 import { QUALITY_EXECUTE_STEP_ID } from "./native-definition.js";
 import { isAddendumWithdrawnForTarget } from "./rollback.js";
 import { applyCurrentOutputCorrection, readCurrentOutputEAdmission } from "./current-output.js";
+import { workflowRunHasC5AdmissionScope } from "../workflow/control-flow/qa-remediation-admission-root.js";
 import { buildQualityWakeAcceptancePatch } from "./heartbeat-admission.js";
 import { parseQaCorrectionPreparationRow } from "../workflow/control-flow/qa-correction-authority.js";
 import { qaCorrectionAppliedKey } from "../workflow/control-flow/qa-correction-contract.js";
@@ -185,7 +186,16 @@ export async function deliverQualityIntent(db: Db, key: QualityKey): Promise<{ s
             ?? outcomes[0] ?? { status: "blocked", receiptId: null };
         }
       }
-      if (correction.remediation?.outcome !== "not_applicable") return { status: "blocked", receiptId: null };
+      if (correction.remediation?.outcome !== "not_applicable") {
+        const target = qualityTargetSchema.safeParse(action.target);
+        if (correction.status !== "unsupported_target" || correction.remediation || !target.success
+          || target.data.kind !== "current_output" || target.data.source.companyId !== parsed.companyId
+          || target.data.source.workflow.kind !== "workflow_step") return { status: "blocked", receiptId: null };
+        try {
+          if (await workflowRunHasC5AdmissionScope(db, target.data.source.workflow.runId))
+            return { status: "blocked", receiptId: null };
+        } catch { return { status: "blocked", receiptId: null }; }
+      }
     }
     await ensureCanonicalQualityExecution(db, parsed); // 실행 직전 정의 해시 재검증 포함(T3)
   } catch (error) {
