@@ -42,7 +42,7 @@ import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import { buildStepRunMap, toConditionalStepObservation, deriveIfControlOutcome } from "./dag-step-observation.js";
-import { normalizeRecord } from "./dag-metadata-helpers.js";
+import { normalizeRecord, getMetadataRecord, readMetadataString } from "./dag-metadata-helpers.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1704,14 +1704,6 @@ function renderWorkflowRunTextTemplate(
     });
 }
 
-function getMetadataRecord(value: unknown, key: string): Record<string, unknown> {
-  const metadata = normalizeRecord(value);
-  return normalizeRecord(metadata[key]);
-}
-
-function readMetadataString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
 
 
 
