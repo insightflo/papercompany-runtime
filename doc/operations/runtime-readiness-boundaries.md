@@ -95,3 +95,15 @@ mission service tests combine decision parsing and DB-backed mission behavior.
 Before moving any group, record actual test discovery by name, count, skipped
 status and timeout; preserve shared setup lifetime and compare the identical
 commands before/after. Static source counts do not establish discovered tests.
+
+### R1–R3 decision inputs
+
+| Candidate | Exact observed boundary | Evidence needed before selecting it |
+| --- | --- | --- |
+| Backup read (`backup-lib.ts`) | `runDatabaseBackup` opens one repeatable-read, read-only transaction, builds SQL lines within it, returns those lines, then writes a compressed partial file and renames it. Its `readError` is preserved. | 1A/1B acceptance and the same snapshot, options, original errors, output ordering and restore results. The read block is too large to move wholesale under the 300-line target. |
+| Shutdown (`server/src/index.ts`) | It stops the scheduler; starts durable flush and child termination concurrently; waits for the flush and grace interval; then forces child termination, clears tracking and stops only its own embedded database. | 2B acceptance and tests for the same concurrent ordering, callback/result preservation, process ownership and restart consumption. A serial rewrite would change behavior. |
+| Metrics response (`server/src/routes/metrics.ts`) | The route exposes the existing registry in text and JSON and has a separate, currently unmounted legacy middleware. | 3A-02's accepted source, freshness and failure contract. If that collector already provides the needed boundary, an extra response extraction may be unnecessary. |
+
+No extraction or new runtime state follows from these inputs. Each later change
+must retain its own approved file limit and run the corresponding before/after
+behavioral tests; an unverified prerequisite is not treated as an accepted one.
