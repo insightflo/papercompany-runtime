@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import type { QaCorrectionExecutionIdentity } from "./workflow/control-flow/qa-remediation-admission-root.js";
 import type { HeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
 import type { heartbeatRuns, agentWakeupRequests } from "@paperclipai/db";
 
@@ -35,4 +37,12 @@ export function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelec
   if (run.invocationSource === "timer") return "timer";
   if (run.invocationSource === "on_demand") return "manual_on_demand";
   return "automation_nonworkflow";
+}
+
+export function sameC5ExecutionIdentityBeforeOwnerRelease(expected: QaCorrectionExecutionIdentity,
+  current: QaCorrectionExecutionIdentity) {
+  const { executorOwnerReleasedAt: expectedReleasedAt, ...expectedAttempt } = expected;
+  const { executorOwnerReleasedAt: currentReleasedAt, ...currentAttempt } = current;
+  return expectedReleasedAt === null && currentReleasedAt instanceof Date
+    && Number.isFinite(currentReleasedAt.getTime()) && isDeepStrictEqual(expectedAttempt, currentAttempt);
 }

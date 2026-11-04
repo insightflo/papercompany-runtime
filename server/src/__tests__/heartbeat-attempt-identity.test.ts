@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { heartbeatRuns } from "@paperclipai/db";
-import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind } from "../services/heartbeat-attempt-identity.js";
+import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "../services/heartbeat-attempt-identity.js";
 
 it("rejects changes in every persisted execution-attempt identity field", () => {
   const keys = ["id", "companyId", "agentId", "issueId", "wakeupRequestId", "workflowStepRunId", "workflowExecutionGeneration", "executionScopeKind", "executionEpoch", "executionToken", "executorOwnerId", "executorOwnerLeaseEpoch", "executorOwnerLeaseToken", "retryOfRunId", "processLossRetryCount"] as const;
@@ -33,4 +33,14 @@ it("preserves workflow, issue, mission and invocation scope precedence", () => {
   expect(producedExecutionScopeKind(run, { ...wake, workflowExecutionGeneration: null })).toBe("issue_nonworkflow");
   expect(producedExecutionScopeKind({ ...run, issueId: null }, { ...wake, workflowStepRunId: null })).toBe("mission_nonworkflow");
   expect(producedExecutionScopeKind({ ...run, issueId: null }, null)).toBe("timer");
+});
+
+
+it("accepts only the owner-release transition for an otherwise identical C5 attempt", () => {
+  const before = { executorOwnerReleasedAt: null, executorOwnerId: "owner", executionToken: "token" } as unknown as Parameters<typeof sameC5ExecutionIdentityBeforeOwnerRelease>[0];
+  const released = { ...before, executorOwnerReleasedAt: new Date("2026-01-01T00:00:00Z") };
+  expect(sameC5ExecutionIdentityBeforeOwnerRelease(before, released)).toBe(true);
+  expect(sameC5ExecutionIdentityBeforeOwnerRelease(before, { ...released, executorOwnerId: "other" })).toBe(false);
+  expect(sameC5ExecutionIdentityBeforeOwnerRelease(before, before)).toBe(false);
+  expect(sameC5ExecutionIdentityBeforeOwnerRelease(before, { ...released, executorOwnerReleasedAt: new Date("invalid") })).toBe(false);
 });
