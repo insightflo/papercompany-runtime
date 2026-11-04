@@ -46,3 +46,24 @@ actual scraper, rule source, owner and permitted test destination; agree on
 intervals and thresholds, then separately verify scrape failure, stalled work,
 backup failure, delivery and recovery notices. No collector, rule or destination
 was changed or contacted.
+
+### Collector and notification acceptance outline
+
+A candidate arrangement is runtime `/api/metrics` → an existing approved
+scraper → rule evaluation → an explicitly approved test receiver. This is a
+proposal only: the current environment, credentials and receiver are unknown,
+and no installation or network transmission is implied.
+
+| Scenario | Observable condition | Required evidence |
+| --- | --- | --- |
+| Scrape stopped | The scraper reports a failed or absent target, subject to an agreed interval and delay. | Test receiver gets one firing notification; restoration leads to a recovery notification. |
+| Work stalled | A defined, identity-safe metric distinguishes eligible waiting work from expected HOLD and indicates the agreed elapsed duration. | A controlled stalled fixture is detected; normal completion and intentional HOLD do not become false alerts. |
+| Backup failed | An authoritative backup result supplies success/failure and last successful time. Missing or stale data stays unknown. | A controlled failure reaches the test receiver and recovery reaches it after a successful result. |
+| Collector query fails | The collection result and its last-success time remain distinguishable from a true zero. | DB failure and recovery are observed without writing product state or blocking requests. |
+
+Before enabling any rule, its owner must specify target identity, data source,
+collection interval, allowable read load, absence/stale semantics, threshold,
+receiver, delivery/recovery deadlines and access controls. A local HTTP scrape
+proves neither DB freshness nor notification delivery. The metrics draft's
+fixed-mount aggregation and omitted early connection closes also limit
+endpoint-level and failure-rate alerting until separately resolved.
