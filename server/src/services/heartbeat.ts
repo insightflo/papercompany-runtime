@@ -273,6 +273,8 @@ type HeartbeatServiceOptions = {
 
 // A root Db keeps its explicitly supplied owner runtime across bare service recreation.
 // The WeakMap keys by the exact Db object and does not share execution contexts or roots.
+import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "./heartbeat-attempt-identity.js";
+
 const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
 
 function bindHeartbeatC5OwnerRuntime(db: Db, explicit: QaFileOwnerRuntime | undefined) {
@@ -326,53 +328,13 @@ function activeHeartbeatExecutionFrames(db: Db) {
   return frames;
 }
 
-function sameHeartbeatExecutionAttempt(left: typeof heartbeatRuns.$inferSelect,
-  right: typeof heartbeatRuns.$inferSelect) {
-  return left.id === right.id && left.companyId === right.companyId && left.agentId === right.agentId
-    && left.issueId === right.issueId && left.wakeupRequestId === right.wakeupRequestId
-    && left.workflowStepRunId === right.workflowStepRunId
-    && left.workflowExecutionGeneration === right.workflowExecutionGeneration
-    && left.executionScopeKind === right.executionScopeKind && left.executionEpoch === right.executionEpoch
-    && left.executionToken === right.executionToken && left.executorOwnerId === right.executorOwnerId
-    && left.executorOwnerLeaseEpoch === right.executorOwnerLeaseEpoch
-    && left.executorOwnerLeaseToken === right.executorOwnerLeaseToken && left.retryOfRunId === right.retryOfRunId
-    && left.processLossRetryCount === right.processLossRetryCount;
-}
 
-function sameC5ExecutionIdentityBeforeOwnerRelease(expected: QaCorrectionExecutionIdentity,
-  current: QaCorrectionExecutionIdentity) {
-  const { executorOwnerReleasedAt: expectedReleasedAt, ...expectedAttempt } = expected;
-  const { executorOwnerReleasedAt: currentReleasedAt, ...currentAttempt } = current;
-  return expectedReleasedAt === null && currentReleasedAt instanceof Date
-    && Number.isFinite(currentReleasedAt.getTime()) && isDeepStrictEqual(expectedAttempt, currentAttempt);
-}
 
 const NONWORKFLOW_EXECUTION_SCOPES = new Set([
   "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
 ]);
 
-function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelect,
-  wake: typeof agentWakeupRequests.$inferSelect | null) {
-  if (wake?.workflowStepRunId && wake.workflowExecutionGeneration !== null) return "workflow_step";
-  if (run.issueId) return "issue_nonworkflow";
-  if (wake?.missionId) return "mission_nonworkflow";
-  if (run.invocationSource === "timer") return "timer";
-  if (run.invocationSource === "on_demand") return "manual_on_demand";
-  return "automation_nonworkflow";
-}
 
-function heartbeatActualIdentityMatchesRun(identity: HeartbeatActualDrainIdentity,
-  run: typeof heartbeatRuns.$inferSelect) {
-  return identity.heartbeatRunId === run.id && identity.companyId === run.companyId
-    && identity.issueId === run.issueId && identity.wakeupRequestId === run.wakeupRequestId
-    && identity.workflowStepRunId === run.workflowStepRunId
-    && identity.executionGeneration === run.workflowExecutionGeneration
-    && identity.executionScopeKind === run.executionScopeKind && identity.executionEpoch === run.executionEpoch
-    && identity.executionToken === run.executionToken && identity.executorOwnerId === run.executorOwnerId
-    && identity.ownerLeaseEpoch === run.executorOwnerLeaseEpoch
-    && identity.ownerLeaseToken === run.executorOwnerLeaseToken && identity.retryOfRunId === run.retryOfRunId
-    && identity.processLossRetryCount === run.processLossRetryCount;
-}
 import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
 import { isStoredOperatorDecisionWake, promoteStoredDeferredWakes } from "./heartbeat-stored-recovery-admission.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
