@@ -67,3 +67,31 @@ receiver, delivery/recovery deadlines and access controls. A local HTTP scrape
 proves neither DB freshness nor notification delivery. The metrics draft's
 fixed-mount aggregation and omitted early connection closes also limit
 endpoint-level and failure-rate alerting until separately resolved.
+
+### Extraction candidates and test grouping evidence
+
+These are candidate boundaries for a later approved change, not implementation
+instructions or completed refactors:
+
+1. Review `AgentDetail.tsx` display-only formatting and redaction helpers
+   (around lines 121–180) as one possible isolated unit. Preserve secret/path
+   redaction exactly and keep the existing `agents/:agentId`, tab and run URLs.
+   The page's data mutations, queries and run streaming are outside that unit.
+2. Review graph model and presentation responsibilities separately:
+   `workflow-graph.ts` has a broad exported surface used by graph-editor
+   components and tests. Preserve exports and graph serialization; inspect the
+   full consumer map before choosing a single model boundary.
+3. Keep `access.ts` as a separate authorization review: its invite payload,
+   replay checks and route handler have different effects. Any extracted helper
+   must retain permission, replay and stored-payload behavior and its tests.
+4. For `dag-engine.ts`, keep dynamic heartbeat/finalization callers and
+   workflow sync transactions together until their exact boundary is proven.
+   Do not combine this server step with UI or access refactoring.
+
+Test movement should follow the selected production responsibility, one suite
+at a time. Workflow DAG tests contain pure normalization and embedded-DB issue
+lifecycle groups; heartbeat preflight combines context setup and completion;
+mission service tests combine decision parsing and DB-backed mission behavior.
+Before moving any group, record actual test discovery by name, count, skipped
+status and timeout; preserve shared setup lifetime and compare the identical
+commands before/after. Static source counts do not establish discovered tests.
