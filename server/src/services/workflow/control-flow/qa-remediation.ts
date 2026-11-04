@@ -21,7 +21,7 @@
 //   사용한다.
 
 import { writeFile } from "node:fs/promises";
-import { and, eq, inArray, or, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, or, isNotNull, sql } from "drizzle-orm";
 import type { WorkflowStep } from "../dag-engine.js";
 import type { workflowDefinitions, Db } from "@paperclipai/db";
 import { wakeExistingWorkflowStepIssue } from "../workflow-step-wake.js";
@@ -31,7 +31,7 @@ import {
   tryQaCorrectionFollowup,
 } from "./qa-correction-followup-reconcile.js";
 import { QaRemediationReconcileError } from "./qa-remediation-reconcile.js";
-import { workflowTransitionEvents, workflowRecoveryAuthorities, heartbeatRuns, workflowStepRuns, workflowRuns } from "@paperclipai/db";
+import { agentWakeupRequests, workflowTransitionEvents, workflowRecoveryAuthorities, heartbeatRuns, workflowStepRuns, workflowRuns } from "@paperclipai/db";
 import { logger } from "../../../middleware/logger.js";
 import {
   QA_REMEDIATION_EVENT_TYPE, remediationIdempotencyKey,
@@ -46,6 +46,7 @@ import type { QaRemediationCompletion } from "./qa-remediation-completion.js";
 import { QA_REMEDIATION_PREPARATION_EVENT_TYPE } from "./qa-remediation-preparation-contract.js";
 import { hashQaCorrectionPayload } from "./qa-correction-contract.js";
 import { collectQualifiableQaRemediations } from "./qa-remediation-qualification.js";
+import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 
 export {
   QA_REMEDIATION_EVENT_TYPE,
@@ -135,20 +136,22 @@ async function directEntryHasC5Scope({ db, run }: TryQaRemediationInput): Promis
   const [current] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, run.companyId)));
   if (!current || current.missionId !== run.missionId
     || current.status !== run.status) throw new QaRemediationReconcileError("request");
-  if (!await workflowRunHasC5AdmissionScope(db, run.id)) return false;
   const steps = await db.select({ status: workflowStepRuns.status }).from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
-  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities)
+  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id, kind: workflowRecoveryAuthorities.recoveryKind }).from(workflowRecoveryAuthorities)
     .where(and(eq(workflowRecoveryAuthorities.companyId, run.companyId), or(
       eq(workflowRecoveryAuthorities.workflowRunId, run.id), eq(workflowRecoveryAuthorities.replacementRunId, run.id)))).limit(1);
+  if (authority && ["manual_resume", "supervision_tool_retry", "source_issue_unblock"].includes(authority.kind)
+    && !await workflowRunHasC5AdmissionScope(db, run.id)) return false;
   const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
     .where(and(eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, run.id),
-      inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared"])) ).limit(1);
+      or(inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared", "heartbeat_actual_drained_v1"]), and(eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE), sql`${workflowTransitionEvents.payload} ? 'schemaVersion'`))) ).limit(1);
   const [actual] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
     .innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId))
     .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, run.id),
       isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken))).limit(1);
+  const c5Wake = (await db.select({ wake: agentWakeupRequests }).from(agentWakeupRequests).leftJoin(workflowStepRuns, eq(workflowStepRuns.id, agentWakeupRequests.workflowStepRunId)).where(and(eq(agentWakeupRequests.companyId, run.companyId), or(eq(agentWakeupRequests.workflowRunId, run.id), eq(workflowStepRuns.workflowRunId, run.id))))).some(({ wake }) => { try { return Object.hasOwn(wake.payload ?? {}, "qaRemediationCompletion") || readQaCorrectionWakeRef(wake) !== null; } catch { return true; } });
   if (authority || history) await hasPendingQaRemediationForRun(db, current);
-  return Boolean(authority || history || actual || steps.some(step => step.status === "held" || step.status === "blocked"));
+  return Boolean(authority || history || actual || c5Wake || steps.some(step => step.status === "held" || step.status === "blocked"));
 }
 
 async function legacyDirectPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {

@@ -226,7 +226,7 @@ async function writeArtifact(file: string, content: string): Promise<void> {
 }
 
 
-import { withQaCorrectionFollowupReconcile } from "../services/workflow/control-flow/qa-correction-followup-reconcile.js";
+import { QaRemediationReconcileRequired, withQaCorrectionFollowupReconcile } from "../services/workflow/control-flow/qa-correction-followup-reconcile.js";
 import { syncWorkflowRunStateWithOutcome } from "../services/workflow/dag-engine.js";
 import { recoverTerminalRun } from "../services/workflow/run-recovery-authority.js";
 import { workflowRunHasC5AdmissionScope } from "../services/workflow/control-flow/qa-remediation-admission-root.js";
@@ -329,6 +329,16 @@ describeEP("main-era official resume remediation scope", () => {
     const sync = await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId);
     expect(sync.result.status).toBe("completed");
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId))).toHaveLength(before.length);
+  }, 120_000);
+
+  it("keeps an unproven C5 wake on the guarded path without recovery authority", async () => {
+    const file = path.join(tempRoot, "unproven-wake.html");
+    await writeArtifact(file, "<html>old</html>");
+    const seed = await seedScenario(db, { artifactUrl: file, remediations: remediationsFor(file, "old", "new") });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.workflowStepRunId, seed.qa.id));
+    await db.update(agentWakeupRequests).set({ payload: { qaRemediationCompletion: { preparationEventId: randomUUID() } } }).where(eq(agentWakeupRequests.id, wake!.id));
+    await expect(runPass({ db, tempRoot }, seed, async () => true)).rejects.toBeInstanceOf(QaRemediationReconcileRequired);
+    expect(await readFile(file, "utf8")).toBe("<html>old</html>");
   }, 120_000);
 
   it.each(["supervision_tool_retry", "source_issue_unblock"] as const)(
