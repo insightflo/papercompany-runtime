@@ -38,6 +38,9 @@ import { QaRemediationAdmissionHold, unresolvedQaRemediationAdmissionPending,
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
+import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
+import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
+import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1720,31 +1723,6 @@ function hasRecoverableQaRequestChangesDependency(
   return false;
 }
 
-function getSingleToolStepName(step: WorkflowStep): string {
-  const toolNames = Array.isArray(step.toolNames)
-    ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
-    : [];
-  if (toolNames.length !== 1) {
-    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received ${toolNames.length}.`);
-  }
-  const toolName = toolNames[0];
-  if (!toolName) {
-    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received 0.`);
-  }
-  return toolName;
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableJson(item)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 const RUN_METADATA_TEXT_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
 
@@ -1773,36 +1751,7 @@ function readMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function isCacheEnabled(step: WorkflowStep): boolean {
-  return step.executionControls?.cacheEnabled === true;
-}
 
-function workflowPriorityRank(priority: string | undefined): number {
-  switch (priority) {
-    case "critical":
-      return 4;
-    case "high":
-      return 3;
-    case "normal":
-      return 2;
-    case "low":
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-function sortWorkflowStepsByPriority(steps: WorkflowStep[]): WorkflowStep[] {
-  return [...steps].sort((left, right) =>
-    workflowPriorityRank(right.executionControls?.priority) - workflowPriorityRank(left.executionControls?.priority)
-  );
-}
-
-function getCacheTtlSeconds(step: WorkflowStep): number | undefined {
-  return typeof step.executionControls?.cacheTtlSeconds === "number" && step.executionControls.cacheTtlSeconds > 0
-    ? step.executionControls.cacheTtlSeconds
-    : undefined;
-}
 
 async function findCachedToolStepRun(input: {
   db: Db;
