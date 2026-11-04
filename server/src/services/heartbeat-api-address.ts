@@ -9,3 +9,10 @@ export function normalizePaperclipApiUrl(value: string | null | undefined): stri
   }
   return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
 }
+
+export function resolveHostForPaperclipApiUrl(value: string | null | undefined): string {
+  const host = value?.trim() ?? "";
+  if (!host || host === "0.0.0.0" || host === "::") return "localhost";
+  if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
+  return host;
+}

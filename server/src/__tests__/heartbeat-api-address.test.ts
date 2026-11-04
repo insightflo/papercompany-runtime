@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizePaperclipApiUrl } from "../services/heartbeat-api-address.js";
+import { normalizePaperclipApiUrl, resolveHostForPaperclipApiUrl } from "../services/heartbeat-api-address.js";
 
 describe("heartbeat API address", () => {
   it("normalizes valid HTTP addresses and rejects other inputs", () => {
@@ -8,5 +8,12 @@ describe("heartbeat API address", () => {
     expect(normalizePaperclipApiUrl("file:///tmp/x")).toBeNull();
     expect(normalizePaperclipApiUrl("bad")).toBeNull();
     expect(normalizePaperclipApiUrl(null)).toBeNull();
+  });
+  it("converts wildcard hosts and brackets IPv6", () => {
+    expect(resolveHostForPaperclipApiUrl("0.0.0.0")).toBe("localhost");
+    expect(resolveHostForPaperclipApiUrl("::")).toBe("localhost");
+    expect(resolveHostForPaperclipApiUrl("::1")).toBe("[::1]");
+    expect(resolveHostForPaperclipApiUrl("[::1]")).toBe("[::1]");
+    expect(resolveHostForPaperclipApiUrl("  example.com  ")).toBe("example.com");
   });
 });
