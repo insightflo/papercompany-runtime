@@ -40,6 +40,7 @@ import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifac
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
 import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
+import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1720,20 +1721,6 @@ function hasRecoverableQaRequestChangesDependency(
     if (hasRemainingBackEdgeRework) return true;
   }
   return false;
-}
-
-function getSingleToolStepName(step: WorkflowStep): string {
-  const toolNames = Array.isArray(step.toolNames)
-    ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
-    : [];
-  if (toolNames.length !== 1) {
-    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received ${toolNames.length}.`);
-  }
-  const toolName = toolNames[0];
-  if (!toolName) {
-    throw new Error(`Workflow tool step "${step.id}" requires exactly one toolName; received 0.`);
-  }
-  return toolName;
 }
 
 
