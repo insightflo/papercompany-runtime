@@ -103,6 +103,7 @@ import {
 import { AgentRunsTab } from "../components/agent-detail/AgentRunsTab";
 import { parseAgentDetailView, runMetrics, setsEqual, type AgentDetailView } from "./agent-detail-view-helpers";
 import { parseStoredLogContent } from "./agent-detail-log-content";
+import { workspaceOperationPhaseLabel, workspaceOperationStatusTone } from "./agent-detail-workspace-display";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -243,35 +244,6 @@ function asNonEmptyString(value: unknown): string | null {
 }
 
 
-function workspaceOperationPhaseLabel(phase: WorkspaceOperation["phase"]) {
-  switch (phase) {
-    case "worktree_prepare":
-      return "Execution context setup";
-    case "workspace_provision":
-      return "Provision";
-    case "workspace_teardown":
-      return "Teardown";
-    case "worktree_cleanup":
-      return "Execution context cleanup";
-    default:
-      return phase;
-  }
-}
-
-function workspaceOperationStatusTone(status: WorkspaceOperation["status"]) {
-  switch (status) {
-    case "succeeded":
-      return "border-green-500/20 bg-green-500/10 text-green-700 dark:text-green-300";
-    case "failed":
-      return "border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-300";
-    case "running":
-      return "border-cyan-500/20 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300";
-    case "skipped":
-      return "border-yellow-500/20 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300";
-    default:
-      return "border-border bg-muted/40 text-muted-foreground";
-  }
-}
 
 function WorkspaceOperationStatusBadge({ status }: { status: WorkspaceOperation["status"] }) {
   return (
