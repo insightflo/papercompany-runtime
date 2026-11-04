@@ -521,7 +521,7 @@ export function accessService(db: Db) {
   // --- Permission groups (Phase 2). Every query is scoped by companyId so a
   // cross-company groupId/memberId is treated as not-found rather than leaking. ---
 
-  const { listGroups, getGroup, listGroupMembers } = createAccessGroupReaders(db);
+  const { listGroups, getGroup, listGroupMembers, listUserGroupMemberships } = createAccessGroupReaders(db);
 
   async function createGroup(
     companyId: string,
@@ -617,19 +617,6 @@ export function accessService(db: Db) {
     });
   }
 
-  // Used to enrich GET /members with each user's active group memberships.
-  async function listUserGroupMemberships(companyId: string, userId: string) {
-    return db
-      .select({ groupId: permissionGroupMembers.groupId, status: permissionGroupMembers.status })
-      .from(permissionGroupMembers)
-      .where(
-        and(
-          eq(permissionGroupMembers.companyId, companyId),
-          eq(permissionGroupMembers.userId, userId),
-          eq(permissionGroupMembers.status, "active"),
-        ),
-      );
-  }
 
   return {
     isInstanceAdmin,

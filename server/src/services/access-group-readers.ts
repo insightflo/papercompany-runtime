@@ -31,5 +31,19 @@ export function createAccessGroupReaders(db: Db) {
       .orderBy(permissionGroupMembers.createdAt);
   }
 
-  return { listGroups, getGroup, listGroupMembers };
+  // Used to enrich GET /members with each user's active group memberships.
+  async function listUserGroupMemberships(companyId: string, userId: string) {
+    return db
+      .select({ groupId: permissionGroupMembers.groupId, status: permissionGroupMembers.status })
+      .from(permissionGroupMembers)
+      .where(
+        and(
+          eq(permissionGroupMembers.companyId, companyId),
+          eq(permissionGroupMembers.userId, userId),
+          eq(permissionGroupMembers.status, "active"),
+        ),
+      );
+  }
+
+  return { listGroups, getGroup, listGroupMembers, listUserGroupMemberships };
 }
