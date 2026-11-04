@@ -63,6 +63,7 @@ vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => {
 });
 
 import { registerStuckWorkflowCase } from "./helpers/workflow-stuck-case.js";
+import { cleanWorkflowDagFixture } from "./helpers/workflow-dag-cleanup-fixture.js";
 import { issueService } from "../services/issues.ts";
 import { missionService } from "../services/missions.js";
 import { createPluginEventBus } from "../services/plugin-event-bus.js";
@@ -103,24 +104,7 @@ describeEmbeddedPostgres("executeWorkflowRun issue lifecycle parity", () => {
     heartbeatWakeup.mockReset();
     setWorkflowToolStepExecutor(null);
     setWorkflowToolStepReadinessChecker(null);
-    await db.delete(instanceSettings);
-    await db.delete(workflowTransitionEvents);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(issueWorkProducts);
-    await db.delete(workflowDelegations);
-    await db.delete(workflowStepRuns);
-    await db.delete(workflowRuns);
-    await db.delete(workflowDefinitions);
-    await db.delete(pluginEntities);
-    await db.delete(plugins);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(missionPlanArtifacts);
-    await db.delete(missions);
-    await db.delete(agents);
-    await db.delete(companies);
+    await cleanWorkflowDagFixture(db);
   });
 
   afterAll(async () => {
