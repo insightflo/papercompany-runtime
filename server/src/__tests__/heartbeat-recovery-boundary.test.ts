@@ -1171,7 +1171,26 @@ it("P2 public execution holds only with typed C5 proof and preserves boxed actua
       return qaRefireActual;
     });
 
-    const ordinaryService = heartbeatService(harness.db);
+    const realRuntime = createQaFileOwnerRuntime({ qaFileOwnerLockRoot: harness.lockRoot, qaFileOwnerPython: PYTHON! });
+    const ownerRuntime: QaFileOwnerRuntime = { capability: realRuntime.capability,
+      begin: async (targets, beginOptions = {}) => {
+        const targetSetIndex = ownerTargetSets.length;
+        ownerTargetSets.push([...targets]);
+        if (failNextOwnerBegin) {
+          failNextOwnerBegin = false;
+          unknownOwnerBegin.resolve();
+          throw new Error("P2 generic adapter-start owner failure");
+        }
+        const owner = await realRuntime.begin(targets, { ...beginOptions, onEvent: event => {
+          if (event.type === "lock_wait") nativeWait.resolve();
+          beginOptions.onEvent?.(event);
+        } });
+        const exit = owner.awaitExit();
+        ownerExits.push(exit);
+        ownerExitByTargetSet.set(targetSetIndex, exit);
+        return owner;
+      } };
+    const ordinaryService = heartbeatService(harness.db, { qaCorrectionExecution: { ownerRuntime } });
     const producerWake = await ordinaryService.wakeup(scenario.authorId, publicWakeOptions(
       { issueId: scenario.producerIssueId, stepRun: scenario.producer }, scenario));
     if (!producerWake?.wakeupRequestId) throw new Error("P2 producer did not enter the existing public wake path");
@@ -1199,25 +1218,6 @@ it("P2 public execution holds only with typed C5 proof and preserves boxed actua
       .where(and(eq(agentWakeupRequests.companyId, scenario.companyId), eq(agentWakeupRequests.workflowRunId, scenario.runId)))
       .orderBy(asc(agentWakeupRequests.id))).map(row => row.id);
 
-    const realRuntime = createQaFileOwnerRuntime({ qaFileOwnerLockRoot: harness.lockRoot, qaFileOwnerPython: PYTHON! });
-    const ownerRuntime: QaFileOwnerRuntime = { capability: realRuntime.capability,
-      begin: async (targets, beginOptions = {}) => {
-        const targetSetIndex = ownerTargetSets.length;
-        ownerTargetSets.push([...targets]);
-        if (failNextOwnerBegin) {
-          failNextOwnerBegin = false;
-          unknownOwnerBegin.resolve();
-          throw new Error("P2 generic adapter-start owner failure");
-        }
-        const owner = await realRuntime.begin(targets, { ...beginOptions, onEvent: event => {
-          if (event.type === "lock_wait") nativeWait.resolve();
-          beginOptions.onEvent?.(event);
-        } });
-        const exit = owner.awaitExit();
-        ownerExits.push(exit);
-        ownerExitByTargetSet.set(targetSetIndex, exit);
-        return owner;
-      } };
     const optedService = heartbeatService(harness.db, { qaCorrectionExecution: { ownerRuntime } });
     const heldAgentId = await addExecutionCandidateAgent(harness, scenario, "P2 held public executor");
     const heldTarget = await addExecutionCandidateStep(harness, scenario, heldAgentId, "P2 held public step");
