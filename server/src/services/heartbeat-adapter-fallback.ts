@@ -1,3 +1,4 @@
+import type { heartbeatRuns } from "@paperclipai/db";
 import { asNumber, parseObject } from "../adapters/utils.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
 
@@ -63,5 +64,39 @@ export function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): Adapter
     thinkingLadder,
     triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
     maxAttempts,
+  };
+}
+
+function shouldApplyAdapterFallbackConfig(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  context: Record<string, unknown>;
+}) {
+  return (
+    Boolean(input.run.retryOfRunId) &&
+    readNonEmptyString(input.context.wakeReason) === "adapter_fallback" &&
+    readNonEmptyString(input.context.fallbackOfRunId) === input.run.retryOfRunId &&
+    Boolean(readNonEmptyString(input.context.fallbackCommand))
+  );
+}
+
+export function applyAdapterFallbackRuntimeConfig(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  context: Record<string, unknown>;
+  config: Record<string, unknown>;
+}) {
+  if (!shouldApplyAdapterFallbackConfig(input)) return input.config;
+  const command = readNonEmptyString(input.context.fallbackCommand);
+  if (!command) return input.config;
+  const provider = readNonEmptyString(input.context.fallbackProvider);
+  const model = readNonEmptyString(input.context.fallbackModel);
+  // [thinking ladder] thinking만 덮어쓴다. command는 enqueue 시점에 현재 command와 동일하게
+  //   설정되도록 운용한다(단일 모델 바인딩 유지 — provider/model 불변).
+  const thinking = readNonEmptyString(input.context.fallbackThinking);
+  return {
+    ...input.config,
+    command,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(thinking ? { thinking } : {}),
   };
 }
