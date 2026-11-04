@@ -102,6 +102,7 @@ import {
 } from "../lib/agent-skills-state";
 import { AgentRunsTab } from "../components/agent-detail/AgentRunsTab";
 import { parseAgentDetailView, runMetrics, setsEqual, type AgentDetailView } from "./agent-detail-view-helpers";
+import { parseStoredLogContent } from "./agent-detail-log-content";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -230,8 +231,6 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type RunLogChunk = { ts: string; stream: "stdout" | "stderr" | "system"; chunk: string };
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -243,25 +242,6 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function parseStoredLogContent(content: string): RunLogChunk[] {
-  const parsed: RunLogChunk[] = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const raw = JSON.parse(trimmed) as { ts?: unknown; stream?: unknown; chunk?: unknown };
-      const stream =
-        raw.stream === "stderr" || raw.stream === "system" ? raw.stream : "stdout";
-      const chunk = typeof raw.chunk === "string" ? raw.chunk : "";
-      const ts = typeof raw.ts === "string" ? raw.ts : new Date().toISOString();
-      if (!chunk) continue;
-      parsed.push({ ts, stream, chunk });
-    } catch {
-      // Ignore malformed log lines.
-    }
-  }
-  return parsed;
-}
 
 function workspaceOperationPhaseLabel(phase: WorkspaceOperation["phase"]) {
   switch (phase) {
