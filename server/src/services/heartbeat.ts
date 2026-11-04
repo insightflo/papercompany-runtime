@@ -270,6 +270,8 @@ type HeartbeatServiceOptions = {
 
 // A root Db keeps its explicitly supplied owner runtime across bare service recreation.
 // The WeakMap keys by the exact Db object and does not share execution contexts or roots.
+import { sameHeartbeatExecutionAttempt } from "./heartbeat-attempt-identity.js";
+
 const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
 
 function bindHeartbeatC5OwnerRuntime(db: Db, explicit: QaFileOwnerRuntime | undefined) {
@@ -323,18 +325,6 @@ function activeHeartbeatExecutionFrames(db: Db) {
   return frames;
 }
 
-function sameHeartbeatExecutionAttempt(left: typeof heartbeatRuns.$inferSelect,
-  right: typeof heartbeatRuns.$inferSelect) {
-  return left.id === right.id && left.companyId === right.companyId && left.agentId === right.agentId
-    && left.issueId === right.issueId && left.wakeupRequestId === right.wakeupRequestId
-    && left.workflowStepRunId === right.workflowStepRunId
-    && left.workflowExecutionGeneration === right.workflowExecutionGeneration
-    && left.executionScopeKind === right.executionScopeKind && left.executionEpoch === right.executionEpoch
-    && left.executionToken === right.executionToken && left.executorOwnerId === right.executorOwnerId
-    && left.executorOwnerLeaseEpoch === right.executorOwnerLeaseEpoch
-    && left.executorOwnerLeaseToken === right.executorOwnerLeaseToken && left.retryOfRunId === right.retryOfRunId
-    && left.processLossRetryCount === right.processLossRetryCount;
-}
 
 function sameC5ExecutionIdentityBeforeOwnerRelease(expected: QaCorrectionExecutionIdentity,
   current: QaCorrectionExecutionIdentity) {
