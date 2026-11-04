@@ -169,6 +169,8 @@ async function clearUseLinkFault() {
 describe.sequential("C5 E first settlement stage", () => {
   beforeAll(async () => {
     root = await realpath(await mkdtemp(path.join(os.tmpdir(), "c5-e-settlement-")));
+    vi.stubEnv("PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT", root);
+    vi.stubEnv("PAPERCLIP_QA_FILE_OWNER_PYTHON", PYTHON!);
     storageRoot = path.join(root, "storage");
     vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk"); vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", storageRoot);
     owned = await createQaCorrectionTestDb(); quality = await seedQualityFixture(owned.db);

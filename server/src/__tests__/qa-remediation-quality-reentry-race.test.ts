@@ -125,6 +125,8 @@ async function clearUseLinkFault() {
 describe.sequential("C5 E-root extra", () => {
   beforeAll(async () => {
     root = await realpath(await mkdtemp(path.join(os.tmpdir(), "c5-e-root-extra-"))); storageRoot = path.join(root, "storage");
+    vi.stubEnv("PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT", root);
+    vi.stubEnv("PAPERCLIP_QA_FILE_OWNER_PYTHON", PYTHON!);
     vi.stubEnv("PAPERCLIP_STORAGE_PROVIDER", "local_disk"); vi.stubEnv("PAPERCLIP_STORAGE_LOCAL_DIR", storageRoot); owned = await createQaCorrectionTestDb(); quality = await seedQualityFixture(owned.db);
   }, 120_000);
   afterAll(async () => { await owned?.close(); vi.unstubAllEnvs(); if (root) await rm(root, { recursive: true, force: true }); }, 120_000);
@@ -132,20 +134,28 @@ describe.sequential("C5 E-root extra", () => {
   it("observes upload without DB locks and Quality prefix before mission/run locks", async () => {
     const w = await qualityRootWorld(), lock = await nativeRoot(w), observer = owned.connect(), lockProbe = owned.connect();
     const entered = deferred<void>(), releaseUpload = deferred<void>(), holderLocked = deferred<void>(), holderReleased = deferred<void>();
-    const actionQuerySent = deferred<{ connection: number; index: number }>(), queries: { connection: number; query: string }[] = [];
+    const actionQuerySent = deferred<{ connection: number; index: number }>(), queries: { connection: number; query: string; parameters: unknown[] }[] = [];
     const notifications = createReplacementRootNotifications();
     ioHooks.uploadCalls = 0; ioHooks.putFile = { entered: () => entered.resolve(undefined), release: releaseUpload.promise };
     const debugClient = owned.db.$client as unknown as { options: { debug: unknown } }, previousDebug = debugClient.options.debug;
     const transactionDepth = new Map<number, number>();
     let watchSecondTx = false, rootPromise: ReturnType<typeof rootCall>, holderPromise: Promise<unknown> | null = null, lockProbeResult = "", transactionDepthAtUpload = -1;
     let transactionStart = 0, blocked: { connection: number; index: number } | undefined;
-    debugClient.options.debug = (connection: number, query: string) => {
+    debugClient.options.debug = (connection: number, query: string, parameters: unknown[]) => {
       const normalized = query.trim().toLowerCase();
-      queries.push({ connection, query: normalized });
+      queries.push({ connection, query: normalized, parameters });
       if (/^begin\b/.test(normalized)) transactionDepth.set(connection, (transactionDepth.get(connection) ?? 0) + 1);
       if (/^(commit|rollback)\b/.test(normalized)) transactionDepth.set(connection, Math.max(0, (transactionDepth.get(connection) ?? 0) - 1));
       if (watchSecondTx && /from "?quality_actions"?/.test(normalized) && /for update/.test(normalized)) actionQuerySent.resolve({ connection, index: queries.length - 1 });
     };
+    const originalTransaction = owned.db.transaction, backendPids = new Map<number, number>(); let observedTx = 0;
+    owned.db.transaction = ((work, ...options) => originalTransaction.call(owned.db, async tx => {
+      const query = `select pg_backend_pid() as pid /* root-observer-${++observedTx} */`;
+      const rows = await tx.execute(sql.raw(query)) as unknown as Array<{ pid: number }>;
+      const sent = queries.find(entry => entry.query === query);
+      if (sent) backendPids.set(sent.connection, rows[0]!.pid);
+      return work(tx);
+    }, ...options)) as typeof owned.db.transaction;
     rootPromise = rootCall(w, lock.runtime, notifications);
     try {
       await within(entered.promise, "storage upload entry");
@@ -171,24 +181,30 @@ describe.sequential("C5 E-root extra", () => {
       if (holderPromise) await holderPromise;
       await Promise.allSettled([rootPromise]);
       try { await drainReplacementRootNotifications(owned.db, notifications); await w.world.close(); await waitForHeartbeatExecutionsToDrain(owned.db); }
-      finally { debugClient.options.debug = previousDebug; await lock.cleanup(); }
+      finally { owned.db.transaction = originalTransaction; debugClient.options.debug = previousDebug; await lock.cleanup(); }
     }
     const result = await rootPromise;
     expect(transactionDepthAtUpload).toBe(0);
     expect(lockProbeResult).toBe("mission/run locks available while root waits for Quality action");
     expect(blocked).toBeDefined();
-    const window = (after: number) => { const begin = queries.findIndex((e, i) => i >= after && e.connection === blocked!.connection && /^begin\b/.test(e.query)); return { begin,
-      end: queries.findIndex((e, i) => i > begin && e.connection === blocked!.connection && /^(commit|rollback)\b/.test(e.query)) }; };
+    const window = (after: number) => {
+      const action = queries.findIndex((e, i) => i >= after && e.query.includes('from "quality_actions"')
+        && e.query.includes("for update") && e.parameters.includes(w.actionId));
+      const connection = queries[action]?.connection;
+      let begin = -1; queries.forEach((e, i) => { if (i < action && e.connection === connection && /^begin\b/.test(e.query)) begin = i; });
+      return { begin, connection, backendPid: connection === undefined ? undefined : backendPids.get(connection), actionId: w.actionId,
+        end: queries.findIndex((e, i) => i > action && e.connection === connection && /^(commit|rollback)\b/.test(e.query)) };
+    };
     const firstTx = window(transactionStart), secondTx = window(firstTx.end + 1);
-    const find = (tx: { begin: number; end: number }, table: string, lockMode: string) => queries.findIndex((e, i) => i > tx.begin && i < tx.end
-      && e.connection === blocked!.connection && e.query.includes(`from "${table}"`) && e.query.includes(lockMode));
-    const orderFor = (tx: { begin: number; end: number }) => [find(tx, "quality_policy_usage", "for update"), find(tx, "quality_action_groups", "for update"), find(tx, "quality_actions", "for update"), find(tx, "quality_policy_versions", "for share"), find(tx, "missions", "for no key update"), find(tx, "workflow_runs", "for no key update")];
+    const find = (tx: { begin: number; end: number; connection: number | undefined }, table: string, lockMode: string) => queries.findIndex((e, i) => i > tx.begin && i < tx.end
+      && e.connection === tx.connection && e.query.includes(`from "${table}"`) && e.query.includes(lockMode));
+    const orderFor = (tx: { begin: number; end: number; connection: number | undefined }) => [find(tx, "quality_policy_usage", "for update"), find(tx, "quality_action_groups", "for update"), find(tx, "quality_actions", "for update"), find(tx, "quality_policy_versions", "for share"), find(tx, "missions", "for no key update"), find(tx, "workflow_runs", "for no key update")];
     const firstOrder = orderFor(firstTx), secondOrder = orderFor(secondTx), order = [...firstOrder, ...secondOrder];
     expect(blocked!.index).toBe(firstOrder[2]);
     expect(firstTx.begin).toBeGreaterThanOrEqual(transactionStart); expect(firstTx.end).toBeGreaterThan(blocked!.index); expect(secondTx.begin).toBeGreaterThan(firstTx.end);
     expect(firstTx.end > firstOrder[5]!).toBe(true); expect(secondTx.end > secondOrder[5]!).toBe(true);
     expect(order.every((value, index) => value >= 0 && (index === 0 || index === 6 || value > order[index - 1]!)), JSON.stringify({ firstTx, secondTx, firstOrder, secondOrder })).toBe(true);
-    console.info("C5 same-connection lock SQL", JSON.stringify({ connection: blocked!.connection, first: firstOrder.map(i => [i, queries[i]?.query]), second: secondOrder.map(i => [i, queries[i]?.query]) }));
+    console.info("C5 same-connection lock SQL", JSON.stringify({ firstTx, secondTx, first: firstOrder.map(i => [i, queries[i]?.query]), second: secondOrder.map(i => [i, queries[i]?.query]) }));
     expect(result.result).toMatchObject({ outcome: "completed" }); expect(ioHooks.uploadCalls).toBe(1);
     expect(await readFile(w.file, "utf8")).toBe(w.afterText);
   }, 120_000);
