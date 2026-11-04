@@ -55,6 +55,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
 import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
+import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
@@ -2426,31 +2427,6 @@ function shouldQueueRunFailureAdapterFallback(input: {
   return true;
 }
 
-// A positive liveness check means some process currently owns the PID.
-// On Linux, PIDs can be recycled, so this is a best-effort signal rather
-// than proof that the original child is still alive.
-function isProcessAlive(pid: number | null | undefined) {
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "EPERM") return true;
-    if (code === "ESRCH") return false;
-    return false;
-  }
-}
-
-function terminateRecordedProcess(pid: number | null | undefined, signal: NodeJS.Signals = "SIGTERM") {
-  if (!isProcessAlive(pid)) return false;
-  try {
-    process.kill(pid as number, signal);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function truncateDisplayId(value: string | null | undefined, max = 128) {
   if (!value) return null;
