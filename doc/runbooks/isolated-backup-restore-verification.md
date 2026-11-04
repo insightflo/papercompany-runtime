@@ -1,0 +1,21 @@
+# Isolated verification of the PR 464 and PR 465 database backups
+
+This is a proposed local procedure, not evidence of a successful restore. No restore has been run. The reported A1 files are `~/backups/db/paperclip-pr464-202611040624.dump` and `~/backups/db/paperclip-pr465-202611041231.dump`; their presence, format, checksums, PostgreSQL versions and contents must be independently established before use. Do not print connection credentials or copy backups to a shared location.
+
+## Prepare an isolated target
+
+1. Record the source filename, byte size, SHA-256 and capture time on the source host. Obtain a separately authorized read-only copy to access-controlled local storage and match its SHA-256. If access or identity cannot be verified, stop. Do not fetch, change or restore either source as part of this document-only work.
+2. Identify the archive format and PostgreSQL client/server major versions using the archive and source metadata. Inspect a custom-format archive with a compatible `pg_restore --list`; a plain SQL file requires a separately reviewed procedure. Do not execute archive contents during inspection. Treat an unknown format, version mismatch or corrupt listing as a stop.
+3. Create a disposable local PostgreSQL instance with no network access, no published host port, no application connection and an empty data volume. Use a compatible major version and an isolated OS account or container; do not reuse a running service, the configured `DATABASE_URL`, a host socket, or the local Paperclip DB. Confirm instance identity, data directory, socket and absence of external connectivity from inside the isolated environment. Never use `--clean` against an existing database.
+4. Verify available disk capacity and choose a fresh database name for each archive. Record the actual PostgreSQL and client versions, instance identity, archive hash, start/end time and exit status without secrets. Stop if target identity cannot be proven.
+
+## Restore and inspect
+
+1. In the isolated environment create a new empty database, then restore one archive with a compatible `pg_restore --exit-on-error --no-owner --no-privileges` using an explicit connection to the isolated instance. Capture stderr and exit status in access-controlled evidence. Do not run application workers, schedulers, webhooks or outbound integrations against the restored copy.
+2. Compare the archive listing and restored schema objects, migration journal and representative company-scoped row counts against read-only source-side counts captured at the same backup point if available. Check foreign keys and database integrity with appropriate read-only queries; record exact queries and results. Do not infer equality from a successful exit alone. Because backups may include personal or secret data, restrict output to counts and schema metadata and securely remove local copies under an authorized retention policy.
+3. The database dump does not prove artifact bytes or encryption keys are available. Under separate authorization, compare an inventory and checksums of the matching artifact snapshot and verify key availability without exposing key material; validate references and decryptability in the isolated environment only. Missing snapshots, keys or baseline counts mean those checks are **NOT_VERIFIED**, not PASS.
+4. Repeat independently for the other archive using a different empty database. Measure recovery duration from recorded start/end and compare with explicitly agreed RTO; compare backup timestamp with an independently agreed recovery point and RPO. A successful isolated restore is not a production recovery exercise.
+
+## Evidence and stop conditions
+
+For each archive preserve identity/hash, listing result, isolation proof, target identity, versions, restore exit and logs, schema/migration/count/integrity checks, artifact/key status and elapsed time. Mark PASS, FAIL or NOT_VERIFIED separately for each item. Stop on unexpected destination, any ambiguity about isolation, incompatible archive, failed restore, missing key or evidence mismatch; preserve the original backup and diagnostic evidence. Cleanup of the isolated instance and copies requires the applicable authorization and must not touch any other volume or service.
