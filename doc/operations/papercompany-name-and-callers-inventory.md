@@ -43,6 +43,32 @@ producer discovery, compatibility and coordinated cutover remain unverified.
 The `paperclip`, `paperclipai`, `@paperclipai/*`, `PAPERCLIP_*` and
 `~/.paperclip` identifiers are also retained under the existing task contract.
 
+### Deployment dispatch and path consumers
+
+The bridge producer constructs `event_type` from its configured event type and
+`client_payload` from the exact approval id, commit, repository and branch in
+`papercompany-plugins/packages/github-repository-bridge/src/deploy-checks.ts`
+and `dispatch-outbox.ts`. Its outbox is keyed by approval id plus exact commit;
+`deploy-approvals.ts` sends only pending records. The README contains an example
+configuration for `papercompany-deploy-a1-approved`, but that example is not
+proof of the active installation. Runtime and operations workflows both listen
+for this event. A name transition would therefore require the actual producer
+configuration and both receivers to be coordinated while preserving pending,
+sent and failed outbox identity and exact approval/revision verification.
+Until then, retain the existing identifier and repository/package names; do not
+create a second event or alter the approval checks.
+
+| Boundary | Evidence in local source | Unverified before transition |
+| --- | --- | --- |
+| Runtime deployment | Operations `.github/workflows/deploy-a1-approved.yml` defaults to `/srv/papercompany/papercompany-runtime`; `scripts/deploy-a1/deploy-runtime-with-drain.sh` names the runtime repository. | Actual overrides, external consumers, compatibility period and rollback. |
+| Plugin deployment | Runtime `scripts/deploy-github-repository-bridge-a1.sh` defaults to `/srv/papercompany/papercompany-plugins` and verifies a repository identity. | Actual override and all installed consumers. |
+| Runtime/artifacts relation | Runtime `scripts/workflow-engine-core-migration-dry-run.ts` refers to `../../../papercompany-artifacts/doc/plans/`. | Other active worktrees and relative-path consumers. |
+| Tax | Local tracked text search found 15 kernel and 5 portal files mentioning the old name; paths are listed in the inventory JSON. | Active Tax deployments and individual contract ownership. |
+| Agent instructions | Local `papercompany-agent-instructions-v3/source/papercompany.md` contains project names; `build.py` generates `ready/` and explicitly does not install. | Generated/source parity, installation destinations and new-session loading. |
+
+Local configuration defaults are not live-server observations. No rename,
+installation, deployment or runtime flag change follows from this table.
+
 ## Heartbeat callers (LF0)
 
 `server/src/services/heartbeat.ts` exports the `heartbeatService` factory and
