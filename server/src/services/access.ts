@@ -521,7 +521,7 @@ export function accessService(db: Db) {
   // --- Permission groups (Phase 2). Every query is scoped by companyId so a
   // cross-company groupId/memberId is treated as not-found rather than leaking. ---
 
-  const { listGroups, getGroup } = createAccessGroupReaders(db);
+  const { listGroups, getGroup, listGroupMembers } = createAccessGroupReaders(db);
 
   async function createGroup(
     companyId: string,
@@ -586,18 +586,6 @@ export function accessService(db: Db) {
     });
   }
 
-  async function listGroupMembers(companyId: string, groupId: string) {
-    return db
-      .select()
-      .from(permissionGroupMembers)
-      .where(
-        and(
-          eq(permissionGroupMembers.companyId, companyId),
-          eq(permissionGroupMembers.groupId, groupId),
-        ),
-      )
-      .orderBy(permissionGroupMembers.createdAt);
-  }
 
   // addUserIds are inserted active (onConflict do nothing guards the unique index);
   // removeUserIds are deleted. All scoped by companyId + groupId.

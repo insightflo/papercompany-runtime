@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { permissionGroups, type Db } from "@paperclipai/db";
+import { permissionGroups, permissionGroupMembers, type Db } from "@paperclipai/db";
 
 export function createAccessGroupReaders(db: Db) {
   async function listGroups(companyId: string) {
@@ -18,5 +18,18 @@ export function createAccessGroupReaders(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  return { listGroups, getGroup };
+  async function listGroupMembers(companyId: string, groupId: string) {
+    return db
+      .select()
+      .from(permissionGroupMembers)
+      .where(
+        and(
+          eq(permissionGroupMembers.companyId, companyId),
+          eq(permissionGroupMembers.groupId, groupId),
+        ),
+      )
+      .orderBy(permissionGroupMembers.createdAt);
+  }
+
+  return { listGroups, getGroup, listGroupMembers };
 }
