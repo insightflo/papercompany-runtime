@@ -92,6 +92,8 @@ import {
 } from "./control-flow/edge-condition.js";
 import { normalizeWorkflowStepContract } from "./step-contract.js";
 import { validateDag } from "./dag-validation.js";
+import { getWorkflowToolReferenceNames } from "./tool-references.js";
+export { getWorkflowToolReferenceNames } from "./tool-references.js";
 export { validateDag } from "./dag-validation.js";
 import { applyBackEdgeReworkPass } from "./control-flow/loop-driver.js";
 import { cancelResolvedQaSourceDefectOwnerCards } from "./qa-source-defect-owner-card.js";
@@ -333,15 +335,7 @@ export function setWorkflowToolStepReadinessChecker(checker: WorkflowToolStepRea
   workflowToolStepReadinessChecker = checker;
 }
 
-export function getWorkflowToolReferenceNames(steps: WorkflowStep[]): string[] {
-  return Array.from(new Set(
-    steps.flatMap((step) => Array.isArray(step.toolNames)
-      ? step.toolNames.map((toolName) => toolName.trim()).filter(Boolean)
-      : []),
-  ))
-    .filter((toolName) => toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL)
-    .sort((a, b) => a.localeCompare(b));
-}
+
 
 export async function assertWorkflowToolStepsReady(input: {
   companyId: string;
