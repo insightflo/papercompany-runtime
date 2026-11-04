@@ -11,3 +11,7 @@ The metrics route serves registry text and JSON, while HTTP measurement and samp
 ## B2b reservation wiring
 
 The earlier reservation-only candidate lacked runtime publication and completion wiring. Current source connects `qa-remediation-prepare.ts` and `qa-remediation-quality-root.ts` to the preparation writer; `qa-correction-followup-reconcile.ts` invokes `qa-remediation-reconcile.ts`, which calls the publisher and completion path. This is source linkage only: exact identity, owner, preserved bytes, wake behavior, failure/cancellation and same-mission completion still need the appropriate existing acceptance evidence; no replacement patch is inferred from the old snapshot.
+
+## B1 independent publisher evidence
+
+The focused real-filesystem `qa-remediation-publication.test.ts` suite passed 10/10 on the current branch. Its own scope excludes database reservation, transaction/wake integration and a real mission; the available record does not establish that this suite alone satisfies every historical B1 condition. This evidence is partial and does not establish live mission impact or absence of impact.
