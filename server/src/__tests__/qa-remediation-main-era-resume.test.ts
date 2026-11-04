@@ -330,4 +330,27 @@ describeEP("main-era official resume remediation scope", () => {
     expect(sync.result.status).toBe("completed");
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId))).toHaveLength(before.length);
   }, 120_000);
+
+  it.each(["supervision_tool_retry", "source_issue_unblock"] as const)(
+    "keeps main-era %s recovery on the legacy remediation path", async recoveryKind => {
+      const file = path.join(tempRoot, `${recoveryKind}.html`);
+      await writeArtifact(file, "<html>old</html>");
+      const seed = await seedScenario(db, { artifactUrl: file, remediations: remediationsFor(file, "old", "new") });
+      const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, seed.workflowRunId));
+      await db.update(workflowRuns).set({ status: "failed", completedAt: new Date() }).where(eq(workflowRuns.id, seed.workflowRunId));
+      await db.insert(workflowTerminalDecisions).values({ companyId: seed.companyId, workflowRunId: seed.workflowRunId,
+        decidedAuthorityVersion: run!.dispatchAuthorityVersion, decision: "failed", policyCause: "recovery_deadline_hard",
+        discoveryPath: "test-seed", origin: "test" });
+      expect((await recoverTerminalRun(db, { companyId: seed.companyId, runId: seed.workflowRunId,
+        expectedAuthorityVersion: run!.dispatchAuthorityVersion, recoveryKind, requestedBy: "test", now: new Date() })).kind).toBe("recovered");
+      expect(await workflowRunHasC5AdmissionScope(db, seed.workflowRunId)).toBe(false);
+      const before = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId));
+      const refires: string[] = [];
+      await withQaCorrectionFollowupReconcile(db, seed.workflowRunId, rootDb => runPass({ db: rootDb, tempRoot }, seed,
+        async qa => { refires.push(qa.stepRunId); return true; }));
+      expect(await readFile(file, "utf8")).toBe("<html>new</html>");
+      expect(refires).toEqual([seed.qa.id]);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId))).toHaveLength(before.length);
+      expect((await reloadRuns({ db, tempRoot }, seed)).producer.status).toBe("completed");
+    }, 120_000);
 });

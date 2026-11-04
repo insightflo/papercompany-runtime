@@ -618,7 +618,7 @@ export async function workflowRunHasC5AdmissionScope(db: Db, runId: string): Pro
   if (!run) return true;
   const authorities = await db.select({ a: workflowRecoveryAuthorities, decision: sql<boolean>`exists (select 1 from workflow_terminal_decisions d where d.id = ${workflowRecoveryAuthorities.targetDecisionId} and d.company_id = ${workflowRecoveryAuthorities.companyId} and d.workflow_run_id = ${workflowRecoveryAuthorities.workflowRunId} and d.decided_authority_version = ${workflowRecoveryAuthorities.targetAuthorityVersion})` }).from(workflowRecoveryAuthorities).where(and(
     eq(workflowRecoveryAuthorities.companyId, run.companyId), or(eq(workflowRecoveryAuthorities.workflowRunId, runId), eq(workflowRecoveryAuthorities.replacementRunId, runId))));
-  const authority = authorities.some(({ a, decision }) => !decision || a.recoveryKind !== "manual_resume" || a.status !== "consumed"
+  const authority = authorities.some(({ a, decision }) => !decision || !["manual_resume", "supervision_tool_retry", "source_issue_unblock"].includes(a.recoveryKind) || a.status !== "consumed"
     || a.replacementRunId !== null || !a.consumedAt || a.resultingAuthorityVersion !== a.targetAuthorityVersion + 1
     || a.resultingAuthorityVersion > run.dispatchAuthorityVersion);
   const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
