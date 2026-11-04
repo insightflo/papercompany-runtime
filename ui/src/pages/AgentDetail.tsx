@@ -102,6 +102,9 @@ import {
 } from "../lib/agent-skills-state";
 import { AgentRunsTab } from "../components/agent-detail/AgentRunsTab";
 import { parseAgentDetailView, runMetrics, setsEqual, type AgentDetailView } from "./agent-detail-view-helpers";
+import { parseStoredLogContent } from "./agent-detail-log-content";
+import { workspaceOperationPhaseLabel, workspaceOperationStatusTone } from "./agent-detail-workspace-display";
+import { findScrollContainer, readScrollMetrics, scrollToContainerBottom, type ScrollContainer } from "./agent-detail-scroll";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -177,60 +180,6 @@ const sourceLabels: Record<string, string> = {
 };
 
 const LIVE_SCROLL_BOTTOM_TOLERANCE_PX = 32;
-type ScrollContainer = Window | HTMLElement;
-
-function isWindowContainer(container: ScrollContainer): container is Window {
-  return container === window;
-}
-
-function isElementScrollContainer(element: HTMLElement): boolean {
-  const overflowY = window.getComputedStyle(element).overflowY;
-  return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
-}
-
-function findScrollContainer(anchor: HTMLElement | null): ScrollContainer {
-  let parent = anchor?.parentElement ?? null;
-  while (parent) {
-    if (isElementScrollContainer(parent)) return parent;
-    parent = parent.parentElement;
-  }
-  return window;
-}
-
-function readScrollMetrics(container: ScrollContainer): { scrollHeight: number; distanceFromBottom: number } {
-  if (isWindowContainer(container)) {
-    const pageHeight = Math.max(
-      document.documentElement.scrollHeight,
-      document.body.scrollHeight,
-    );
-    const viewportBottom = window.scrollY + window.innerHeight;
-    return {
-      scrollHeight: pageHeight,
-      distanceFromBottom: Math.max(0, pageHeight - viewportBottom),
-    };
-  }
-
-  const viewportBottom = container.scrollTop + container.clientHeight;
-  return {
-    scrollHeight: container.scrollHeight,
-    distanceFromBottom: Math.max(0, container.scrollHeight - viewportBottom),
-  };
-}
-
-function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBehavior = "auto") {
-  if (isWindowContainer(container)) {
-    const pageHeight = Math.max(
-      document.documentElement.scrollHeight,
-      document.body.scrollHeight,
-    );
-    window.scrollTo({ top: pageHeight, behavior });
-    return;
-  }
-
-  container.scrollTo({ top: container.scrollHeight, behavior });
-}
-
-type RunLogChunk = { ts: string; stream: "stdout" | "stderr" | "system"; chunk: string };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -243,55 +192,7 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function parseStoredLogContent(content: string): RunLogChunk[] {
-  const parsed: RunLogChunk[] = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const raw = JSON.parse(trimmed) as { ts?: unknown; stream?: unknown; chunk?: unknown };
-      const stream =
-        raw.stream === "stderr" || raw.stream === "system" ? raw.stream : "stdout";
-      const chunk = typeof raw.chunk === "string" ? raw.chunk : "";
-      const ts = typeof raw.ts === "string" ? raw.ts : new Date().toISOString();
-      if (!chunk) continue;
-      parsed.push({ ts, stream, chunk });
-    } catch {
-      // Ignore malformed log lines.
-    }
-  }
-  return parsed;
-}
 
-function workspaceOperationPhaseLabel(phase: WorkspaceOperation["phase"]) {
-  switch (phase) {
-    case "worktree_prepare":
-      return "Execution context setup";
-    case "workspace_provision":
-      return "Provision";
-    case "workspace_teardown":
-      return "Teardown";
-    case "worktree_cleanup":
-      return "Execution context cleanup";
-    default:
-      return phase;
-  }
-}
-
-function workspaceOperationStatusTone(status: WorkspaceOperation["status"]) {
-  switch (status) {
-    case "succeeded":
-      return "border-green-500/20 bg-green-500/10 text-green-700 dark:text-green-300";
-    case "failed":
-      return "border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-300";
-    case "running":
-      return "border-cyan-500/20 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300";
-    case "skipped":
-      return "border-yellow-500/20 bg-yellow-500/10 text-yellow-700 dark:text-yellow-300";
-    default:
-      return "border-border bg-muted/40 text-muted-foreground";
-  }
-}
 
 function WorkspaceOperationStatusBadge({ status }: { status: WorkspaceOperation["status"] }) {
   return (
