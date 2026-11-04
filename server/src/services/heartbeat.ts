@@ -55,6 +55,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
+import { deriveRepoNameFromRepoUrl } from "./heartbeat-workspace-repo-name.js";
 import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { hasSatisfiedWorkProductRegistration } from "./heartbeat-artifact-registration.js";
@@ -425,18 +426,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "commandcode_local",
 ]);
 
-function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
-  const trimmed = repoUrl?.trim() ?? "";
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed);
-    const cleanedPath = parsed.pathname.replace(/\/+$/, "");
-    const repoName = cleanedPath.split("/").filter(Boolean).pop()?.replace(/\.git$/i, "") ?? "";
-    return repoName || null;
-  } catch {
-    return null;
-  }
-}
+
 
 
 /**
