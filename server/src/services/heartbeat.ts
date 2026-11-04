@@ -53,6 +53,7 @@ import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./h
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
+import { withAgentStartLock } from "./heartbeat-start-lock.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
@@ -448,7 +449,6 @@ function firstDependencyIssueFromDescription(description: string | null | undefi
     targetIssueTitle: match[3].trim(),
   };
 }
-const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const execFile = promisify(execFileCallback);
@@ -650,23 +650,6 @@ function normalizeMaxConcurrentRuns(value: unknown) {
   const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
   if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
   return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
-}
-
-async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
-  const previous = startLocksByAgent.get(agentId) ?? Promise.resolve();
-  const run = previous.then(fn);
-  const marker = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  startLocksByAgent.set(agentId, marker);
-  try {
-    return await run;
-  } finally {
-    if (startLocksByAgent.get(agentId) === marker) {
-      startLocksByAgent.delete(agentId);
-    }
-  }
 }
 
 
