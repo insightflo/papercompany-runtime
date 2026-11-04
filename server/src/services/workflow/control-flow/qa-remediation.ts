@@ -135,6 +135,7 @@ async function directEntryHasC5Scope({ db, run }: TryQaRemediationInput): Promis
   const [current] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, run.companyId)));
   if (!current || current.missionId !== run.missionId
     || current.status !== run.status) throw new QaRemediationReconcileError("request");
+  if (!await workflowRunHasC5AdmissionScope(db, run.id)) return false;
   const steps = await db.select({ status: workflowStepRuns.status }).from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
   const [authority] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities)
     .where(and(eq(workflowRecoveryAuthorities.companyId, run.companyId), or(

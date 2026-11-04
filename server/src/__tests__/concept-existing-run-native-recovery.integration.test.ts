@@ -20,6 +20,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { readQaRemediationActualDrain } from "../services/heartbeat-actual-drain.js";
 import { recoverTerminalRun } from "../services/workflow/run-recovery-authority.js";
+import { workflowRunHasC5AdmissionScope } from "../services/workflow/control-flow/qa-remediation-admission-root.js";
 import { prepareQaRemediationReservation } from "../services/workflow/control-flow/qa-remediation-prepare.js";
 import { errorHandler } from "../middleware/index.js";
 import { workflowRoutes } from "../routes/workflows.js";
@@ -128,6 +129,7 @@ describeDb("concept existing-run native recovery — Stage A public resume branc
     const reservation = await prepareQaRemediationReservation(db, { companyId: w.companyId, missionId: w.missionId,
       workflowRunId: w.runId, producerStepRunId: w.producerStepRunId, qaStepRunIds: [w.qaStepRunId] });
     expect(reservation.outcome).toBe("prepared");
+    expect(await workflowRunHasC5AdmissionScope(db, w.runId)).toBe(true);
     if (reservation.outcome !== "prepared") throw new Error("resume reservation missing");
     const [producer] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, w.producerStepRunId));
     const read = (connection: Db) => readQaRemediationActualDrain(connection, reservation.preparation, producer!);

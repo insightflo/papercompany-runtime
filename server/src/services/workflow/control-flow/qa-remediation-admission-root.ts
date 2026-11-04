@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, is, or, isNotNull } from "drizzle-orm";
+import { and, asc, eq, inArray, is, or, isNotNull, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { isDeepStrictEqual } from "node:util";
 import { agentWakeupRequests, heartbeatRuns, missions, workflowRecoveryAuthorities, workflowRuns, workflowStepRuns,
@@ -10,7 +10,7 @@ import { readQaRemediationActualDrain } from "../../heartbeat-actual-drain.js";
 import { createReplacementRootNotifications, registerQaCorrectionRootDrain, withReplacementRootNotificationDb,
   type ReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
 import { QA_REMEDIATION_EVENT_TYPE } from "./qa-remediation-contract.js";
-import { QA_REMEDIATION_PREPARATION_EVENT_TYPE, classifyQaRemediationLegacyRow, parseQaRemediationPreparation,
+import { QA_REMEDIATION_PREPARATION_EVENT_TYPE, classifyQaRemediationLegacyRow, parseQaRemediationPreparation, qaRemediationLegacyAppliedPayloadSchema,
   qaRemediationPreparationKey, type QaRemediationPreparation, type QaRemediationPreparationScope,
   type QaRemediationVerdict } from "./qa-remediation-preparation-contract.js";
 import { qaRemediationCompletionKey, validateQaRemediationCompletionEvidence } from "./qa-remediation-completion-evidence.js";
@@ -616,16 +616,23 @@ async function inventoryForRun(db: Db, run: Run): Promise<Inventory> {
 export async function workflowRunHasC5AdmissionScope(db: Db, runId: string): Promise<boolean> {
   const [run] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, runId));
   if (!run) return true;
-  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities).where(and(
-    eq(workflowRecoveryAuthorities.companyId, run.companyId), or(eq(workflowRecoveryAuthorities.workflowRunId, runId), eq(workflowRecoveryAuthorities.replacementRunId, runId)))).limit(1);
+  const authorities = await db.select({ a: workflowRecoveryAuthorities, decision: sql<boolean>`exists (select 1 from workflow_terminal_decisions d where d.id = ${workflowRecoveryAuthorities.targetDecisionId} and d.company_id = ${workflowRecoveryAuthorities.companyId} and d.workflow_run_id = ${workflowRecoveryAuthorities.workflowRunId} and d.decided_authority_version = ${workflowRecoveryAuthorities.targetAuthorityVersion})` }).from(workflowRecoveryAuthorities).where(and(
+    eq(workflowRecoveryAuthorities.companyId, run.companyId), or(eq(workflowRecoveryAuthorities.workflowRunId, runId), eq(workflowRecoveryAuthorities.replacementRunId, runId))));
+  const authority = authorities.some(({ a, decision }) => !decision || a.recoveryKind !== "manual_resume" || a.status !== "consumed"
+    || a.replacementRunId !== null || !a.consumedAt || a.resultingAuthorityVersion !== a.targetAuthorityVersion + 1
+    || a.resultingAuthorityVersion > run.dispatchAuthorityVersion);
   const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, runId),
-    inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared"])) ).limit(1);
+    or(inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared", "heartbeat_actual_drained_v1"]), and(eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE), sql`${workflowTransitionEvents.payload} ? 'schemaVersion'`))) ).limit(1);
   const actuals = await db.select({ wake: agentWakeupRequests }).from(heartbeatRuns).innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId))
     .leftJoin(agentWakeupRequests, eq(agentWakeupRequests.id, heartbeatRuns.wakeupRequestId)).where(and(
       eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, runId), isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken)));
-  const actual = actuals.some(({ wake }) => { try { return !wake || readQaCorrectionWakeRef(wake) !== null; } catch { return true; } });
+  const wakes = await db.select({ wake: agentWakeupRequests }).from(agentWakeupRequests)
+    .leftJoin(workflowStepRuns, eq(workflowStepRuns.id, agentWakeupRequests.workflowStepRunId))
+    .where(and(eq(agentWakeupRequests.companyId, run.companyId), or(eq(agentWakeupRequests.workflowRunId, runId), eq(workflowStepRuns.workflowRunId, runId))));
+  const actual = [...actuals, ...wakes].some(({ wake }) => { try { return !wake || Object.hasOwn(wake.payload ?? {}, "qaRemediationCompletion") || readQaCorrectionWakeRef(wake) !== null; } catch { return true; } });
   const [held] = await db.select({ id: workflowStepRuns.id }).from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, runId), inArray(workflowStepRuns.status, ["held", "blocked"])) ).limit(1);
+  if (!authority && !history && !actual && !held) { const legacy = await db.select().from(workflowTransitionEvents).where(and(eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, runId), eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE))); if (legacy.every(row => row.missionId === run.missionId && row.layer === "workflow_validation" && row.verdict === "request_changes" && row.reason === "workflow_api" && row.reasonCode === "qa_remediation" && !!row.workflowStepRunId && qaRemediationLegacyAppliedPayloadSchema.safeParse(row.payload).success)) return false; }
   const inventory = await inventoryForRun(db, run);
   return Boolean(authority || history || actual || held || inventory.pending.length);
 }
