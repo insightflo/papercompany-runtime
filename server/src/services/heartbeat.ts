@@ -54,6 +54,7 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
+import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
 import { mergeAgentConfig } from "./agents.js";
 import {
@@ -670,34 +671,6 @@ async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
 
 
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
-
-function isWorkflowStepResumeWake(input: {
-  requestKind?: unknown;
-  reason?: unknown;
-  payload?: unknown;
-  contextSnapshot?: unknown;
-}) {
-  const payload = parseObject(input.payload);
-  const contextSnapshot = parseObject(input.contextSnapshot);
-  const kind = typeof input.requestKind === "string" ? input.requestKind : "";
-  const mutation = typeof payload.mutation === "string" ? payload.mutation : "";
-  const reason = typeof input.reason === "string" ? input.reason : "";
-  const workflowRunId = typeof contextSnapshot.workflowRunId === "string"
-    ? contextSnapshot.workflowRunId
-    : typeof payload.workflowRunId === "string"
-      ? payload.workflowRunId
-      : "";
-  const workflowStepRunId = typeof contextSnapshot.workflowStepRunId === "string"
-    ? contextSnapshot.workflowStepRunId
-    : typeof payload.workflowStepRunId === "string"
-      ? payload.workflowStepRunId
-      : "";
-  return (
-    (kind === "workflow_resume" || mutation === "workflow_resume" || reason === "workflow_step_runnable") &&
-    workflowRunId.length > 0 &&
-    workflowStepRunId.length > 0
-  );
-}
 
 
 export async function recordHeartbeatQueueTransitionEvent(db: Db, input: {
