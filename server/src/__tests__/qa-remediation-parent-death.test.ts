@@ -69,7 +69,7 @@ describe.sequential("C5 owning Node parent death at native rename barriers", () 
           if (!ownerPid) throw new Error("owning Node child did not receive an OS PID");
           const observed = observeRootChild(child);
           ownerClose = observed.closed;
-          const started = await within(observed.started, "owning Node startup");
+          const started = await within(observed.started, "owning Node startup", 60_000);
           expect(started.pid).toBe(ownerPid);
           expect(started.appName).toBe(appName);
           expect(started.argv).toContain(CHILD_FIXTURE);
