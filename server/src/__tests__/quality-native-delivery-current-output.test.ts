@@ -1,73 +1,170 @@
-// F1 public-entry proof: E completion is the only non-C03 correction owner, and
-// ordinary Quality delivery cannot replace its exact workflow-resume wake.
-
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { watch } from "node:fs/promises";
-import { isDeepStrictEqual } from "node:util";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, expect, it } from "vitest";
-import { z } from "zod";
-import { and, eq, exists, like, sql } from "drizzle-orm";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { and, eq, like } from "drizzle-orm";
 import {
   agentWakeupRequests,
   agents,
-  companies,
   heartbeatRuns,
-  heartbeatRunFinalizationSteps,
-  instanceSettings,
   issues,
-  issueWorkProducts,
-  missions,
   qualityActions,
-  qualityEvidenceRefs,
-  workflowRuns,
-  workflowTransitionEvents,
-  workflowStepInvocations,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { uploadEvidence, linkEvidence } from "../services/quality/evidence-store.js";
+import type { SourceAttempt } from "@paperclipai/shared";
+import { createQualityTestDb, describeQualityDb, type QualityTestDb } from "./helpers/quality-db.js";
+import { seedQualityFixture, type QualityFixture } from "./helpers/quality-fixture.js";
+import { reviewItemForAction, seedCurrentOutputScenario, type CurrentOutputSeed } from "./helpers/quality-proofs.js";
 import { hashContract } from "../services/quality/contract.js";
-import { cancelQualityIntent, deliverQualityIntent, readQualityCancellation } from "../services/quality/native-delivery.js";
-import { applyCurrentOutputCorrection } from "../services/quality/current-output.js";
+import { qualityWakeKey } from "../services/quality/native-wake.js";
+import { deliverQualityIntent } from "../services/quality/native-delivery.js";
 import { ensureCanonicalQualityExecution } from "../services/quality/native-records.js";
+
+const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
+vi.mock("../adapters/index.js", async original => {
+  const actual = await original<typeof import("../adapters/index.js")>();
+  return { ...actual, getServerAdapter: (kind: string) => kind === "codex_local"
+    ? { supportsLocalAgentJwt: false, execute: executeSpy } : actual.getServerAdapter(kind) };
+});
+
+function successfulAdapterResult() {
+  return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, usage: null, provider: "test", model: "test-model", resultJson: null, runtimeServices: [] };
+}
+
+
+describeQualityDb("Quality native delivery (current_output)", () => {
+  let owned: QualityTestDb;
+  let f: QualityFixture;
+  let home: string;
+  const originalHome = process.env.PAPERCLIP_HOME;
+
+  beforeAll(async () => {
+    home = await mkdtemp(path.join(os.tmpdir(), "quality-t4-co-deliver-"));
+    process.env.PAPERCLIP_HOME = home;
+    executeSpy.mockResolvedValue(successfulAdapterResult());
+    owned = await createQualityTestDb();
+    f = await seedQualityFixture(owned.db);
+    await owned.db.update(agents).set({
+      adapterType: "codex_local", adapterConfig: { promptTemplate: "Test." }, runtimeConfig: {}, permissions: {},
+    }).where(eq(agents.companyId, f.companyId));
+  }, 180_000);
+  afterAll(async () => {
+    if (originalHome === undefined) delete process.env.PAPERCLIP_HOME;
+    else process.env.PAPERCLIP_HOME = originalHome;
+    await owned?.close();
+    if (home) await rm(home, { recursive: true, force: true });
+  });
+
+  /** 진행 중 원본 + request_changes verdict + current_output 조치를 실제 행으로 만든다. */
+  async function seedCurrentOutputAction(): Promise<{ seeded: QualityFixture; seed: CurrentOutputSeed; actionId: string; intentKey: string }> {
+    const db = owned.db;
+    const seeded = await seedQualityFixture(db);
+    await db.update(agents).set({ adapterType: "codex_local", adapterConfig: { promptTemplate: "Test." }, runtimeConfig: {}, permissions: {} })
+      .where(eq(agents.companyId, seeded.companyId));
+    const artifactUrl = path.join(home, "co-delivery", `index-${randomUUID().slice(0, 6)}.html`);
+    const seed = await seedCurrentOutputScenario(db, {
+      companyId: seeded.companyId, authorAgentId: seeded.authorAgentId, verifierAgentId: seeded.verifierAgentId,
+      artifactUrl, remediations: { items: [{ op: "string_replace", file: artifactUrl, find: "a", replace: "b" }] },
+    });
+    const source = seed.source as SourceAttempt;
+    const actionId = randomUUID();
+    const intentKey = `co-deliver-${actionId.slice(0, 8)}`;
+    const target = { kind: "current_output" as const, source };
+    const effect = { kind: "repair_supported_output" as const, target };
+    const { occurrenceId } = await reviewItemForAction(db, seeded.companyId, source, source.heartbeatRunId);
+    await db.insert(qualityActions).values({
+      id: actionId, companyId: seeded.companyId, groupId: seeded.groupId, kind: "current_output",
+      occurrenceSetHash: hashContract([occurrenceId]), occurrenceIds: [occurrenceId],
+      policyVersionId: seeded.policyVersionId, scopeVersion: 1,
+      target, targetHash: hashContract(target), effect, effectHash: hashContract(effect),
+      retryEnvelope: {
+        intentKey, effectHash: hashContract(effect), targetHash: hashContract(target),
+        maxExecutorAttempts: 2, deadlineAt: new Date(Date.now() + 3_600_000).toISOString(),
+        groupId: seeded.groupId, policyVersionId: seeded.policyVersionId, maxCumulativeCostCents: 100,
+      },
+      revision: 1, state: "created", intentKey,
+    });
+    return { seeded, seed, actionId, intentKey };
+  }
+
+  it("delivers a current_output repair through the bound source QA step with a real acceptance receipt", async () => {
+    const db = owned.db;
+    const { seeded, seed, actionId, intentKey } = await seedCurrentOutputAction();
+    const result = await deliverQualityIntent(db, { companyId: seeded.companyId, actionId });
+    expect(result.status).toBe("accepted");
+    expect(result.receiptId).not.toBeNull();
+    const key = qualityWakeKey({ actionId, stepRunId: seed.qaStepRunId, generation: 1, attempt: 1 });
+    const [row] = await db.select().from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, seeded.companyId), eq(agentWakeupRequests.idempotencyKey, key)));
+    expect(row).toBeDefined();
+    expect(row!.id).toBe(result.receiptId);
+    const acc = row!.qualityAcceptance as Record<string, unknown>;
+    expect(acc.intentKey).toBe(intentKey);
+    expect(acc.inputHash).toBe("ab".repeat(32));
+    expect(acc.issueId).toBe(seed.qaIssueId);
+    expect(acc.stepRunId).toBe(seed.qaStepRunId);
+    expect(acc.workflowRunId).toBe(seed.workflowRunId);
+    expect(acc.generation).toBe(1);
+    expect(acc.agentId).toBe(seeded.verifierAgentId);
+    expect(acc.attempt).toBe(1);
+    expect(acc.heartbeatRunId).toBe(row!.runId);
+    const [qaIssue] = await db.select().from(issues).where(eq(issues.id, seed.qaIssueId));
+    expect(qaIssue!.status).toBe("in_progress");
+    expect(qaIssue!.executionRunId).toBe(row!.runId);
+  });
+
+  it("refuses delivery when the original source attempt changed after binding (원본 시도 변경)", async () => {
+    const db = owned.db;
+    const { seeded, seed, actionId } = await seedCurrentOutputAction();
+    const binding = await ensureCanonicalQualityExecution(db, { companyId: seeded.companyId, actionId });
+    expect(binding.stepRunId).toBe(seed.qaStepRunId);
+    // 원본 시도 A(producer generation 1) → B(generation 2) 교체: 승인된 적 없는 새 시도다.
+    await db.update(workflowStepRuns).set({ executionGeneration: 2 })
+      .where(and(eq(workflowStepRuns.workflowRunId, seed.workflowRunId), eq(workflowStepRuns.id, seed.producerStepRunId)));
+    const result = await deliverQualityIntent(db, { companyId: seeded.companyId, actionId });
+    expect(result).toEqual({ status: "blocked", receiptId: null });
+    // 새 수락·실행 없음: quality wake 행 0개, QA 이슈에 새 heartbeat run 0개(seed verdict 제외).
+    const wakes = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, seeded.companyId), like(agentWakeupRequests.idempotencyKey, `quality-action-wake:${actionId}:%`)));
+    expect(wakes).toHaveLength(0);
+    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.companyId, seeded.companyId), eq(heartbeatRuns.issueId, seed.qaIssueId)));
+    expect(runs.map((run) => run.id)).toEqual([seed.verdictHeartbeatId]);
+    const [action] = await db.select({ b: qualityActions.canonicalBinding }).from(qualityActions)
+      .where(and(eq(qualityActions.companyId, seeded.companyId), eq(qualityActions.id, actionId)));
+    expect(action!.b).toEqual(binding);
+  });
+});
+
+// F1 public-entry proof: E completion is the only non-C03 correction owner, and
+// ordinary Quality delivery cannot replace its exact workflow-resume wake.
+
+import { createHash } from "node:crypto";
+import { chmod, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { watch } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
+import { exists, sql } from "drizzle-orm";
+import { companies, heartbeatRunFinalizationSteps, instanceSettings, issueWorkProducts, missions, qualityEvidenceRefs, workflowRuns, workflowTransitionEvents, workflowStepInvocations } from "@paperclipai/db";
+import { uploadEvidence, linkEvidence } from "../services/quality/evidence-store.js";
+import { cancelQualityIntent, readQualityCancellation } from "../services/quality/native-delivery.js";
+import { applyCurrentOutputCorrection } from "../services/quality/current-output.js";
 import { createQaFileOwnerRuntime } from "../services/workflow/control-flow/qa-remediation-runtime.js";
 import { parseQaRemediationCompletion } from "../services/workflow/control-flow/qa-remediation-completion-evidence.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
-import {
-  freezeHeartbeatActualDrainIdentity,
-  HEARTBEAT_ACTUAL_DRAIN_EVENT_TYPE,
-  HEARTBEAT_ACTUAL_DRAIN_SCHEMA,
-  readQaRemediationActualDrain,
-  type HeartbeatActualDrainIdentity,
-} from "../services/heartbeat-actual-drain.js";
+import { freezeHeartbeatActualDrainIdentity, HEARTBEAT_ACTUAL_DRAIN_EVENT_TYPE, HEARTBEAT_ACTUAL_DRAIN_SCHEMA, readQaRemediationActualDrain, type HeartbeatActualDrainIdentity } from "../services/heartbeat-actual-drain.js";
 import { readWorkflowAttemptProof } from "../services/heartbeat-finalization/workflow-attempt-proof.js";
-import {
-  createTerminalReleaseManifest,
-  readTerminalReleaseAcknowledgment,
-  readTerminalReleaseManifest,
-  readTerminalReleaseManifestForSource,
-  readReadyTerminalReleaseContinuation,
-  terminalReleaseMatchesRun,
-  TERMINAL_RELEASE_ACK_EVENT_TYPE,
-  TERMINAL_RELEASE_EVENT_TYPE,
-} from "../services/heartbeat-terminal-release-continuation.js";
+import { createTerminalReleaseManifest, readTerminalReleaseAcknowledgment, readTerminalReleaseManifest, readTerminalReleaseManifestForSource, readReadyTerminalReleaseContinuation, terminalReleaseMatchesRun, TERMINAL_RELEASE_ACK_EVENT_TYPE, TERMINAL_RELEASE_EVENT_TYPE } from "../services/heartbeat-terminal-release-continuation.js";
 import { completeWorkflowIssue, registerWorkflowArtifact, submitWorkflowVerdict } from "../services/workflow/agent-api.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { missionService } from "../services/missions.js";
 import { getStorageService } from "../storage/index.js";
-import { createQualityTestDb, describeQualityDb, type QualityTestDb } from "./helpers/quality-db.js";
-import { seedQualityFixture, type QualityFixture } from "./helpers/quality-fixture.js";
-import { reviewItemForAction, seedCurrentOutputScenario, type CurrentOutputSeed } from "./helpers/quality-proofs.js";
 import { PYTHON } from "./helpers/qa-remediation-parent-death-harness.js";
 import { runningProcesses } from "../adapters/index.js";
-import {
-  QA_REMEDIATION_PREPARATION_SCHEMA_VERSION_V3,
-  parseQaRemediationPreparation,
-} from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
+import { QA_REMEDIATION_PREPARATION_SCHEMA_VERSION_V3, parseQaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
 
 type TestAction = {
   seeded: QualityFixture;
