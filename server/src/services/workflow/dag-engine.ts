@@ -38,6 +38,7 @@ import { QaRemediationAdmissionHold, unresolvedQaRemediationAdmissionPending,
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
+import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1734,17 +1735,6 @@ function getSingleToolStepName(step: WorkflowStep): string {
   return toolName;
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableJson(item)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 const RUN_METADATA_TEXT_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
 
@@ -1773,9 +1763,6 @@ function readMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function isCacheEnabled(step: WorkflowStep): boolean {
-  return step.executionControls?.cacheEnabled === true;
-}
 
 function workflowPriorityRank(priority: string | undefined): number {
   switch (priority) {
@@ -1798,11 +1785,6 @@ function sortWorkflowStepsByPriority(steps: WorkflowStep[]): WorkflowStep[] {
   );
 }
 
-function getCacheTtlSeconds(step: WorkflowStep): number | undefined {
-  return typeof step.executionControls?.cacheTtlSeconds === "number" && step.executionControls.cacheTtlSeconds > 0
-    ? step.executionControls.cacheTtlSeconds
-    : undefined;
-}
 
 async function findCachedToolStepRun(input: {
   db: Db;
