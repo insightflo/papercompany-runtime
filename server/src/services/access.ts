@@ -1,5 +1,6 @@
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { createAccessGroupReaders } from "./access-group-readers.js";
 import {
   authUsers,
   companyMemberships,
@@ -520,21 +521,7 @@ export function accessService(db: Db) {
   // --- Permission groups (Phase 2). Every query is scoped by companyId so a
   // cross-company groupId/memberId is treated as not-found rather than leaking. ---
 
-  async function listGroups(companyId: string) {
-    return db
-      .select()
-      .from(permissionGroups)
-      .where(eq(permissionGroups.companyId, companyId))
-      .orderBy(permissionGroups.name);
-  }
-
-  async function getGroup(companyId: string, groupId: string) {
-    return db
-      .select()
-      .from(permissionGroups)
-      .where(and(eq(permissionGroups.id, groupId), eq(permissionGroups.companyId, companyId)))
-      .then((rows) => rows[0] ?? null);
-  }
+  const { listGroups, getGroup } = createAccessGroupReaders(db);
 
   async function createGroup(
     companyId: string,
