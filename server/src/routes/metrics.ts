@@ -7,6 +7,8 @@
 
 import { Router } from "express";
 import client from "prom-client";
+import { logger } from "../middleware/logger.js";
+import { createRuntimeMetricsMonitor } from "../services/runtime-metrics-monitor.js";
 
 function normalizeMetricRoute(url: string): string {
   const path = url.split("?")[0] ?? url;
@@ -138,7 +140,16 @@ export function metricsMiddleware() {
 // Routes
 // ---------------------------------------------------------------------------
 
+let metricsMonitorStarted = false;
+
 export function metricsRoutes() {
+  if (!metricsMonitorStarted) {
+    metricsMonitorStarted = true;
+    const monitor = createRuntimeMetricsMonitor(() => httpRequestTotal.get(), logger);
+    void monitor.sample();
+    const timer = setInterval(() => void monitor.sample(), 60_000);
+    timer.unref();
+  }
   const router = Router();
 
   /**
