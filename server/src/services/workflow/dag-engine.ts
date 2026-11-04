@@ -39,6 +39,7 @@ import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missio
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
 import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
+import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1763,27 +1764,6 @@ function readMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-
-function workflowPriorityRank(priority: string | undefined): number {
-  switch (priority) {
-    case "critical":
-      return 4;
-    case "high":
-      return 3;
-    case "normal":
-      return 2;
-    case "low":
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-function sortWorkflowStepsByPriority(steps: WorkflowStep[]): WorkflowStep[] {
-  return [...steps].sort((left, right) =>
-    workflowPriorityRank(right.executionControls?.priority) - workflowPriorityRank(left.executionControls?.priority)
-  );
-}
 
 
 async function findCachedToolStepRun(input: {

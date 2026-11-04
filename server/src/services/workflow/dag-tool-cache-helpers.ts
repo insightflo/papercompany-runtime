@@ -23,4 +23,3 @@ export function getCacheTtlSeconds(step: WorkflowStep): number | undefined {
     ? step.executionControls.cacheTtlSeconds
     : undefined;
 }
-
