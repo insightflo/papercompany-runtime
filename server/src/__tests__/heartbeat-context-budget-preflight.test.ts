@@ -1,16 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { registerHeartbeatFailureClassificationCase } from "./helpers/heartbeat-failure-classification-case.js";
+import { startTempDatabase, type EmbeddedPostgresInstance } from "./helpers/heartbeat-budget-database-fixture.js";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  applyPendingMigrations,
   createDb,
-  ensurePostgresDatabase,
   agents,
   agentInstructionInjections,
   agentRuntimeState,
@@ -73,70 +71,6 @@ import { hashStructuredValue } from "../services/issue-execution-cards/hash.ts";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.ts";
 import { secretService } from "../services/secrets.ts";
 
-type EmbeddedPostgresInstance = {
-  initialise(): Promise<void>;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-};
-
-type EmbeddedPostgresCtor = new (opts: {
-  databaseDir: string;
-  user: string;
-  password: string;
-  port: number;
-  persistent: boolean;
-  initdbFlags?: string[];
-  onLog?: (message: unknown) => void;
-  onError?: (message: unknown) => void;
-}) => EmbeddedPostgresInstance;
-
-async function getEmbeddedPostgresCtor(): Promise<EmbeddedPostgresCtor> {
-  const mod = await import("embedded-postgres");
-  return mod.default as EmbeddedPostgresCtor;
-}
-
-async function getAvailablePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to allocate test port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
-      });
-    });
-  });
-}
-
-async function startTempDatabase() {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-heartbeat-budget-"));
-  const port = await getAvailablePort();
-  const EmbeddedPostgres = await getEmbeddedPostgresCtor();
-  const instance = new EmbeddedPostgres({
-    databaseDir: dataDir,
-    user: "paperclip",
-    password: "paperclip",
-    port,
-    persistent: true,
-    initdbFlags: ["--encoding=UTF8", "--locale=C"],
-    onLog: () => {},
-    onError: () => {},
-  });
-  await instance.initialise();
-  await instance.start();
-
-  const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
-  await ensurePostgresDatabase(adminConnectionString, "paperclip");
-  const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
-  await applyPendingMigrations(connectionString);
-  return { connectionString, instance, dataDir };
-}
 
 /** [플레이크 RCA 2026-09-28] 런 종단 이후 wakeup 행 상태 전환(claimed→failed 등)은 비동기
  *   사후 기록이라 고정 sleep 후 읽으면 부하 시 아직 claimed 인 채로 읽힌다 — 유계 폴링으로 대기. */
