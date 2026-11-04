@@ -15,3 +15,5 @@ The earlier reservation-only candidate lacked runtime publication and completion
 ## B1 independent publisher evidence
 
 The focused real-filesystem `qa-remediation-publication.test.ts` suite passed 10/10 on the current branch. Its own scope excludes database reservation, transaction/wake integration and a real mission; the available record does not establish that this suite alone satisfies every historical B1 condition. This evidence is partial and does not establish live mission impact or absence of impact.
+
+A second bounded verification ran `qa-remediation-admission-root.test.ts` for the exact current B1 public-sync case with a 60-second CLI timeout: 1/1 passed (6 skipped). It checks the union owner, two exact completions and refire evidence in the fixture. Together these are focused local publisher and public-sync evidence, not a live mission proof or a complete M01–M10 acceptance.
