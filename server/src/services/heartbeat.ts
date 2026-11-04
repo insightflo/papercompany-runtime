@@ -57,7 +57,7 @@ import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdap
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
 import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
-import { workProductReferencesClaimedArtifact } from "./heartbeat-artifact-registration.js";
+import { workProductReferencesClaimedArtifact, workProductWithinAllowedRoot } from "./heartbeat-artifact-registration.js";
 export { workProductReferencesClaimedArtifact } from "./heartbeat-artifact-registration.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
@@ -1246,32 +1246,6 @@ export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | 
 }
 
 
-function workProductArtifactPaths(product: {
-  url: string | null;
-  externalId: string | null;
-  metadata: Record<string, unknown> | null;
-}) {
-  const paths: string[] = [];
-  for (const value of [product.url, product.externalId]) {
-    if (typeof value === "string" && path.isAbsolute(value)) paths.push(value);
-  }
-  const metadataPath = product.metadata?.path;
-  if (typeof metadataPath === "string" && path.isAbsolute(metadataPath)) paths.push(metadataPath);
-  return paths;
-}
-
-function workProductWithinAllowedRoot(
-  product: {
-    url: string | null;
-    externalId: string | null;
-    metadata: Record<string, unknown> | null;
-  },
-  allowedArtifactRoot: string | null | undefined,
-) {
-  if (!allowedArtifactRoot) return true;
-  const paths = workProductArtifactPaths(product);
-  return paths.length > 0 && paths.some((artifactPath) => isPathInsideOrEqual(artifactPath, allowedArtifactRoot));
-}
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

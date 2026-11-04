@@ -1,3 +1,6 @@
+import path from "node:path";
+import { isPathInsideOrEqual } from "./work-products/output-paths.js";
+
 export function workProductReferencesClaimedArtifact(
   product: {
     url: string | null;
@@ -26,4 +29,31 @@ export function workProductReferencesClaimedArtifact(
   if (!haystack.trim()) return false;
 
   return claimedArtifactPaths.some((artifactPath) => haystack.includes(artifactPath));
+}
+
+function workProductArtifactPaths(product: {
+  url: string | null;
+  externalId: string | null;
+  metadata: Record<string, unknown> | null;
+}) {
+  const paths: string[] = [];
+  for (const value of [product.url, product.externalId]) {
+    if (typeof value === "string" && path.isAbsolute(value)) paths.push(value);
+  }
+  const metadataPath = product.metadata?.path;
+  if (typeof metadataPath === "string" && path.isAbsolute(metadataPath)) paths.push(metadataPath);
+  return paths;
+}
+
+export function workProductWithinAllowedRoot(
+  product: {
+    url: string | null;
+    externalId: string | null;
+    metadata: Record<string, unknown> | null;
+  },
+  allowedArtifactRoot: string | null | undefined,
+) {
+  if (!allowedArtifactRoot) return true;
+  const paths = workProductArtifactPaths(product);
+  return paths.length > 0 && paths.some((artifactPath) => isPathInsideOrEqual(artifactPath, allowedArtifactRoot));
 }
