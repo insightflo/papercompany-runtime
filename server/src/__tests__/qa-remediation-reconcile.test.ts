@@ -582,6 +582,7 @@ describe("reconcileQaRemediationReservation", () => {
     const term = createDb(pg.connectionString), termObserver = createDb(pg.connectionString);
     const controller = await term.$client.reserve(), observer = await termObserver.$client.reserve();
     const w = await seedWorld(term);
+    const notifications = createReplacementRootNotifications();
     let held = false;
     let reconciliation: ReturnType<typeof reconcile> | undefined;
     try {
@@ -604,7 +605,7 @@ describe("reconcileQaRemediationReservation", () => {
       await controller.unsafe("SELECT pg_advisory_lock(73128,2)"); held = true;
 
       // Trigger and held barrier exist before any reconcile work can start.
-      reconciliation = reconcile(w, term);
+      reconciliation = reconcile(w, term, w.fileOwnerRuntime, notifications);
       const deadline = Date.now() + 25000;
       let pid: number | null = null;
       for (;;) {
@@ -633,13 +634,16 @@ describe("reconcileQaRemediationReservation", () => {
       }
       expect(backendExited).toBe(true);
 
-      let rejection: unknown;
-      try { await reconciliation; } catch (error) { rejection = error; }
-      expect(rejection).toBeInstanceOf(Error);
-      const connectionFailure = rejection as Error & { code?: unknown; errno?: unknown };
+      const outcome = await reconciliation;
+      expect(outcome).toMatchObject({ outcome: "held", reason: "transaction_outcome_unknown" });
+      if (outcome.outcome !== "held") throw new Error("terminated transaction was not held");
+      expect(outcome.cause).toBeInstanceOf(Error);
+      const connectionFailure = outcome.cause as Error & { code?: unknown; errno?: unknown };
       expect(["CONNECTION_CLOSED", "CONNECTION_DESTROYED", "57P01"].includes(String(connectionFailure.code))).toBe(true);
       expect(connectionFailure.message).toMatch(/connection|terminat|closed|destroy/i);
       expect(connectionFailure.errno === undefined || String(connectionFailure.errno) === String(connectionFailure.code)).toBe(true);
+      expect(notifications.agentIds.size).toBe(0);
+      expect(notifications.correctionWakeupRequestIds.size).toBe(0);
 
       await controller.unsafe("SELECT pg_advisory_unlock(73128,2)"); held = false;
       expect((await rowsOf(w, "qa_remediation_prepared", term))).toHaveLength(1); // 내구 예약은 보존
