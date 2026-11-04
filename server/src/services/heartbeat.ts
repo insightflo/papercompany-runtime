@@ -55,6 +55,8 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
+import { deriveRepoNameFromRepoUrl } from "./heartbeat-workspace-repo-name.js";
+import { normalizePaperclipApiUrl, resolveHostForPaperclipApiUrl } from "./heartbeat-api-address.js";
 import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { hasSatisfiedWorkProductRegistration } from "./heartbeat-artifact-registration.js";
@@ -425,18 +427,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
   "commandcode_local",
 ]);
 
-function deriveRepoNameFromRepoUrl(repoUrl: string | null): string | null {
-  const trimmed = repoUrl?.trim() ?? "";
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed);
-    const cleanedPath = parsed.pathname.replace(/\/+$/, "");
-    const repoName = cleanedPath.split("/").filter(Boolean).pop()?.replace(/\.git$/i, "") ?? "";
-    return repoName || null;
-  } catch {
-    return null;
-  }
-}
+
 
 
 /**
@@ -1126,24 +1117,9 @@ function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnap
   }
 }
 
-function normalizePaperclipApiUrl(value: string | null | undefined): string | null {
-  const trimmed = value?.trim().replace(/\/+$/, "");
-  if (!trimmed) return null;
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  } catch {
-    return null;
-  }
-  return trimmed.endsWith("/api") ? trimmed.slice(0, -4) : trimmed;
-}
 
-function resolveHostForPaperclipApiUrl(value: string | null | undefined): string {
-  const host = value?.trim() ?? "";
-  if (!host || host === "0.0.0.0" || host === "::") return "localhost";
-  if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
-  return host;
-}
+
+
 
 function resolveCurrentPaperclipApiUrl(): string {
   const explicit = normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL);
