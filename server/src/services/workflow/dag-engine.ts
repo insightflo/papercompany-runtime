@@ -42,6 +42,7 @@ import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import { buildStepRunMap, toConditionalStepObservation, deriveIfControlOutcome } from "./dag-step-observation.js";
+import { normalizeRecord } from "./dag-metadata-helpers.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -366,9 +367,6 @@ export type WorkflowExecutionContext = {
   stepRuns: (typeof workflowStepRuns.$inferSelect)[];
 };
 
-function normalizeRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
 
 function buildWorkflowDefinitionExecutionShape(context: WorkflowExecutionContext): WorkflowDefinitionExecutionShape {
   const definitionMeta = context.definition as typeof workflowDefinitions.$inferSelect & {
