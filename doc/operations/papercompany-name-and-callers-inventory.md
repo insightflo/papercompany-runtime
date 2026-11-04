@@ -82,6 +82,18 @@ decisions also start or resume work through the factory. The barrel
 `recordHeartbeatQueueTransitionEvent` exist in quality admission and recovery
 guard; the provider-failure ladder and recovery queue use other exports.
 
+The broader local inventory records import/export declarations, dynamic-import
+and logging line numbers for six files in
+`c5-candidate-backups/wbs/t10b-large-file-map.json`. Text matches are discovery
+evidence rather than proof of all semantic consumers. The first risk priority
+is the heartbeat and DAG engine boundary: both changed in the #464 integration
+range and affect dispatch, recovery and completion. Mission supervision also
+coordinates mission work. UI graph and agent detail affect presentation;
+access routes retain security priority because they decide authorization.
+Length alone is not the priority rule, and logging occurrences are recorded for
+review rather than presumed unnecessary. Dynamic imports, reexports, tests and
+consumers outside these source trees still need exact symbol-level inspection.
+
 This is a starting map, not complete LF0 acceptance: all large-file exports,
 dynamic and external consumers, tests, debug logging and change-frequency risk
 still need classification. In particular, no extraction or change of execution,
