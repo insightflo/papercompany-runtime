@@ -1,5 +1,6 @@
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { createAccessGroupReaders } from "./access-group-readers.js";
 import {
   authUsers,
   companyMemberships,
@@ -520,21 +521,7 @@ export function accessService(db: Db) {
   // --- Permission groups (Phase 2). Every query is scoped by companyId so a
   // cross-company groupId/memberId is treated as not-found rather than leaking. ---
 
-  async function listGroups(companyId: string) {
-    return db
-      .select()
-      .from(permissionGroups)
-      .where(eq(permissionGroups.companyId, companyId))
-      .orderBy(permissionGroups.name);
-  }
-
-  async function getGroup(companyId: string, groupId: string) {
-    return db
-      .select()
-      .from(permissionGroups)
-      .where(and(eq(permissionGroups.id, groupId), eq(permissionGroups.companyId, companyId)))
-      .then((rows) => rows[0] ?? null);
-  }
+  const { listGroups, getGroup, listGroupMembers, listUserGroupMemberships } = createAccessGroupReaders(db);
 
   async function createGroup(
     companyId: string,
@@ -599,18 +586,6 @@ export function accessService(db: Db) {
     });
   }
 
-  async function listGroupMembers(companyId: string, groupId: string) {
-    return db
-      .select()
-      .from(permissionGroupMembers)
-      .where(
-        and(
-          eq(permissionGroupMembers.companyId, companyId),
-          eq(permissionGroupMembers.groupId, groupId),
-        ),
-      )
-      .orderBy(permissionGroupMembers.createdAt);
-  }
 
   // addUserIds are inserted active (onConflict do nothing guards the unique index);
   // removeUserIds are deleted. All scoped by companyId + groupId.
@@ -642,19 +617,6 @@ export function accessService(db: Db) {
     });
   }
 
-  // Used to enrich GET /members with each user's active group memberships.
-  async function listUserGroupMemberships(companyId: string, userId: string) {
-    return db
-      .select({ groupId: permissionGroupMembers.groupId, status: permissionGroupMembers.status })
-      .from(permissionGroupMembers)
-      .where(
-        and(
-          eq(permissionGroupMembers.companyId, companyId),
-          eq(permissionGroupMembers.userId, userId),
-          eq(permissionGroupMembers.status, "active"),
-        ),
-      );
-  }
 
   return {
     isInstanceAdmin,

@@ -106,6 +106,23 @@ describeDb("accessService.canUser - group-aware permission resolution", () => {
     });
   }
 
+  it("keeps group and active member reads scoped to their company", async () => {
+    const companyId = await setupCompany();
+    const otherCompanyId = await setupCompany();
+    const userId = randomUUID();
+    await addAuthUser(userId, "Reader", `${userId}@example.com`);
+    const group = await createGroup(companyId, "Readers");
+    const otherGroup = await createGroup(otherCompanyId, "Foreign readers");
+    await addGroupMember(companyId, group.id, userId);
+    await addGroupMember(otherCompanyId, otherGroup.id, userId);
+    expect((await access.listGroups(companyId)).map((row) => row.id)).toEqual([group.id]);
+    expect((await access.getGroup(companyId, group.id))?.id).toBe(group.id);
+    expect(await access.getGroup(companyId, otherGroup.id)).toBeNull();
+    expect((await access.listGroupMembers(companyId, group.id)).map((row) => row.userId)).toEqual([userId]);
+    expect(await access.listGroupMembers(companyId, otherGroup.id)).toEqual([]);
+    expect((await access.listUserGroupMemberships(companyId, userId)).map((row) => row.groupId)).toEqual([group.id]);
+  });
+
   it("direct user grant passes", async () => {
     const companyId = await setupCompany();
     const userId = randomUUID();
