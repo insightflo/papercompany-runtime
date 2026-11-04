@@ -53,6 +53,12 @@ import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./h
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
+import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
+import { withAgentStartLock } from "./heartbeat-start-lock.js";
+import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
+import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
+import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
+import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
 import { mergeAgentConfig } from "./agents.js";
 import {
@@ -201,7 +207,7 @@ import {
   acknowledgeHeartbeatRunBeforeAdapter,
   recordHeartbeatTerminalOutcomeShadow,
 } from "./heartbeat-finalization/shadow-writes.js";
-import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
+import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt, runTaskKey, isSameTaskScope } from "./heartbeat-run-context.js";
 import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetryEnqueueDeps } from "./heartbeat-retry-enqueue.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
@@ -406,8 +412,6 @@ export {
 type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
 const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
-const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
-const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 // [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
@@ -425,7 +429,6 @@ const DETACHED_GRACE_SEC = 5;
 // (run 자체는 longevity cap 에 따라 별도 회수 — 여기서는 agent 가시성만 교정.)
 const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
-const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 
 function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
   if (!description) return null;
@@ -446,7 +449,6 @@ function firstDependencyIssueFromDescription(description: string | null | undefi
     targetIssueTitle: match[3].trim(),
   };
 }
-const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const execFile = promisify(execFileCallback);
@@ -644,70 +646,9 @@ const heartbeatRunListColumns = {
   updatedAt: heartbeatRuns.updatedAt,
 } as const;
 
-function normalizeMaxConcurrentRuns(value: unknown) {
-  const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
-  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
-  return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
-}
 
-async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
-  const previous = startLocksByAgent.get(agentId) ?? Promise.resolve();
-  const run = previous.then(fn);
-  const marker = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  startLocksByAgent.set(agentId, marker);
-  try {
-    return await run;
-  } finally {
-    if (startLocksByAgent.get(agentId) === marker) {
-      startLocksByAgent.delete(agentId);
-    }
-  }
-}
-
-function resolveHeartbeatFailureCode(error: unknown, fallback: string) {
-  if (typeof (error as { code?: unknown } | null)?.code === "string") {
-    return (error as { code: string }).code;
-  }
-  return fallback;
-}
-
-const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
 
-function isWorkflowStepResumeWake(input: {
-  requestKind?: unknown;
-  reason?: unknown;
-  payload?: unknown;
-  contextSnapshot?: unknown;
-}) {
-  const payload = parseObject(input.payload);
-  const contextSnapshot = parseObject(input.contextSnapshot);
-  const kind = typeof input.requestKind === "string" ? input.requestKind : "";
-  const mutation = typeof payload.mutation === "string" ? payload.mutation : "";
-  const reason = typeof input.reason === "string" ? input.reason : "";
-  const workflowRunId = typeof contextSnapshot.workflowRunId === "string"
-    ? contextSnapshot.workflowRunId
-    : typeof payload.workflowRunId === "string"
-      ? payload.workflowRunId
-      : "";
-  const workflowStepRunId = typeof contextSnapshot.workflowStepRunId === "string"
-    ? contextSnapshot.workflowStepRunId
-    : typeof payload.workflowStepRunId === "string"
-      ? payload.workflowStepRunId
-      : "";
-  return (
-    (kind === "workflow_resume" || mutation === "workflow_resume" || reason === "workflow_step_runnable") &&
-    workflowRunId.length > 0 &&
-    workflowStepRunId.length > 0
-  );
-}
-
-function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
-  return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
-}
 
 export async function recordHeartbeatQueueTransitionEvent(db: Db, input: {
   companyId: string;
@@ -2335,114 +2276,13 @@ function mergeCoalescedContextSnapshot(
   return merged;
 }
 
-function runTaskKey(run: typeof heartbeatRuns.$inferSelect) {
-  return deriveTaskKey(run.contextSnapshot as Record<string, unknown> | null, null);
-}
-
-function isSameTaskScope(left: string | null, right: string | null) {
-  return (left ?? null) === (right ?? null);
-}
 
 function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
 }
 
-type AdapterFallbackConfig = {
-  command: string;
-  provider?: string;
-  model?: string;
-  /** [thinking ladder] 폴백 실행에 적용할 추론 수준(단일 값). command/provider/model은 바꾸지 않는다. */
-  thinking?: string;
-  /** [thinking ladder] 시도 횟수별 추론 수준 사다리(명시 config만 — 자동 승격 금지). */
-  thinkingLadder: string[];
-  triggers: Set<string>;
-  maxAttempts: number;
-};
 
-/**
- * [thinking ladder] 폴백 시도(1-based)에 적용할 thinking 값.
- *   - 사다리가 없으면 단일 thinking 값을 매 시도에 적용.
- *   - 사다리가 있으면 ladder[min(attempt-1, len-1)] — 시도가 사다리보다 길면 마지막 값 유지.
- * 어댑터별 정식 순서표가 없어(pi 문서 off~xhigh vs UI minimal~max 불일치) 값 자동 추론/승격은 금지이며,
- * 반드시 agent config(fallback.thinking / fallback.thinkingLadder)에 명시된 값만 사용한다.
- */
-function resolveAdapterFallbackThinking(
-  config: Pick<AdapterFallbackConfig, "thinking" | "thinkingLadder">,
-  attempt: number,
-): string | undefined {
-  if (config.thinkingLadder.length === 0) return config.thinking;
-  const index = Math.min(Math.max(attempt - 1, 0), config.thinkingLadder.length - 1);
-  return config.thinkingLadder[index];
-}
 
-function resolveAdapterFallbackConfig(adapterConfigRaw: unknown): AdapterFallbackConfig | null {
-  const adapterConfig = parseObject(adapterConfigRaw);
-  const fallback = parseObject(adapterConfig.fallback);
-  const command =
-    readNonEmptyString(adapterConfig.fallbackCommand) ??
-    readNonEmptyString(fallback.command);
-  if (!command) return null;
-  const provider = readNonEmptyString(fallback.provider) ?? undefined;
-  const model = readNonEmptyString(fallback.model) ?? undefined;
-  const thinking = readNonEmptyString(fallback.thinking) ?? undefined;
-  const rawThinkingLadder = Array.isArray(fallback.thinkingLadder) ? fallback.thinkingLadder : [];
-  const thinkingLadder = rawThinkingLadder
-    .map((value) => readNonEmptyString(value))
-    .filter((value): value is string => Boolean(value));
-
-  const rawTriggers = Array.isArray(fallback.triggers) ? fallback.triggers : [];
-  const triggers = rawTriggers
-    .map((value) => readNonEmptyString(value))
-    .filter((value): value is string => Boolean(value));
-  const maxAttempts = Math.max(
-    1,
-    Math.floor(asNumber(fallback.maxAttempts ?? adapterConfig.fallbackMaxAttempts, DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS)),
-  );
-
-  return {
-    command,
-    provider,
-    model,
-    thinking,
-    thinkingLadder,
-    triggers: triggers.length > 0 ? new Set(triggers) : new Set(["process_lost"]),
-    maxAttempts,
-  };
-}
-
-function shouldApplyAdapterFallbackConfig(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  context: Record<string, unknown>;
-}) {
-  return (
-    Boolean(input.run.retryOfRunId) &&
-    readNonEmptyString(input.context.wakeReason) === "adapter_fallback" &&
-    readNonEmptyString(input.context.fallbackOfRunId) === input.run.retryOfRunId &&
-    Boolean(readNonEmptyString(input.context.fallbackCommand))
-  );
-}
-
-function applyAdapterFallbackRuntimeConfig(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  context: Record<string, unknown>;
-  config: Record<string, unknown>;
-}) {
-  if (!shouldApplyAdapterFallbackConfig(input)) return input.config;
-  const command = readNonEmptyString(input.context.fallbackCommand);
-  if (!command) return input.config;
-  const provider = readNonEmptyString(input.context.fallbackProvider);
-  const model = readNonEmptyString(input.context.fallbackModel);
-  // [thinking ladder] thinking만 덮어쓴다. command는 enqueue 시점에 현재 command와 동일하게
-  //   설정되도록 운용한다(단일 모델 바인딩 유지 — provider/model 불변).
-  const thinking = readNonEmptyString(input.context.fallbackThinking);
-  return {
-    ...input.config,
-    command,
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
-    ...(thinking ? { thinking } : {}),
-  };
-}
 
 function isTerminalAdapterFallbackConfigurationFailure(run: typeof heartbeatRuns.$inferSelect) {
   const text = [
@@ -2493,31 +2333,6 @@ function shouldQueueRunFailureAdapterFallback(input: {
   return true;
 }
 
-// A positive liveness check means some process currently owns the PID.
-// On Linux, PIDs can be recycled, so this is a best-effort signal rather
-// than proof that the original child is still alive.
-function isProcessAlive(pid: number | null | undefined) {
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "EPERM") return true;
-    if (code === "ESRCH") return false;
-    return false;
-  }
-}
-
-function terminateRecordedProcess(pid: number | null | undefined, signal: NodeJS.Signals = "SIGTERM") {
-  if (!isProcessAlive(pid)) return false;
-  try {
-    process.kill(pid as number, signal);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function truncateDisplayId(value: string | null | undefined, max = 128) {
   if (!value) return null;
