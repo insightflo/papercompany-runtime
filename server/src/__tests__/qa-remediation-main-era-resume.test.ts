@@ -227,6 +227,7 @@ async function writeArtifact(file: string, content: string): Promise<void> {
 
 
 import { withQaCorrectionFollowupReconcile } from "../services/workflow/control-flow/qa-correction-followup-reconcile.js";
+import { syncWorkflowRunStateWithOutcome } from "../services/workflow/dag-engine.js";
 import { recoverTerminalRun } from "../services/workflow/run-recovery-authority.js";
 import { workflowRunHasC5AdmissionScope } from "../services/workflow/control-flow/qa-remediation-admission-root.js";
 
@@ -310,6 +311,23 @@ describeEP("main-era official resume remediation scope", () => {
       runPass({ db: rootDb, tempRoot }, seed, async qa => { refireCalls.push(qa.stepRunId); return true; }));
     expect(refireCalls).toEqual([seed.qa.id]);
     expect(await remediationEvents({ db, tempRoot }, seed)).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId))).toHaveLength(before.length);
+
+    // The QA callback above stands in for a fresh QA execution; persist its result before real workflow synchronization.
+    const wakeId = randomUUID(), heartbeatId = randomUUID(), now = new Date();
+    await db.insert(agentWakeupRequests).values({ id: wakeId, companyId: seed.companyId, agentId: seed.agentId,
+      source: "workflow.dispatch", workflowStepRunId: seed.qa.id });
+    await db.insert(heartbeatRuns).values({ id: heartbeatId, companyId: seed.companyId, agentId: seed.agentId,
+      issueId: seed.qaIssueId, status: "succeeded", wakeupRequestId: wakeId, startedAt: now, finishedAt: now, createdAt: now });
+    await db.insert(workflowTransitionEvents).values({ companyId: seed.companyId, missionId: seed.missionId,
+      workflowRunId: seed.workflowRunId, workflowStepRunId: seed.qa.id, issueId: seed.qaIssueId, heartbeatRunId: heartbeatId,
+      eventType: "workflow_validation_verdict", layer: "workflow_validation", verdict: "pass", decision: "pass",
+      reason: "workflow_api", reasonCode: "workflow_api", idempotencyKey: `verdict:${seed.qa.id}:${heartbeatId}`,
+      payload: { kind: "workflow_validation_verdict", workflowRunId: seed.workflowRunId, stepRunId: seed.qa.id,
+        issueId: seed.qaIssueId, verdict: "pass" } });
+    await db.update(workflowStepRuns).set({ status: "completed", completedAt: now }).where(eq(workflowStepRuns.id, seed.qa.id));
+    const sync = await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId);
+    expect(sync.result.status).toBe("completed");
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.issueId, seed.producerIssueId))).toHaveLength(before.length);
   }, 120_000);
 });
