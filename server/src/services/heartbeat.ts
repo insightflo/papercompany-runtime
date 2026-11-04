@@ -270,7 +270,7 @@ type HeartbeatServiceOptions = {
 
 // A root Db keeps its explicitly supplied owner runtime across bare service recreation.
 // The WeakMap keys by the exact Db object and does not share execution contexts or roots.
-import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun } from "./heartbeat-attempt-identity.js";
+import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind } from "./heartbeat-attempt-identity.js";
 
 const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
 
@@ -337,16 +337,6 @@ function sameC5ExecutionIdentityBeforeOwnerRelease(expected: QaCorrectionExecuti
 const NONWORKFLOW_EXECUTION_SCOPES = new Set([
   "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
 ]);
-
-function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelect,
-  wake: typeof agentWakeupRequests.$inferSelect | null) {
-  if (wake?.workflowStepRunId && wake.workflowExecutionGeneration !== null) return "workflow_step";
-  if (run.issueId) return "issue_nonworkflow";
-  if (wake?.missionId) return "mission_nonworkflow";
-  if (run.invocationSource === "timer") return "timer";
-  if (run.invocationSource === "on_demand") return "manual_on_demand";
-  return "automation_nonworkflow";
-}
 
 
 import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";

@@ -1,5 +1,5 @@
 import type { HeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
-import type { heartbeatRuns } from "@paperclipai/db";
+import type { heartbeatRuns, agentWakeupRequests } from "@paperclipai/db";
 
 export function sameHeartbeatExecutionAttempt(left: typeof heartbeatRuns.$inferSelect,
   right: typeof heartbeatRuns.$inferSelect) {
@@ -25,4 +25,14 @@ export function heartbeatActualIdentityMatchesRun(identity: HeartbeatActualDrain
     && identity.ownerLeaseEpoch === run.executorOwnerLeaseEpoch
     && identity.ownerLeaseToken === run.executorOwnerLeaseToken && identity.retryOfRunId === run.retryOfRunId
     && identity.processLossRetryCount === run.processLossRetryCount;
+}
+
+export function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelect,
+  wake: typeof agentWakeupRequests.$inferSelect | null) {
+  if (wake?.workflowStepRunId && wake.workflowExecutionGeneration !== null) return "workflow_step";
+  if (run.issueId) return "issue_nonworkflow";
+  if (wake?.missionId) return "mission_nonworkflow";
+  if (run.invocationSource === "timer") return "timer";
+  if (run.invocationSource === "on_demand") return "manual_on_demand";
+  return "automation_nonworkflow";
 }

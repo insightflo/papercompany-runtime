@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { heartbeatRuns } from "@paperclipai/db";
-import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun } from "../services/heartbeat-attempt-identity.js";
+import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind } from "../services/heartbeat-attempt-identity.js";
 
 it("rejects changes in every persisted execution-attempt identity field", () => {
   const keys = ["id", "companyId", "agentId", "issueId", "wakeupRequestId", "workflowStepRunId", "workflowExecutionGeneration", "executionScopeKind", "executionEpoch", "executionToken", "executorOwnerId", "executorOwnerLeaseEpoch", "executorOwnerLeaseToken", "retryOfRunId", "processLossRetryCount"] as const;
@@ -23,4 +23,14 @@ it("binds a drained actual to the exact persisted run and owner", () => {
   for (const key of Object.keys(pairs)) {
     expect(heartbeatActualIdentityMatchesRun({ ...typedIdentity, [key]: `different-${key}` }, typedRun)).toBe(false);
   }
+});
+
+
+it("preserves workflow, issue, mission and invocation scope precedence", () => {
+  const run = { issueId: "issue", invocationSource: "timer" } as unknown as typeof heartbeatRuns.$inferSelect;
+  const wake = { workflowStepRunId: "step", workflowExecutionGeneration: 0, missionId: "mission" } as unknown as NonNullable<Parameters<typeof producedExecutionScopeKind>[1]>;
+  expect(producedExecutionScopeKind(run, wake)).toBe("workflow_step");
+  expect(producedExecutionScopeKind(run, { ...wake, workflowExecutionGeneration: null })).toBe("issue_nonworkflow");
+  expect(producedExecutionScopeKind({ ...run, issueId: null }, { ...wake, workflowStepRunId: null })).toBe("mission_nonworkflow");
+  expect(producedExecutionScopeKind({ ...run, issueId: null }, null)).toBe("timer");
 });
