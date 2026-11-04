@@ -1,4 +1,6 @@
 import { parse as parseYaml } from "yaml";
+import { parseDependencies } from "./workflow-graph-dependencies.js";
+export { parseDependencies } from "./workflow-graph-dependencies.js";
 import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
 
 export type WorkflowGraphStep = {
@@ -993,17 +995,6 @@ export type WorkflowGraphSearchResult = {
 
 export type WorkflowGraphPaletteNodeKind = "agent" | "tool" | "if" | "complete" | "branch" | "loop" | "failure-handler" | "approval";
 
-export function parseDependencies(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-  }
-  if (typeof value === "string") {
-    return value.split(",").map((entry) => entry.trim()).filter(Boolean);
-  }
-  return [];
-}
 
 function formatDependencies(dependencies: string[]): string {
   return dependencies.join(", ");
