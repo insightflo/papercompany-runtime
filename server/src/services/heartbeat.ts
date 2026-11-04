@@ -53,6 +53,8 @@ import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./h
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
+import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
+import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
 import { mergeAgentConfig } from "./agents.js";
 import {
@@ -201,7 +203,7 @@ import {
   acknowledgeHeartbeatRunBeforeAdapter,
   recordHeartbeatTerminalOutcomeShadow,
 } from "./heartbeat-finalization/shadow-writes.js";
-import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
+import { deriveTaskKey, normalizeAgentNameKey, readNonEmptyString, resolveAdapterFallbackAttempt, runTaskKey, isSameTaskScope } from "./heartbeat-run-context.js";
 import { enqueueAdapterFallbackRun, enqueueProcessLossRetry, type HeartbeatRetryEnqueueDeps } from "./heartbeat-retry-enqueue.js";
 import { resolveWorkflowExecutionLink } from "./heartbeat-finalization/workflow-link.js";
 import { insertWorkflowWakeRequest } from "./heartbeat-workflow-wake.js";
@@ -667,47 +669,9 @@ async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
   }
 }
 
-function resolveHeartbeatFailureCode(error: unknown, fallback: string) {
-  if (typeof (error as { code?: unknown } | null)?.code === "string") {
-    return (error as { code: string }).code;
-  }
-  return fallback;
-}
 
-const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
 
-function isWorkflowStepResumeWake(input: {
-  requestKind?: unknown;
-  reason?: unknown;
-  payload?: unknown;
-  contextSnapshot?: unknown;
-}) {
-  const payload = parseObject(input.payload);
-  const contextSnapshot = parseObject(input.contextSnapshot);
-  const kind = typeof input.requestKind === "string" ? input.requestKind : "";
-  const mutation = typeof payload.mutation === "string" ? payload.mutation : "";
-  const reason = typeof input.reason === "string" ? input.reason : "";
-  const workflowRunId = typeof contextSnapshot.workflowRunId === "string"
-    ? contextSnapshot.workflowRunId
-    : typeof payload.workflowRunId === "string"
-      ? payload.workflowRunId
-      : "";
-  const workflowStepRunId = typeof contextSnapshot.workflowStepRunId === "string"
-    ? contextSnapshot.workflowStepRunId
-    : typeof payload.workflowStepRunId === "string"
-      ? payload.workflowStepRunId
-      : "";
-  return (
-    (kind === "workflow_resume" || mutation === "workflow_resume" || reason === "workflow_step_runnable") &&
-    workflowRunId.length > 0 &&
-    workflowStepRunId.length > 0
-  );
-}
-
-function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
-  return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
-}
 
 export async function recordHeartbeatQueueTransitionEvent(db: Db, input: {
   companyId: string;
@@ -2335,13 +2299,6 @@ function mergeCoalescedContextSnapshot(
   return merged;
 }
 
-function runTaskKey(run: typeof heartbeatRuns.$inferSelect) {
-  return deriveTaskKey(run.contextSnapshot as Record<string, unknown> | null, null);
-}
-
-function isSameTaskScope(left: string | null, right: string | null) {
-  return (left ?? null) === (right ?? null);
-}
 
 function isTrackedLocalChildProcessAdapter(adapterType: string) {
   return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
