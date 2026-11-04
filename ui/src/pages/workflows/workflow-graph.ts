@@ -1,5 +1,7 @@
 import { parse as parseYaml } from "yaml";
 import { parseDependencies } from "./workflow-graph-dependencies.js";
+import { normalizeGraphRunStatus } from "./workflow-graph-run-status.js";
+export { normalizeGraphRunStatus } from "./workflow-graph-run-status.js";
 export { parseDependencies } from "./workflow-graph-dependencies.js";
 import { cloneWorkflowConditionGroup, defaultIfConditionGroup } from "./workflow-control-nodes.js";
 
@@ -1042,25 +1044,6 @@ function clearGraphRunOverlay<TStep extends WorkflowGraphStep>(step: TStep): Rec
   return next;
 }
 
-export function normalizeGraphRunStatus(value: unknown): WorkflowGraphRunStatus {
-  const status = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (status === "running" || status === "succeeded" || status === "failed" || status === "skipped" || status === "paused") {
-    return status;
-  }
-  if (status === "in_progress" || status === "active") {
-    return "running";
-  }
-  if (status === "success" || status === "completed" || status === "done") {
-    return "succeeded";
-  }
-  if (status === "escalated" || status === "blocked" || status === "error" || status === "aborted" || status === "timed-out") {
-    return "failed";
-  }
-  if (status === "cancelled" || status === "canceled") {
-    return "skipped";
-  }
-  return "planned";
-}
 
 function readStepRunStatus(step: WorkflowGraphStep): WorkflowGraphStepRunStatus {
   const concurrencyBlocked = readConcurrencyBlocked(step.graphRunConcurrencyBlocked);
