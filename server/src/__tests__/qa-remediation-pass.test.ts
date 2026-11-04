@@ -515,6 +515,7 @@ import { QA_REMEDIATION_PREPARATION_EVENT_TYPE } from "../services/workflow/cont
 import type { QaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
 import { QA_REMEDIATION_EVENT_TYPE, remediationIdempotencyKey } from "../services/workflow/control-flow/qa-remediation-contract.js";
 
+import { QaRemediationAdmissionHold } from "../services/workflow/control-flow/qa-remediation-admission-root.js";
 import { afterEach, vi } from "vitest";
 import { seedInternalAdmissionWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
 vi.mock("../adapters/index.js", async original => {
@@ -858,10 +859,9 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
       () => new Error("expected pending-history hold"), error => error,
     );
 
-    expect(hold).toBeInstanceOf(QaRemediationWorkflowHoldError);
-    const pendingHold = (hold as QaRemediationWorkflowHoldError).result;
-    expect(pendingHold.outcome).toBe("preparation_held");
-    if (pendingHold.outcome === "preparation_held") expect(pendingHold.reason).toBe("invalid_history");
+    expect(hold).toBeInstanceOf(QaRemediationAdmissionHold);
+    expect((hold as QaRemediationAdmissionHold).reason).toBe("unresolved_legacy_effect");
+    expect((hold as QaRemediationAdmissionHold).eventIds).toHaveLength(1);
     expect(producerAttempt((await reloadRuns({ db, tempRoot }, seed)).producer)).toEqual(producerBefore);
     expect(await readFile(artifactPath, "utf8")).toBe("pending findme");
     expect(await remediationEvents({ db, tempRoot }, seed)).toHaveLength(1);
@@ -927,7 +927,9 @@ describeEP("QA structured remediation pass (loop-driver integration)", () => {
     const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "cap findme", "x"), priorRemediationEvents: 3 });
     artifactPath = seed.file;
 
-    await expect(runPass({ db, tempRoot }, seed, async () => true)).rejects.toBeInstanceOf(QaRemediationWorkflowHoldError);
+    const hold = await runPass({ db, tempRoot }, seed, async () => true).then(() => null, error => error);
+    expect(hold).toBeInstanceOf(QaRemediationAdmissionHold);
+    expect((hold as QaRemediationAdmissionHold).reason).toBe("unresolved_legacy_effect");
 
     const runs = await reloadRuns({ db, tempRoot }, seed);
     expect(runs.producer.status).toBe("completed");
