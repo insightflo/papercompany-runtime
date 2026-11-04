@@ -12,6 +12,7 @@
 //   - resolveAdapterFallbackAttempt 는 0 미만/비유한 값을 0 으로, normalizeAgentNameKey 는
 //     trim+소문자 정규화 결과만 반환(heartbeat.ts 원본 극치와 동일).
 import { asNumber, parseObject } from "../adapters/utils.js";
+import type { heartbeatRuns } from "@paperclipai/db";
 
 export function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -42,4 +43,12 @@ export function normalizeAgentNameKey(value: string | null | undefined) {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+export function runTaskKey(run: typeof heartbeatRuns.$inferSelect) {
+  return deriveTaskKey(run.contextSnapshot as Record<string, unknown> | null, null);
+}
+
+export function isSameTaskScope(left: string | null, right: string | null) {
+  return (left ?? null) === (right ?? null);
 }
