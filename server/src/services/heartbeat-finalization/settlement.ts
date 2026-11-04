@@ -1,14 +1,16 @@
 import { and, eq, isNull } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRunFinalizations, heartbeatRuns, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { heartbeatRunFinalizations, heartbeatRunFinalizationSteps, heartbeatRuns, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { appendWorkflowAuthorityTransition } from "../workflow/authority/transitions.js";
 import { logger } from "../../middleware/logger.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import type { HeartbeatRun } from "./owner-capability.js";
-import { allRequiredStages, Q_STAGE, STAGE_CLASS } from "./stage-classifier.js";
+import { allRequiredStages, C_STAGE, Q_STAGE, STAGE_CLASS } from "./stage-classifier.js";
 import { ensureFinalization, loadStages, recordStage, setStageState } from "./finalization-state.js";
 import { observeQuiescenceProof } from "./quiescence-probe.js";
-
+import { readTerminalReleaseManifest, terminalReleaseEffectKeys, terminalReleaseMatchesRun, TERMINAL_RELEASE_REASON }
+  from "../heartbeat-terminal-release-continuation.js";
 
 export type SettlementOutcome = "settled" | "not_ready" | "blocked_noncompensable";
 type SettleDb = Pick<Db, "select" | "update" | "insert" | "transaction">;
@@ -215,18 +217,23 @@ export async function markQuiescenceStageDeadLetter(
 
 
 /**
- * Full settlement pipeline for a terminal v1 run: observe quiescence → record Q
- * stages if proven → record C stages whose executeRun path has completed → settle.
- * Call this only after executeRun has finished its business side-effects and runtime
- * cleanup. The earlier terminal-status hook records outcome/owner release only.
+ * Full terminal settlement: Q remains positively observed; C is done inline or is
+ * equivalent_failed only when the exact retained continuation is durable.
  */
 export async function attemptFullSettlement(
   db: SettleDb,
   run: HeartbeatRun,
   now: Date,
+  terminalContinuationEventId?: string,
 ): Promise<SettlementOutcome> {
   if (!(await isHeartbeatFinalizationV1Enabled(db))) return "not_ready";
   if (run.finalizationVersion !== 1) return "not_ready";
+
+  const continuation = terminalContinuationEventId ? await readTerminalReleaseManifest(db, terminalContinuationEventId) : null;
+  if (terminalContinuationEventId && (continuation?.kind !== "found"
+    || !terminalReleaseMatchesRun(continuation.manifest.source, run))) {
+    throw new Error("terminal_release_settlement_obligation_unproven");
+  }
 
   const fin = await ensureFinalization(db, run, now);
 
@@ -252,15 +259,38 @@ export async function attemptFullSettlement(
   const stages = allRequiredStages(run);
   for (const stage of stages) {
     if (stage.stageClass === STAGE_CLASS.compensable) {
-      await recordStage(db, {
+      const deferred = continuation?.kind === "found";
+      const effectKeys = deferred ? terminalReleaseEffectKeys(continuation.manifest, stage.kind) : [];
+      if (deferred && (!effectKeys.length || (stage.kind !== C_STAGE.issuePromotion && stage.kind !== C_STAGE.workflowEvidenceSync))) {
+        throw new Error("terminal_release_compensable_stage_obligation_missing");
+      }
+      const payload = deferred ? { schemaVersion: 1, source: "terminal_release_continuation",
+        reason: TERMINAL_RELEASE_REASON, continuationEventId: terminalContinuationEventId!, effectKeys } : undefined;
+      const input = {
         companyId: run.companyId,
         runId: run.id,
         finalizationId: fin.id,
         stageClass: STAGE_CLASS.compensable,
         stageKind: stage.kind,
         idempotencyKey: `settle-c:${stage.kind}:${run.id}`,
-        state: "done",
-      }).catch(() => undefined);
+        state: deferred ? "equivalent_failed" : "done",
+        ...(payload ? { payload } : {}),
+      };
+      if (!deferred) {
+        await recordStage(db, input).catch(() => undefined);
+        continue;
+      }
+      await recordStage(db, input);
+      const rows = await db.select().from(heartbeatRunFinalizationSteps).where(and(
+        eq(heartbeatRunFinalizationSteps.companyId, run.companyId),
+        eq(heartbeatRunFinalizationSteps.heartbeatRunId, run.id),
+        eq(heartbeatRunFinalizationSteps.heartbeatRunFinalizationId, fin.id),
+        eq(heartbeatRunFinalizationSteps.stageKind, stage.kind),
+        eq(heartbeatRunFinalizationSteps.idempotencyKey, input.idempotencyKey)));
+      if (rows.length !== 1 || rows[0]!.stageClass !== STAGE_CLASS.compensable
+        || rows[0]!.state !== "equivalent_failed" || !isDeepStrictEqual(rows[0]!.payload, payload)) {
+        throw new Error("terminal_release_compensable_stage_durable_write_mismatch");
+      }
     }
   }
 

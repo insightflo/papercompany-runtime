@@ -138,9 +138,16 @@ export async function collectQaRemediationEligibility(input: QaRemediationEligib
   return { status: "eligible", qualified };
 }
 
+/** Reduced structural input — the legacy full input satisfies it; B2b prepare supplies the same fields (no refire callback).
+ *  Optional refireQaStep keeps legacy literal callers compiling; the qualifier never invokes it. */
+export type QaRemediationQualificationInput = Pick<TryQaRemediationInput,
+  "db" | "run" | "steps" | "producerStep" | "producerRun" | "rejectedQas" | "findingsByQaStepId">
+  & Partial<Pick<TryQaRemediationInput, "refireQaStep">>;
+
 /** Existing callers retain the boundary, size, read and sequential exactly-once replacement checks. */
-export async function collectQualifiableQaRemediations(input: TryQaRemediationInput): Promise<QualificationResult> {
-  const eligibility = await collectQaRemediationEligibility(input);
+export async function collectQualifiableQaRemediations(input: QaRemediationQualificationInput,
+  options: { history?: "legacy" | "prepare" } = {}): Promise<QualificationResult> {
+  const eligibility = await collectQaRemediationEligibility(input, options.history ?? "legacy");
   if (eligibility.status !== "eligible") return eligibility;
   const { qualified } = eligibility;
   // boundary: 생산자 등록 산출물 경로/디렉터리 외부 파일은 절대 건드리지 않는다.

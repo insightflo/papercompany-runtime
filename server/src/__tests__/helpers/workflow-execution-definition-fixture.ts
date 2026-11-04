@@ -62,10 +62,17 @@ export async function seedCompanyWithMission(
   const companyId = randomUUID();
   const agentId = randomUUID();
   const missionId = randomUUID();
-  await sql`
+  const inserted = await sql`
     INSERT INTO companies (id, name, issue_prefix)
     VALUES (${companyId}, ${"ExecDef Co " + issuePrefix}, ${issuePrefix})
+    ON CONFLICT (issue_prefix) DO NOTHING RETURNING id
   `;
+  if (inserted.length === 0) {
+    await sql`
+      INSERT INTO companies (id, name, issue_prefix)
+      VALUES (${companyId}, ${"ExecDef Co " + issuePrefix}, ${issuePrefix + "-" + companyId})
+    `;
+  }
   await sql`
     INSERT INTO agents (id, company_id, name)
     VALUES (${agentId}, ${companyId}, ${"ExecDef Owner " + issuePrefix})

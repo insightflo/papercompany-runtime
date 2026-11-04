@@ -185,9 +185,10 @@ describe("instant-advance heartbeat hook placement (indirect, structural)", () =
 
   it("hook fires from exactly 3 terminal finalization sites, each right after issue release commit", () => {
     const source = readFileSync(heartbeatPath, "utf8");
-    const callLines = source.match(/^[ \t]*fireInstantWorkflowAdvanceForTerminalRun\(/gm) ?? [];
+    const callLines = [...source.matchAll(/\bfireInstantWorkflowAdvanceForTerminalRun\(/g)]
+      .filter((match) => !/\bfunction\s*$/.test(source.slice(0, match.index)));
     expect(callLines).toHaveLength(3);
-    // 각 훅 호출 직전(300자 내)에 releaseIssueExecutionAndPromote 커밋 호출이 있어야 한다.
+    // 각 훅 호출 직전 400자 내에 issue release 커밋 경로가 있어야 한다.
     const positions: number[] = [];
     let cursor = source.indexOf("fireInstantWorkflowAdvanceForTerminalRun(");
     while (cursor !== -1) {
@@ -196,12 +197,13 @@ describe("instant-advance heartbeat hook placement (indirect, structural)", () =
     }
     const callPositions = positions.filter((pos) => {
       const lineStart = source.lastIndexOf("\n", pos) + 1;
-      return /^[ \t]*$/.test(source.slice(lineStart, pos));
+      return !/\bfunction\s*$/.test(source.slice(lineStart, pos));
     });
     expect(callPositions).toHaveLength(3);
+    expect(source).toMatch(/if \(!actualDrainIdentity \|\| !actual\) \{\s*const release = await releaseIssueExecutionAndPromote\(finished\)/);
     for (const pos of callPositions) {
       const preceding = source.slice(Math.max(0, pos - 400), pos);
-      expect(preceding.includes("releaseIssueExecutionAndPromote(")).toBe(true);
+      expect(/release(?:FinishedRun|IssueExecutionAndPromote)\(/.test(preceding)).toBe(true);
     }
   });
 
@@ -209,7 +211,7 @@ describe("instant-advance heartbeat hook placement (indirect, structural)", () =
     const source = readFileSync(heartbeatPath, "utf8");
     expect(source).toContain("configureInstantWorkflowAdvanceDb(db);");
     // 팩토리 본문 안(heartbeatService 정의 이후)에서 호출되어야 한다.
-    const factoryAt = source.indexOf("export function heartbeatService(db: Db) {");
+    const factoryAt = source.search(/export function heartbeatService\(db: Db(?=[,)])/);
     const wiringAt = source.indexOf("configureInstantWorkflowAdvanceDb(db);");
     expect(factoryAt).toBeGreaterThan(-1);
     expect(wiringAt).toBeGreaterThan(factoryAt);

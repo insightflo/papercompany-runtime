@@ -6,19 +6,16 @@
 //   제공한다. 수동 resume/수동 임대 의도와 fire-and-forget(wait:false) 팔은 삭제됐다(D1/D3) —
 //   합법 시작은 자동 하나뿐이다.
 // [authority] 내구 레코드만이 권위(규칙 7/8/9). 최종 변이는 잠금 하 최종 UPDATE 의 술어로 판정한다.
-import { and, eq, sql } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
-import type { Db } from "@paperclipai/db";
-import {
-  workflowRuns,
-  workflowStepInvocations,
-  workflowStepRuns,
-} from "@paperclipai/db";
-import {
-  WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL,
-  deadPredicate,
-  type WorkflowChildIdentity,
-} from "./workflow-child-start-predicates.js";
+import { and, eq, is, sql } from "drizzle-orm";
+import { alias, PgTransaction } from "drizzle-orm/pg-core";
+import { isDeepStrictEqual } from "node:util";
+import { workflowRuns, workflowStepInvocations, workflowStepRuns, type Db } from "@paperclipai/db";
+import { loadConfig } from "../../config.js";
+import { readQaRemediationActualDrain } from "../heartbeat-actual-drain.js";
+import { createReplacementRootNotifications } from "../issue-assignment-wakeup.js";
+import { QaRemediationAdmissionHold, withQaRemediationSharedAdmission, type QaRemediationAdmissionContext } from "./control-flow/qa-remediation-admission-root.js";
+import { createQaFileOwnerRuntime } from "./control-flow/qa-remediation-runtime.js";
+import { WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL, deadPredicate, type WorkflowChildIdentity } from "./workflow-child-start-predicates.js";
 
 /**
  * 자식 초기화 신원(설계 §3 B). 발견용 stepId 를 포함한 완전 신원이다. 호출자가 먼저 발견하더라도
@@ -48,6 +45,8 @@ export type LockedChildStartContext = {
   child: typeof workflowRuns.$inferSelect;
 };
 
+export async function setChildStartLockTimeouts(tx: Db): Promise<void> { await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`); }
+
 /**
  * 공통 잠금 순서(부모 run → invocation → 부모 step-run → 자식 run)로 적재하고
  * 회사/링크/스텝 ID/세대/부모 정합(BASE_ID + stepId)을 검증한다. 하나라도 어긋나면 null(fail-closed).
@@ -56,8 +55,9 @@ export type LockedChildStartContext = {
 export async function withLockedChildStartIdentity(
   tx: Db,
   identity: ChildStartIdentity,
+  options: Readonly<{ timeoutsAlreadySet?: boolean }> = {},
 ): Promise<LockedChildStartContext | null> {
-  await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`);
+  if (!options.timeoutsAlreadySet) await setChildStartLockTimeouts(tx);
   const [parent] = await tx
     .select()
     .from(workflowRuns)
@@ -163,6 +163,58 @@ export async function findChildStartIdentityForRun(
   };
 }
 
+export async function withChildCancellationAdmission<T>(input: {
+  db: Db;
+  identity: ChildStartIdentity;
+  work: (db: Db, context: QaRemediationAdmissionContext) => Promise<T>;
+}): Promise<T> {
+  if (is(input.db, PgTransaction)) throw new QaRemediationAdmissionHold("cancel_transaction_root_required", []);
+  return withQaRemediationSharedAdmission({
+    db: input.db,
+    runId: input.identity.childRunId,
+    ownerRuntime: createQaFileOwnerRuntime(loadConfig()),
+    outerNotifications: createReplacementRootNotifications(),
+    resolutionMap: new Map<string, unknown>(),
+    bindResolutionMap: () => {},
+    driftBudget: { corrections: 0 },
+    childCancellation: {
+      identity: input.identity,
+      discoverChild: (db, runId) => findChildStartIdentityForRun(db, runId),
+      setChildLockTimeouts: setChildStartLockTimeouts,
+      lockChildIdentity: (db, identity) => withLockedChildStartIdentity(db, identity, { timeoutsAlreadySet: true }),
+    },
+    work: async (rootDb, context) => {
+      const [target] = await rootDb.select().from(workflowRuns).where(and(
+        eq(workflowRuns.id, input.identity.childRunId),
+        eq(workflowRuns.companyId, input.identity.companyId),
+      )).limit(1);
+      if (!target || !Number.isSafeInteger(target.dispatchAuthorityVersion) || target.dispatchAuthorityVersion < 0
+        || (context.pending.length > 0 && !target.missionId)) throw new QaRemediationAdmissionHold("cancel_target_scope_unproven", context.pending.map(item => item.eventId));
+      for (const { eventId, preparation } of context.pending) {
+        const [scope] = await rootDb.select({ companyId: workflowRuns.companyId, missionId: workflowRuns.missionId,
+          dispatchAuthorityVersion: workflowRuns.dispatchAuthorityVersion }).from(workflowRuns).where(and(
+          eq(workflowRuns.id, preparation.workflowRunId), eq(workflowRuns.companyId, preparation.companyId),
+        )).limit(1);
+        if (!scope?.missionId || !Number.isSafeInteger(scope.dispatchAuthorityVersion)
+          || scope.missionId !== preparation.missionId
+          || scope.dispatchAuthorityVersion !== preparation.dispatchAuthorityVersion) {
+          throw new QaRemediationAdmissionHold("cancel_pending_scope_unproven", [eventId]);
+        }
+        const [producer] = await rootDb.select().from(workflowStepRuns).where(and(
+          eq(workflowStepRuns.id, preparation.producer.stepRunId),
+          eq(workflowStepRuns.workflowRunId, preparation.workflowRunId),
+        )).limit(1);
+        if (!producer) throw new QaRemediationAdmissionHold("cancel_actual_drain_producer_missing", [eventId]);
+        const drain = await readQaRemediationActualDrain(rootDb, preparation, producer);
+        if (drain.kind !== "proven") {
+          throw new QaRemediationAdmissionHold("cancel_actual_drain_unproven", [eventId], new Error(drain.reason));
+        }
+      }
+      return input.work(rootDb, context);
+    },
+  });
+}
+
 /**
  * [fix4 §3, descope §4] 죽은 부모(DEAD) fence 하 취소 — 전파 정산(propagated cleanup) 소관.
  * 공통 잠금 순서로 신원을 재적재하고, 최종 UPDATE 의 WHERE 에서 BASE_ID+CURRENT+DEAD(완료 부모
@@ -177,6 +229,7 @@ export async function claimCancelledChildRunWithParentFence(
     fence: { invocationId: string; generation: number; parentRunId: string; parentStepRunId: string };
   },
 ): Promise<Array<{ id: string; companyId: string; missionId: string | null }>> {
+  if (is(db, PgTransaction)) throw new QaRemediationAdmissionHold("cancel_transaction_root_required", []);
   // step_id 는 불변 컬럼 — 잠금 전 선읽기로 완전 신원(B)을 구성해도 시효(staleness)가 없다.
   const [stepRef] = await db
     .select({ stepId: workflowStepRuns.stepId })
@@ -195,12 +248,17 @@ export async function claimCancelledChildRunWithParentFence(
   };
   // [D2] 구세대 신원은 CURRENT/DEAD 술어가 거부한다 — 진입점에서 먼저 거부한다(fail-closed).
   if (identity.generation !== 1) return [];
-  return await db.transaction(async (tx) => {
+  const [requested] = await db.select({ companyId: workflowRuns.companyId, status: workflowRuns.status })
+    .from(workflowRuns).where(eq(workflowRuns.id, identity.childRunId)).limit(1);
+  if (!requested || requested.companyId !== identity.companyId || TERMINAL_CHILD_STATUSES.includes(requested.status)) return [];
+  const discovered = await findChildStartIdentityForRun(db, input.childRunId);
+  if (!discovered || !isDeepStrictEqual(discovered.identity, identity)) return [];
+  return withChildCancellationAdmission({ db, identity, work: async (rootDb) => rootDb.transaction(async (tx) => {
     const ctx = await withLockedChildStartIdentity(tx as unknown as Db, identity);
     if (!ctx) return [];
     if (TERMINAL_CHILD_STATUSES.includes(ctx.child.status)) return [];
     const bound = identityBound(identity);
-    return await tx
+    return tx
       .update(workflowRuns)
       .set({
         status: "cancelled",
@@ -219,7 +277,7 @@ export async function claimCancelledChildRunWithParentFence(
             and workflow_runs.status not in ${WORKFLOW_CHILD_TERMINAL_RUN_STATUSES_SQL})`,
       ))
       .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
-  });
+  }) });
 }
 
 const CANCEL_TABLES = {

@@ -501,3 +501,441 @@ describeEP("loadLatestQaRemediations ledger loader", () => {
     await expect(svc.approve({ companyId: seedA.companyId, id: foreignDraft.card!.id })).rejects.toThrow(/draft not found/);
   });
 });
+
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { access, chmod, realpath } from "node:fs/promises";
+import { syncWorkflowRunStateWithOutcome } from "../services/workflow/dag-engine.js";
+import {
+  QaRemediationWorkflowHoldError,
+  withQaCorrectionFollowupReconcile,
+} from "../services/workflow/control-flow/qa-correction-followup-reconcile.js";
+import { QA_REMEDIATION_COMPLETION_EVENT_TYPE, qaRemediationRefireV2WakeKey } from "../services/workflow/control-flow/qa-remediation-completion.js";
+import { QA_REMEDIATION_PREPARATION_EVENT_TYPE } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
+import type { QaRemediationPreparation } from "../services/workflow/control-flow/qa-remediation-preparation-contract.js";
+import { QA_REMEDIATION_EVENT_TYPE, remediationIdempotencyKey } from "../services/workflow/control-flow/qa-remediation-contract.js";
+
+import { QaRemediationAdmissionHold } from "../services/workflow/control-flow/qa-remediation-admission-root.js";
+import { afterEach, vi } from "vitest";
+import { seedInternalAdmissionWorld, executeAdmissionFixtureAdapter } from "./helpers/qa-remediation-admission-public-fixture.js";
+vi.mock("../adapters/index.js", async original => {
+  const actual = await original<typeof import("../adapters/index.js")>();
+  return { ...actual, getServerAdapter: (kind: string) => kind === "codex_local"
+    ? { supportsLocalAgentJwt: false, execute: executeAdmissionFixtureAdapter } : actual.getServerAdapter(kind) };
+});
+
+describeEP("C5 public pass contract", () => {
+type StepRun = typeof workflowStepRuns.$inferSelect;
+
+const PRODUCER = "produce-A";
+const QA = "qa-A";
+const MAX_ITER = 2;
+
+function buildSteps(agentId: string) {
+  return [
+    {
+      id: PRODUCER,
+      name: "Produce",
+      agentId,
+      dependencies: [],
+      conditionalDependencies: [{ stepId: QA, when: "qa_request_changes" as const, isBackEdge: true, maxIterations: MAX_ITER }],
+    },
+    { id: QA, name: "QA validate", agentId, type: "qa", dependencies: [PRODUCER] },
+  ];
+}
+
+interface SeedOptions {
+  /** verdict payload `remediations` value (already-shaped object); omit for legacy verdicts. */
+  remediations?: Record<string, unknown> | null;
+  /** Public-sync cases need persisted issue/step times that preserve the real producer-to-verdict order. */
+  publicSyncTimeline?: QaRemediationPublicSyncTimeline;
+  /** absolute path registered as the producer's active work product. */
+  artifactUrl?: string;
+  /** newer heartbeat (after the verdict heartbeat) bound to the QA step run — breaks execution freshness. */
+  newerHeartbeatAfterVerdict?: boolean;
+  /** number of pre-existing qa_remediation_applied events for the QA step run. */
+  priorRemediationEvents?: number;
+  /** 재사용 회사(P1 캡처 등 회사 스코프 집계 테스트용). 미지정 시 신규 회사. */
+  companyId?: string;
+}
+
+interface QaRemediationPublicSyncTimeline {
+  producerStartedAt: Date;
+  producerCompletedAt: Date;
+  qaStartedAt: Date;
+  verdictObservedAt: Date;
+  qaCompletedAt: Date;
+}
+
+function makeQaRemediationPublicSyncTimeline(): QaRemediationPublicSyncTimeline {
+  const base = Date.now();
+  return {
+    producerStartedAt: new Date(base - 60_000),
+    producerCompletedAt: new Date(base - 50_000),
+    qaStartedAt: new Date(base - 40_000),
+    verdictObservedAt: new Date(base - 30_000),
+    qaCompletedAt: new Date(base - 20_000),
+  };
+}
+
+interface Seed {
+  file: string;
+  companyId: string;
+  agentId: string;
+  missionId: string;
+  workflowRunId: string;
+  producer: StepRun;
+  qa: StepRun;
+  producerIssueId: string;
+  qaIssueId: string;
+  verdictEventId: string;
+  verdictHeartbeatId: string;
+}
+
+const fixtureClosers = new Set<() => Promise<void>>();
+const fixtureTeams = new Map<string, { companyId: string; authorId: string; verifierId: string }>();
+afterEach(async () => { await Promise.all([...fixtureClosers].map(close => close())); fixtureClosers.clear(); }, 120_000);
+async function seedScenario(db: Db, opts: SeedOptions): Promise<Seed> {
+  if (!opts.artifactUrl) throw new Error("C5 pass requires a producer artifact");
+  const item = (opts.remediations?.items as Array<{ find: string; replace: string }>)[0]!;
+  const existing = opts.companyId ? fixtureTeams.get(opts.companyId) : undefined;
+  if (opts.companyId && !existing) throw new Error("C5 pass team missing");
+  const seeded = await seedInternalAdmissionWorld(db, ownerLockRoot!, ownerLockRoot!, {
+    file: opts.artifactUrl, bytes: await readFile(opts.artifactUrl), find: item.find, replace: item.replace, existing,
+  });
+  fixtureClosers.add(seeded.close);
+  const u = seeded.unit;
+  fixtureTeams.set(u.companyId, { companyId: u.companyId, authorId: u.authorId, verifierId: u.verifierId });
+  for (let i = 0; i < (opts.priorRemediationEvents ?? 0); i += 1) {
+    await db.insert(workflowTransitionEvents).values({
+      companyId: u.companyId, missionId: u.missionId, workflowRunId: u.runId, workflowStepRunId: u.qa.id, issueId: u.qaIssue.id,
+      eventType: "qa_remediation_applied", layer: "workflow_validation",
+      verdict: "request_changes", decision: "mechanical_remediation_applied", reason: "workflow_api", reasonCode: "qa_remediation",
+      idempotencyKey: `qa-remediation-applied:${u.companyId}:${u.qa.id}:prior-${i}`,
+      payload: { kind: "qa_remediation_applied", outcome: "applied" },
+    });
+  }
+  return { file: u.file, companyId: u.companyId, agentId: u.authorId, missionId: u.missionId, workflowRunId: u.runId,
+    producer: u.producer, qa: u.qa, producerIssueId: u.producerIssueId, qaIssueId: u.qaIssue.id,
+    verdictEventId: u.verdictEventId, verdictHeartbeatId: u.verdictHeartbeatId };
+}
+
+interface Harness {
+  db: Db;
+  tempRoot: string;
+}
+
+async function runPass(h: Harness, seed: Seed, refire: (qa: { stepId: string; stepRunId: string; issueId: string | null }) => Promise<boolean>) {
+  const stepRuns = await h.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.workflowRunId));
+  const [run] = await h.db.select().from(workflowRuns).where(eq(workflowRuns.id, seed.workflowRunId));
+  const [definition] = await h.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, run!.workflowId));
+  await withQaCorrectionFollowupReconcile(h.db, seed.workflowRunId, () => applyBackEdgeReworkPass({
+      db: h.db,
+      run: { id: seed.workflowRunId, companyId: seed.companyId, status: "running", missionId: seed.missionId },
+      steps: definition!.stepsJson as Parameters<typeof applyBackEdgeReworkPass>[0]["steps"],
+      stepRuns,
+      predsByStepId: new Map([[QA, { status: "failed" as const, isQaGate: true, verdict: "request_changes" as const }]]),
+      validationVerdictsByIssueId: new Map([[seed.qaIssueId, { observedAt: new Date() }]]),
+      refireQaStep: refire,
+    }));
+}
+
+async function reloadRuns(h: Harness, seed: Seed): Promise<{ producer: StepRun; qa: StepRun }> {
+  const rows = await h.db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, seed.workflowRunId));
+  return {
+    producer: rows.find((r) => r.stepId === PRODUCER)!,
+    qa: rows.find((r) => r.stepId === QA)!,
+  };
+}
+
+async function remediationEvents(h: Harness, seed: Seed) {
+  return h.db.select({ id: workflowTransitionEvents.id, payload: workflowTransitionEvents.payload })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, seed.companyId),
+      eq(workflowTransitionEvents.workflowStepRunId, seed.qa.id),
+      eq(workflowTransitionEvents.eventType, "qa_remediation_applied"),
+    ));
+}
+
+async function rootRemediationEvents(h: Harness, seed: Seed, eventType: string) {
+  return h.db.select({ id: workflowTransitionEvents.id, payload: workflowTransitionEvents.payload })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, seed.companyId),
+      eq(workflowTransitionEvents.workflowRunId, seed.workflowRunId),
+      eq(workflowTransitionEvents.eventType, eventType),
+    ));
+}
+
+function producerAttempt(row: StepRun) {
+  return {
+    id: row.id, status: row.status, originalStatus: row.originalStatus,
+    retryCount: row.retryCount, statusTransitionVersion: row.statusTransitionVersion,
+    dispatchAuthorityKind: row.dispatchAuthorityKind, executionGeneration: row.executionGeneration,
+    dispatchOwnerWakeupRequestId: row.dispatchOwnerWakeupRequestId,
+    dispatchOwnerHeartbeatRunId: row.dispatchOwnerHeartbeatRunId,
+    iterationIndex: row.iterationIndex, sessionId: row.sessionId,
+    metadata: row.metadata, startedAt: row.startedAt, completedAt: row.completedAt,
+  };
+}
+
+const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+
+let ownerLockRoot: string | null = null;
+let previousOwnerLockRoot: string | undefined;
+let previousOwnerPython: string | undefined;
+
+async function findExecutable(name: string): Promise<string> {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    const candidate = path.join(directory, name);
+    try {
+      await access(candidate, constants.X_OK);
+      return await realpath(candidate);
+    } catch { /* continue through the existing PATH; no install or fallback */ }
+  }
+  throw new Error(`${name} was not found as an executable on PATH`);
+}
+
+async function configureOwnerRuntimeForTest(): Promise<void> {
+  previousOwnerLockRoot = process.env.PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT;
+  previousOwnerPython = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+  ownerLockRoot = await realpath(await mkdtemp(path.join(tmpdir(), "qa-rem-owner-root-")));
+  await chmod(ownerLockRoot, 0o700);
+  process.env.PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT = ownerLockRoot;
+  process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON = await findExecutable("python3");
+}
+
+async function cleanupOwnerRuntimeForTest(): Promise<void> {
+  if (previousOwnerLockRoot === undefined) delete process.env.PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT;
+  else process.env.PAPERCLIP_QA_FILE_OWNER_LOCK_ROOT = previousOwnerLockRoot;
+  if (previousOwnerPython === undefined) delete process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+  else process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON = previousOwnerPython;
+  if (ownerLockRoot) await rm(ownerLockRoot, { recursive: true, force: true });
+  ownerLockRoot = null;
+}
+
+const remediationsFor = (file: string, find: string, replace: string) => ({
+  items: [{ op: "string_replace", file, find, replace }],
+});
+
+/** 임시 산출물 파일 생성(중첩 디렉터리 포함). */
+async function writeArtifact(file: string, content: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, content, "utf8");
+}
+
+describeEP("QA structured remediation pass (loop-driver integration)", () => {
+  let db: Db;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let tempRoot: string;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-qa-remediation-");
+    db = createDb(tempDb.connectionString);
+    tempRoot = await realpath(await mkdtemp(path.join(tmpdir(), "qa-rem-")));
+    await configureOwnerRuntimeForTest();
+  }, 60_000);
+  afterAll(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+    await db.$client.end({ timeout: 5 });
+    await tempDb?.cleanup();
+    await cleanupOwnerRuntimeForTest();
+  });
+
+  it("routes the public sync legacy branch through the guarded root and reuses one completion and wake on same-verdict reentry", async () => {
+    let artifactPath = path.join(tempRoot, "case1", "index.html");
+    await writeArtifact(artifactPath, "<html>내부 용어 leads/evidence.json 노출됨</html>");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "leads/evidence.json", "선별 근거 요약"),
+      publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
+    const before = await reloadRuns({ db, tempRoot }, seed);
+    const producerBefore = producerAttempt(before.producer);
+
+    await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId);
+    const afterFirst = await reloadRuns({ db, tempRoot }, seed);
+    expect(producerAttempt(afterFirst.producer)).toEqual(producerBefore);
+    const firstPreparations = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE);
+    const firstCompletions = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE);
+    expect(firstPreparations).toHaveLength(1);
+    expect(firstCompletions).toHaveLength(1);
+    const firstPreparation = firstPreparations[0]!;
+    const firstCompletion = firstCompletions[0]!;
+    const firstArtifactHash = sha256(await readFile(artifactPath));
+    await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId);
+
+    const runs = await reloadRuns({ db, tempRoot }, seed);
+    expect(producerAttempt(runs.producer)).toEqual(producerBefore);
+
+    const patched = await readFile(artifactPath, "utf8");
+    expect(patched).toBe("<html>내부 용어 선별 근거 요약 노출됨</html>");
+
+    const preparations = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE);
+    const completions = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE);
+    expect(preparations).toHaveLength(1);
+    expect(completions).toHaveLength(1);
+    expect(preparations[0]!.id).toBe(firstPreparation.id);
+    expect(completions[0]!.id).toBe(firstCompletion.id);
+    expect(preparations[0]!.payload).toEqual(firstPreparation.payload);
+    expect(completions[0]!.payload).toEqual(firstCompletion.payload);
+    expect(sha256(await readFile(artifactPath))).toBe(firstArtifactHash);
+    const preparation = preparations[0]!.payload as {
+      preparationId: string; files: Array<{ path: string; beforeSha256: string; afterSha256: string }>;
+    };
+    const completion = completions[0]!.payload as {
+      preparationId: string; completionId: string; wakes: Array<{ wakeupRequestId: string; idempotencyKey: string }>;
+    };
+    expect(completion.preparationId).toBe(preparation.preparationId);
+    expect(preparations[0]!.id).toBe(preparation.preparationId);
+    expect(completions[0]!.id).toBe(completion.completionId);
+    expect(preparation.files).toHaveLength(1);
+    expect(preparation.files[0]!.path).toBe(artifactPath);
+    expect(sha256(await readFile(artifactPath))).toBe(preparation.files[0]!.afterSha256);
+    expect(completion.wakes).toHaveLength(1);
+    const wakeKey = qaRemediationRefireV2WakeKey(preparation as QaRemediationPreparation, seed.qa.id, seed.verdictEventId);
+    expect(completion.wakes[0]!.idempotencyKey).toBe(wakeKey);
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, seed.companyId), eq(agentWakeupRequests.idempotencyKey, wakeKey)));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.id).toBe(completion.wakes[0]!.wakeupRequestId);
+    expect(await remediationEvents({ db, tempRoot }, seed)).toHaveLength(0);
+  });
+
+  it("holds an unavailable native owner after preserving the durable preparation and producer attempt", async () => {
+    let artifactPath = path.join(tempRoot, "native-unavailable", "index.html");
+    await writeArtifact(artifactPath, "native unavailable findme");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath,
+      remediations: remediationsFor(artifactPath, "findme", "fixed"),
+      publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
+    const before = await reloadRuns({ db, tempRoot }, seed);
+    const producerBefore = producerAttempt(before.producer);
+    const configuredPython = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+    process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON = path.join(ownerLockRoot!, "missing-python");
+    let hold: unknown;
+    try {
+      hold = await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId).then(
+        () => new Error("expected native owner hold"), error => error,
+      );
+    } finally {
+      if (configuredPython === undefined) delete process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+      else process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON = configuredPython;
+    }
+
+    expect(hold).toBeInstanceOf(QaRemediationWorkflowHoldError);
+    const nativeHold = (hold as QaRemediationWorkflowHoldError).result;
+    expect(nativeHold.outcome).toBe("held");
+    if (nativeHold.outcome === "held") expect(nativeHold.reason).toBe("owner_unavailable");
+    expect(producerAttempt((await reloadRuns({ db, tempRoot }, seed)).producer)).toEqual(producerBefore);
+    expect(await readFile(artifactPath, "utf8")).toBe("native unavailable findme");
+    expect(await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE)).toHaveLength(1);
+    expect(await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE)).toHaveLength(0);
+    const wakeKey = `qa-remediation-refire-v2:${seed.companyId}:${seed.workflowRunId}:${seed.producer.id}:${seed.qa.id}:${seed.verdictEventId}`;
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, seed.companyId), eq(agentWakeupRequests.idempotencyKey, wakeKey)))).toHaveLength(0);
+
+    let followupPath = path.join(tempRoot, "native-followup", "index.html");
+    await writeArtifact(followupPath, "followup findme");
+    const followupSeed = await seedScenario(db, { companyId: seed.companyId, artifactUrl: followupPath,
+      remediations: remediationsFor(followupPath, "findme", "fixed"),
+      publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    followupPath = followupSeed.file;
+    await syncWorkflowRunStateWithOutcome(db, followupSeed.workflowRunId);
+    expect(await rootRemediationEvents({ db, tempRoot }, followupSeed, QA_REMEDIATION_COMPLETION_EVENT_TYPE)).toHaveLength(1);
+    expect(await knowledgePatternsService(db).search({ companyId: seed.companyId, includeDrafts: true })).toHaveLength(0);
+  });
+
+  it("holds malformed pending remediation history at the public root without resetting the producer or issuing another wake", async () => {
+    let artifactPath = path.join(tempRoot, "pending-legacy", "index.html");
+    await writeArtifact(artifactPath, "pending findme");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath,
+      remediations: remediationsFor(artifactPath, "findme", "fixed"), priorRemediationEvents: 1,
+      publicSyncTimeline: makeQaRemediationPublicSyncTimeline() });
+    artifactPath = seed.file;
+    const before = await reloadRuns({ db, tempRoot }, seed);
+    const producerBefore = producerAttempt(before.producer);
+
+    const hold = await syncWorkflowRunStateWithOutcome(db, seed.workflowRunId).then(
+      () => new Error("expected pending-history hold"), error => error,
+    );
+
+    expect(hold).toBeInstanceOf(QaRemediationAdmissionHold);
+    expect((hold as QaRemediationAdmissionHold).reason).toBe("unresolved_legacy_effect");
+    expect((hold as QaRemediationAdmissionHold).eventIds).toHaveLength(1);
+    expect(producerAttempt((await reloadRuns({ db, tempRoot }, seed)).producer)).toEqual(producerBefore);
+    expect(await readFile(artifactPath, "utf8")).toBe("pending findme");
+    expect(await remediationEvents({ db, tempRoot }, seed)).toHaveLength(1);
+    expect(await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE)).toHaveLength(0);
+    expect(await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE)).toHaveLength(0);
+    const wakeKey = `qa-remediation-refire-v2:${seed.companyId}:${seed.workflowRunId}:${seed.producer.id}:${seed.qa.id}:${seed.verdictEventId}`;
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, seed.companyId), eq(agentWakeupRequests.idempotencyKey, wakeKey)))).toHaveLength(0);
+  });
+
+  it("re-evaluating the same root completion preserves reservation/completion/wake IDs and file hash", async () => {
+    let artifactPath = path.join(tempRoot, "case2", "index.html");
+    await writeArtifact(artifactPath, "term X appears once");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "X", "Y") });
+    artifactPath = seed.file;
+
+    await runPass({ db, tempRoot }, seed, async () => true);
+    const preparationsAfterFirst = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE);
+    const completionsAfterFirst = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE);
+    const firstCompletion = completionsAfterFirst[0]!.payload as { wakes: Array<{ wakeupRequestId: string }> };
+    const firstPreparationId = preparationsAfterFirst[0]!.id;
+
+    await runPass({ db, tempRoot }, seed, async () => true);
+
+    const preparationsAfterSecond = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_PREPARATION_EVENT_TYPE);
+    const completionsAfterSecond = await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE);
+    const secondCompletion = completionsAfterSecond[0]!.payload as { wakes: Array<{ wakeupRequestId: string }> };
+    expect(preparationsAfterSecond).toHaveLength(1);
+    expect(completionsAfterSecond).toHaveLength(1);
+    expect(preparationsAfterSecond[0]!.id).toBe(firstPreparationId);
+    expect(completionsAfterSecond[0]!.id).toBe(completionsAfterFirst[0]!.id);
+    expect(secondCompletion.wakes.map(w => w.wakeupRequestId)).toEqual(firstCompletion.wakes.map(w => w.wakeupRequestId));
+    const runs = await reloadRuns({ db, tempRoot }, seed);
+    expect(runs.producer.status).toBe("completed");
+    expect(runs.producer.iterationIndex).toBe(0);
+    expect(await readFile(artifactPath, "utf8")).toBe("term Y appears once");
+    const wakeKey = `qa-remediation-refire-v2:${seed.companyId}:${seed.workflowRunId}:${seed.producer.id}:${seed.qa.id}:${seed.verdictEventId}`;
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, seed.companyId), eq(agentWakeupRequests.idempotencyKey, wakeKey)))).toHaveLength(1);
+  });
+
+  it("does not let the legacy refire callback refuse or duplicate the root-owned QA wake", async () => {
+    let artifactPath = path.join(tempRoot, "case3", "index.html");
+    await writeArtifact(artifactPath, "findme once");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "findme", "fixed") });
+    artifactPath = seed.file;
+    const refireCalls: unknown[] = [];
+
+    await runPass({ db, tempRoot }, seed, async (qa) => { refireCalls.push(qa); return false; });
+
+    const runs = await reloadRuns({ db, tempRoot }, seed);
+    expect(runs.producer.status).toBe("completed");
+    expect(runs.producer.iterationIndex).toBe(0);
+    expect(refireCalls).toHaveLength(0);
+    expect(await remediationEvents({ db, tempRoot }, seed)).toHaveLength(0);
+    expect(await readFile(artifactPath, "utf8")).toBe("fixed once");
+    expect(await rootRemediationEvents({ db, tempRoot }, seed, QA_REMEDIATION_COMPLETION_EVENT_TYPE)).toHaveLength(1);
+  });
+
+  it("holds at the per-QA reservation cap instead of treating attempted history as producer rework permission", async () => {
+    let artifactPath = path.join(tempRoot, "case7", "index.html");
+    await writeArtifact(artifactPath, "cap findme");
+    const seed = await seedScenario(db, { artifactUrl: artifactPath, remediations: remediationsFor(artifactPath, "cap findme", "x"), priorRemediationEvents: 3 });
+    artifactPath = seed.file;
+
+    const hold = await runPass({ db, tempRoot }, seed, async () => true).then(() => null, error => error);
+    expect(hold).toBeInstanceOf(QaRemediationAdmissionHold);
+    expect((hold as QaRemediationAdmissionHold).reason).toBe("unresolved_legacy_effect");
+
+    const runs = await reloadRuns({ db, tempRoot }, seed);
+    expect(runs.producer.status).toBe("completed");
+    expect(runs.producer.iterationIndex).toBe(0);
+    const events = await remediationEvents({ db, tempRoot }, seed);
+    expect(events).toHaveLength(3); // only the seeded prior events, no new one
+  });
+});
+});

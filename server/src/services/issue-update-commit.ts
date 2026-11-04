@@ -1,6 +1,7 @@
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { issues } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, workflowRuns, workflowStepRuns, workflowRecoveryAuthorities, workflowTransitionEvents } from "@paperclipai/db";
+import { conflict } from "../errors.js";
 import { getProjectDefaultGoalId, syncIssueLabels, type IssueWriteDb } from "./issue-create-records.js";
 import { resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
@@ -10,6 +11,12 @@ import { persistTerminalIssueHandoff } from "./missions/issue-terminal-handoff.j
 import { closeLockedOwnerHumanSettlements, lockSourceOwnerHumanSettlement } from "./missions/mission-work-settlement.js";
 import { completeWorkflowIssueStepRunsAfterDone } from "./workflow/work-product-completion-gate.js";
 import type { WorkflowSyncSource } from "./workflow/workflow-sync-source.js";
+import { readWorkflowAttemptProof } from "./heartbeat-finalization/workflow-attempt-proof.js";
+import { freezeHeartbeatActualDrainIdentity } from "./heartbeat-actual-drain.js";
+import { createTerminalReleaseManifest, readTerminalReleaseManifestForSource, terminalReleaseMatchesRun,
+  writeTerminalReleaseManifest, type TerminalReleaseManifest } from "./heartbeat-terminal-release-continuation.js";
+
+import { hasPendingQaRemediationForRun } from "./workflow/control-flow/qa-remediation-admission-root.js";
 
 type IssueRow = typeof issues.$inferSelect;
 type IssueUpdateCommitInput<T extends IssueRow> = {
@@ -22,6 +29,124 @@ type IssueUpdateCommitInput<T extends IssueRow> = {
   workflowSyncSource: WorkflowSyncSource;
   withIssueLabels: (dbOrTx: IssueWriteDb, rows: IssueRow[]) => Promise<T[]>;
 };
+
+type TerminalOwnerRelease = { heartbeatRunId: string; manifest: TerminalReleaseManifest };
+const ownerReleaseHeld = (reason: string): never => {
+  throw conflict(`terminal_issue_owner_release_unproven:${reason}`, { reason });
+};
+
+/** Freeze the exact workflow owner before public completion clears its owner columns. */
+async function readTerminalOwnerRelease(tx: Parameters<Parameters<Db["transaction"]>[0]>[0], issue: IssueRow):
+Promise<TerminalOwnerRelease | null> {
+  const workflowIssue = issue.originKind === "workflow_execution" || issue.missionId !== null;
+  const owners = [issue.executionRunId, issue.checkoutRunId].filter((value): value is string => value !== null);
+  if (new Set(owners).size > 1) return workflowIssue ? ownerReleaseHeld("owner_columns_disagree") : null;
+  const heartbeatRunId = owners[0];
+  if (!heartbeatRunId) return null;
+
+  const [run] = await tx.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.id, heartbeatRunId), eq(heartbeatRuns.companyId, issue.companyId),
+  )).for("update");
+  if (!run) return workflowIssue ? ownerReleaseHeld("owner_run_missing") : null;
+  const workflowLinked = run.workflowStepRunId !== null || run.workflowExecutionGeneration !== null
+    || run.executionScopeKind === "workflow_step" || issue.originKind === "workflow_execution";
+  if (!workflowLinked) return null;
+  const related = await tx.select({ run: workflowRuns, step: workflowStepRuns }).from(workflowRuns)
+    .leftJoin(workflowStepRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
+    .where(and(eq(workflowRuns.companyId, issue.companyId), or(eq(workflowStepRuns.issueId, issue.id),
+      ...(run.workflowStepRunId ? [eq(workflowStepRuns.id, run.workflowStepRunId)] : []),
+      ...(issue.originRunId ? [eq(sql<string>`${workflowRuns.id}::text`, issue.originRunId)] : []))));
+  const scopedRuns = [...new Map(related.map(row => [row.run.id, row.run])).values()];
+  if ((run.workflowStepRunId || issue.originRunId) && scopedRuns.length === 0)
+    return ownerReleaseHeld("legacy_workflow_scope_unproven");
+  if (run.workflowStepRunId && !related.some(row => row.step?.id === run.workflowStepRunId
+    && row.step.issueId === issue.id && row.step.executionGeneration === run.workflowExecutionGeneration))
+    return ownerReleaseHeld("legacy_workflow_attempt_unproven");
+  let strict = false;
+  for (const workflow of scopedRuns) strict = await hasPendingQaRemediationForRun(tx as unknown as Db, workflow) || strict;
+  const ids = scopedRuns.map(row => row.id);
+  const [authority] = ids.length ? await tx.select({ id: workflowRecoveryAuthorities.id }).from(workflowRecoveryAuthorities)
+    .where(and(eq(workflowRecoveryAuthorities.companyId, issue.companyId), or(
+      inArray(workflowRecoveryAuthorities.workflowRunId, ids), inArray(workflowRecoveryAuthorities.replacementRunId, ids)))).limit(1) : [];
+  const [history] = ids.length ? await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+    .where(and(eq(workflowTransitionEvents.companyId, issue.companyId), inArray(workflowTransitionEvents.workflowRunId, ids),
+      inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_applied", "qa_remediation_completed"]))).limit(1) : [];
+  let modernActual = false;
+  if (run.workflowStepRunId && run.workflowExecutionGeneration !== null && run.wakeupRequestId
+    && run.executorOwnerId && run.executorOwnerLeaseEpoch !== null && run.executorOwnerLeaseToken && run.executionToken) {
+    const [originalWake] = await tx.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, issue.companyId)));
+    if (!originalWake) return ownerReleaseHeld("original_wake_missing");
+    let proof: ReturnType<typeof readWorkflowAttemptProof>;
+    try { proof = readWorkflowAttemptProof(originalWake); }
+    catch { return ownerReleaseHeld("original_attempt_scope_unproven"); }
+    if (originalWake.runId !== run.id || proof.issueId !== issue.id || proof.agentId !== run.agentId
+      || proof.stepRunId !== run.workflowStepRunId || proof.executionGeneration !== run.workflowExecutionGeneration)
+      return ownerReleaseHeld("original_attempt_scope_mismatch");
+    modernActual = true;
+  }
+  if (!strict && !authority && !history && !modernActual) {
+    if (run.agentId !== issue.assigneeAgentId || run.issueId !== null && run.issueId !== issue.id)
+      return ownerReleaseHeld("legacy_owner_scope_mismatch");
+    return null;
+  }
+  if (!issue.missionId || !run.issueId || run.issueId !== issue.id || run.agentId !== issue.assigneeAgentId
+    || !run.workflowStepRunId || run.workflowExecutionGeneration === null || !run.wakeupRequestId
+    || issue.executionRunId !== null && issue.executionRunId !== run.id
+    || issue.checkoutRunId !== null && issue.checkoutRunId !== run.id) {
+    return ownerReleaseHeld("original_owner_scope_mismatch");
+  }
+
+  const [step] = await tx.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, run.workflowStepRunId)).for("share");
+  if (!step || step.issueId !== issue.id || step.executionGeneration !== run.workflowExecutionGeneration
+    || step.retryCount === null || step.iterationIndex === null) return ownerReleaseHeld("workflow_step_attempt_missing");
+  if (step.dispatchOwnerHeartbeatRunId !== run.id || step.dispatchOwnerWakeupRequestId !== run.wakeupRequestId) {
+    return ownerReleaseHeld("dispatch_owner_changed");
+  }
+  const [workflow] = await tx.select().from(workflowRuns).where(and(
+    eq(workflowRuns.id, step.workflowRunId), eq(workflowRuns.companyId, issue.companyId),
+  )).for("share");
+  const [wake] = await tx.select().from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, issue.companyId),
+  )).for("share");
+  if (!workflow || !wake || workflow.missionId !== issue.missionId || wake.runId !== run.id
+    || wake.agentId !== run.agentId || wake.issueId !== issue.id || wake.missionId !== issue.missionId
+    || wake.workflowRunId !== workflow.id || wake.workflowStepRunId !== step.id
+    || wake.workflowExecutionGeneration !== step.executionGeneration) return ownerReleaseHeld("source_authority_mismatch");
+
+  const identity = await freezeHeartbeatActualDrainIdentity(tx, run, { workflowRunId: workflow.id });
+  if (!identity || identity.companyId !== issue.companyId || identity.missionId !== issue.missionId
+    || identity.workflowRunId !== workflow.id || identity.dispatchAuthorityVersion !== workflow.dispatchAuthorityVersion
+    || identity.workflowStepRunId !== step.id || identity.stepId !== step.stepId || identity.issueId !== issue.id
+    || identity.heartbeatRunId !== run.id || identity.wakeupRequestId !== wake.id
+    || identity.executionGeneration !== step.executionGeneration || identity.retryCount !== step.retryCount
+    || identity.iterationIndex !== step.iterationIndex) return ownerReleaseHeld("frozen_actual_identity_unproven");
+
+  const manifest = createTerminalReleaseManifest(identity, run.agentId, [
+    { stage: "issue_promotion", action: { kind: "promote_issue_wakes", companyId: issue.companyId, issueId: issue.id } },
+    { stage: "issue_promotion", action: { kind: "promote_agent_queue", companyId: issue.companyId, agentId: run.agentId } },
+    { stage: "workflow_evidence_sync", action: { kind: "sync_issue", companyId: issue.companyId, issueId: issue.id } },
+    { stage: "workflow_evidence_sync", action: { kind: "reevaluate_source" } },
+  ]);
+  if (!terminalReleaseMatchesRun(manifest.source, run)) return ownerReleaseHeld("frozen_actual_run_mismatch");
+  const prior = await readTerminalReleaseManifestForSource(tx, identity, run.agentId);
+  if (prior.kind !== "absent") return ownerReleaseHeld(prior.kind === "held"
+    ? `prior_manifest_${prior.reason}` : "manifest_preexists_before_owner_clear");
+  return { heartbeatRunId: run.id, manifest };
+}
+
+async function lockAndVerifyIssueOwnerSnapshot(tx: Parameters<Parameters<Db["transaction"]>[0]>[0], issue: IssueRow) {
+  const [current] = await tx.select().from(issues).where(and(
+    eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
+  )).for("update");
+  if (!current || current.status !== issue.status || current.missionId !== issue.missionId
+    || current.originKind !== issue.originKind || current.originId !== issue.originId || current.originRunId !== issue.originRunId
+    || current.assigneeAgentId !== issue.assigneeAgentId || current.executionRunId !== issue.executionRunId
+    || current.checkoutRunId !== issue.checkoutRunId || current.executionAgentNameKey !== issue.executionAgentNameKey
+    || current.executionLockedAt?.getTime() !== issue.executionLockedAt?.getTime()) {
+    ownerReleaseHeld("source_issue_owner_snapshot_changed");
+  }
+}
 
 export async function commitIssueUpdate<T extends IssueRow>({
   db,
@@ -54,10 +179,15 @@ export async function commitIssueUpdate<T extends IssueRow>({
       goalId: resolvedNextGoalId,
       defaultGoalId: defaultCompanyGoal?.id ?? null,
     });
+    const terminalOwnerRelease = issueData.status === "done" && existing.status !== "done"
+      ? await readTerminalOwnerRelease(tx, existing) : null;
     const ownerHuman = existing.missionId && issueData.status !== existing.status
       && (issueData.status === "done" || issueData.status === "cancelled")
       ? await lockSourceOwnerHumanSettlement(tx, { companyId: existing.companyId,
         missionId: existing.missionId, sourceIssueId: existing.id }) : null;
+    if (terminalOwnerRelease || (issueData.status === "done" && existing.status !== "done"
+      && (existing.executionRunId !== null || existing.checkoutRunId !== null)))
+      await lockAndVerifyIssueOwnerSnapshot(tx, existing);
     const updated = await tx
       .update(issues)
       .set(patch)
@@ -65,6 +195,16 @@ export async function commitIssueUpdate<T extends IssueRow>({
       .returning()
       .then((rows) => rows[0] ?? null);
     if (!updated) return null;
+    if (terminalOwnerRelease) {
+      if (updated.id !== existing.id || updated.companyId !== existing.companyId
+        || updated.missionId !== terminalOwnerRelease.manifest.source.missionId
+        || updated.assigneeAgentId !== terminalOwnerRelease.manifest.source.agentId
+        || updated.executionRunId !== null || updated.checkoutRunId !== null
+        || updated.executionAgentNameKey !== null || updated.executionLockedAt !== null) {
+        ownerReleaseHeld("owner_clear_result_mismatch");
+      }
+      await writeTerminalReleaseManifest(tx, terminalOwnerRelease.manifest);
+    }
     await closeLockedOwnerHumanSettlements(ownerHuman ? [ownerHuman] : []);
     if (issueData.status === "done" && existing.status !== "done") {
       await completeWorkflowIssueStepRunsAfterDone({

@@ -170,7 +170,7 @@ export async function waitForDeliveryLocks(observer: Db, holderPid: number, coun
       const row = rows.find(r => Number(r.pid) === pid);
       return !!row && (row.blockers as number[]).some(p => reaches(Number(p), new Set(seen).add(pid)));
     };
-    const waiting = rows.filter(r => /from\s+"?(workflow_runs|quality_policy_usage|quality_action_groups|quality_actions|quality_policy_versions)"?\s/i.test(String(r.query))
+    const waiting = rows.filter(r => /from\s+"?(missions|workflow_runs|quality_policy_usage|quality_action_groups|quality_actions|quality_policy_versions)"?\s/i.test(String(r.query))
       && /for\s+(no\s+key\s+update|update|share)/i.test(String(r.query)) && reaches(Number(r.pid)));
     const pids = new Set(waiting.map(r => Number(r.pid)));
     if (pids.size === count) return [...pids];

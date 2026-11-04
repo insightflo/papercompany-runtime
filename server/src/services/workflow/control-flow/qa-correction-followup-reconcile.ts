@@ -10,9 +10,11 @@ import { and, eq, inArray, is } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, missions, workflowRuns,
   workflowStepOutputBindings, workflowStepRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { loadConfig } from "../../../config.js";
 import { workProductProducerSchema, type WorkflowVerdictFinding } from "@paperclipai/shared";
 import { createReplacementRootNotifications, currentReplacementRootNotifications,
-  validateAndRegisterQaCorrectionRootDrain, withReplacementRootNotificationDb } from "../../issue-assignment-wakeup.js";
+  validateAndRegisterQaCorrectionRootDrain, withReplacementRootNotificationDb,
+  type ReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
 import { insertWorkflowWakeRequest } from "../../heartbeat-workflow-wake.js";
 import { resolveWorkProductLocalFilePath } from "../../work-products/producer-seal.js";
 import { qaCorrectionWakeKey } from "../../work-products/qa-correction-producer-attempt.js";
@@ -35,12 +37,60 @@ import { readQaCorrectionFollowupDb, readQaCorrectionFollowupConsumption } from 
 import { readQaCorrectionDelivery, type CorrectionDeliveryInput } from "./qa-correction-delivery-receipt.js";
 import { collectQaRemediationEligibility } from "./qa-remediation-qualification.js";
 import type { TryQaRemediationInput, QaRemediationPassResult } from "./qa-remediation-contract.js";
+import { createQaFileOwnerRuntime } from "./qa-remediation-runtime.js";
+import { withQaRemediationSharedAdmission, workflowRunHasC5AdmissionScope, type QaRemediationAdmissionContext } from "./qa-remediation-admission-root.js";
+import {
+  reconcileQaRemediationReservation,
+  type QaRemediationReconcileRequest,
+  type QaRemediationReconcileResult,
+} from "./qa-remediation-reconcile.js";
 
 type Input = Omit<TryQaRemediationInput, "refireQaStep">;
 type Step = typeof workflowStepRuns.$inferSelect;
 type Request = { runId: string; producerStepRunId: string; qaStepRunIds: string[]; verdictEventIds: string[] };
 export class QaCorrectionReconcileRequired extends Error {
   constructor(readonly request: Request) { super("qa_correction_reconcile_required"); }
+}
+export class QaRemediationReconcileRequired extends Error {
+  constructor(readonly request: QaRemediationReconcileRequest, readonly syncIdentity: string) {
+    super("qa_remediation_reconcile_required");
+  }
+}
+
+type QaRemediationRootResolution = Extract<QaRemediationReconcileResult,
+  { readonly outcome: "completed" | "not_applicable" | "superseded_by_replacement" }>;
+type QaRemediationRootHold = Exclude<QaRemediationReconcileResult,
+  { readonly outcome: "completed" | "not_applicable" | "superseded_by_replacement" }>;
+// Per-sync handoff only: the workflow loop consumes the typed root result on reentry; publication authority is re-read by reconcile.
+const qaRemediationRootResolutions = new WeakMap<ReplacementRootNotifications,
+  Map<string, QaRemediationRootResolution>>();
+// One sync observation time survives rollback/reentry; it is not publication or completion authority.
+const qaCorrectionSyncTimes = new WeakMap<ReplacementRootNotifications, number>();
+export function currentQaCorrectionSyncTime(db: Db): Date | null {
+  const notifications = currentReplacementRootNotifications(db);
+  const time = notifications ? qaCorrectionSyncTimes.get(notifications) : undefined;
+  return time === undefined ? null : new Date(time);
+}
+const qaRemediationResolutionKey = (request: QaRemediationReconcileRequest, syncIdentity: string) => JSON.stringify([
+  request.companyId, request.missionId, request.workflowRunId, request.producerStepRunId,
+  [...request.qaStepRunIds].sort(), syncIdentity,
+]);
+
+export function currentQaRemediationRootResolution(db: Db, request: QaRemediationReconcileRequest, syncIdentity: string):
+QaRemediationRootResolution | null {
+  const notifications = currentReplacementRootNotifications(db);
+  return notifications
+    ? qaRemediationRootResolutions.get(notifications)?.get(qaRemediationResolutionKey(request, syncIdentity)) ?? null
+    : null;
+}
+
+export class QaRemediationWorkflowHoldError extends Error {
+  readonly result: QaRemediationRootHold;
+  constructor(result: QaRemediationRootHold) {
+    super(`qa_remediation_workflow_${result.outcome}`);
+    this.result = result;
+    Object.defineProperty(this, "result", { value: result, enumerable: false });
+  }
 }
 const attempt = (s: Step): QaCorrectionAttempt => ({ stepRunId: s.id, stepId: s.stepId, issueId: s.issueId!,
   executionGeneration: s.executionGeneration, retryCount: s.retryCount, iterationIndex: s.iterationIndex });
@@ -274,21 +324,59 @@ async function reconcile(db: Db, request: Request) {
 }
 
 /** The transaction check applies to the supplied object itself; an external owner must unwind too. */
-export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string, sync: () => Promise<T>): Promise<T> {
-  if (is(db, PgTransaction)) return sync();
+export async function withQaCorrectionFollowupReconcile<T>(db: Db, runId: string,
+  sync: (rootDb: Db, admission?: QaRemediationAdmissionContext) => Promise<T>): Promise<T> {
+  if (is(db, PgTransaction)) return sync(db);
   const notifications = createReplacementRootNotifications(), handled = new Set<string>();
+  const resolutions = new Map<string, QaRemediationRootResolution>();
+  qaRemediationRootResolutions.set(notifications, resolutions);
+  const syncTime = Date.now();
+  qaCorrectionSyncTimes.set(notifications, syncTime);
+  const driftBudget = { corrections: 0 };
+  const ownerRuntime = createQaFileOwnerRuntime(loadConfig());
   const execution = await loadExecutionDefinition(db, runId, { requireHistorical: false });
   const result = await withReplacementRootNotificationDb(db, notifications, async () => {
     for (let pass = 0; pass <= execution.steps.length + 1; pass++) {
-      try { return await sync(); }
+      try {
+        if (!await workflowRunHasC5AdmissionScope(db, runId)) return await sync(db);
+        return await withQaRemediationSharedAdmission({ db, runId, ownerRuntime,
+          outerNotifications: notifications, resolutionMap: resolutions,
+          bindResolutionMap: (attemptNotifications, map) => {
+            qaRemediationRootResolutions.set(attemptNotifications, map as Map<string, QaRemediationRootResolution>);
+            qaCorrectionSyncTimes.set(attemptNotifications, syncTime);
+          },
+          driftBudget, work: sync });
+      }
       catch (error) {
-        if (!(error instanceof QaCorrectionReconcileRequired)) throw error;
-        requireQaCorrection(error.request.runId === runId, "scope");
-        const key = JSON.stringify(error.request);
-        if (handled.has(key)) throw new QaCorrectionReadError("stale");
-        handled.add(key);
-        // withReplacementFirstDelivery has rolled back before this catch. No transaction object escapes.
-        await reconcile(db, error.request);
+        if (error instanceof QaCorrectionReconcileRequired) {
+          requireQaCorrection(error.request.runId === runId, "scope");
+          const key = `correction:${JSON.stringify(error.request)}`;
+          if (handled.has(key)) throw new QaCorrectionReadError("stale");
+          handled.add(key);
+          // withReplacementFirstDelivery has rolled back before this catch. No transaction object escapes.
+          await reconcile(db, error.request);
+          continue;
+        }
+        if (error instanceof QaRemediationReconcileRequired) {
+          requireQaCorrection(error.request.workflowRunId === runId, "scope");
+          const key = `remediation:${qaRemediationResolutionKey(error.request, error.syncIdentity)}`;
+          if (handled.has(key)) throw new QaCorrectionReadError("stale");
+          handled.add(key);
+          // The sync/savepoint has unwound. Re-derive authority and publish only with the configured native owner.
+          const outcome = await reconcileQaRemediationReservation(db, error.request,
+            createQaFileOwnerRuntime(loadConfig()));
+          if (outcome.outcome === "superseded_by_replacement") {
+            requireQaCorrection(outcome.companyId === error.request.companyId
+              && outcome.sourceRunId === error.request.workflowRunId, "scope");
+          }
+          if (outcome.outcome !== "completed" && outcome.outcome !== "not_applicable"
+            && outcome.outcome !== "superseded_by_replacement") {
+            throw new QaRemediationWorkflowHoldError(outcome);
+          }
+          resolutions.set(qaRemediationResolutionKey(error.request, error.syncIdentity), outcome);
+          continue;
+        }
+        throw error;
       }
     }
     throw new QaCorrectionReadError("stale");

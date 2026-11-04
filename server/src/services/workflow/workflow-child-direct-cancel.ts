@@ -10,10 +10,12 @@
 //   이후의 completion hook(child_run_cancelled 부모 스텝 실패 → native 동기화)는 기존 경로다.
 //   불법 링크(스텝 행+무영수증 등)는 수리하지 않고 거부한다(0행).
 // [authority] 내구 레코드만이 권위(규칙 7/8). 경합은 busy, 알 수 없는 오류는 전파한다.
+import { isDeepStrictEqual } from "node:util";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { withLockedChildStartIdentity } from "./workflow-child-start-state.js";
+import { QaRemediationAdmissionHold } from "./control-flow/qa-remediation-admission-root.js";
+import { findChildStartIdentityForRun, withChildCancellationAdmission, withLockedChildStartIdentity } from "./workflow-child-start-state.js";
 import { isChildStartContention } from "./workflow-child-start-contention.js";
 import type { ChildStartIdentity } from "./workflow-child-start-state.js";
 
@@ -34,7 +36,15 @@ export async function claimDirectlyCancelledLinkedChildRun(
   // [D2] 구세대 신원은 잠금 전에 거부한다(fail-closed — 세대는 신원 확인이지 능력이 아니다).
   if (identity.generation !== 1) return { outcome: "cancelled", rows: [] };
   try {
-    const rows = await db.transaction(async (tx) => {
+    const [requested] = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
+      eq(workflowRuns.id, identity.childRunId),
+      eq(workflowRuns.companyId, identity.companyId),
+      sql`${workflowRuns.status} in ('pending', 'running')`,
+    )).limit(1);
+    if (!requested) return { outcome: "cancelled", rows: [] };
+    const observed = await findChildStartIdentityForRun(db, identity.childRunId);
+    if (!observed || !isDeepStrictEqual(observed.identity, identity)) return { outcome: "cancelled", rows: [] };
+    const rows = await withChildCancellationAdmission({ db, identity, work: async (rootDb) => rootDb.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       const ctx = await withLockedChildStartIdentity(txDb, identity);
       if (!ctx) return [];
@@ -80,10 +90,13 @@ export async function claimDirectlyCancelledLinkedChildRun(
               and workflow_runs.status in ('pending', 'running'))`,
         ))
         .returning({ id: workflowRuns.id, companyId: workflowRuns.companyId, missionId: workflowRuns.missionId });
-    });
+    }),
+  });
     return { outcome: "cancelled", rows };
   } catch (error) {
     // [설계 §3] 구조화 경합만 busy — 성공 보고 없이 기존 호출 계약을 유지한다.
+    // C5 admission HOLD carries authority/actual uncertainty even when its cause is a DB error.
+    if (error instanceof QaRemediationAdmissionHold) throw error;
     if (isChildStartContention(error)) return { outcome: "busy" };
     throw error;
   }

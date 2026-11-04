@@ -298,6 +298,12 @@ async function readHistory(db: QaCorrectionDb, scope: Scope, cache: IssuedCache 
     return prior.issued;
   } };
 }
+export function createQaCorrectionInventoryReader(db: QaCorrectionDb, scope: Pick<Scope, "companyId" | "workflowRunId">) {
+  const root = { companyId: scope.companyId, workflowRunId: scope.workflowRunId };
+  const cache = observationCache();
+  return async (appliedEventId: string): Promise<IssuedQaCorrection> =>
+    (await readHistory(db, { ...root, appliedEventId }, cache)).issued;
+}
 export async function readIssuedQaCorrectionHistory(db: QaCorrectionDb, scope: Scope) {
   return readHistory(db, scope);
 }

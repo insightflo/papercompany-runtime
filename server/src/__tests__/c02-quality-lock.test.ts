@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, heartbeatRuns, issues, missions, qualityActions,
-  workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+  workflowRuns, workflowStepRuns, workflowTerminalDecisions, workflowTransitionEvents } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { createConsumptionHarness } from "./helpers/c02-consumption-fixture.js";
 import { commitBuffers, commitDbState, makeCommitSource, type CommitSourceCase } from "./qa-correction-commit-fixture.js";
@@ -101,12 +101,88 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
     vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "11".repeat(32));
     let release = () => {};
     const held = new Promise<void>(resolve => { release = resolve; });
+    let receiptId: string | null = null;
+    let correction: C02Case | null = null;
+    const phase = (label: string) => process.stderr.write(`[C03/15B_PHASE] ${label}\n`);
+    const capture = async (label: string) => {
+      phase(`peer snapshot ${label}:begin`);
+      try {
+        const issueId = correction?.followup.target.issueId ?? s.f.qa.issueId!;
+        const stepRunId = correction?.followup.target.stepRunId ?? s.f.qa.id;
+        const wakeRows = receiptId
+          ? await peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receiptId)) : [];
+        const actualRows = receiptId
+          ? await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, receiptId)) : [];
+        const [issueRows, stepRows, workflowRows, actionRows, terminalRows, eventRows] = await Promise.all([
+          peer.select().from(issues).where(eq(issues.id, issueId)),
+          peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)),
+          peer.select().from(workflowRuns).where(eq(workflowRuns.id, s.p.workflowRunId)),
+          peer.select().from(qualityActions).where(eq(qualityActions.id, key.actionId)),
+          peer.select().from(workflowTerminalDecisions).where(eq(workflowTerminalDecisions.workflowRunId, s.p.workflowRunId)),
+          peer.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowRunId, s.p.workflowRunId)),
+        ]);
+        const actualIds = new Set(actualRows.map(row => row.id));
+        process.stderr.write(`[C03/15B_STATE] ${JSON.stringify({ label,
+          identity: { requestId: correction?.ref.requestId ?? null, followupEventId: correction?.followupRow.id ?? null,
+            wakeId: receiptId, issueId, stepRunId, workflowRunId: s.p.workflowRunId },
+          wakeCount: wakeRows.length, wakes: wakeRows.map(({ id, status, runId, idempotencyKey, payload,
+            issueId: rowIssueId, workflowStepRunId, workflowExecutionGeneration, requestedAt, claimedAt, finishedAt, updatedAt }) =>
+            ({ id, status, runId, idempotencyKey, payload, issueId: rowIssueId, workflowStepRunId,
+              workflowExecutionGeneration, requestedAt, claimedAt, finishedAt, updatedAt })),
+          actualCount: actualRows.length, actuals: actualRows.map(({ id, status, agentId: actualAgentId, issueId: rowIssueId,
+            wakeupRequestId, workflowStepRunId, workflowExecutionGeneration, executionScopeKind, executionEpoch,
+            executionToken, executorOwnerId, executorOwnerLeaseEpoch, executorOwnerLeaseToken, executorOwnerReleasedAt,
+            terminalOutcome, terminalDecidedAt, finalizationVersion, settledAt, exitCode, signal, resultJson, errorCode, finishedAt }) =>
+            ({ id, status, agentId: actualAgentId, issueId: rowIssueId, wakeupRequestId, workflowStepRunId,
+              workflowExecutionGeneration, executionScopeKind, executionEpoch, executionToken, executorOwnerId,
+              executorOwnerLeaseEpoch, executorOwnerLeaseToken, executorOwnerReleasedAt, terminalOutcome,
+              terminalDecidedAt, finalizationVersion, settledAt, exitCode, signal, resultJson, errorCode, finishedAt })),
+          issue: issueRows[0] ? { id: issueRows[0].id, status: issueRows[0].status,
+            assigneeAgentId: issueRows[0].assigneeAgentId, completedAt: issueRows[0].completedAt } : null,
+          step: stepRows[0] ? { id: stepRows[0].id, status: stepRows[0].status, issueId: stepRows[0].issueId,
+            executionGeneration: stepRows[0].executionGeneration, retryCount: stepRows[0].retryCount,
+            statusTransitionVersion: stepRows[0].statusTransitionVersion, dispatchAuthorityKind: stepRows[0].dispatchAuthorityKind,
+            dispatchOwnerWakeupRequestId: stepRows[0].dispatchOwnerWakeupRequestId,
+            dispatchOwnerHeartbeatRunId: stepRows[0].dispatchOwnerHeartbeatRunId,
+            iterationIndex: stepRows[0].iterationIndex, lastDispatchRequestId: stepRows[0].lastDispatchRequestId,
+            dispatchReadyAt: stepRows[0].dispatchReadyAt, startedAt: stepRows[0].startedAt, completedAt: stepRows[0].completedAt } : null,
+          workflow: workflowRows[0] ? { id: workflowRows[0].id, status: workflowRows[0].status,
+            dispatchAuthorityVersion: workflowRows[0].dispatchAuthorityVersion, completedAt: workflowRows[0].completedAt } : null,
+          action: actionRows[0] ? { id: actionRows[0].id, state: actionRows[0].state,
+            cancelRequestedAt: actionRows[0].cancelRequestedAt } : null,
+          terminalDecisions: terminalRows.map(({ id, decidedAuthorityVersion, decision, policyCause, discoveryPath,
+            origin, reason, recoveryGate, capturedStopTargets, createdAt }) =>
+            ({ id, decidedAuthorityVersion, decision, policyCause, discoveryPath, origin, reason,
+              recoveryGate, capturedStopTargets, createdAt })),
+          routeEvents: eventRows.filter(row => row.eventType.startsWith("qa_correction_")
+            || row.eventType === "workflow_validation_verdict" || (row.heartbeatRunId && actualIds.has(row.heartbeatRunId)))
+            .map(({ id, eventType, wakeupRequestId, heartbeatRunId, workflowStepRunId, executionGeneration,
+              fromStatus, toStatus, decision, verdict, reasonCode, idempotencyKey, payload, createdAt }) =>
+              ({ id, eventType, wakeupRequestId, heartbeatRunId, workflowStepRunId, executionGeneration,
+                fromStatus, toStatus, decision, verdict, reasonCode, idempotencyKey, payload, createdAt }))
+        })}\n`);
+      } catch (error) {
+        process.stderr.write(`[C03/15B_SNAPSHOT_ERROR] ${JSON.stringify({ label,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) })}\n`);
+      }
+      phase(`peer snapshot ${label}:end`);
+    };
     adapter.mockReset();
     try {
+      phase("before initial peer baseline");
       const before = await commitDbState({ ...s, db: peer });
+      phase("before deliverQualityIntent waiting");
       const waiting = await deliverQualityIntent(owned.db, key);
+      receiptId = waiting.receiptId;
+      phase("after deliverQualityIntent waiting");
+      await capture("waiting delivery returned");
       expect(waiting).toMatchObject({ status: "waiting", receiptId: expect.any(String) });
-      const c = await issued(s), revision = c.applied.revisions[0]!;
+      phase("before reading issued B");
+      const c = await issued(s);
+      correction = c;
+      phase("after reading issued B");
+      await capture("B issued");
+      const revision = c.applied.revisions[0]!;
       const state = () => commitDbState({ ...s, db: peer });
       const queued = await correctionRows(c), issuedState = await state();
       expect([queued.wakes.length, queued.heartbeats.length, queued.receipts.length]).toEqual([1, 0, 0]);
@@ -124,7 +200,10 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
       expect(issuedState.groups[0]!.usage.executionAttempts).toBe(1);
       expect(issuedState.events.filter(e => e.eventType === "qa_correction_prepared")).toHaveLength(1);
       expect(issuedState.events.filter(e => e.eventType === "qa_correction_followup_requested")).toHaveLength(1);
-      expect(await deliverQualityIntent(peer, key)).toEqual(waiting);
+      phase("before deliverQualityIntent queued replay");
+      const queuedReplay = await deliverQualityIntent(peer, key);
+      phase("after deliverQualityIntent queued replay");
+      expect(queuedReplay).toEqual(waiting);
       expect(await state()).toEqual(issuedState);
       expect(adapter).not.toHaveBeenCalled();
       const finalize = async () => finalizeRunTerminal(peer, {
@@ -133,7 +212,9 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
         gatePolicy: "immediate", now: new Date(),
         stepRuns: await peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, s.p.workflowRunId)),
       });
+      phase("before terminal finalize before claim");
       expect(await finalize()).toMatchObject({ kind: "deferred", gateKind: "open", run: { status: "running" } });
+      await capture("terminal still open before claim");
       const executed: Array<{ runId: string; wakeId: string; ref: unknown }> = [];
       adapter.mockImplementation(async (ctx: { runId: string; agent: { id: string } }) => {
         const [run] = await peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, ctx.runId));
@@ -150,33 +231,51 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
           provider: "test", model: "test", resultJson: null, runtimeServices: [] };
       });
       await peer.update(agents).set({ status: "active" }).where(eq(agents.id, agentId));
+      phase("before deliverQualityIntent accepted");
       const accepted = await deliverQualityIntent(owned.db, key);
+      phase("after deliverQualityIntent accepted");
+      await capture("accepted delivery");
       expect(accepted).toEqual({ status: "accepted", receiptId: waiting.receiptId });
+      phase("before adapter claim observation");
       await vi.waitFor(() => expect(executed).toHaveLength(1), { timeout: 5000 });
+      phase("after adapter claim observation");
+      await capture("claimed B actual");
       const delivered = await correctionRows(c);
       expect([delivered.wakes.length, delivered.heartbeats.length, delivered.receipts.length]).toEqual([1, 1, 1]);
       expect(executed).toEqual([{ runId: delivered.heartbeats[0]!.id, wakeId: waiting.receiptId, ref: c.ref }]);
+      phase("before C03 reconcile");
       expect(await reconcileQualityIntents(peer, { ownership: "native-active-plugin-disabled", now: new Date() }))
         .toMatchObject({ visited: 1, accepted: 1, blocked: 0 });
+      phase("after C03 reconcile; before pre-verdict consumption read");
       expect(await readQaCorrectionFollowupConsumption(peer, c.ref, readIssuedQaCorrection)).toBeNull();
       expect((await state()).events.filter(e => e.eventType === "workflow_validation_verdict"
         && e.heartbeatRunId === executed[0]!.runId)).toHaveLength(0);
       expect((await peer.select().from(qualityActions).where(eq(qualityActions.id, key.actionId)))[0]!.state).not.toBe("corrected");
+      phase("before terminal finalize before verdict");
       expect(await finalize()).toMatchObject({ kind: "deferred", gateKind: "open", run: { status: "running" } });
+      await capture("terminal still open before verdict");
       const [issue] = await peer.select().from(issues).where(eq(issues.id, c.followup.target.issueId));
       if (!issue) throw Error("public B issue required");
+      phase("before submitWorkflowVerdict");
       expect(await submitWorkflowVerdict({ db: owned.db, issue,
         actor: { actorType: "agent", actorId: agentId, agentId, runId: executed[0]!.runId },
         data: { verdict: "pass", reason: "Publicly delivered B checked" } })).toMatchObject({ satisfied: true, verdict: "pass" });
+      phase("after submitWorkflowVerdict");
+      await capture("official B verdict recorded");
+      phase("before official consumption read");
       const relation = await readQaCorrectionFollowupConsumption(peer, c.ref, readIssuedQaCorrection);
+      phase("after official consumption read");
       expect(relation?.consumed).toMatchObject({ ref: c.ref, followupEventId: c.followupRow.id,
         evidence: { kind: "workflow_verdict" } });
       if (relation?.consumed.evidence.kind !== "workflow_verdict") throw Error("public B official consumption required");
       const [verdict] = await peer.select().from(workflowTransitionEvents)
         .where(eq(workflowTransitionEvents.id, relation.consumed.evidence.eventId));
       expect(verdict).toMatchObject({ heartbeatRunId: executed[0]!.runId, verdict: "pass" });
+      phase("before workflow validation ledger read");
       expect(await hasWorkflowValidationCompletionLedger({ db: peer, issue })).toMatchObject({ satisfied: true, verdict: "pass" });
+      phase("after workflow validation ledger read; before consumed replay");
       expect(await deliverQualityIntent(peer, key)).toEqual(accepted);
+      phase("after deliverQualityIntent consumed replay");
       const consumed = await state();
       expect(consumed.receipts).toEqual(issuedState.receipts);
       expect(consumed.usage).toEqual(issuedState.usage);
@@ -185,17 +284,34 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
       expect(consumed.wakes).toHaveLength(before.wakes.length + 1);
       expect(consumed.wakes.filter(w => w.idempotencyKey?.startsWith("quality-action-wake:"))).toEqual(
         before.wakes.filter(w => w.idempotencyKey?.startsWith("quality-action-wake:")));
+      phase("before terminal finalize after official consumption");
       expect(await finalize()).toMatchObject({ kind: "finalized", run: { status: "completed" } });
+      phase("after terminal finalize after official consumption");
+      await capture("workflow terminal completed");
+      phase("before cancelQualityIntent");
       const cancellation = await cancelQualityIntent(peer, key);
+      phase("after cancelQualityIntent");
+      await capture("terminal cancellation requested");
       expect(cancellation).toMatchObject({ heartbeatRunId: executed[0]!.runId, runCancellationRequested: true });
+      phase("before readQualityCancellation");
       expect(await readQualityCancellation(peer, key)).toMatchObject({
         requested: true, runStatus: "cancelled", cancelledConfirmed: true });
+      phase("after readQualityCancellation");
       release();
+      await capture("after release before owner DB drain");
+      phase("before heartbeat execution drain on owner DB");
       await waitForHeartbeatExecutionsToDrain(owned.db);
+      phase("after heartbeat execution drain on owner DB");
+      await capture("owner DB actual drained");
+      phase("before heartbeat execution drain on peer DB");
       await waitForHeartbeatExecutionsToDrain(peer);
+      phase("after heartbeat execution drain on peer DB");
+      await capture("both DB actual drains returned");
       expect(await correctionRows(c)).toMatchObject({ wakes: [expect.objectContaining({ id: waiting.receiptId })],
         heartbeats: [expect.objectContaining({ id: executed[0]!.runId })], receipts: [expect.any(Object)] });
+      phase("before settled peer state read");
       const settled = await state();
+      phase("after settled peer state read");
       expect(settled.receipts).toEqual(issuedState.receipts);
       expect(settled.usage).toEqual(issuedState.usage);
       expect(settled.groups).toEqual(issuedState.groups);
@@ -204,12 +320,18 @@ describeEP("C02 15A: quality entry uses C03 issuance and stored consumption", ()
       expect(settled.events.filter(e => e.eventType === "qa_correction_followup_requested")).toHaveLength(1);
       expect(adapter).toHaveBeenCalledTimes(1);
       const cancelled = await state();
+      phase("before post-cancel blocked delivery");
       expect(await deliverQualityIntent(peer, key)).toEqual({ status: "blocked", receiptId: null });
+      phase("after post-cancel blocked delivery");
       expect(await state()).toEqual(cancelled);
     } finally {
       release();
+      phase("finally before heartbeat execution drain on owner DB");
       await waitForHeartbeatExecutionsToDrain(owned.db);
+      phase("finally after heartbeat execution drain on owner DB");
+      phase("finally before heartbeat execution drain on peer DB");
       await waitForHeartbeatExecutionsToDrain(peer);
+      phase("finally after heartbeat execution drain on peer DB");
       adapter.mockReset();
     }
   }, 60000);

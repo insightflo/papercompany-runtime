@@ -11,33 +11,42 @@
 // [safety]
 //   - boundary: remediation file 은 생산자의 active workProduct 절대경로 또는 그 디렉터리 내부로 한정.
 //   - determinism: find 는 대상 파일(현재까지 적용된 시뮬레이션 내용 기준)에서 정확히 한 번 나타나야 한다.
-//   - idempotency: qa_remediation_applied 이벤트의 idempotencyKey 가 원천 verdict event id 를 물고 있어
-//     같은 verdict 를 두 번 적용하지 않는다(재평가 시 "waiting" 홀드). Quality current_output 경로도
-//     같은 이벤트/키 계약을 쓴다(T3 연결).
-//   - bounded: QA stepRun 당 remediation 시도(이벤트 수) 상한. 초과/실패 시 기존 생산자 재작업 경로로 폴백.
-//   - fail-closed: 어떤 조건이든 증명되지 않으면 not_applicable — caller(loop-driver)는 기존 재작업 경로 유지.
+//   - idempotency: workflow root 는 exact source verdict/attempt 에 묶인 reservation/completion/wake 키를 사용해
+//     같은 verdict 를 두 번 적용하거나 재QA wake 를 중복 생성하지 않는다.
+//   - bounded: root 가 attempt/reservation 상한과 불확실한 기존 효과를 typed hold 로 판정한다.
+//   - fail-closed: root 의 명시적 not_applicable 만 기존 producer rework 를 허용하고, hold 는 fallback 하지 않는다.
 //
 // [ordering] C02의 생산자 증명·binding 지원 경로는 불변 파일 저장→발급→내구 큐→확정 후 전달한다.
-//   지원되지 않는 legacy 경로는 기존 wake→직접 기록·실패 폴백을 유지한다. Quality current_output은
-//   기존 export 코어를 재사용하며 해당 호출자 이전은 별도 단계다.
+//   남은 legacy workflow 경로도 식별자 전용 요청으로 root transaction 밖에 나가 기존 guarded reconcile을
+//   사용한다.
 
 import { writeFile } from "node:fs/promises";
+import { and, eq, inArray, or, isNotNull, sql } from "drizzle-orm";
 import type { WorkflowStep } from "../dag-engine.js";
-import type { workflowDefinitions, workflowRuns, workflowStepRuns, Db } from "@paperclipai/db";
+import type { workflowDefinitions, Db } from "@paperclipai/db";
 import { wakeExistingWorkflowStepIssue } from "../workflow-step-wake.js";
-import { tryQaCorrectionFollowup } from "./qa-correction-followup-reconcile.js";
-import { workflowTransitionEvents } from "@paperclipai/db";
+import {
+  currentQaRemediationRootResolution,
+  QaRemediationReconcileRequired,
+  tryQaCorrectionFollowup,
+} from "./qa-correction-followup-reconcile.js";
+import { QaRemediationReconcileError } from "./qa-remediation-reconcile.js";
+import { agentWakeupRequests, workflowTransitionEvents, workflowRecoveryAuthorities, heartbeatRuns, workflowStepRuns, workflowRuns } from "@paperclipai/db";
 import { logger } from "../../../middleware/logger.js";
 import {
-  QA_REMEDIATION_EVENT_TYPE,
-  remediationIdempotencyKey,
-  type PreparedFile,
+  QA_REMEDIATION_EVENT_TYPE, remediationIdempotencyKey,
   type QaRemediationPassResult,
-  type QualifiedQa,
   type TryQaRemediationInput,
 } from "./qa-remediation-contract.js";
-import { collectQualifiableQaRemediations } from "./qa-remediation-qualification.js";
+import { hasPendingQaRemediationForRun, workflowRunHasC5AdmissionScope } from "./qa-remediation-admission-root.js";
+import { currentReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
 import { captureMechanicalReworkPatterns, computeDefectSignature } from "./knowledge-draft-capture.js";
+import { loadLatestQaRemediations } from "../validation-verdict-ledger.js";
+import type { QaRemediationCompletion } from "./qa-remediation-completion.js";
+import { QA_REMEDIATION_PREPARATION_EVENT_TYPE } from "./qa-remediation-preparation-contract.js";
+import { hashQaCorrectionPayload } from "./qa-correction-contract.js";
+import { collectQualifiableQaRemediations } from "./qa-remediation-qualification.js";
+import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 
 export {
   QA_REMEDIATION_EVENT_TYPE,
@@ -58,61 +67,6 @@ export type {
 } from "./qa-remediation-contract.js";
 export { collectQualifiableQaRemediations, isInsideBoundary } from "./qa-remediation-qualification.js";
 
-/**
- * [T3 추출] write phase: 패치 파일 기록 + 감사 이벤트 기록. extraEventPayload 로 호출자(Quality
- *   current_output)가 머신 생성 추가 필드(file 이전/이후 hash)를 같은 이벤트에 넣을 수 있다.
- */
-export async function writeQaRemediationPatches(input: Pick<TryQaRemediationInput, "db" | "run" | "producerStep" | "producerRun"> & {
-  qualified: readonly QualifiedQa[]; fileBuffers: ReadonlyMap<string, PreparedFile>;
-  extraEventPayload?: (qa: QualifiedQa) => Record<string, unknown>;
-}): Promise<{ writeError: string | null }> {
-  const { db, run } = input;
-  let writeError: string | null = null;
-  for (const [file, entry] of input.fileBuffers) {
-    try {
-      await writeFile(file, entry.content, "utf8");
-    } catch (error) {
-      writeError = error instanceof Error ? error.message : String(error);
-      break;
-    }
-  }
-
-  const nowIso = new Date().toISOString();
-  for (const qa of input.qualified) {
-    await db.insert(workflowTransitionEvents).values({
-      companyId: run.companyId,
-      missionId: run.missionId ?? null,
-      workflowRunId: run.id,
-      workflowStepRunId: qa.qaRun.id,
-      issueId: qa.qaRun.issueId ?? null,
-      heartbeatRunId: qa.heartbeatRunId,
-      eventType: QA_REMEDIATION_EVENT_TYPE,
-      layer: "workflow_validation",
-      decision: writeError ? "mechanical_remediation_write_failed" : "mechanical_remediation_applied",
-      verdict: "request_changes",
-      reason: "workflow_api",
-      reasonCode: "qa_remediation",
-      idempotencyKey: remediationIdempotencyKey(run.companyId, qa.qaRun.id, qa.sourceVerdictEventId),
-      payload: {
-        kind: "qa_remediation_applied",
-        outcome: writeError ? "write_failed" : "applied",
-        producerStepId: input.producerStep.id,
-        producerStepRunId: input.producerRun.id,
-        producerIteration: input.producerRun.iterationIndex ?? 0,
-        qaStepId: qa.qaRun.stepId,
-        sourceVerdictEventId: qa.sourceVerdictEventId,
-        appliedAt: nowIso,
-        items: qa.remediations.items,
-        // [P1 결함 서명] 동일 교정 반복 감지용 머신 생성 해시(knowledge-draft-capture 규약 v1).
-        signatures: qa.remediations.items.map((item) => computeDefectSignature(item.find, item.replace)),
-        ...(input.extraEventPayload ? input.extraEventPayload(qa) : {}),
-        ...(writeError ? { writeError } : {}),
-      },
-    }).onConflictDoNothing();
-  }
-  return { writeError };
-}
-
 /** Existing DAG refire contract, kept here with the remediation owner to avoid a runtime DAG import. */
 export function createQaRemediationRefire(input: {
   db: Db; run: typeof workflowRuns.$inferSelect; definition: typeof workflowDefinitions.$inferSelect;
@@ -132,45 +86,188 @@ export function createQaRemediationRefire(input: {
 }
 
 /**
- * [purpose] fresh 반려 QA 전원이 기계 remediable 이면 결정론적 패치 + QA 재실행, 아니면 not_applicable.
- *   "waiting" = 이 verdict 들은 이미 remediation 이 적용된 상태(재실행 대기 중) — caller 는 재작업도 스킵.
+ * [purpose] C02 correction 경로를 우선 처리한 뒤, legacy workflow 요청을 identifier-only root reconcile 로 넘긴다.
+ *   durable completed 는 기존 waiting loop 결과로, root-confirmed not_applicable 만 producer rework 로 이어진다.
  */
 export async function tryQaRemediationPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {
   const { db, run } = input;
   const correction = await tryQaCorrectionFollowup(input);
   if (correction) return correction;
-  const prepared = await collectQualifiableQaRemediations(input);
+  if (!await directEntryHasC5Scope(input)
+    && (!currentReplacementRootNotifications(db) || !await workflowRunHasC5AdmissionScope(db, run.id))) return legacyDirectPass(input);
+  const qaStepRunIds = input.rejectedQas.map((qa) => qa.qaRun?.id);
+  if (!run.missionId || qaStepRunIds.length === 0 || qaStepRunIds.some((id) => !id)
+    || new Set(qaStepRunIds).size !== qaStepRunIds.length) {
+    throw new QaRemediationReconcileError("request");
+  }
+  const request = {
+    companyId: run.companyId,
+    missionId: run.missionId,
+    workflowRunId: run.id,
+    producerStepRunId: input.producerRun.id,
+    qaStepRunIds: qaStepRunIds as string[],
+  };
+  const syncIdentity = await qaRemediationSyncIdentity(input, request);
+  const rootResolution = currentQaRemediationRootResolution(db, request, syncIdentity);
+  if (rootResolution?.outcome === "completed") {
+    if (rootResolution.created) await captureCompletedRemediationPatterns(input, rootResolution.completion);
+    return { outcome: "waiting", detail: "guarded root completion and QA wake are durable; producer rework is withheld" };
+  }
+  if (rootResolution?.outcome === "superseded_by_replacement") {
+    return { outcome: "waiting", detail: "consumed replacement preserves original completion without new publication or rework" };
+  }
+  if (rootResolution?.outcome === "not_applicable") {
+    const currentQualification = await collectQualifiableQaRemediations(input);
+    if (currentQualification.status === "waiting") {
+      return { outcome: "waiting", detail: "current qualification remains behind an existing remediation effect" };
+    }
+    if (currentQualification.status === "qualified") {
+      throw new QaRemediationReconcileError("root_resolution_stale");
+    }
+    if (!await hasRemediationHistory(db, request)) {
+      return { outcome: "not_applicable", detail: "guarded root and current history re-read found no applicable or attempted effect" };
+    }
+  }
+  throw new QaRemediationReconcileRequired(request, syncIdentity);
+}
+
+/** Only proven unlinked direct callers retain the original legacy publication contract. */
+async function directEntryHasC5Scope({ db, run }: TryQaRemediationInput): Promise<boolean> {
+  const [current] = await db.select().from(workflowRuns).where(and(eq(workflowRuns.id, run.id), eq(workflowRuns.companyId, run.companyId)));
+  if (!current || current.missionId !== run.missionId
+    || current.status !== run.status) throw new QaRemediationReconcileError("request");
+  const steps = await db.select({ status: workflowStepRuns.status }).from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
+  const [authority] = await db.select({ id: workflowRecoveryAuthorities.id, kind: workflowRecoveryAuthorities.recoveryKind }).from(workflowRecoveryAuthorities)
+    .where(and(eq(workflowRecoveryAuthorities.companyId, run.companyId), or(
+      eq(workflowRecoveryAuthorities.workflowRunId, run.id), eq(workflowRecoveryAuthorities.replacementRunId, run.id)))).limit(1);
+  if (authority && ["manual_resume", "supervision_tool_retry", "source_issue_unblock"].includes(authority.kind)
+    && !await workflowRunHasC5AdmissionScope(db, run.id)) return false;
+  const [history] = await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents)
+    .where(and(eq(workflowTransitionEvents.companyId, run.companyId), eq(workflowTransitionEvents.workflowRunId, run.id),
+      or(inArray(workflowTransitionEvents.eventType, ["qa_remediation_prepared", "qa_remediation_completed", "qa_correction_prepared", "heartbeat_actual_drained_v1"]), and(eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE), sql`${workflowTransitionEvents.payload} ? 'schemaVersion'`))) ).limit(1);
+  const [actual] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .innerJoin(workflowStepRuns, eq(workflowStepRuns.id, heartbeatRuns.workflowStepRunId))
+    .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(workflowStepRuns.workflowRunId, run.id),
+      isNotNull(heartbeatRuns.executorOwnerId), isNotNull(heartbeatRuns.executionToken))).limit(1);
+  const c5Wake = (await db.select({ wake: agentWakeupRequests }).from(agentWakeupRequests).leftJoin(workflowStepRuns, eq(workflowStepRuns.id, agentWakeupRequests.workflowStepRunId)).where(and(eq(agentWakeupRequests.companyId, run.companyId), or(eq(agentWakeupRequests.workflowRunId, run.id), eq(workflowStepRuns.workflowRunId, run.id))))).some(({ wake }) => { try { return Object.hasOwn(wake.payload ?? {}, "qaRemediationCompletion") || readQaCorrectionWakeRef(wake) !== null; } catch { return true; } });
+  if (authority || history) await hasPendingQaRemediationForRun(db, current);
+  return Boolean(authority || history || actual || c5Wake || steps.some(step => step.status === "held" || step.status === "blocked"));
+}
+
+async function legacyDirectPass(input: TryQaRemediationInput): Promise<QaRemediationPassResult> {
+  const { db, run } = input, prepared = await collectQualifiableQaRemediations(input);
   if (prepared.status !== "qualified") return { outcome: prepared.status, detail: prepared.detail };
   const { qualified, fileBuffers } = prepared;
-
-  // wake first: QA 재실행이 거부되면 아무것도 기록하지 않는다(원자성 — 부분 상태 없음).
   for (const qa of qualified) {
     if (!qa.qaRun.issueId) return { outcome: "not_applicable", detail: "qualified qa lost issue binding" };
-    const queued = await input.refireQaStep({ stepId: qa.qaRun.stepId, stepRunId: qa.qaRun.id, issueId: qa.qaRun.issueId });
-    if (!queued) return { outcome: "not_applicable", detail: `qa re-fire refused for ${qa.qaRun.stepId}` };
+    if (!await input.refireQaStep({ stepId: qa.qaRun.stepId, stepRunId: qa.qaRun.id, issueId: qa.qaRun.issueId }))
+      return { outcome: "not_applicable", detail: `qa re-fire refused for ${qa.qaRun.stepId}` };
   }
-
-  const { writeError } = await writeQaRemediationPatches({ db, run, producerStep: input.producerStep, producerRun: input.producerRun, qualified, fileBuffers });
-
+  let writeError: string | null = null;
+  for (const [file, entry] of fileBuffers) {
+    try { await writeFile(file, entry.content, "utf8"); }
+    catch (error) { writeError = error instanceof Error ? error.message : String(error); break; }
+  }
+  const nowIso = new Date().toISOString();
+  for (const qa of qualified) {
+    await db.insert(workflowTransitionEvents).values({
+      companyId: run.companyId, missionId: run.missionId ?? null, workflowRunId: run.id,
+      workflowStepRunId: qa.qaRun.id, issueId: qa.qaRun.issueId ?? null, heartbeatRunId: qa.heartbeatRunId,
+      eventType: QA_REMEDIATION_EVENT_TYPE, layer: "workflow_validation", verdict: "request_changes",
+      decision: writeError ? "mechanical_remediation_write_failed" : "mechanical_remediation_applied",
+      reason: "workflow_api", reasonCode: "qa_remediation",
+      idempotencyKey: remediationIdempotencyKey(run.companyId, qa.qaRun.id, qa.sourceVerdictEventId),
+      payload: { kind: "qa_remediation_applied", outcome: writeError ? "write_failed" : "applied",
+        producerStepId: input.producerStep.id, producerStepRunId: input.producerRun.id,
+        producerIteration: input.producerRun.iterationIndex ?? 0, qaStepId: qa.qaRun.stepId,
+        sourceVerdictEventId: qa.sourceVerdictEventId, appliedAt: nowIso, items: qa.remediations.items,
+        signatures: qa.remediations.items.map(item => computeDefectSignature(item.find, item.replace)),
+        ...(writeError ? { writeError } : {}) },
+    }).onConflictDoNothing();
+  }
   if (writeError) return { outcome: "not_applicable", detail: `remediation write failed: ${writeError}` };
-
-  // [P1 지식 초안 캡처 — 비차단] 모든 제어 판정/기록이 끝난 뒤의 부수 기록. 실패해도
-  //   applied 반환과 재작업 경로는 절대 바뀌지 않는다(규칙 7 — 실행통제 영향 0).
   try {
-    for (const qa of qualified) {
+    for (const qa of qualified) await captureMechanicalReworkPatterns({ db, companyId: run.companyId,
+      remediationEventType: QA_REMEDIATION_EVENT_TYPE, producerStepId: input.producerStep.id,
+      qaStepId: qa.qaRun.stepId, sourceVerdictEventId: qa.sourceVerdictEventId, items: qa.remediations.items });
+  } catch (error) { logger.warn({ err: error, runId: run.id }, "knowledge-draft-capture non-blocking failure"); }
+  return { outcome: "applied", detail: `${qualified.length} qa remediated without producer rework` };
+}
+
+function attemptIdentity(stepRun: {
+  id: string; stepId: string; issueId: string | null;
+  executionGeneration: number; retryCount: number; iterationIndex: number | null;
+  dispatchOwnerWakeupRequestId: string | null; dispatchOwnerHeartbeatRunId: string | null;
+  completedAt: Date | null;
+} | null | undefined) {
+  if (!stepRun) return null;
+  return {
+    id: stepRun.id, stepId: stepRun.stepId, issueId: stepRun.issueId,
+    executionGeneration: stepRun.executionGeneration,
+    retryCount: stepRun.retryCount, iterationIndex: stepRun.iterationIndex,
+    dispatchOwnerWakeupRequestId: stepRun.dispatchOwnerWakeupRequestId,
+    dispatchOwnerHeartbeatRunId: stepRun.dispatchOwnerHeartbeatRunId,
+    completedAt: stepRun.completedAt?.toISOString() ?? null,
+  };
+}
+
+async function qaRemediationSyncIdentity(input: TryQaRemediationInput,
+  request: { companyId: string; missionId: string; workflowRunId: string; producerStepRunId: string; qaStepRunIds: string[] }): Promise<string> {
+  const qas = await Promise.all(input.rejectedQas.map(async ({ qaRun }) => {
+    const source = qaRun?.issueId
+      ? await loadLatestQaRemediations({ db: input.db, companyId: input.run.companyId, issueId: qaRun.issueId })
+      : null;
+    return {
+      attempt: attemptIdentity(qaRun),
+      source: source ? { eventId: source.sourceVerdictEventId, heartbeatRunId: source.heartbeatRunId,
+        remediationsHash: hashQaCorrectionPayload(source.remediations.items) } : null,
+    };
+  }));
+  qas.sort((a, b) => (a.attempt?.id ?? "").localeCompare(b.attempt?.id ?? ""));
+  return JSON.stringify({ request: { ...request, qaStepRunIds: [...request.qaStepRunIds].sort() },
+    run: { status: input.run.status, missionId: input.run.missionId },
+    producer: attemptIdentity(input.producerRun), qas,
+    findings: [...input.findingsByQaStepId.entries()].sort(([a], [b]) => a.localeCompare(b)) });
+}
+
+async function hasRemediationHistory(db: Db, request: {
+  companyId: string; workflowRunId: string; producerStepRunId: string; qaStepRunIds: string[];
+}): Promise<boolean> {
+  const [preparations, legacy] = await Promise.all([
+    db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, request.companyId),
+      eq(workflowTransitionEvents.workflowRunId, request.workflowRunId),
+      eq(workflowTransitionEvents.workflowStepRunId, request.producerStepRunId),
+      eq(workflowTransitionEvents.eventType, QA_REMEDIATION_PREPARATION_EVENT_TYPE))),
+    db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, request.companyId),
+      eq(workflowTransitionEvents.workflowRunId, request.workflowRunId),
+      inArray(workflowTransitionEvents.workflowStepRunId, request.qaStepRunIds),
+      eq(workflowTransitionEvents.eventType, QA_REMEDIATION_EVENT_TYPE))),
+  ]);
+  return preparations.length > 0 || legacy.length > 0;
+}
+
+async function captureCompletedRemediationPatterns(input: TryQaRemediationInput, completion: QaRemediationCompletion): Promise<void> {
+  // This was non-blocking on the legacy success path. The durable completion, not memory or prepared bytes,
+  // supplies the exact QA attempts; the source ledger is re-read before retaining the same optional side effect.
+  try {
+    for (const verdict of completion.verdicts) {
+      const loaded = await loadLatestQaRemediations({ db: input.db, companyId: input.run.companyId,
+        issueId: verdict.qa.issueId });
+      if (!loaded || loaded.workflowStepRunId !== verdict.qa.stepRunId
+        || loaded.sourceVerdictEventId !== verdict.eventId || loaded.heartbeatRunId !== verdict.heartbeatRunId) continue;
       await captureMechanicalReworkPatterns({
-        db,
-        companyId: run.companyId,
+        db: input.db,
+        companyId: input.run.companyId,
         remediationEventType: QA_REMEDIATION_EVENT_TYPE,
-        producerStepId: input.producerStep.id,
-        qaStepId: qa.qaRun.stepId,
-        sourceVerdictEventId: qa.sourceVerdictEventId,
-        items: qa.remediations.items,
+        producerStepId: completion.producer.stepId,
+        qaStepId: verdict.qa.stepId,
+        sourceVerdictEventId: verdict.eventId,
+        items: loaded.remediations.items,
       });
     }
   } catch (error) {
-    logger.warn({ err: error, runId: run.id }, "knowledge-draft-capture non-blocking failure");
+    logger.warn({ err: error, runId: input.run.id }, "knowledge-draft-capture non-blocking failure");
   }
-
-  return { outcome: "applied", detail: `${qualified.length} qa remediated without producer rework` };
 }

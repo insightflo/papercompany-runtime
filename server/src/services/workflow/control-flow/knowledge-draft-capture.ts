@@ -5,8 +5,9 @@
 //   순간, company_knowledge_patterns에 failure_mode 초안 카드(source='auto_rework_draft',
 //   status='draft')를 생성한다. 사람 승인(approve) 전까지 검색/주입 어디에도 노출되지 않는다.
 //
-// [authority] 서명과 발생 횟수는 오직 기계 레코드 — qa_remediation_applied 전이 이벤트의
-//   payload.signatures(머신 생성 해시 배열)에서만 계산한다. 프로즈/코멘트/stdout 파싱 없음(규칙 8).
+// [authority] 서명과 발생 횟수는 기계 레코드에서만 계산한다: legacy applied 이벤트의
+//   payload.signatures 또는 정확히 연결된 successful root completion/preparation의 schema-검증 items.
+//   프로즈/코멘트/stdout 파싱 없음(규칙 8).
 //
 // [safety — 규칙 7 실행통제 영향 0]
 //   - 호출부(qa-remediation.tryQaRemediationPass)는 모든 제어 판정(applied/waiting/not_applicable)이
@@ -17,10 +18,25 @@
 //     재감지에도 카드는 하나뿐이다.
 
 import { createHash } from "node:crypto";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { workflowTransitionEvents } from "@paperclipai/db";
 import { knowledgePatternsService } from "../../knowledge-patterns.js";
+import {
+  QA_REMEDIATION_COMPLETION_EVENT_TYPE,
+  parseQaRemediationCompletion,
+  qaRemediationCompletionKey,
+  type QaRemediationCompletion,
+} from "./qa-remediation-completion.js";
+import {
+  classifyQaRemediationPreparationRow,
+  parseQaRemediationPreparation,
+  QA_REMEDIATION_PREPARATION_EVENT_TYPE,
+  qaRemediationPreparationKey,
+  type QaRemediationEventRow,
+  type QaRemediationPreparation,
+  type QaRemediationPreparationScope,
+} from "./qa-remediation-preparation-contract.js";
 
 /** 서명 발생 집계 lookback — 이 기간 내 반복만 "같은 결함의 재발"로 인정한다. */
 export const REMEDIATION_SIGNATURE_LOOKBACK_DAYS = 30;
@@ -42,34 +58,159 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-/** 과거 적용 이벤트들의 payload.signatures에서 해당 서명의 발생 횟수.
- *  이번 패스가 방금 기록한 이벤트(sourceVerdictEventId 일치)는 선행 발생에서 제외한다 —
- *  그렇지 않으면 첫 적용이 곧 2회째로 집계되는 자기포함 버그가 생긴다. */
+/** 과거 적용 verdict 별 해당 서명의 발생 횟수.
+ *  이번 verdict는 legacy/root 중 어떤 이벤트로 기록됐든 선행 발생에서 제외한다. */
 async function countPriorOccurrences(
   db: Db,
   companyId: string,
-  eventType: string,
+  legacyEventType: string,
   signature: string,
   excludeSourceVerdictEventId: string,
 ): Promise<number> {
   const since = new Date(Date.now() - REMEDIATION_SIGNATURE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-  const events = await db
-    .select({ payload: workflowTransitionEvents.payload })
-    .from(workflowTransitionEvents)
-    .where(and(
+  const countedSourceVerdicts = new Set<string>();
+  const completionCandidates: Array<{ row: QaRemediationEventRow; completion: QaRemediationCompletion }> = [];
+  const [legacyEvents, completionEvents] = await Promise.all([
+    db.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.eventType, eventType),
+      eq(workflowTransitionEvents.eventType, legacyEventType),
       eq(workflowTransitionEvents.decision, "mechanical_remediation_applied"),
       gte(workflowTransitionEvents.createdAt, since),
-    ))
-    .orderBy(desc(workflowTransitionEvents.createdAt))
-    .limit(PRIOR_EVENT_SCAN_LIMIT);
+    )).orderBy(desc(workflowTransitionEvents.createdAt)).limit(PRIOR_EVENT_SCAN_LIMIT),
+    db.select().from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.eventType, QA_REMEDIATION_COMPLETION_EVENT_TYPE),
+      isNull(workflowTransitionEvents.decision),
+      gte(workflowTransitionEvents.createdAt, since),
+    )).orderBy(desc(workflowTransitionEvents.createdAt)).limit(PRIOR_EVENT_SCAN_LIMIT),
+  ]);
+  const events = [...legacyEvents, ...completionEvents].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   let occurrences = 0;
-  for (const event of events) {
-    const payload = event.payload as { signatures?: unknown; sourceVerdictEventId?: unknown } | null;
-    if (payload?.sourceVerdictEventId === excludeSourceVerdictEventId) continue;
-    const signatures = payload?.signatures;
-    if (Array.isArray(signatures) && signatures.includes(signature)) occurrences += 1;
+  for (const rawRow of events) {
+    const row = rawRow as unknown as QaRemediationEventRow;
+    if (row.eventType === legacyEventType) {
+      const payload = row.payload as { signatures?: unknown; sourceVerdictEventId?: unknown } | null;
+      const sourceVerdictEventId = payload?.sourceVerdictEventId;
+      const signatures = payload?.signatures;
+      if (typeof sourceVerdictEventId === "string" && sourceVerdictEventId !== excludeSourceVerdictEventId
+        && Array.isArray(signatures) && signatures.includes(signature) && !countedSourceVerdicts.has(sourceVerdictEventId)) {
+        countedSourceVerdicts.add(sourceVerdictEventId);
+        occurrences += 1;
+      }
+      continue;
+    }
+    if (row.eventType === QA_REMEDIATION_COMPLETION_EVENT_TYPE) {
+      try {
+        const completion = parseQaRemediationCompletion(row.payload);
+        if (row.companyId === companyId && row.id === completion.completionId
+          && row.missionId === completion.missionId && row.workflowRunId === completion.workflowRunId
+          && row.heartbeatRunId === null && row.reasonCode === "qa_remediation_complete") {
+          completionCandidates.push({ row, completion });
+        }
+      } catch {
+        // Malformed completion payloads are not completed-correction evidence.
+      }
+    }
+  }
+  occurrences += await countCompletedRootOccurrences(db, companyId, signature, completionCandidates,
+    excludeSourceVerdictEventId, countedSourceVerdicts);
+  return occurrences;
+}
+
+function preparationScope(preparation: QaRemediationPreparation): QaRemediationPreparationScope {
+  return {
+    companyId: preparation.companyId,
+    missionId: preparation.missionId,
+    workflowRunId: preparation.workflowRunId,
+    dispatchAuthorityVersion: preparation.dispatchAuthorityVersion,
+    producer: preparation.producer,
+    verdicts: preparation.verdicts.map(({ eventId, heartbeatRunId, qa, remediationsHash }) => ({
+      eventId, heartbeatRunId, qa, remediationsHash,
+    })),
+  };
+}
+
+function sameAttempt(
+  a: QaRemediationPreparation["producer"],
+  b: QaRemediationCompletion["producer"],
+): boolean {
+  return a.stepRunId === b.stepRunId && a.stepId === b.stepId && a.issueId === b.issueId
+    && a.executionGeneration === b.executionGeneration && a.retryCount === b.retryCount
+    && a.iterationIndex === b.iterationIndex;
+}
+
+function completionBindsPreparation(
+  row: QaRemediationEventRow,
+  completion: QaRemediationCompletion,
+  preparation: QaRemediationPreparation,
+): boolean {
+  if (row.id !== completion.completionId || row.eventType !== QA_REMEDIATION_COMPLETION_EVENT_TYPE
+    || row.layer !== "workflow_validation" || row.decision !== null || row.verdict !== null
+    || row.companyId !== preparation.companyId || row.missionId !== preparation.missionId
+    || row.workflowRunId !== preparation.workflowRunId || row.workflowStepRunId !== preparation.producer.stepRunId
+    || row.issueId !== preparation.producer.issueId || row.executionGeneration !== preparation.producer.executionGeneration
+    || row.idempotencyKey !== qaRemediationCompletionKey(preparation)
+    || completion.preparationId !== preparation.preparationId
+    || completion.companyId !== preparation.companyId || completion.missionId !== preparation.missionId
+    || completion.workflowRunId !== preparation.workflowRunId
+    || completion.dispatchAuthorityVersion !== preparation.dispatchAuthorityVersion
+    || !sameAttempt(preparation.producer, completion.producer)) return false;
+
+  const matchedVerdicts = new Set<number>();
+  if (completion.verdicts.length !== preparation.verdicts.length || !completion.verdicts.every((verdict) => {
+    const index = preparation.verdicts.findIndex((prepared, i) => !matchedVerdicts.has(i)
+      && prepared.eventId === verdict.eventId && prepared.heartbeatRunId === verdict.heartbeatRunId
+      && prepared.remediationsHash === verdict.remediationsHash && sameAttempt(prepared.qa, verdict.qa));
+    if (index < 0) return false;
+    matchedVerdicts.add(index);
+    return true;
+  })) return false;
+
+  const preparedPaths = new Set(preparation.files.map((file) => file.path));
+  const completedPaths = completion.files.map((file) => file.file);
+  return completedPaths.length === preparedPaths.size && new Set(completedPaths).size === completedPaths.length
+    && completion.files.every((file) => preparedPaths.has(file.file)
+      && (file.status === "applied" || file.status === "already_applied"));
+}
+
+/** Count only source verdicts backed by a schema-valid preparation and its exact successful root completion. */
+async function countCompletedRootOccurrences(
+  db: Db,
+  companyId: string,
+  signature: string,
+  candidates: readonly { row: QaRemediationEventRow; completion: QaRemediationCompletion }[],
+  excludeSourceVerdictEventId: string,
+  countedSourceVerdicts: Set<string>,
+): Promise<number> {
+  if (candidates.length === 0) return 0;
+
+  const preparationIds = [...new Set(candidates.map(({ completion }) => completion.preparationId))];
+  const preparationRows = await db.select().from(workflowTransitionEvents).where(and(
+    eq(workflowTransitionEvents.companyId, companyId),
+    eq(workflowTransitionEvents.eventType, QA_REMEDIATION_PREPARATION_EVENT_TYPE),
+    inArray(workflowTransitionEvents.id, preparationIds),
+  ));
+  const preparationsById = new Map(preparationRows.map((row) => [row.id, row as unknown as QaRemediationEventRow]));
+  let occurrences = 0;
+  for (const { row, completion } of candidates) {
+    const preparationRow = preparationsById.get(completion.preparationId);
+    if (!preparationRow) continue;
+    try {
+      const preparation = parseQaRemediationPreparation(preparationRow.payload);
+      if (classifyQaRemediationPreparationRow(preparationRow, preparationScope(preparation)).kind !== "prepared"
+        || preparationRow.idempotencyKey !== qaRemediationPreparationKey(preparation)
+        || !completionBindsPreparation(row, completion, preparation)) continue;
+      for (const verdict of completion.verdicts) {
+        if (verdict.eventId === excludeSourceVerdictEventId || countedSourceVerdicts.has(verdict.eventId)) continue;
+        const preparedVerdict = preparation.verdicts.find((candidate) => candidate.eventId === verdict.eventId);
+        if (preparedVerdict?.items.some((item) => computeDefectSignature(item.find, item.replace) === signature)) {
+          countedSourceVerdicts.add(verdict.eventId);
+          occurrences += 1;
+        }
+      }
+    } catch {
+      // Invalid preparation payloads or row bindings are not completed-correction evidence.
+    }
   }
   return occurrences;
 }

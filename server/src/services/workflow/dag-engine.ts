@@ -31,8 +31,10 @@ import { and, asc, desc, eq, gte, inArray, is, isNotNull, isNull, lt, lte, ne, o
 import type { Db, IssueExecutionCardJson } from "@paperclipai/db";
 import { withReplacementFirstDelivery } from "./replacement-first-delivery.js";
 import { createQaRemediationRefire } from "./control-flow/qa-remediation.js";
-import { withQaCorrectionFollowupReconcile,
+import { withQaCorrectionFollowupReconcile, currentQaCorrectionSyncTime,
   queueCurrentIssuedQaCorrectionTargets } from "./control-flow/qa-correction-followup-reconcile.js";
+import { QaRemediationAdmissionHold, unresolvedQaRemediationAdmissionPending,
+  type QaRemediationAdmissionContext } from "./control-flow/qa-remediation-admission-root.js";
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
@@ -1032,7 +1034,7 @@ async function syncStepRunsFromIssueState(
       patch.completedAt = null;
     } else if (desiredStatus === "completed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.completedAt ?? now;
+      patch.completedAt = issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
       // When finalization v1 is active, issue-backed steps also need
       // dispatch_ready_at set so downstream edge-condition evaluation admits
       // successors. Heartbeat-linked steps get this via settlement.ts, but
@@ -1047,7 +1049,7 @@ async function syncStepRunsFromIssueState(
       }
     } else if (desiredStatus === "failed") {
       patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? now;
+      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
     } else {
       patch.startedAt = null;
       patch.completedAt = null;
@@ -3239,14 +3241,16 @@ async function loadIssueStatusesForStepRuns(
 
 export async function syncWorkflowRunStateWithOutcome(db: Db, runId: string, source: WorkflowSyncSource = "workflow_sync",
   options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean }): Promise<WorkflowSyncOutcome> {
-  return withQaCorrectionFollowupReconcile(db, runId, () =>
-    withReplacementFirstDelivery(db, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options)));
+  return withQaCorrectionFollowupReconcile(db, runId, (rootDb, admission) =>
+    withReplacementFirstDelivery(rootDb, runId, (tx) => syncWorkflowRunStateCore(tx, runId, source, options, admission, rootDb)));
 }
 async function syncWorkflowRunStateCore(
   db: Db,
   runId: string,
   source: WorkflowSyncSource = "workflow_sync",
   options?: { childStartFence?: ChildStartFence; requireRunning?: boolean; requireMaterialized?: boolean },
+  admission?: QaRemediationAdmissionContext,
+  admissionDb: Db = db,
 ): Promise<WorkflowSyncOutcome> {
   const normalizedSource = normalizeWorkflowSyncSource(source);
   const context = await loadWorkflowExecutionContext(db, runId);
@@ -3460,6 +3464,10 @@ async function syncWorkflowRunStateCore(
         steps: context.steps, stepRuns }),
     });
     stepRuns = reworkResult.stepRuns;
+  }
+  if (admission?.pending.length) {
+    const unresolved = await unresolvedQaRemediationAdmissionPending(admissionDb, admission, runId);
+    if (unresolved.length) throw new QaRemediationAdmissionHold("unresolved_after_back_edge_rework", unresolved);
   }
   // [Hybrid QA] structural gate rework pass — when a structural (deterministic)
   //   tool gate returned request_changes, reset the producer for rework within

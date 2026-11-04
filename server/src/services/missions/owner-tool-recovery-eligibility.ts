@@ -82,7 +82,9 @@ export function classifyOwnerToolSourceFacts(input: {
   const { mission, run, stepRun, step } = input;
   if (run.companyId !== mission.companyId || run.missionId !== mission.id || stepRun.workflowRunId !== run.id)
     return { kind: "held", reason: "source_scope_mismatch" };
-  if (!step || step.id !== stepRun.stepId || step.type !== "tool" || stepRun.issueId !== null || !isIssueLessToolStep(step))
+  // Canonical shape is owned by the shared DAG predicate (omitted type is valid); only the
+  // exact scope, step id and null-issue checks are repeated here.
+  if (!step || step.id !== stepRun.stepId || stepRun.issueId !== null || !isIssueLessToolStep(step))
     return { kind: "held", reason: "source_not_canonical_issue_less_tool" };
   if (stepRun.status === "failed") return { kind: "failed_source" };
   if (stepRun.status !== "completed") return { kind: "held", reason: "source_execution_unsettled" };

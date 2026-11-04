@@ -1,15 +1,22 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { agentApiKeys, agents, agentWakeupRequests, heartbeatRuns, type Db } from "@paperclipai/db";
+import { agentApiKeys, agents, agentWakeupRequests, heartbeatRuns, issueWorkProducts, issues, workflowStepRuns, type Db } from "@paperclipai/db";
 import type { runningProcesses } from "../adapters/index.js";
 import { conflict, notFound } from "../errors.js";
 import { agentService } from "./agents.js";
 import { commitAgentResume } from "./heartbeat-agent-resume.js";
 import { lockPauseFacts, recordPauseScope } from "./heartbeat-pause-intents.js";
 import type { publishLiveEvent } from "./live-events.js";
-import { commitPauseInvalidation, type PauseInvalidationTarget, type PauseInvalidationCause } from "./heartbeat-pause-invalidation.js";
+import { commitPauseInvalidation, withPauseInvalidationOwner, type PauseInvalidationTarget,
+  type PauseInvalidationCause } from "./heartbeat-pause-invalidation.js";
 import type { BudgetEnforcementScope } from "./budgets.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
+
+function cancellationReleaseIsHeld(value: unknown): boolean {
+  if (!value || typeof value !== "object" || !("kind" in value)) return false;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "release_deferred" || kind === "release_held";
+}
 
 export function publishHeartbeatRunStatus(publish: typeof publishLiveEvent, updated: HeartbeatRun) {
   publish({
@@ -101,6 +108,7 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
       error: reason,
     });
 
+    let releaseDisposition: unknown;
     if (cancelled) {
       await appendRunEvent(cancelled, 1, {
         eventType: "lifecycle",
@@ -108,12 +116,12 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
         level: "warn",
         message: "run cancelled",
       });
-      await releaseIssueExecutionAndPromote(cancelled, { resumeQueue });
+      releaseDisposition = await releaseIssueExecutionAndPromote(cancelled, { resumeQueue });
     }
 
     runningProcesses.delete(run.id);
     await finalizeAgentStatus(run.agentId, "cancelled");
-    if (resumeQueue) await startNextQueuedRunForAgent(run.agentId);
+    if (resumeQueue && !cancellationReleaseIsHeld(releaseDisposition)) await startNextQueuedRunForAgent(run.agentId);
     return cancelled;
   }
 
@@ -126,16 +134,18 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
       publishRunStatus(cancelled);
       if (bulk) stopBulkRun(original); else stopSingleRun(original);
     }
+    const heldReleaseAgentIds = new Set<string>();
     for (const { original, cancelled } of committed.changed) {
       if (!bulk) await appendRunEvent(cancelled, 1, {
         eventType: "lifecycle", stream: "system", level: "warn", message: "run cancelled",
       });
-      await releaseIssueExecutionAndPromote(bulk ? original : cancelled);
+      const releaseDisposition = await releaseIssueExecutionAndPromote(bulk ? original : cancelled);
+      if (cancellationReleaseIsHeld(releaseDisposition)) heldReleaseAgentIds.add(original.agentId);
     }
     if (!bulk) {
       for (const agentId of new Set(committed.changed.map(({ original }) => original.agentId))) {
         await finalizeAgentStatus(agentId, "cancelled");
-        await startNextQueuedRunForAgent(agentId);
+        if (!heldReleaseAgentIds.has(agentId)) await startNextQueuedRunForAgent(agentId);
       }
     }
     return committed;
@@ -188,16 +198,44 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
   async function controlAgent(agentId: string, cause: "manual_pause" | "terminate") {
     const reason = "Cancelled due to agent pause";
     const changed = () => { throw conflict("heartbeat_pause_scope_unproven_or_changed"); };
-    const committed = await db.transaction(async tx => {
+    const committed = await withPauseInvalidationOwner(db, { kind: "agent", id: agentId }, (initial, revalidate) =>
+      db.transaction(async tx => {
       const t = tx as unknown as Db;
       const [observed] = await t.select().from(agents).where(eq(agents.id, agentId));
       if (!observed) return null;
       const candidates = await activeRuns(t, agentId);
+      let firstHeadTransactionId: string | undefined;
+      if (initial.records.length === 0) {
+        const [identity] = await t.execute(sql`SELECT txid_current()::text AS xid`);
+        const xid = identity?.xid;
+        if (typeof xid !== "string" || !/^[1-9][0-9]*$/.test(xid)) changed();
+        firstHeadTransactionId = xid as string;
+      }
       const facts = await lockPauseFacts(t, { companyId: observed.companyId, agentId, cause,
         heartbeatRunIds: candidates.map(run => run.id) });
       // lockPauseFacts also locks prior undelivered originals. Never acquire new targets here.
       const runs = await activeRuns(t, agentId);
       if (runs.length !== candidates.length || runs.some((run, index) => run.id !== candidates[index].id)) changed();
+      const pendingSources = initial.revocationPreparations.filter(entry => entry.pending)
+        .flatMap(entry => entry.sourceFiles);
+      const sourceHeartbeatIds = [...new Set(pendingSources.map(source => source.heartbeat.id))].sort();
+      const sourceIssueIds = [...new Set(pendingSources.map(source => source.heartbeat.issueId).filter((id): id is string => !!id))].sort();
+      const sourceStepIds = [...new Set(pendingSources.map(source => source.heartbeat.workflowStepRunId)
+        .filter((id): id is string => !!id))].sort();
+      const sourceProductIds = [...new Set(pendingSources.map(source => source.product.id))].sort();
+      const sourceWakeIds = [...new Set(pendingSources.map(source => source.heartbeat.wakeupRequestId)
+        .filter((id): id is string => !!id))].sort();
+      if (sourceHeartbeatIds.length) await t.select().from(heartbeatRuns).where(inArray(heartbeatRuns.id, sourceHeartbeatIds))
+        .orderBy(heartbeatRuns.id).for("update");
+      if (sourceIssueIds.length) await t.select().from(issues).where(inArray(issues.id, sourceIssueIds))
+        .orderBy(issues.id).for("update");
+      if (sourceStepIds.length) await t.select().from(workflowStepRuns).where(inArray(workflowStepRuns.id, sourceStepIds))
+        .orderBy(workflowStepRuns.id).for("update");
+      if (sourceProductIds.length) await t.select().from(issueWorkProducts).where(inArray(issueWorkProducts.id, sourceProductIds))
+        .orderBy(issueWorkProducts.id).for("update");
+      if (sourceWakeIds.length) await t.select().from(agentWakeupRequests).where(inArray(agentWakeupRequests.id, sourceWakeIds))
+        .orderBy(agentWakeupRequests.id).for("update");
+      await revalidate(t, firstHeadTransactionId);
       const svc = agentService(t);
       const agent = cause === "manual_pause" ? await svc.pause(agentId) : await svc.terminate(agentId);
       if (!agent || agent.status !== (cause === "manual_pause" ? "paused" : "terminated")) return changed();
@@ -226,7 +264,7 @@ export function createHeartbeatAgentCancellation(deps: HeartbeatAgentCancellatio
       // Legacy optional terminal hooks catch errors. A failed SQL statement must still abort this save.
       await t.execute(sql`select 1`);
       return { agent, targets };
-    });
+    }));
     if (!committed) return null;
     for (const { original, cancelled } of committed.targets) {
       publishRunStatus(cancelled);
