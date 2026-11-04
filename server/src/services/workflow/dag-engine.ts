@@ -41,6 +41,7 @@ import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type Work
 import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
+import { buildStepRunMap } from "./dag-step-observation.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -1504,11 +1505,6 @@ async function createWorkflowStepIssue(input: {
   return createdIssue.id;
 }
 
-function buildStepRunMap(
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-): Map<string, typeof workflowStepRuns.$inferSelect> {
-  return new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
-}
 
 /**
  * [목적] completed 된 IF step 의 persisted controlNodeResult 에서 outcome 만 안전하게 유도.
