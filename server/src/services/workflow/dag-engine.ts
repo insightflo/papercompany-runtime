@@ -43,6 +43,7 @@ import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import { buildStepRunMap, toConditionalStepObservation, deriveIfControlOutcome } from "./dag-step-observation.js";
 import { normalizeRecord, getMetadataRecord, readMetadataString } from "./dag-metadata-helpers.js";
+import { renderWorkflowRunTextTemplate } from "./dag-run-text-template.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -124,7 +125,7 @@ import {
 import { upsertWorkflowIssueExecutionCard } from "../issue-execution-cards/workflow-upsert.js";
 import { readExplicitValidationVerdict } from "../validation-verdict.js";
 import { applyWorkProductDependencyGate, collectUniqueStepRunIssueIds, loadWorkProductDependencyGate, reloadWorkflowStepRunsForSameRun } from "./workproduct-dependency-gate.js";
-import { resolveWorkflowToolStepArgs, stringifyWorkflowRunMetadataValue, stripShellEscapeResidue } from "./tool-step-args.js";
+import { resolveWorkflowToolStepArgs, stripShellEscapeResidue } from "./tool-step-args.js";
 import { isStructuralGateStep } from "./control-flow/structural-gate.js";
 import { STEP_MACHINE_CHECKS_TOOL, evaluateStepMachineChecks, renderMachineCheckFailure } from "./step-machine-checks.js";
 import {
@@ -1685,24 +1686,6 @@ function hasRecoverableQaRequestChangesDependency(
   return false;
 }
 
-
-const RUN_METADATA_TEXT_TOKEN = /\{\$runMetadata\.([A-Za-z0-9_]+)\}/g;
-
-function renderWorkflowRunTextTemplate(
-  value: string,
-  run: typeof workflowRuns.$inferSelect,
-): string {
-  const runDate = run.runDate ?? "";
-  const runMetadata = run.metadata ?? {};
-  return value
-    .replaceAll("{$runDate}", runDate)
-    .replaceAll("{$date}", runDate)
-    .replace(RUN_METADATA_TEXT_TOKEN, (token, key: string) => {
-      if (!Object.prototype.hasOwnProperty.call(runMetadata, key)) return token;
-      const rendered = stringifyWorkflowRunMetadataValue(runMetadata[key]);
-      return rendered === null ? token : rendered;
-    });
-}
 
 
 
