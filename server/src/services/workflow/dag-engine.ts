@@ -41,6 +41,7 @@ import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type Work
 import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
+import { buildStepRunMap, toConditionalStepObservation, deriveIfControlOutcome } from "./dag-step-observation.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -108,7 +109,6 @@ import { applyStructuralGatePass, requeueStaleStructuralGatesForBlockedQa } from
 import {
   reviveConditionalSkip,
   settleConditionalSkip,
-  type ConditionalStepObservation,
 } from "./conditional-skip-settlement.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
@@ -1504,29 +1504,7 @@ async function createWorkflowStepIssue(input: {
   return createdIssue.id;
 }
 
-function buildStepRunMap(
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-): Map<string, typeof workflowStepRuns.$inferSelect> {
-  return new Map(stepRuns.map((stepRun) => [stepRun.stepId, stepRun]));
-}
 
-/**
- * [목적] completed 된 IF step 의 persisted controlNodeResult 에서 outcome 만 안전하게 유도.
- *   agent/tool step 이나 누락/잘못된 metadata 에선 빈 객체를 반환해 condition_true/false edge 가
- *   양쪽 모두 비활성(fail-closed) 되게 한다. metadata 는 검증된 스키마로만 통과.
- */
-function deriveIfControlOutcome(
-  step: WorkflowStep,
-  run: typeof workflowStepRuns.$inferSelect | undefined,
-): { controlOutcome?: "condition_true" | "condition_false" } {
-  if (!run || run.status !== "completed") return {};
-  if (typeof step.type !== "string" || step.type !== "if") return {};
-  const raw = run.metadata?.controlNodeResult;
-  if (!raw || typeof raw !== "object") return {};
-  const parsed = workflowControlNodeResultSchema.safeParse(raw);
-  if (!parsed.success || parsed.data.nodeType !== "if") return {};
-  return { controlOutcome: parsed.data.outcome };
-}
 
 async function failMalformedCompletedControlNodes(
   db: Db,
@@ -1639,20 +1617,6 @@ function buildPredFactsMap(
   return facts;
 }
 
-function toConditionalStepObservation(row: typeof workflowStepRuns.$inferSelect): ConditionalStepObservation {
-  return {
-    id: row.id,
-    workflowRunId: row.workflowRunId,
-    stepId: row.stepId,
-    status: row.status,
-    issueId: row.issueId,
-    startedAt: row.startedAt,
-    lastDispatchAttemptAt: row.lastDispatchAttemptAt,
-    dispatchReadyAt: row.dispatchReadyAt,
-    executionGeneration: row.executionGeneration,
-    metadata: row.metadata,
-  };
-}
 
 function findRunnableSteps(
   steps: WorkflowStep[],
