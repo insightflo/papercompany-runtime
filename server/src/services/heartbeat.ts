@@ -54,6 +54,9 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
+import { withAgentStartLock } from "./heartbeat-start-lock.js";
+import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
+import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { resolveHeartbeatFailureCode, isTerminalHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { isWorkflowStepResumeWake } from "./heartbeat-workflow-resume-wake.js";
 import { costService } from "./costs.js";
@@ -409,8 +412,6 @@ export {
 type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
 const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
-const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = 1;
-const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 10;
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 // [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
@@ -448,7 +449,6 @@ function firstDependencyIssueFromDescription(description: string | null | undefi
     targetIssueTitle: match[3].trim(),
   };
 }
-const startLocksByAgent = new Map<string, Promise<void>>();
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const execFile = promisify(execFileCallback);
@@ -645,29 +645,6 @@ const heartbeatRunListColumns = {
   createdAt: heartbeatRuns.createdAt,
   updatedAt: heartbeatRuns.updatedAt,
 } as const;
-
-function normalizeMaxConcurrentRuns(value: unknown) {
-  const parsed = Math.floor(asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT));
-  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
-  return Math.max(HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT, Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed));
-}
-
-async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
-  const previous = startLocksByAgent.get(agentId) ?? Promise.resolve();
-  const run = previous.then(fn);
-  const marker = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  startLocksByAgent.set(agentId, marker);
-  try {
-    return await run;
-  } finally {
-    if (startLocksByAgent.get(agentId) === marker) {
-      startLocksByAgent.delete(agentId);
-    }
-  }
-}
 
 
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
@@ -2356,31 +2333,6 @@ function shouldQueueRunFailureAdapterFallback(input: {
   return true;
 }
 
-// A positive liveness check means some process currently owns the PID.
-// On Linux, PIDs can be recycled, so this is a best-effort signal rather
-// than proof that the original child is still alive.
-function isProcessAlive(pid: number | null | undefined) {
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === "EPERM") return true;
-    if (code === "ESRCH") return false;
-    return false;
-  }
-}
-
-function terminateRecordedProcess(pid: number | null | undefined, signal: NodeJS.Signals = "SIGTERM") {
-  if (!isProcessAlive(pid)) return false;
-  try {
-    process.kill(pid as number, signal);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function truncateDisplayId(value: string | null | undefined, max = 128) {
   if (!value) return null;
