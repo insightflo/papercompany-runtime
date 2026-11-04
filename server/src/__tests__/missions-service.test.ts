@@ -38,6 +38,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { missionPluginManifest } from "./helpers/mission-service-fixtures.js";
+import { cleanMissionServiceFixture } from "./helpers/mission-service-cleanup-fixture.js";
 import { registerMissionOwnerCreationCase } from "./helpers/mission-owner-creation-case.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { buildQaReworkCapDescription } from "../services/missions/qa-rework-cap-oversight.js";
@@ -127,30 +128,7 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
 
   afterEach(async () => {
     setWorkflowToolStepExecutor(null);
-    await db.delete(activityLog);
-    await db.delete(missionDelegations);
-    await db.delete(issueWorkProducts);
-    await db.delete(pluginEntities);
-    await db.delete(missionPlanArtifacts);
-    await db.delete(missionSessions);
-    await db.delete(workflowStepRuns);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(heartbeatRuns);
-    await db.delete(agentWakeupRequests);
-    await db.delete(workflowRuns);
-    await db.delete(workflowDefinitions);
-    await db.delete(plugins);
-    await db.delete(issueComments);
-    await db.delete(issues);
-    await db.delete(missions);
-    await db.delete(agentRuntimeState);
-    await db.delete(companySecrets);
-    await db.delete(companySkills);
-    // assets 는 companies(company_id) 와 agents(created_by_agent_id) 를 참조하므로
-    // 두 부모 테이블보다 먼저 비운다(첨부 FK teardown 누락 수정).
-    await db.delete(assets);
-    await db.delete(agents);
-    await db.delete(companies);
+    await cleanMissionServiceFixture(db);
   });
 
   afterAll(async () => {
