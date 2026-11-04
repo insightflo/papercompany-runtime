@@ -270,7 +270,7 @@ type HeartbeatServiceOptions = {
 
 // A root Db keeps its explicitly supplied owner runtime across bare service recreation.
 // The WeakMap keys by the exact Db object and does not share execution contexts or roots.
-import { sameHeartbeatExecutionAttempt } from "./heartbeat-attempt-identity.js";
+import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun } from "./heartbeat-attempt-identity.js";
 
 const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
 
@@ -348,18 +348,7 @@ function producedExecutionScopeKind(run: typeof heartbeatRuns.$inferSelect,
   return "automation_nonworkflow";
 }
 
-function heartbeatActualIdentityMatchesRun(identity: HeartbeatActualDrainIdentity,
-  run: typeof heartbeatRuns.$inferSelect) {
-  return identity.heartbeatRunId === run.id && identity.companyId === run.companyId
-    && identity.issueId === run.issueId && identity.wakeupRequestId === run.wakeupRequestId
-    && identity.workflowStepRunId === run.workflowStepRunId
-    && identity.executionGeneration === run.workflowExecutionGeneration
-    && identity.executionScopeKind === run.executionScopeKind && identity.executionEpoch === run.executionEpoch
-    && identity.executionToken === run.executionToken && identity.executorOwnerId === run.executorOwnerId
-    && identity.ownerLeaseEpoch === run.executorOwnerLeaseEpoch
-    && identity.ownerLeaseToken === run.executorOwnerLeaseToken && identity.retryOfRunId === run.retryOfRunId
-    && identity.processLossRetryCount === run.processLossRetryCount;
-}
+
 import { createSkippedWakeWriter, promoteQueuedWakeupRequestsForAgent, selectQueuedAgentIds, selectDeferredWakeupRequest, failFollowupWake, type HeartbeatFollowupQueueDeps } from "./heartbeat-followup-queue.js";
 import { isStoredOperatorDecisionWake, promoteStoredDeferredWakes } from "./heartbeat-stored-recovery-admission.js";
 import { promoteQueuedWakeupRequest, promoteDeferredWakeupRequest, insertInitialWakeupRun, insertQueuedHeartbeat, type HeartbeatFollowupPromotionDeps } from "./heartbeat-followup-promotion.js";
