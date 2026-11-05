@@ -100,7 +100,7 @@ describe("plugin tool execution idempotency receipts", () => {
   const runContext = { agentId: "agent-1", runId: "run-1", companyId: COMPANY_ID };
   const receiptRows = () => db.select().from(pluginToolExecutionReceipts);
 
-  /** Pre-seed a receipt row for takeover/freshness tests. */
+  /** Pre-seed a receipt row for in-progress and replay tests. */
   const seedReceipt = (tool: string, key: string, values: Record<string, unknown>) =>
     db.insert(pluginToolExecutionReceipts).values({
       companyId: COMPANY_ID,
@@ -162,21 +162,20 @@ describe("plugin tool execution idempotency receipts", () => {
     expect(rows[0].status).toBe("executing");
   });
 
-  it("(d) executing receipt claimed 11 minutes ago is taken over and re-executed", async () => {
+  it("(d) executing receipt claimed 11 minutes ago stays in progress", async () => {
     const tool = "acme.linear:stale-tool";
     await seedReceipt(tool, "K-D", { claimedAt: new Date(Date.now() - 11 * 60 * 1000) });
 
     const dispatcher = makeDispatcher(tool, vi.fn().mockResolvedValue({ content: "recovered" }));
     const res = await post(createApp(dispatcher), { tool, runContext, idempotencyKey: "K-D" });
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ content: "recovered" });
-    expect(dispatcher.executeTool).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(409);
+    expect(dispatcher.executeTool).not.toHaveBeenCalled();
 
     const rows = await receiptRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe("completed");
-    expect(rows[0].resultStatus).toBe(200);
-    expect(rows[0].completedAt).not.toBeNull();
+    expect(rows[0].status).toBe("executing");
+    expect(rows[0].resultStatus).toBeNull();
+    expect(rows[0].completedAt).toBeNull();
   });
 
   it("(e) request without a key keeps legacy behavior and leaves no receipt rows", async () => {

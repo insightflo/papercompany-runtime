@@ -1,57 +1,36 @@
-import { and, eq, lt } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import { pluginToolExecutionReceipts } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
+import {
+  decodeRetainedToolOutcome, encodeRetainedToolRequest, jsonEqual, requestForRow, ToolReceiptPersistenceError, validRequest,
+  type JsonValue, type OriginalWorkflowAuthority, type ReceiptDb, type RetainedToolRequest,
+} from "./plugin-tool-receipt-envelope.js";
 
-/**
- * Tool execution receipt claims for `POST /api/plugins/tools/execute`.
- *
- * One receipt row per (company, run, tool, idempotency key): the unique index
- * `plugin_tool_execution_receipts_identity_uq` makes the claim insert atomic,
- * so exactly one concurrent request wins the claim and executes the tool.
- * A `completed` receipt replays its stored response instead of re-running the
- * tool's side effects (lost-HTTP-response retry safety). An `executing`
- * receipt answers in-progress while fresh and can be taken over after
- * {@link TOOL_EXECUTION_TAKEOVER_MS} so a crashed execution never silently
- * blocks the key forever.
- *
- * Only responses from real execution paths are recorded. Validation,
- * authorization, tool-not-found, and unconfigured-dispatcher outcomes never
- * complete a receipt; a claim whose request turns out not to execute at all
- * (tool not found) releases its own row so the same key stays usable.
- *
- * Key stability is the caller's responsibility: reusing one key for two
- * different logical tool calls makes the second call an unintended replay.
- *
- * @see server/src/services/plugin-webhook-receipt.ts — the sibling receipt idiom
- */
+export {
+  completeRetainedToolReceipt, decodeRetainedToolActual, decodeRetainedToolOutcome,
+  stageRetainedToolOutcome, ToolReceiptPersistenceError,
+} from "./plugin-tool-receipt-envelope.js";
+export type {
+  ActualToolOutcome, OriginalWorkflowAuthority, RetainedDisposition, RetainedResponse, RetainedToolRequest,
+} from "./plugin-tool-receipt-envelope.js";
 
-/** A claimed-but-unfinished receipt older than this may be taken over. */
+/** An executing receipt is held regardless of age: age is not proof of an unsent call. */
 export const TOOL_EXECUTION_TAKEOVER_MS = 10 * 60 * 1000;
-
-/** Max accepted idempotencyKey length. */
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 200;
-
-/** Bounded attempts to resolve a claim race before failing closed. */
 const CLAIM_ATTEMPTS = 3;
 
-/**
- * Validate and normalize a caller-supplied idempotency key, or null when the
- * value can never form a valid key (wrong type, blank, overlong).
- */
 export function normalizeIdempotencyKey(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed.length > IDEMPOTENCY_KEY_MAX_LENGTH) return null;
-  return trimmed;
+  return trimmed.length > 0 && trimmed.length <= IDEMPOTENCY_KEY_MAX_LENGTH ? trimmed : null;
 }
 
 export interface ClaimToolExecutionReceiptInput {
   companyId: string;
-  /** Raw runContext.runId string. */
   runId: string;
   tool: string;
   idempotencyKey: string;
-  /** Original request parameters (audit copy). */
   parameters: unknown;
 }
 
@@ -60,6 +39,7 @@ export type ToolExecutionReceiptDecision =
   | { kind: "replay"; status: number; body: unknown }
   | { kind: "in-progress" };
 
+type ReceiptRow = typeof pluginToolExecutionReceipts.$inferSelect;
 const identityColumns = [
   pluginToolExecutionReceipts.companyId,
   pluginToolExecutionReceipts.runId,
@@ -67,119 +47,147 @@ const identityColumns = [
   pluginToolExecutionReceipts.idempotencyKey,
 ];
 
-/**
- * Atomically claim the receipt for one logical tool call, or report what the
- * existing row dictates (replay / still in progress). Fail closed (throw) if
- * the insert/read race cannot be resolved — the caller's bounded retry path
- * re-drives the request.
- */
-export async function claimToolExecutionReceipt(
-  db: Db,
-  input: ClaimToolExecutionReceiptInput,
-): Promise<ToolExecutionReceiptDecision> {
-  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
-    const inserted = await db
-      .insert(pluginToolExecutionReceipts)
-      .values({
-        companyId: input.companyId,
-        runId: input.runId,
-        tool: input.tool,
-        idempotencyKey: input.idempotencyKey,
-        status: "executing",
-        requestParameters: input.parameters ?? {},
-        claimedAt: new Date(),
-      })
-      .onConflictDoNothing({ target: identityColumns })
-      .returning({ id: pluginToolExecutionReceipts.id });
-    if (inserted.length > 0) return { kind: "claim", receiptId: inserted[0].id };
-
-    const [existing] = await db
-      .select({
-        id: pluginToolExecutionReceipts.id,
-        status: pluginToolExecutionReceipts.status,
-        resultStatus: pluginToolExecutionReceipts.resultStatus,
-        resultBody: pluginToolExecutionReceipts.resultBody,
-        claimedAt: pluginToolExecutionReceipts.claimedAt,
-      })
-      .from(pluginToolExecutionReceipts)
-      .where(
-        and(
-          eq(pluginToolExecutionReceipts.companyId, input.companyId),
-          eq(pluginToolExecutionReceipts.runId, input.runId),
-          eq(pluginToolExecutionReceipts.tool, input.tool),
-          eq(pluginToolExecutionReceipts.idempotencyKey, input.idempotencyKey),
-        ),
-      );
-    if (!existing) continue; // receipt vanished between conflict and read — retry
-
-    if (existing.status === "completed") {
-      // Lost HTTP response retry: replay the recorded terminal response.
-      return { kind: "replay", status: existing.resultStatus ?? 500, body: existing.resultBody ?? {} };
-    }
-
-    // Concurrent execution holds a fresh claim; an abandoned one (crashed
-    // execution) is taken over with a refreshed audit copy.
-    const cutoff = new Date(Date.now() - TOOL_EXECUTION_TAKEOVER_MS);
-    const took = await db
-      .update(pluginToolExecutionReceipts)
-      .set({ claimedAt: new Date(), requestParameters: input.parameters ?? {} })
-      .where(
-        and(
-          eq(pluginToolExecutionReceipts.id, existing.id),
-          eq(pluginToolExecutionReceipts.status, "executing"),
-          lt(pluginToolExecutionReceipts.claimedAt, cutoff),
-        ),
-      )
-      .returning({ id: pluginToolExecutionReceipts.id });
-    if (took.length > 0) return { kind: "claim", receiptId: existing.id };
-    return { kind: "in-progress" };
-  }
-  // Fail closed: no execution without an owned receipt.
-  throw new Error(
-    `Tool execution receipt race unresolved after ${CLAIM_ATTEMPTS} attempts ` +
-      `(company ${input.companyId}, run ${input.runId}, tool ${input.tool}, key ${input.idempotencyKey})`,
+function identityWhere(input: ClaimToolExecutionReceiptInput) {
+  return and(
+    eq(pluginToolExecutionReceipts.companyId, input.companyId),
+    eq(pluginToolExecutionReceipts.runId, input.runId),
+    eq(pluginToolExecutionReceipts.tool, input.tool),
+    eq(pluginToolExecutionReceipts.idempotencyKey, input.idempotencyKey),
   );
 }
 
-/**
- * Record the terminal response of a real execution on the claimed receipt.
- * The body must already be condensed (replay equals the first response).
- */
+function existingDecision(row: ReceiptRow): ToolExecutionReceiptDecision {
+  const request = requestForRow(row);
+  if (request) {
+    if (request.consumer !== "http-keyed" || row.status !== "completed") return { kind: "in-progress" };
+    const outcome = decodeRetainedToolOutcome(row.resultBody);
+    if (!outcome || outcome.receiptId !== row.id || !outcome.response || outcome.disposition ||
+        row.resultStatus !== outcome.response.status || row.completedAt === null ||
+        row.workflowRunId !== (request.workflow?.workflowRunId ?? null) ||
+        row.stepId !== (request.workflow?.stepId ?? null)) return { kind: "in-progress" };
+    return { kind: "replay", status: outcome.response.status, body: outcome.response.body };
+  }
+  if (row.status === "completed") {
+    return { kind: "replay", status: row.resultStatus ?? 500, body: row.resultBody ?? {} };
+  }
+  return { kind: "in-progress" };
+}
+
+/** Existing keyed callers retain their response shape; an existing executing row is never taken over. */
+export async function claimToolExecutionReceipt(
+  db: Db, input: ClaimToolExecutionReceiptInput,
+): Promise<ToolExecutionReceiptDecision> {
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
+    const [inserted] = await db.insert(pluginToolExecutionReceipts).values({
+      companyId: input.companyId, runId: input.runId, tool: input.tool, idempotencyKey: input.idempotencyKey,
+      status: "executing", requestParameters: input.parameters ?? {}, claimedAt: new Date(),
+    }).onConflictDoNothing({ target: identityColumns }).returning({ id: pluginToolExecutionReceipts.id });
+    if (inserted) return { kind: "claim", receiptId: inserted.id };
+    const [existing] = await db.select().from(pluginToolExecutionReceipts).where(identityWhere(input));
+    if (existing) return existingDecision(existing);
+  }
+  throw new ToolReceiptPersistenceError("collision");
+}
+
+/** Insert a random internal identity only; a collision never adopts the existing row. */
+export async function insertInternalToolReceipt(
+  db: ReceiptDb,
+  input: {
+    companyId: string; tool: string; parameters: unknown; consumer: "workflow" | "http-internal";
+    workflow?: OriginalWorkflowAuthority;
+  },
+): Promise<RetainedToolRequest> {
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
+    const owner: RetainedToolRequest = {
+      kind: "paperclip.retained-tool-request", version: 1, receiptId: randomUUID(),
+      consumer: input.consumer, companyId: input.companyId, tool: input.tool,
+      parameters: (input.parameters === undefined ? {} : input.parameters) as JsonValue,
+      identity: { runId: randomUUID(), idempotencyKey: randomUUID() },
+      ...(input.workflow ? { workflow: input.workflow } : {}),
+    };
+    if (!validRequest(owner)) throw new ToolReceiptPersistenceError("invalid");
+    const [inserted] = await db.insert(pluginToolExecutionReceipts).values({
+      id: owner.receiptId, companyId: owner.companyId, runId: owner.identity.runId, tool: owner.tool,
+      idempotencyKey: owner.identity.idempotencyKey, status: "executing", requestParameters: encodeRetainedToolRequest(owner),
+    }).onConflictDoNothing().returning();
+    if (inserted && jsonEqual(requestForRow(inserted), owner) && inserted.status === "executing" &&
+        inserted.resultBody === null && inserted.resultStatus === null && inserted.completedAt === null) return owner;
+    if (inserted) throw new ToolReceiptPersistenceError("write");
+  }
+  throw new ToolReceiptPersistenceError("collision");
+}
+
+/** New keyed consumers insert their own envelope, but never adopt a caller-created row. */
+export async function claimRetainedKeyedToolReceipt(
+  db: ReceiptDb, input: ClaimToolExecutionReceiptInput,
+): Promise<{ kind: "claim"; owner: RetainedToolRequest } | Exclude<ToolExecutionReceiptDecision, { kind: "claim" }>> {
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
+    const owner: RetainedToolRequest = {
+      kind: "paperclip.retained-tool-request", version: 1, receiptId: randomUUID(), consumer: "http-keyed",
+      companyId: input.companyId, tool: input.tool,
+      parameters: (input.parameters === undefined ? {} : input.parameters) as JsonValue,
+      identity: { runId: input.runId, idempotencyKey: input.idempotencyKey },
+    };
+    if (!validRequest(owner)) throw new ToolReceiptPersistenceError("invalid");
+    const [inserted] = await db.insert(pluginToolExecutionReceipts).values({
+      id: owner.receiptId, companyId: owner.companyId, runId: owner.identity.runId, tool: owner.tool,
+      idempotencyKey: owner.identity.idempotencyKey, status: "executing", requestParameters: encodeRetainedToolRequest(owner),
+    }).onConflictDoNothing().returning();
+    if (inserted && jsonEqual(requestForRow(inserted), owner) && inserted.status === "executing" &&
+        inserted.resultBody === null && inserted.resultStatus === null && inserted.completedAt === null) {
+      return { kind: "claim", owner };
+    }
+    if (inserted) throw new ToolReceiptPersistenceError("write");
+    const [existing] = await db.select().from(pluginToolExecutionReceipts).where(identityWhere(input));
+    if (existing) return existingDecision(existing) as Exclude<ToolExecutionReceiptDecision, { kind: "claim" }>;
+  }
+  throw new ToolReceiptPersistenceError("collision");
+}
+
+/** Complete a legacy receipt only after a verified update or identical completed readback. */
 export async function completeToolExecutionReceipt(
-  db: Db,
+  db: ReceiptDb,
   receiptId: string,
   result: { status: number; body: unknown; workflowRunId?: string | null; stepId?: string | null },
 ): Promise<void> {
-  await db
-    .update(pluginToolExecutionReceipts)
-    .set({
-      status: "completed",
-      resultStatus: result.status,
-      resultBody: result.body ?? {},
-      completedAt: new Date(),
-      workflowRunId: result.workflowRunId ?? null,
-      stepId: result.stepId ?? null,
-    })
-    .where(
-      and(
-        eq(pluginToolExecutionReceipts.id, receiptId),
-        eq(pluginToolExecutionReceipts.status, "executing"),
-      ),
-    );
+  let body: unknown;
+  try {
+    body = JSON.parse(JSON.stringify(result.body ?? {}));
+  } catch {
+    throw new ToolReceiptPersistenceError("invalid");
+  }
+  const workflowRunId = result.workflowRunId ?? null;
+  const stepId = result.stepId ?? null;
+  const matches = (row: ReceiptRow) => row.status === "completed" && row.completedAt !== null &&
+    row.resultStatus === result.status && jsonEqual(row.resultBody, body) &&
+    row.workflowRunId === workflowRunId && row.stepId === stepId && !requestForRow(row);
+  await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(pluginToolExecutionReceipts)
+      .where(eq(pluginToolExecutionReceipts.id, receiptId)).for("update");
+    if (!row) throw new ToolReceiptPersistenceError("missing");
+    if (requestForRow(row)) throw new ToolReceiptPersistenceError("owner");
+    if (row.status === "completed") {
+      if (!matches(row)) throw new ToolReceiptPersistenceError("conflict");
+      return;
+    }
+    const [written] = await tx.update(pluginToolExecutionReceipts).set({
+      status: "completed", resultStatus: result.status, resultBody: body, completedAt: new Date(), workflowRunId, stepId,
+    }).where(and(eq(pluginToolExecutionReceipts.id, receiptId), eq(pluginToolExecutionReceipts.status, "executing")))
+      .returning();
+    if (written && matches(written)) return;
+    const [readback] = await tx.select().from(pluginToolExecutionReceipts).where(eq(pluginToolExecutionReceipts.id, receiptId));
+    if (!readback || !matches(readback)) throw new ToolReceiptPersistenceError("write");
+  });
 }
 
-/**
- * Release this request's own claim when the request turns out not to execute
- * any tool (tool not found) so the same key remains usable for a valid call.
- * Never touches rows owned by other requests (guarded by status and id).
- */
+/** Legacy callers release their own definitely-unexecuted claim only. */
 export async function releaseToolExecutionReceipt(db: Db, receiptId: string): Promise<void> {
-  await db
-    .delete(pluginToolExecutionReceipts)
-    .where(
-      and(
-        eq(pluginToolExecutionReceipts.id, receiptId),
-        eq(pluginToolExecutionReceipts.status, "executing"),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(pluginToolExecutionReceipts)
+      .where(eq(pluginToolExecutionReceipts.id, receiptId)).for("update");
+    if (row && requestForRow(row)) throw new ToolReceiptPersistenceError("owner");
+    await tx.delete(pluginToolExecutionReceipts).where(and(
+      eq(pluginToolExecutionReceipts.id, receiptId), eq(pluginToolExecutionReceipts.status, "executing"),
+    ));
+  });
 }
