@@ -45,6 +45,24 @@ export type LockedChildStartContext = {
   child: typeof workflowRuns.$inferSelect;
 };
 
+export type WorkflowTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type LockedChildStartRows = {
+  parent: typeof workflowRuns.$inferSelect | null;
+  invocation: typeof workflowStepInvocations.$inferSelect | null;
+  parentStep: typeof workflowStepRuns.$inferSelect | null;
+  child: typeof workflowRuns.$inferSelect | null;
+};
+
+/** Lock the expected identifiers in order; callers validate the returned relationships. */
+export async function lockChildStartIdentityRows(tx: WorkflowTx, identity: ChildStartIdentity): Promise<LockedChildStartRows> {
+  await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`);
+  const [parent] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, identity.parentRunId)).for("update").limit(1);
+  const [invocation] = await tx.select().from(workflowStepInvocations).where(eq(workflowStepInvocations.id, identity.invocationId)).for("update").limit(1);
+  const [parentStep] = await tx.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, identity.parentStepRunId)).for("update").limit(1);
+  const [child] = await tx.select().from(workflowRuns).where(eq(workflowRuns.id, identity.childRunId)).for("update").limit(1);
+  return { parent: parent ?? null, invocation: invocation ?? null, parentStep: parentStep ?? null, child: child ?? null };
+}
+
 export async function setChildStartLockTimeouts(tx: Db): Promise<void> { await tx.execute(sql`select set_config('lock_timeout', '500ms', true), set_config('statement_timeout', '5s', true)`); }
 
 /**
