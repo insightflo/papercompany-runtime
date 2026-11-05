@@ -1,3 +1,5 @@
+import type { agents } from "@paperclipai/db";
+import { resolveSessionCompactionPolicy, type SessionCompactionPolicy } from "@paperclipai/adapter-utils";
 import { HttpError } from "../errors.js";
 import { getServerAdapter } from "../adapters/index.js";
 import type { AdapterExecutionResult, AdapterSessionCodec } from "../adapters/index.js";
@@ -178,4 +180,8 @@ export function resolveNextSessionState(input: {
     displayId,
     legacySessionId,
   };
+}
+
+export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
+  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
 }
