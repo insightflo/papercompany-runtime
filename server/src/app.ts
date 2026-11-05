@@ -17,6 +17,7 @@ import { metricsRoutes } from "./routes/metrics.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { toolDefinitionRoutes } from "./routes/tool-definitions.js";
+import { TOOL_PROGRESS_ROUTE_PATH } from "./routes/tool-progress.js";
 import { companyInstructionRoutes } from "./routes/company-instructions.js";
 import { missionPlanTemplateRoutes } from "./routes/mission-plan-templates.js";
 import { agentRoutes } from "./routes/agents.js";
@@ -94,6 +95,9 @@ import { registerTelegramCommands } from "./channel/telegram/commands.js";
 import { getChatId } from "./channel/telegram/outbound.js";
 import { startAlertMonitor } from "./channel/telegram/alerts.js";
 import { completeWorkflowToolStepFromResult, setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker, type WorkflowToolStepExecutor } from "./services/workflow/dag-engine.js";
+import { runtimeExecutionLifecycle } from "./services/runtime-execution-lifecycle.js";
+import { createHttpHandlerLifetime } from "./services/http-handler-lifetime.js";
+import { waitForHeartbeatExecutionsToDrain } from "./services/heartbeat-execution-tracker.js";
 import { registerNativeWorkflowToolResultEventHandlers } from "./services/workflow/tool-result-events.js";
 import { checkCoreWorkflowToolsAvailable, executeCoreWorkflowTool, resolveWorkflowRunStepEnv } from "./services/workflow/core-tool-executor.js";
 import { createPluginToolConsumer } from "./services/plugin-tool-consumer.js";
@@ -109,6 +113,11 @@ import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 type ApiAliasSurface = "work-items" | "work-contexts" | "execution-contexts" | "recurring-procedures";
+
+function isHttpCoreExecuteRequest(req: ExpressRequest): boolean {
+  if (req.method.toUpperCase() !== "POST") return false;
+  return /^\/api\/plugins\/tools\/execute\/?$/i.test(req.path) || req.path === "/plugins/tools/execute";
+}
 
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
@@ -264,6 +273,7 @@ export function createAppWorkflowToolStepExecutor(input: {
   };
 }
 
+import { createWorkflowToolExecutionTracker, createViteDevServerShutdownOwner, createAppRuntimeShutdownController, type AppRuntimeShutdown } from "./services/runtime-shutdown-controller.js";
 export { createWorkflowToolExecutionTracker, createViteDevServerShutdownOwner, createRuntimeShutdownFlight, createAppRuntimeShutdownController } from "./services/runtime-shutdown-controller.js";
 export type { AppRuntimeShutdown, RuntimeShutdownSignal } from "./services/runtime-shutdown-controller.js";
 
@@ -285,9 +295,117 @@ export async function createApp(
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     socialAuthProviders?: readonly PublicSocialAuthProvider[];
+    onRuntimeShutdown?: (controller: AppRuntimeShutdown) => void;
+    drainAdditionalProducers?: () => Promise<void>;
   },
-) {
+): Promise<express.Express & { runtimeShutdown: AppRuntimeShutdown }> {
   const app = express();
+  const httpHandlerLifetime = createHttpHandlerLifetime();
+  type ShutdownOwner = { stop(): void; drain(): Promise<void> };
+  let stopping = runtimeExecutionLifecycle.shutdownState() !== null;
+  let channelStart: Promise<void> | null = null;
+  let channelStop: Promise<void> | null = null;
+  let loader: ReturnType<typeof pluginLoader> | null = null;
+  let hostServiceCleanup: ReturnType<typeof createPluginHostServiceCleanup> | null = null;
+  let toolDispatcher: ReturnType<typeof createPluginToolDispatcher> | null = null;
+  const stopActions = new Map<string, () => void>();
+  const stoppedActions = new Set<string>();
+  const ownerDrains = new Map<string, () => Promise<void>>();
+  const missingOptionalDrains = new Set<string>();
+  const stopFailures: Array<{ name: string; error: unknown }> = [];
+  const startupWork = new Set<Promise<unknown>>();
+  const workflowToolExecutions = createWorkflowToolExecutionTracker();
+  const viteDevServer = createViteDevServerShutdownOwner();
+
+  const trackStartup = <T>(promise: Promise<T>): Promise<T> => {
+    startupWork.add(promise);
+    void promise.then(
+      () => startupWork.delete(promise),
+      () => startupWork.delete(promise),
+    );
+    return promise;
+  };
+  const stopOwner = (name: string) => {
+    if (stoppedActions.has(name)) return;
+    stoppedActions.add(name);
+    try {
+      stopActions.get(name)?.();
+    } catch (error) {
+      stopFailures.push({ name, error });
+      logger.error({ err: error, owner: name }, "Runtime shutdown owner failed to stop");
+    }
+  };
+  const registerStop = (name: string, stop: () => void) => {
+    stopActions.set(name, stop);
+    if (stopping) stopOwner(name);
+  };
+  const registerOwner = (name: string, owner: ShutdownOwner) => {
+    registerStop(name, () => owner.stop());
+    ownerDrains.set(name, () => owner.drain());
+  };
+  const registerOptionalOwner = (name: string, owner: { stop(): void; drain?: () => Promise<void> } | null) => {
+    if (!owner) return;
+    registerStop(name, () => owner.stop());
+    if (typeof owner.drain === "function") ownerDrains.set(name, () => owner.drain!());
+    else missingOptionalDrains.add(name);
+  };
+
+  const runtimeShutdown = createAppRuntimeShutdownController({
+    stopStarts() {
+      stopping = true;
+      httpHandlerLifetime.stopIndependentStarts();
+      for (const name of stopActions.keys()) stopOwner(name);
+    },
+    async drainStartup() {
+      while (startupWork.size > 0) await Promise.allSettled([...startupWork]);
+    },
+    async drainProducers() {
+      const owners = [...ownerDrains.keys()];
+      const drains = [...ownerDrains.values()];
+      if (opts.drainAdditionalProducers) {
+        owners.push("server-heartbeat-scheduler");
+        drains.push(opts.drainAdditionalProducers);
+      }
+      const outcomes = await Promise.allSettled(drains.map((drain) => drain()));
+      const failures = outcomes.flatMap((outcome, index) => outcome.status === "rejected"
+        ? [{ owner: owners[index], error: outcome.reason }]
+        : []);
+      if (missingOptionalDrains.size > 0) {
+        failures.push(...[...missingOptionalDrains].map((owner) => ({
+          owner,
+          error: new Error("enabled optional shutdown owner does not expose drain()"),
+        })));
+      }
+      failures.push(...stopFailures.map(({ name, error }) => ({ owner: name, error })));
+      if (failures.length > 0) {
+        throw new AggregateError(failures.map((failure) => failure.error),
+          `Runtime shutdown producer drain failed: ${failures.map((failure) => failure.owner).join(", ")}`);
+      }
+    },
+    async shutdownPlugins() {
+      if (!loader) throw new Error("Plugin loader was not initialized before shutdown");
+      await loader.shutdownAll();
+    },
+    async drainExecutions() {
+      await workflowToolExecutions.drain();
+    },
+    drainHeartbeats: () => waitForHeartbeatExecutionsToDrain(db),
+    drainHttpProducers: () => httpHandlerLifetime.drain("independent"),
+    sealHttpIngress: () => httpHandlerLifetime.sealIngress(),
+    drainHttpCallbacks: () => httpHandlerLifetime.drain("callback"),
+    async disposeResources() {
+      setWorkflowToolStepExecutor(null);
+      setWorkflowToolStepReadinessChecker(null);
+      hostServiceCleanup?.disposeAll();
+      hostServiceCleanup?.teardown();
+      toolDispatcher?.teardown();
+      await flushPluginLogBuffer();
+      await viteDevServer.close();
+    },
+  });
+  Object.assign(app, { runtimeShutdown });
+  opts.onRuntimeShutdown?.(runtimeShutdown);
+  if (stopping) runtimeShutdown.stopStarts();
 
   // WBS 3A: HTTP 요청 count/duration/status를 라우트 템플릿 단위로 기록한다.
   // 가장 앞에 마운트해 body 파싱 실패 응답까지 포함하고, 수집 실패가 요청
@@ -321,11 +439,29 @@ export async function createApp(
       bindHost: opts.bindHost,
     }),
   );
+  app.use((req, res, next) => {
+    if (!isHttpCoreExecuteRequest(req)) {
+      next();
+      return;
+    }
+    if (!httpHandlerLifetime.enter(req, "independent")) {
+      res.status(503).json({ error: "Runtime is shutting down" });
+      return;
+    }
+    next();
+  });
+  app.post(`/api${TOOL_PROGRESS_ROUTE_PATH}`, (req, res, next) => {
+    if (!httpHandlerLifetime.enter(req, "callback")) {
+      res.status(503).json({ error: "Runtime is shutting down" });
+      return;
+    }
+    next();
+  });
   app.use(
-    actorMiddleware(db, {
+    httpHandlerLifetime.wrapStage(actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
       resolveSession: opts.resolveSession,
-    }),
+    })),
   );
   app.get("/api/auth/get-session", (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
@@ -443,7 +579,16 @@ export async function createApp(
     }
     next();
   });
-  api.use(boardMutationGuard());
+  const mutationGuard = boardMutationGuard();
+  const completeOriginDenial = httpHandlerLifetime.wrapTerminal(() => undefined);
+  api.use((req, res, next) => {
+    let forwarded = false;
+    mutationGuard(req, res, (...args) => {
+      forwarded = true;
+      return next(...args);
+    });
+    if (!forwarded && res.headersSent) completeOriginDenial(req, res, next);
+  });
   api.use(
     "/health",
     healthRoutes(db, {
@@ -510,7 +655,7 @@ export async function createApp(
   }, "Workflow scheduler ownership mode");
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, { workerManager });
-  const pluginScheduler = createPluginJobScheduler({
+  const pluginSchedulerInstance = createPluginJobScheduler({
     db,
     jobStore,
     workerManager,
@@ -518,18 +663,21 @@ export async function createApp(
       ? [{ pluginKey: "insightflo.workflow-engine", jobKey: "workflow-reconciler" }]
       : [],
   });
-  const toolDispatcher = createPluginToolDispatcher({
+  registerStop("plugin-scheduler", () => pluginSchedulerInstance.stop());
+  const toolDispatcherInstance = createPluginToolDispatcher({
     workerManager,
     lifecycleManager: lifecycle,
     db,
   });
+  toolDispatcher = toolDispatcherInstance;
   api.use(toolDefinitionRoutes(db, {
-    toolDispatcher,
+    toolDispatcher: toolDispatcherInstance,
     strictSecretsMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
+    httpHandlerLifetime,
   }));
 
   setWorkflowToolStepReadinessChecker(async ({ companyId, toolNames }) => {
-    const nonPluginToolNames = toolNames.filter((toolName) => !toolDispatcher.getTool(toolName));
+    const nonPluginToolNames = toolNames.filter((toolName) => !toolDispatcherInstance.getTool(toolName));
     if (nonPluginToolNames.length === 0) {
       return { available: true };
     }
@@ -537,23 +685,30 @@ export async function createApp(
     return checkCoreWorkflowToolsAvailable(db, { companyId, toolNames: nonPluginToolNames });
   });
 
-  setWorkflowToolStepExecutor(createAppWorkflowToolStepExecutor({ db, toolDispatcher }));
-  const jobCoordinator = createPluginJobCoordinator({
+  const appWorkflowExecutor = createAppWorkflowToolStepExecutor({ db, toolDispatcher: toolDispatcherInstance });
+  const trackedWorkflowExecutor: WorkflowToolStepExecutor = (request) => {
+    const execution = appWorkflowExecutor(request);
+    return workflowToolExecutions.track(execution) as ReturnType<WorkflowToolStepExecutor>;
+  };
+  setWorkflowToolStepExecutor(trackedWorkflowExecutor);
+  const jobCoordinatorInstance = createPluginJobCoordinator({
     db,
     lifecycle,
-    scheduler: pluginScheduler,
+    scheduler: pluginSchedulerInstance,
     jobStore,
   });
-  const hostServiceCleanup = createPluginHostServiceCleanup(lifecycle, hostServicesDisposers);
-  const loader = pluginLoader(
+  registerOwner("plugin-job-coordinator", jobCoordinatorInstance);
+  const hostServiceCleanupInstance = createPluginHostServiceCleanup(lifecycle, hostServicesDisposers);
+  hostServiceCleanup = hostServiceCleanupInstance;
+  const loaderInstance = pluginLoader(
     db,
     { localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR },
     {
       workerManager,
       eventBus,
-      jobScheduler: pluginScheduler,
+      jobScheduler: pluginSchedulerInstance,
       jobStore,
-      toolDispatcher,
+      toolDispatcher: toolDispatcherInstance,
       lifecycleManager: lifecycle,
       instanceInfo: {
         instanceId: opts.instanceId ?? "default",
@@ -574,14 +729,16 @@ export async function createApp(
       },
     },
   );
+  loader = loaderInstance;
   api.use(
     pluginRoutes(
       db,
-      loader,
-      { scheduler: pluginScheduler, jobStore },
+      loaderInstance,
+      { scheduler: pluginSchedulerInstance, jobStore },
       { workerManager },
-      { toolDispatcher },
+      { toolDispatcher: toolDispatcherInstance },
       { workerManager },
+      { lifetime: httpHandlerLifetime, runtimeLifecycle: runtimeExecutionLifecycle },
     ),
   );
   api.use(
@@ -602,8 +759,17 @@ export async function createApp(
     api(req, res, next);
   });
   app.use("/api", api);
-  app.use("/api", (_req, res) => {
+  app.use("/api", httpHandlerLifetime.wrapTerminal((_req, res) => {
     res.status(404).json({ error: "API route not found" });
+  }));
+  app.use((req, res, next) => {
+    if (req.method === "POST" && req.path === "/plugins/tools/execute") {
+      httpHandlerLifetime.wrapTerminal((_req, response) => {
+        response.status(404).json({ error: "API route not found" });
+      })(req, res, next);
+      return;
+    }
+    next();
   });
   app.use(pluginUiStaticRoutes(db, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
@@ -642,6 +808,7 @@ export async function createApp(
         allowedHosts: privateHostnameGateEnabled ? Array.from(privateHostnameAllowSet) : undefined,
       },
     });
+    viteDevServer.attach(vite);
 
     app.use(vite.middlewares);
     app.get(/.*/, async (req, res, next) => {
@@ -656,7 +823,7 @@ export async function createApp(
     });
   }
 
-  app.use(errorHandler);
+  app.use(httpHandlerLifetime.wrapError(errorHandler));
 
   // Initialize and start the scheduler
   const heartbeat = heartbeatService(db);
@@ -668,7 +835,7 @@ export async function createApp(
     heartbeat,
     { requestedByActorId: "mission-owner-supervision-monitor", contextSource: "mission_owner_supervision_plan_rework" },
   );
-  const scheduler = createScheduler(db, {
+  const schedulerInstance = createScheduler(db, {
     heartbeat: {
       enqueueWakeup: (agentId, opts) => heartbeat.wakeup(agentId, {
         source: opts?.source === "scheduler" ? "scheduler" : "automation",
@@ -678,28 +845,37 @@ export async function createApp(
       }),
     },
   });
-  scheduler.start();
+  registerOwner("general-cron", schedulerInstance);
+  if (!stopping) schedulerInstance.start();
 
   // Initialize channel registry (Telegram bots)
-  const channelRegistry = createChannelRegistry(db);
-  void channelRegistry.start()
-    .then(() => {
-      for (const companyId of channelRegistry.getActiveCompanyIds()) {
-        registerTelegramCommands(db, companyId);
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "Failed to start channel registry");
-    });
+  const channels = createChannelRegistry(db);
+  if (!stopping) {
+    channelStart = trackStartup(channels.start()
+      .then(() => {
+        if (stopping) return;
+        for (const companyId of channels.getActiveCompanyIds()) registerTelegramCommands(db, companyId);
+      })
+      .catch((err) => logger.error({ err }, "Failed to start channel registry")));
+  }
+  registerStop("channel-registry", () => {
+    channelStop ??= (async () => {
+      await channelStart;
+      await channels.stop();
+    })();
+  });
+  ownerDrains.set("channel-registry", async () => {
+    if (channelStop) await channelStop;
+  });
 
   // Initialize alert rules — broadcast to all registered Telegram chats
-  const alertRules = createAlertRules(
-    () => scheduler.getState(),
+  const alertRulesInstance = createAlertRules(
+    () => schedulerInstance.getState(),
     async (message) => {
-      for (const companyId of channelRegistry.getActiveCompanyIds()) {
+      for (const companyId of channels.getActiveCompanyIds()) {
         const chatId = getChatId(companyId);
         if (chatId === undefined) continue;
-        const sender = channelRegistry.getTelegramSender(companyId);
+        const sender = channels.getTelegramSender(companyId);
         if (!sender) continue;
         try {
           await sender(chatId, message);
@@ -709,23 +885,27 @@ export async function createApp(
       }
     },
   );
-  setAlertRules(alertRules);
-  alertRules.start();
+  setAlertRules(alertRulesInstance);
+  registerStop("alert-rules", () => alertRulesInstance.stop());
+  if (!stopping) alertRulesInstance.start();
 
   // Start Telegram alert monitor — worktree violation spike detection (P9-T9)
-  const stopAlertMonitor = startAlertMonitor(db);
-  process.once("exit", stopAlertMonitor);
+  const stopTelegramAlertMonitor = !stopping ? startAlertMonitor(db) : null;
+  if (stopTelegramAlertMonitor) registerStop("telegram-alert-monitor", stopTelegramAlertMonitor);
 
-  const srbRetryWorker = createDeliveryRetryWorker(db);
-  srbRetryWorker.start();
+  const deliveryRetryWorker = createDeliveryRetryWorker(db);
+  registerOwner("srb-delivery-retry", deliveryRetryWorker);
+  if (!stopping) deliveryRetryWorker.start();
 
-  const srbNonceCleanup = createNonceCleanupJob(db);
-  srbNonceCleanup.start();
+  const nonceCleanup = createNonceCleanupJob(db);
+  registerOwner("srb-nonce-cleanup", nonceCleanup);
+  if (!stopping) nonceCleanup.start();
 
-  const auditLogCleanup = createAuditLogCleanupJob(db);
-  auditLogCleanup.start();
+  const auditCleanup = createAuditLogCleanupJob(db);
+  registerOwner("audit-log-cleanup", auditCleanup);
+  if (!stopping) auditCleanup.start();
 
-  const missionOwnerSupervisionMonitor = createMissionOwnerSupervisionMonitor(db, {
+  const missionOwnerMonitor = createMissionOwnerSupervisionMonitor(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {
       return heartbeat.wakeup(mission.ownerAgentId, {
         source: "assignment",
@@ -983,110 +1163,104 @@ export async function createApp(
     },
     onPlanQaIssueCreated: enqueuePlanQaWakeup,
   });
-  missionOwnerSupervisionMonitor.start();
-  process.once("exit", () => missionOwnerSupervisionMonitor.stop());
+  registerOwner("mission-owner-supervision", missionOwnerMonitor);
+  if (!stopping) missionOwnerMonitor.start();
 
-  const nativeWorkflowScheduler = workflowSchedulerOwnership.mode === "native-shadow"
+  const nativeScheduler = workflowSchedulerOwnership.mode === "native-shadow"
     ? createNativeWorkflowScheduler({ db, mode: "shadow" })
     : workflowSchedulerOwnership.mode === "native-active-plugin-disabled"
       ? createNativeWorkflowScheduler({ db, mode: "active" })
     : null;
-  nativeWorkflowScheduler?.start();
-  if (nativeWorkflowScheduler) {
-    process.once("exit", () => nativeWorkflowScheduler.stop());
+  if (nativeScheduler) {
+    registerOwner("native-workflow-scheduler", nativeScheduler);
+    if (!stopping) nativeScheduler.start();
   }
 
   // Native workflow reconciler: failed step 이후 running 으로 방치되는 stuck run
   // (60min+)과 orphan step run 을 주기 정리. plugin workflow-reconciler
   // (insightflo.workflow-engine) 가 비활성화된 배포에서만 동작한다.
-  const nativeWorkflowReconciler = workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled
+  const nativeReconciler = workflowSchedulerOwnership.pluginReconcilerEffectiveDisabled
     ? createNativeWorkflowReconciler({ db, timeoutMinutes: 60 })
     : null;
-  nativeWorkflowReconciler?.start();
-  if (nativeWorkflowReconciler) {
-    process.once("exit", () => nativeWorkflowReconciler.stop());
+  if (nativeReconciler) {
+    registerOwner("native-workflow-reconciler", nativeReconciler);
+    if (!stopping) nativeReconciler.start();
   }
 
   // Agent Wiki Phase 3 — SkillOpt-Sleep 자가진화 루프. AGENT_WIKI_EVOLUTION_ENABLED=1 일 때만
   // 활성화(default off, 실험적). 반복 실패(frequency≥5)를 agent 영구 promptTemplate 에 bounded-edit 후
   // 관찰창(24h) 동안 실패 추이로 수락/기각. 비활성 시 loop 자체를 생성하지 않아 완전 inert.
-  const agentWikiEvolutionLoop = agentWikiEvolutionOwnership.enabled
+  const wikiEvolutionLoop = agentWikiEvolutionOwnership.enabled
     ? createAgentWikiEvolutionLoop({ db })
     : null;
-  agentWikiEvolutionLoop?.start();
-  if (agentWikiEvolutionLoop) {
-    process.once("exit", () => agentWikiEvolutionLoop.stop());
-  }
+  registerOptionalOwner("agent-wiki-evolution", wikiEvolutionLoop);
+  if (wikiEvolutionLoop && !stopping) wikiEvolutionLoop.start();
 
   // 판단 계층 B-2 — PLAN-QA 사후 관측(섀도) 파일럿. PAPERCLIP_JUDGMENT_ENABLED=1 일 때만 등록
   // (default off). 이미 저장된 PLAN-QA 판정을 사후 관측해 judgment_calls 감사행만 남긴다.
   // 어떤 판정·상태·이슈도 변경하지 않는다(순수 관측). 비활성 시 loop 자체를 생성하지 않는다.
-  const planQaShadowLoop = planQaShadowOwnership.enabled
+  const planQaLoop = planQaShadowOwnership.enabled
     ? createPlanQaShadowLoop({ db })
     : null;
-  planQaShadowLoop?.start();
-  if (planQaShadowLoop) {
-    process.once("exit", () => planQaShadowLoop.stop());
-  } else if (typeof db.select === "function" && typeof db.insert === "function") {
+  registerOptionalOwner("plan-qa-shadow", planQaLoop);
+  if (planQaLoop && !stopping) planQaLoop.start();
+  else if (!planQaLoop && !stopping && typeof db.select === "function" && typeof db.insert === "function") {
     // 판단 게이트가 꺼져도 도구 정의는 존재할 수 있으며, grant는 만들지 않는다.
-    void seedAgentJudgmentTool(db).catch((err) => {
+    trackStartup(seedAgentJudgmentTool(db).catch((err) => {
       logger.error({ err }, "Failed to seed agent judgment tool");
-    });
+    }));
   }
-  if (typeof db.select === "function" && typeof db.insert === "function") {
-    void seedHtmlPreflightTool(db).catch((err) => {
+  if (!stopping && typeof db.select === "function" && typeof db.insert === "function") {
+    trackStartup(seedHtmlPreflightTool(db).catch((err) => {
       logger.error({ err }, "Failed to seed html-preflight tool");
-    });
+    }));
   }
 
   // 판단 계층 stage 2 — agent-judgment 섀도 리플레이(캘리브레이션 수집). 같은 게이트
   // (PAPERCLIP_JUDGMENT_ENABLED)에서 plan-qa 섀도와 병렬 등록된다. 별도 정의 이름
   // "agent-judgment-shadow"로 감사행만 남기며 실판정(agent-judgment)·실행제어와 무접촉이다.
   // [300줄 초과 레거시 예외] plan-qa 섀도 등록 블록의 병렬 선례 최소 추가(4줄).
-  const agentShadowLoop = resolveAgentShadowOwnership().enabled
+  const agentShadowLoopInstance = resolveAgentShadowOwnership().enabled
     ? createAgentJudgmentShadowLoop({ db })
     : null;
-  agentShadowLoop?.start();
-  if (agentShadowLoop) {
-    process.once("exit", () => agentShadowLoop.stop());
-  }
+  registerOptionalOwner("agent-judgment-shadow", agentShadowLoopInstance);
+  if (agentShadowLoopInstance && !stopping) agentShadowLoopInstance.start();
 
-  pluginScheduler.start();
-  jobCoordinator.start();
+  if (!stopping) pluginSchedulerInstance.start();
+  if (!stopping) jobCoordinatorInstance.start();
 
   // [서버 시작 점검] Hermes Ops(adapter hermes_local + heartbeat timer 유일)에게 상태 점검 +
   // 사장에게 telegram 보고 를 지시. wakeOnDemand agent 들은 재부팅/크래시 후 자동 진행을 안 하므로,
   // 사장이 telegram 지시로 풀도록 Hermes Ops 가 running run / todo·pending step / stuck 을 점검·보고.
   // 매 interval timer(불필요 토큰) 대신 시작 1회 wake.
-  void (async () => {
-    try {
-      const opsAgents = await db
-        .select({ id: agents.id })
-        .from(agents)
-        .where(
-          and(
+  if (!stopping) {
+    trackStartup((async () => {
+      try {
+        const opsAgents = await db
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(
             eq(agents.adapterType, "hermes_local"),
             sql`${agents.runtimeConfig} -> 'heartbeat' ->> 'enabled' = 'true'`,
-          ),
-        );
-      for (const a of opsAgents) {
-        void heartbeat
-          .wakeup(a.id, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: "server_startup_state_check",
-            contextSnapshot: {},
-          })
-          .catch((err) => logger.warn({ err, agentId: a.id }, "Server startup: Hermes Ops wake failed"));
+          ));
+        if (stopping) return;
+        await Promise.all(opsAgents.map((agent) => heartbeat.wakeup(agent.id, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "server_startup_state_check",
+          contextSnapshot: {},
+        }).catch((err) => logger.warn({ err, agentId: agent.id }, "Server startup: Hermes Ops wake failed"))));
+      } catch (err) {
+        logger.warn({ err }, "Server startup: failed to wake Hermes Ops for state check");
       }
-    } catch (err) {
-      logger.warn({ err }, "Server startup: failed to wake Hermes Ops for state check");
-    }
-  })();
-  void toolDispatcher.initialize().catch((err) => {
-    logger.error({ err }, "Failed to initialize plugin tool dispatcher");
-  });
-  const devWatcher = opts.uiMode === "vite-dev"
+    })());
+  }
+  if (!stopping) {
+    trackStartup(toolDispatcherInstance.initialize().catch((err) => {
+      logger.error({ err }, "Failed to initialize plugin tool dispatcher");
+    }));
+  }
+  const devWatcherInstance = !stopping && opts.uiMode === "vite-dev"
     ? createPluginDevWatcher(
       lifecycle,
       async (pluginId) => {
@@ -1096,29 +1270,23 @@ export async function createApp(
       },
     )
     : null;
-  void loader.loadAll().then((result) => {
+  if (devWatcherInstance) registerStop("plugin-dev-watcher", () => devWatcherInstance.close());
+  if (!stopping) trackStartup(loaderInstance.loadAll().then((result) => {
     if (!result) return;
     for (const loaded of result.results) {
       if (
-        devWatcher
+        !stopping
+        && devWatcherInstance
         && loaded.success
         && loaded.plugin.packagePath
         && !isCoreIntegratedPluginKey(loaded.plugin.pluginKey)
       ) {
-        devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
+        devWatcherInstance.watch(loaded.plugin.id, loaded.plugin.packagePath);
       }
     }
   }).catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
-  });
-  process.once("exit", () => {
-    devWatcher?.close();
-    hostServiceCleanup.disposeAll();
-    hostServiceCleanup.teardown();
-  });
-  process.once("beforeExit", () => {
-    void flushPluginLogBuffer();
-  });
+  }));
 
-  return app;
+  return Object.assign(app, { runtimeShutdown });
 }

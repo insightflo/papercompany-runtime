@@ -1,14 +1,21 @@
-import { Router, json } from "express";
+import { Router, json, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { toolProgressEventSchema } from "@paperclipai/shared";
 import { z } from "zod";
+import type { createHttpHandlerLifetime } from "../services/http-handler-lifetime.js";
 import { ToolProgressError } from "../services/tools/progress-policy.js";
 import { createToolProgressStore } from "../services/tools/progress-store.js";
 
-export function toolProgressRoutes(db: Db) {
+export const TOOL_PROGRESS_ROUTE_PATH = "/companies/:companyId/tool-executions/:executionId/progress";
+
+type ToolProgressRoutesOptions = {
+  httpHandlerLifetime?: ReturnType<typeof createHttpHandlerLifetime>;
+};
+
+export function toolProgressRoutes(db: Db, options: ToolProgressRoutesOptions = {}) {
   const router = Router();
   const store = createToolProgressStore(db);
-  router.post("/companies/:companyId/tool-executions/:executionId/progress", json({ limit: "4kb" }), async (req, res) => {
+  const acceptProgress: RequestHandler = async (req, res) => {
     const companyId = z.string().uuid().safeParse(req.params.companyId);
     const executionId = z.string().uuid().safeParse(req.params.executionId);
     const token = req.header("X-Papercompany-Progress-Token");
@@ -28,6 +35,11 @@ export function toolProgressRoutes(db: Db) {
       res.status(error instanceof ToolProgressError ? error.status : 500)
         .json({ error: error instanceof ToolProgressError ? error.reason : "tool_progress_db_failure" });
     }
-  });
+  };
+  router.post(
+    TOOL_PROGRESS_ROUTE_PATH,
+    json({ limit: "4kb" }),
+    options.httpHandlerLifetime?.wrapTerminal(acceptProgress) ?? acceptProgress,
+  );
   return router;
 }
