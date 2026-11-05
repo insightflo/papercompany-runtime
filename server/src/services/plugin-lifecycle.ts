@@ -331,6 +331,20 @@ export function pluginLifecycleManager(
   function assertCurrent(pluginId: string, value: number | null | undefined, duringDeactivation = false): void {
     if (value === null || (value !== undefined && pluginLoaderInstance.getRuntimeGeneration?.(pluginId, duringDeactivation) !== value)) throw new Error("Plugin activation was superseded");
   }
+  // A status write and its event must finish before teardown can commit its own status.
+  const statusTails = new Map<string, Promise<void>>();
+  async function withStatusLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = statusTails.get(pluginId);
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    statusTails.set(pluginId, tail);
+    if (previous) await previous;
+    try { return await operation(); }
+    finally {
+      if (statusTails.get(pluginId) === tail) statusTails.delete(pluginId);
+      release();
+    }
+  }
 
   // -----------------------------------------------------------------------
   // Internal helpers
@@ -452,7 +466,11 @@ export function pluginLifecycleManager(
     // -- load -------------------------------------------------------------
     async load(pluginId: string): Promise<PluginRecord> {
       const current = generation(pluginId); assertCurrent(pluginId, current);
-      const result = await transition(pluginId, "ready"); assertCurrent(pluginId, current);
+      const result = await withStatusLock(pluginId, async () => {
+        assertCurrent(pluginId, current);
+        return transition(pluginId, "ready");
+      });
+      assertCurrent(pluginId, current);
       await activateReadyPlugin(pluginId);
       assertCurrent(pluginId, current);
 
@@ -470,17 +488,21 @@ export function pluginLifecycleManager(
     // -- enable -----------------------------------------------------------
     async enable(pluginId: string): Promise<PluginRecord> {
       const current = generation(pluginId); assertCurrent(pluginId, current);
-      const plugin = await requirePlugin(pluginId); assertCurrent(pluginId, current);
+      const result = await withStatusLock(pluginId, async () => {
+        assertCurrent(pluginId, current);
+        const plugin = await requirePlugin(pluginId); assertCurrent(pluginId, current);
 
-      // Only allow enabling from disabled, error, or upgrade_pending states
-      if (plugin.status !== "disabled" && plugin.status !== "error" && plugin.status !== "upgrade_pending") {
-        throw badRequest(
-          `Cannot enable plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'disabled', 'error', or 'upgrade_pending' status to be enabled.`,
-        );
-      }
+        // Only allow enabling from disabled, error, or upgrade_pending states
+        if (plugin.status !== "disabled" && plugin.status !== "error" && plugin.status !== "upgrade_pending") {
+          throw badRequest(
+            `Cannot enable plugin in status '${plugin.status}'. ` +
+              `Plugin must be in 'disabled', 'error', or 'upgrade_pending' status to be enabled.`,
+          );
+        }
 
-      const result = await transition(pluginId, "ready", null, plugin); assertCurrent(pluginId, current);
+        return transition(pluginId, "ready", null, plugin);
+      });
+      assertCurrent(pluginId, current);
       await activateReadyPlugin(pluginId);
       assertCurrent(pluginId, current);
       emitDomain("plugin.enabled", {
@@ -504,9 +526,11 @@ export function pluginLifecycleManager(
 
       const release = await deactivatePluginRuntime(pluginId, plugin.pluginKey);
       try {
-        const result = await transition(pluginId, "disabled", reason ?? null, plugin);
-        emitDomain("plugin.disabled", { pluginId, pluginKey: result.pluginKey, reason });
-        return result;
+        return await withStatusLock(pluginId, async () => {
+          const result = await transition(pluginId, "disabled", reason ?? null);
+          emitDomain("plugin.disabled", { pluginId, pluginKey: result.pluginKey, reason });
+          return result;
+        });
       } finally { release(); }
     },
 
@@ -541,26 +565,36 @@ export function pluginLifecycleManager(
 
       const release = await deactivatePluginRuntime(pluginId, plugin.pluginKey);
       try {
-        await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
+        return await withStatusLock(pluginId, async () => {
+          const current = await requirePlugin(pluginId);
+          if (current.status === "uninstalled") {
+            if (!removeData) throw badRequest(`Plugin ${current.pluginKey} is already uninstalled. Use removeData=true to permanently delete it.`);
+            await pluginLoaderInstance.cleanupInstallArtifacts(current);
+            const deleted = await registry.uninstall(pluginId, true);
+            emitDomain("plugin.unloaded", { pluginId, pluginKey: current.pluginKey, removeData: true });
+            return deleted as PluginRecord | null;
+          }
+          await pluginLoaderInstance.cleanupInstallArtifacts(current);
 
-        // Perform the uninstall via registry (handles soft/hard delete)
-        const result = await registry.uninstall(pluginId, removeData);
+          // Perform the uninstall via registry (handles soft/hard delete)
+          const result = await registry.uninstall(pluginId, removeData);
 
-        log.info(
-          { pluginId, pluginKey: plugin.pluginKey, removeData },
-          `plugin lifecycle: ${plugin.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
-        );
+          log.info(
+            { pluginId, pluginKey: plugin.pluginKey, removeData },
+            `plugin lifecycle: ${current.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
+          );
 
-        emitter.emit("plugin.status_changed", {
-          pluginId,
-          pluginKey: plugin.pluginKey,
-          previousStatus: plugin.status,
-          newStatus: "uninstalled" as PluginStatus,
+          emitter.emit("plugin.status_changed", {
+            pluginId,
+            pluginKey: plugin.pluginKey,
+            previousStatus: current.status,
+            newStatus: "uninstalled" as PluginStatus,
+          });
+
+          emitDomain("plugin.unloaded", { pluginId, pluginKey: plugin.pluginKey, removeData });
+
+          return result as PluginRecord | null;
         });
-
-        emitDomain("plugin.unloaded", { pluginId, pluginKey: plugin.pluginKey, removeData });
-
-        return result as PluginRecord | null;
       } finally { release(); }
     },
 
@@ -572,9 +606,11 @@ export function pluginLifecycleManager(
       const plugin = await requirePlugin(pluginId);
       const release = await deactivatePluginRuntime(pluginId, plugin.pluginKey);
       try {
-        const result = await transition(pluginId, "error", error, plugin);
-        emitDomain("plugin.error", { pluginId, pluginKey: result.pluginKey, error });
-        return result;
+        return await withStatusLock(pluginId, async () => {
+          const result = await transition(pluginId, "error", error);
+          emitDomain("plugin.error", { pluginId, pluginKey: result.pluginKey, error });
+          return result;
+        });
       } finally { release(); }
     },
 
@@ -583,9 +619,11 @@ export function pluginLifecycleManager(
       const plugin = await requirePlugin(pluginId);
       const release = await deactivatePluginRuntime(pluginId, plugin.pluginKey);
       try {
-        const result = await transition(pluginId, "upgrade_pending", null, plugin);
-        emitDomain("plugin.upgrade_pending", { pluginId, pluginKey: result.pluginKey });
-        return result;
+        return await withStatusLock(pluginId, async () => {
+          const result = await transition(pluginId, "upgrade_pending");
+          emitDomain("plugin.upgrade_pending", { pluginId, pluginKey: result.pluginKey });
+          return result;
+        });
       } finally { release(); }
     },
 
@@ -637,13 +675,21 @@ export function pluginLifecycleManager(
         const addedCaps = newManifest.capabilities.filter((cap) => !oldManifest.capabilities.includes(cap));
         if (addedCaps.length > 0) {
           log.info({ pluginId, pluginKey: plugin.pluginKey, addedCaps }, "plugin lifecycle: new capabilities detected, transitioning to upgrade_pending");
-          const result = await transition(pluginId, "upgrade_pending", null, plugin); assertCurrent(pluginId, current, true);
-          emitDomain("plugin.upgrade_pending", { pluginId, pluginKey: result.pluginKey });
+          const result = await withStatusLock(pluginId, async () => {
+            assertCurrent(pluginId, current, true);
+            const updated = await transition(pluginId, "upgrade_pending", null, plugin); assertCurrent(pluginId, current, true);
+            emitDomain("plugin.upgrade_pending", { pluginId, pluginKey: updated.pluginKey });
+            return updated;
+          });
           return result;
         }
-        const result = await transition(pluginId, "ready", null, {
-          ...plugin, version: discovered.version, manifestJson: newManifest,
-        } as PluginRecord); assertCurrent(pluginId, current, true);
+        const result = await withStatusLock(pluginId, async () => {
+          assertCurrent(pluginId, current, true);
+          return transition(pluginId, "ready", null, {
+            ...plugin, version: discovered.version, manifestJson: newManifest,
+          } as PluginRecord);
+        });
+        assertCurrent(pluginId, current, true);
         release(); assertCurrent(pluginId, current);
         await activateReadyPlugin(pluginId); assertCurrent(pluginId, current);
         emitDomain("plugin.loaded", { pluginId, pluginKey: result.pluginKey });
