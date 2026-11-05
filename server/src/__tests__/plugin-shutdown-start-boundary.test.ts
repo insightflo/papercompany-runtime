@@ -78,7 +78,7 @@ describe("plugin shutdown start boundary", () => {
     await db.delete(pluginToolExecutionReceipts);
   });
 
-  function appFor(registered: boolean, executeTool = vi.fn()) {
+  function appFor(registered: boolean, executeToolObserved = vi.fn()) {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -86,7 +86,7 @@ describe("plugin shutdown start boundary", () => {
       next();
     });
     app.use("/api", pluginRoutes(db, {} as never, undefined, undefined, { toolDispatcher: {
-      listToolsForAgent: vi.fn(), getTool: vi.fn(() => registered ? { namespacedName: TOOL } : null), executeTool,
+      listToolsForAgent: vi.fn(), getTool: vi.fn(() => registered ? { namespacedName: TOOL } : null), executeToolObserved,
     } as never }, undefined));
     app.use(errorHandler);
     return app;
@@ -160,15 +160,18 @@ describe("plugin shutdown start boundary", () => {
   });
 
   it("plugin route releases the idempotency claim and never records a deferred success", async () => {
-    const executeTool = vi.fn().mockResolvedValue(deferredResult());
-    const app = appFor(true, executeTool);
+    const executeToolObserved = vi.fn((_tool: string, _parameters: unknown, _context: unknown, identity: typeof workflowIdentity) => ({
+      kind: "deferred_before_start" as const, pluginId: "fixture.plugin", toolName: "publish", identity,
+      deferredBeforeStart: { ...deferredBeforeStart, ...identity },
+    }));
+    const app = appFor(true, executeToolObserved);
     const first = await post(app, "plugin-deferred");
     const second = await post(app, "plugin-deferred");
 
     expect(first.status).toBe(503);
-    expect(first.body).toEqual({ deferredBeforeStart });
+    expect(first.body).toEqual({ deferredBeforeStart: { ...deferredBeforeStart, ...executeToolObserved.mock.calls[0]![3] } });
     expect(second.headers["x-idempotent-replay"]).toBeUndefined();
-    expect(executeTool).toHaveBeenCalledTimes(2);
+    expect(executeToolObserved).toHaveBeenCalledTimes(2);
     expect(await db.select().from(pluginToolExecutionReceipts)).toHaveLength(0);
   });
 
