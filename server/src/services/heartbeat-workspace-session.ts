@@ -1,4 +1,5 @@
 import path from "node:path";
+import { parseObject } from "../adapters/utils.js";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import { readNonEmptyString } from "./heartbeat-run-context.js";
 
@@ -84,4 +85,21 @@ export function resolveRuntimeSessionParamsForWorkspace(input: {
       `Project workspace "${projectCwd}" is now available. ` +
       `Attempting to resume session "${previousSessionId}" that was previously saved in fallback workspace "${previousCwd}".`,
   };
+}
+
+export function hasResumableSessionForRun(
+  runtime: {
+    sessionId: string | null;
+    sessionParams: Record<string, unknown> | null;
+  },
+  cwd: string,
+) {
+  return (
+    typeof runtime.sessionId === "string" &&
+    runtime.sessionId.length > 0 &&
+    (() => {
+      const runtimeSessionCwd = readNonEmptyString(parseObject(runtime.sessionParams).cwd) ?? "";
+      return runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(cwd);
+    })()
+  );
 }
