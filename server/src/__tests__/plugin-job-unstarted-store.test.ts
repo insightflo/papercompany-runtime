@@ -14,6 +14,7 @@ import { createPluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import { executeQueuedPluginJob } from "../services/plugin-job-replay.js";
 import { createRuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 import { nextCronTick, parseCron } from "../services/cron.js";
+import { assertScheduledRunAfterChange } from "./plugin-job-schedule-change-assertions.js";
 
 const PLUGIN_ID = "5361684c-d394-4712-8998-e718ef682147";
 const JOB_ID = "0c1feb0a-220f-44b6-a071-fc5b9b11b53b";
@@ -182,16 +183,11 @@ describe("plugin queued run ownership", () => {
     expect(await store.finalizeClaimedRun(run!.id, claimed.claimToken!, { status: "succeeded" })).toBe("finalized");
   });
 
-  it.each(["schedule", "pointer"])("finalizes without overwriting a changed %s", async (change) => {
-    const store = pluginJobStore(db);
-    const { run } = await store.createOrReuseQueuedScheduledRun({ jobId: JOB_ID, pluginId: PLUGIN_ID });
-    const claimed = (await store.claimQueuedRun(run!.id))!;
-    const changed = change === "schedule" ? { schedule: "*/5 * * * *" } : { nextRunAt: new Date("2026-10-29T09:00:00Z") };
-    await db.update(pluginJobs).set(changed).where(eq(pluginJobs.id, JOB_ID));
-    expect(await store.finalizeClaimedRun(run!.id, claimed.claimToken!, { status: "failed", error: "real failure" })).toBe("finalized");
-    expect(await store.getRunById(run!.id)).toMatchObject({ status: "failed", error: "real failure" });
-    expect(await store.getJobById(JOB_ID)).toMatchObject({ ...changed, lastRunAt: null });
-  });
+  it.each(["schedule", "pointer", "schedule_and_pointer", "removed_schedule", "invalid_schedule", "clock_rollback", "update_rollback"] as const)(
+    "reconciles a changed %s after a scheduled run", async (change) => {
+      await assertScheduledRunAfterChange({ db, jobId: JOB_ID, pluginId: PLUGIN_ID, due: DUE }, change);
+    },
+  );
 
   it.each(["manual", "retry"] as const)("does not move the schedule pointer for %s", async (trigger) => {
     const store = pluginJobStore(db);
