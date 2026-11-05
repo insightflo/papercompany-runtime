@@ -5,19 +5,20 @@
 //   guard, verdict handling logic, and verdict persistence invocation.
 
 import type { WorkflowStep } from "../dag-engine.js";
-import { and, eq, isNull } from "drizzle-orm";
-import { workflowStepRuns } from "@paperclipai/db";
+import type { Db } from "@paperclipai/db";
+import { HttpError } from "../../../errors.js";
 import { isStructuralGateStep } from "./structural-gate.js";
 import {
   parseStructuralGateVerdict,
-  recordStructuralGateVerdict,
   type StructuralGateVerdict,
 } from "./structural-gate-ledger.js";
 import type { StructuralGateProducerToken } from "./structural-gate.js";
-import {
-  recordWorkflowStepStatusTransition,
-  type WorkflowSyncSource,
-} from "../workflow-sync-source.js";
+import type { WorkflowSyncSource } from "../workflow-sync-source.js";
+import { discoverLegacyStructuralScope, withWorkflowToolLockScope,
+  type ExpectedWorkflowToolScope, type RawWorkflowToolScope } from "../workflow-tool-lock-scope.js";
+import { loadExecutionDefinition } from "../execution-definition.js";
+import { isWorkflowChildStep } from "../workflow-child-guards.js";
+import { StructuralCompletionCasLost, writeStructuralCompletionInTransaction } from "./structural-completion-write.js";
 
 export { isStructuralGateStep, parseStructuralGateVerdict };
 
@@ -94,8 +95,8 @@ export interface AtomicStructuralResult extends StructuralCompletionResult {
  * Structural callbacks require non-empty requestId. The ledger idempotency key
  * and conflict lookup are exact to (companyId, workflowStepRunId, requestId).
  */
-export async function atomicStructuralCompletion(input: {
-  db: import("@paperclipai/db").Db;
+export type AtomicStructuralCompletionInput = {
+  db: Db;
   step: WorkflowStep | undefined;
   success: boolean;
   data: unknown;
@@ -105,127 +106,113 @@ export async function atomicStructuralCompletion(input: {
   missionId?: string | null;
   issueId?: string | null;
   source?: WorkflowSyncSource;
-  requestId: string; // required non-empty for structural gates
-  /** Observed step run state for CAS */
+  requestId: string;
   observedStatus: string;
   observedIterationIndex: number | null;
   observedRequestId: string | null;
   observedCompletedAt: Date | null;
-  /** [PR-3 세대 울타리 — 봇 bug·medium 교정] 관측 시점의 스텝 세대. 종결/복구가 세대를
-   *  올리면 상태·iteration·requestId 는 그대로일 수 있어 기존 CAS 만으로는 낡은 구조
-   *  게이트 완료가 통과한다 — 세대 조건이 그 사각을 막는다. 프로덕션 진입
-   *  (completeWorkflowToolStepFromResult) 은 항상 전달하며, 미지정(레거시/테스트) 이면
-   *  조건을 생략해 기존 CAS 계약을 유지한다. */
   observedExecutionGeneration?: number | null;
-  /** Captured at dispatch; binds this verdict to the producer generation. */
   producerToken: StructuralGateProducerToken | null;
-  /** Immutable callback details. The status/error portion is derived inside
-   * the transaction from the authoritative (possibly conflict-resolved)
-   * ledger verdict, never from an untrusted duplicate callback. */
   patch: {
     startedAt: Date;
     completedAt: Date;
     metadata: Record<string, unknown>;
     fallbackFailureSummary: string | null;
   };
-}): Promise<AtomicStructuralResult> {
-  const {
-    db, step, success, data, companyId, workflowRunId,
-    workflowStepRunId, missionId, issueId, source, requestId,
-    observedStatus, observedIterationIndex, observedRequestId, observedCompletedAt, producerToken,
-    observedExecutionGeneration,
-    patch,
-  } = input;
+};
 
-  const structuralVerdict = success && isStructuralGateStep(step) && producerToken
-    ? parseStructuralGateVerdict(data)
-    : null;
-
-  let effectiveVerdict: StructuralGateVerdict | null = structuralVerdict;
-  let casWon = true;
-
-  await db.transaction(async (tx) => {
-    // 1. Record verdict ledger row (onConflictDoNothing within tx)
-    if (structuralVerdict !== null && producerToken) {
-      const ledgerResult = await recordStructuralGateVerdict({
-        db: tx,
-        companyId,
-        workflowRunId,
-        workflowStepRunId,
-        missionId,
-        verdict: structuralVerdict,
-        toolResultData: data,
-        requestId,
-        producerToken,
-      });
-      effectiveVerdict = ledgerResult.authoritativeVerdict;
-    }
-
-    const completion = deriveStructuralCompletion(success, step, effectiveVerdict);
-
-    // 2. CAS update step run — exact observed state match. This runs after
-    // exact request-scoped conflict resolution, so status always follows the
-    // official ledger row rather than an incoming duplicate callback body.
-    const casConditions = [
-      eq(workflowStepRuns.id, workflowStepRunId),
-      eq(workflowStepRuns.status, observedStatus),
-      eq(workflowStepRuns.iterationIndex, observedIterationIndex ?? 0),
-      ...(observedExecutionGeneration != null
-        ? [eq(workflowStepRuns.executionGeneration, observedExecutionGeneration)]
-        : []),
-    ];
-    if (observedRequestId) {
-      casConditions.push(eq(workflowStepRuns.lastDispatchRequestId, observedRequestId));
-    } else {
-      casConditions.push(isNull(workflowStepRuns.lastDispatchRequestId));
-    }
-    if (observedCompletedAt) {
-      casConditions.push(eq(workflowStepRuns.completedAt, observedCompletedAt));
-    } else {
-      casConditions.push(isNull(workflowStepRuns.completedAt));
-    }
-
-    const casResult = await tx.update(workflowStepRuns).set({
-      status: completion.effectiveSuccess ? "completed" : "failed",
-      startedAt: patch.startedAt,
-      completedAt: patch.completedAt,
-      lastDispatchErrorAt: completion.effectiveSuccess ? null : patch.completedAt,
-      lastDispatchErrorSummary: completion.effectiveSuccess ? null
-        : completion.structuralGateRejected ? "structural_gate_request_changes"
-        : completion.structuralContractFailure ? "structural_gate_contract_failure"
-        : patch.fallbackFailureSummary,
-      metadata: patch.metadata,
-    }).where(and(...casConditions)).returning({
-      id: workflowStepRuns.id,
-      transitionVersion: workflowStepRuns.statusTransitionVersion,
-    });
-
-    if (casResult.length === 0) {
-      // CAS lost — a newer row exists. Throwing rolls back the ledger insert
-      // (if this callback inserted a new row) and leaves the newer step untouched.
-      casWon = false;
-      throw new Error("STRUCTURAL_CAS_LOST");
-    }
-    await recordWorkflowStepStatusTransition(tx, {
-      companyId,
-      missionId,
-      workflowRunId,
-      workflowStepRunId,
-      issueId,
-      fromStatus: observedStatus,
-      toStatus: completion.effectiveSuccess ? "completed" : "failed",
-      source,
-      transitionVersion: casResult[0]!.transitionVersion,
-    });
-  }).catch((err) => {
-    // Only swallow the expected CAS-lost signal
-    if (err instanceof Error && err.message === "STRUCTURAL_CAS_LOST") return;
-    throw err;
-  });
-
-  return { ...deriveStructuralCompletion(success, step, effectiveVerdict), casWon };
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
 }
 
+function sameIdentity(left: ExpectedWorkflowToolScope, right: ExpectedWorkflowToolScope): boolean {
+  if (left.kind !== right.kind || left.companyId !== right.companyId ||
+      left.workflowRunId !== right.workflowRunId || left.missionId !== right.missionId) return false;
+  if (left.kind !== "linked" || right.kind !== "linked") return left.kind === right.kind;
+  return left.parentMissionId === right.parentMissionId && left.targetWorkflowId === right.targetWorkflowId &&
+    left.identity.companyId === right.identity.companyId && left.identity.parentRunId === right.identity.parentRunId &&
+    left.identity.parentStepRunId === right.identity.parentStepRunId && left.identity.stepId === right.identity.stepId &&
+    left.identity.invocationId === right.identity.invocationId && left.identity.generation === right.identity.generation &&
+    left.identity.childRunId === right.identity.childRunId;
+}
+
+/** Recheck captured legacy links under the common locks; no retained running/current policy belongs here. */
+async function legacyScopeMatches(
+  scope: RawWorkflowToolScope,
+  expected: ExpectedWorkflowToolScope,
+  input: AtomicStructuralCompletionInput,
+): Promise<boolean> {
+  const run = scope.run;
+  const step = scope.steps.find((candidate) => candidate.id === input.workflowStepRunId &&
+    candidate.workflowRunId === input.workflowRunId);
+  if (scope.scopeIssue !== null || !sameIdentity(scope.expected, expected) || !run || !step ||
+      run.id !== input.workflowRunId || run.companyId !== input.companyId) return false;
+  const invocationMetadata = record(record(step.metadata)?.toolInvocation);
+  if (invocationMetadata && Object.prototype.hasOwnProperty.call(invocationMetadata, "retainedCompletion")) return false;
+
+  if (expected.kind === "plain") {
+    return scope.child === null && run.missionId === expected.missionId &&
+      (scope.mission?.id ?? null) === expected.missionId &&
+      (!scope.mission || scope.mission.companyId === input.companyId) &&
+      run.parentRunId === null && run.parentStepRunId === null && run.triggeredBy !== "workflow-step";
+  }
+
+  const child = scope.child;
+  const parent = child?.parent, invocation = child?.invocation, parentStep = child?.parentStep;
+  if (!child || !parent || !invocation || !parentStep || !child.child || run.missionId !== null ||
+      (scope.mission?.id ?? null) !== expected.parentMissionId ||
+      (parent.missionId ?? null) !== expected.parentMissionId ||
+      (scope.mission && scope.mission.companyId !== input.companyId) ||
+      parent.id !== expected.identity.parentRunId || parent.companyId !== input.companyId ||
+      parentStep.id !== expected.identity.parentStepRunId || parentStep.workflowRunId !== parent.id ||
+      parentStep.stepId !== expected.identity.stepId ||
+      invocation.id !== expected.identity.invocationId || invocation.companyId !== input.companyId ||
+      invocation.parentStepRunId !== parentStep.id || invocation.childRunId !== run.id ||
+      invocation.state !== "linked" || invocation.generation !== expected.identity.generation ||
+      invocation.targetWorkflowId !== expected.targetWorkflowId || child.child.id !== run.id ||
+      child.child.companyId !== input.companyId || child.child.workflowId !== expected.targetWorkflowId ||
+      child.child.parentRunId !== parent.id || child.child.parentStepRunId !== parentStep.id ||
+      child.child.triggeredBy !== "workflow-step") return false;
+
+  try {
+    const definition = await loadExecutionDefinition(scope.tx, parent.id, { requireHistorical: true });
+    const parentStepDefinition = definition.steps.find((candidate) => candidate.id === expected.identity.stepId);
+    return !!parentStepDefinition && isWorkflowChildStep(parentStepDefinition) &&
+      (parentStepDefinition as { targetWorkflowId?: unknown }).targetWorkflowId === expected.targetWorkflowId;
+  } catch (error) {
+    if (error instanceof HttpError) return false;
+    throw error;
+  }
+}
+
+function casLossResult(input: AtomicStructuralCompletionInput): AtomicStructuralResult {
+  const verdict = input.success && isStructuralGateStep(input.step) && input.producerToken
+    ? parseStructuralGateVerdict(input.data) : null;
+  return { ...deriveStructuralCompletion(input.success, input.step, verdict), casWon: false };
+}
+
+/** Legacy structural entry: discover, lock the shared prefix, recheck, then use the shared transaction body. */
+export async function atomicStructuralCompletion(
+  input: AtomicStructuralCompletionInput,
+): Promise<AtomicStructuralResult> {
+  const discovered = await discoverLegacyStructuralScope(input.db, {
+    companyId: input.companyId,
+    workflowRunId: input.workflowRunId,
+  });
+  if (discovered.kind !== "ready") return casLossResult(input);
+
+  try {
+    return await withWorkflowToolLockScope(input.db, discovered.expected, async (scope) => {
+      if (!(await legacyScopeMatches(scope, discovered.expected, input))) return casLossResult(input);
+      const { db: _rootDb, ...writeInput } = input;
+      return writeStructuralCompletionInTransaction(scope, { ...writeInput, mode: "legacy" });
+    });
+  } catch (error) {
+    if (error instanceof StructuralCompletionCasLost) return error.result;
+    throw error;
+  }
+}
 
 export interface DependencyFreshnessResult {
   allFound: boolean;

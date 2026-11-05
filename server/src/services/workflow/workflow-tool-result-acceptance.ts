@@ -1,25 +1,18 @@
 /** Accepts tool callbacks; issued QA completion, proof and consumption commit atomically before sync. */
-import path from "node:path";
 import { isDeepStrictEqual as same } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { missions, workflowDefinitions, workflowRuns, workflowStepRuns, type Db } from "@paperclipai/db";
 import type { WorkflowStep } from "./dag-engine.js";
 import type { WorkflowExecutionResult } from "./types.js";
-import type { PersistedWorkflowStep } from "./execution-steps.js";
 import { recordWorkflowStepStatusTransition, type WorkflowSyncSource } from "./workflow-sync-source.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { isWorkflowChildStep } from "./workflow-child-execution.js";
-import { applyMachineContractTruth } from "./tool-result-truth.js";
 import { isStructuralGateStep, readStructuralGateProducerToken } from "./control-flow/structural-gate.js";
-import { shouldRejectStructuralCallback, planStructuralCompletion, atomicStructuralCompletion } from "./control-flow/structural-completion.js";
-import { verifyArtifactStepCompletion } from "./artifact-step-result.js";
-import { readWorkflowToolArtifactPath } from "./tool-artifact-path.js";
-import { readArtifactDigest } from "./artifact-files.js";
-import { stripRetryTrackingOnSuccess } from "./retry-launch-dispatch.js";
+import { shouldRejectStructuralCallback, atomicStructuralCompletion } from "./control-flow/structural-completion.js";
 import { lockFailureObservationScope } from "./tool-dispatch-failure.js";
-import { isQaRebindConsumer, persistQaRebindCandidate } from "./qa-rebind-candidate.js";
-import { settleToolQueueMetadata } from "./tool-queue-settle.js";
+import { isQaRebindConsumer } from "./qa-rebind-candidate.js";
+import { prepareToolCompletion, withMachineToolTruth, writePreparedToolCompletion } from "./tool-completion-preparation.js";
 import { assertQaReceiptScope, compareQaCorrectionReceiptFiles, persistQaCorrectionToolConsumption } from "./qa-artifact-receipt.js";
 import { findWorkflowVerdictCorrection } from "./workflow-verdict-current.js";
 import { createQaCorrectionHistorySession } from "./control-flow/qa-correction-history-session.js";
@@ -47,7 +40,7 @@ export interface WorkflowToolResultInput {
     error?: string;
     allowTerminalRecovery?: boolean;
 }
-interface WorkflowToolResultAcceptanceHooks {
+export interface WorkflowToolResultAcceptanceHooks {
   normalizeRecord(value: unknown): Record<string, unknown>;
   getMetadataRecord(value: unknown, key: string): Record<string, unknown>;
   readMetadataString(value: unknown): string | undefined;
@@ -60,8 +53,7 @@ export async function acceptWorkflowToolResult(
   input: WorkflowToolResultInput,
   hooks: WorkflowToolResultAcceptanceHooks,
 ): Promise<WorkflowExecutionResult | null> {
-  const { normalizeRecord, getMetadataRecord, readMetadataString, buildWorkflowStepRunMetadata,
-    getWorkflowExecutionResultSnapshot, syncWorkflowRunState } = hooks;
+  const { getMetadataRecord, getWorkflowExecutionResultSnapshot, syncWorkflowRunState } = hooks;
   const row = await db
     .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
     .from(workflowStepRuns)
@@ -92,16 +84,7 @@ export async function acceptWorkflowToolResult(
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
   // Machine-contract failures remain failures; structural gates keep their own verdict contract.
-  input = {
-    ...input,
-    ...applyMachineContractTruth({
-      success: input.success,
-      data: input.data,
-      error: input.error,
-      exitCode: input.exitCode,
-      isStructuralGate: isStructuralGateStep(stepForGuard),
-    }),
-  };
+  input = withMachineToolTruth(input, stepForGuard);
   if (shouldRejectStructuralCallback(stepForGuard, input.requestId, row.stepRun.lastDispatchRequestId)) {
     return null;
   }
@@ -111,60 +94,9 @@ export async function acceptWorkflowToolResult(
   if (WORKFLOW_STEP_TERMINAL_STATUSES.has(row.stepRun.status) && !canRecoverTerminalFailure) {
     return getWorkflowExecutionResultSnapshot(db, row.run.id);
   }
-  const now = new Date();
-  const existingMetadata = row.stepRun.metadata && typeof row.stepRun.metadata === "object" && !Array.isArray(row.stepRun.metadata)
-    ? row.stepRun.metadata
-    : {};
-  const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-  const toolRequestId = input.requestId ?? row.stepRun.lastDispatchRequestId ?? null;
-  const artifactCompletion = await verifyArtifactStepCompletion(row, (step as PersistedWorkflowStep | undefined)?.toolArtifactContract, input);
-  const toolArtifactReceipt = artifactCompletion?.receipt ?? null;
-  const artifactDataRecord = normalizeRecord(input.data);
-  const relativeArtifactCandidate = [
-    typeof input.artifactPath === "string" ? input.artifactPath.trim() : "",
-    readMetadataString(artifactDataRecord.rawPath) ?? "",
-    readMetadataString(artifactDataRecord.artifactPath) ?? "",
-  ].find((candidate) => candidate.length > 0 && !path.isAbsolute(candidate));
-  if (relativeArtifactCandidate) {
-    throw new Error(`workflow_tool_result_rejected: artifact path is not absolute (${relativeArtifactCandidate})`);
-  }
-  const artifactPath = toolArtifactReceipt ? null : readWorkflowToolArtifactPath({
-    artifactPath: input.artifactPath,
-    data: input.data,
-  });
-  // Preserve the production digest used by later seed validation.
-  const producedArtifactSha256 = artifactPath && input.success ? await readArtifactDigest(artifactPath) : null;
-  const deleteAfterUse = step?.executionControls?.deleteAfterUse === true
-    || getMetadataRecord(existingMetadata, "executionControls").deleteAfterUse === true;
-  const baseToolResult = {
-    requestId: input.requestId ?? row.stepRun.lastDispatchRequestId ?? null,
-    toolName: input.toolName ?? null,
-    success: input.success,
-    stdout: input.stdout ?? null,
-    ...(input.data === undefined ? {} : { data: toolArtifactReceipt ? { ...artifactDataRecord, artifactPath: undefined, rawPath: undefined } : input.data }),
-    ...(artifactPath ? { artifactPath, ...(producedArtifactSha256 ? { artifactSha256: producedArtifactSha256 } : {}) } : {}),
-    stderr: input.stderr ?? null,
-    exitCode: input.exitCode ?? null,
-    error: input.error ?? null,
-    completedAt: now.toISOString(),
-  };
-  const toolResult = input.allowTerminalRecovery === true
-    ? { ...baseToolResult, recoveredBy: "owner-action" }
-    : baseToolResult;
-  let resultMetadata: Record<string, unknown> = deleteAfterUse
-    ? {
-      ...(step ? buildWorkflowStepRunMetadata(step, existingMetadata) : normalizeRecord(existingMetadata)),
-      retentionDeleted: { deleteAfterUse: true, toolName: input.toolName ?? null, success: input.success, exitCode: input.exitCode ?? null, deletedAt: now.toISOString() },
-    }
-    : { ...existingMetadata, toolResult, ...(toolArtifactReceipt ? { toolArtifactReceipt } : {}) };
-  resultMetadata = settleToolQueueMetadata(resultMetadata, now.toISOString());
-  if (deleteAfterUse) { delete resultMetadata.toolInvocation; delete resultMetadata.toolResult; delete resultMetadata.cacheHit; }
-  const completionPlan = planStructuralCompletion({
-    step: stepForGuard, success: input.success, data: input.data,
-  });
-  if (completionPlan.effectiveSuccess) {
-    resultMetadata = stripRetryTrackingOnSuccess(resultMetadata) ?? resultMetadata;
-  }
+  const prepared = await prepareToolCompletion(row, stepForGuard, input, hooks);
+  const { now, existingMetadata, toolRequestId, artifactCompletion, toolArtifactReceipt,
+    resultMetadata, completionPlan } = prepared;
 
   // Structural verdict and step CAS remain in their existing atomic writer.
   if (isStructuralGateStep(stepForGuard)) {
@@ -193,7 +125,7 @@ export async function acceptWorkflowToolResult(
   }
 
   // Successful tools also expose dispatch readiness to downstream evaluation.
-  const { structuralGateRejected, structuralContractFailure, effectiveSuccess } = completionPlan;
+  const { effectiveSuccess } = completionPlan;
   const nextStatus = effectiveSuccess ? "completed" : "failed";
   // Generation fences terminal/recovery changes; resume also fences transition version.
   const completionCasCondition = and(
@@ -204,27 +136,8 @@ export async function acceptWorkflowToolResult(
       : []),
   );
   const observeFailure = nextStatus === "failed" && isQaRebindConsumer(row.stepRun.issueId, stepForGuard, existingMetadata);
-  const writeCompletion = async (writer: Db) => {
-    const [updated] = await writer.update(workflowStepRuns).set({
-      status: nextStatus,
-      startedAt: row.stepRun.startedAt ?? now, completedAt: now,
-      dispatchReadyAt: effectiveSuccess && !row.stepRun.dispatchReadyAt ? now : undefined,
-      lastDispatchErrorAt: effectiveSuccess ? null : now,
-      lastDispatchErrorSummary: effectiveSuccess ? null
-        : structuralGateRejected ? "structural_gate_request_changes"
-        : structuralContractFailure ? "structural_gate_contract_failure"
-        : (input.error ?? input.stderr ?? null),
-      metadata: resultMetadata,
-    }).where(and(eq(workflowStepRuns.id, row.stepRun.id), completionCasCondition)).returning({
-      id: workflowStepRuns.id,
-      transitionVersion: workflowStepRuns.statusTransitionVersion,
-    });
-    if (updated && observeFailure) {
-      await persistQaRebindCandidate(writer, { companyId: row.run.companyId,
-        workflowRunId: row.run.id, consumerStepRunId: updated.id });
-    }
-    return updated;
-  };
+  const writeCompletion = (writer: Db) =>
+    writePreparedToolCompletion(writer, row, stepForGuard, input, prepared, completionCasCondition);
   // Files and frozen-receipt verification above run without locks. Only issued QA uses this writer.
   const correction = effectiveSuccess && toolArtifactReceipt && row.stepRun.issueId
     ? await findWorkflowVerdictCorrection(db, { companyId: row.run.companyId, issueId: row.stepRun.issueId,
