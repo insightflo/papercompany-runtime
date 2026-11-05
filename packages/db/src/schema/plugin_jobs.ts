@@ -84,6 +84,7 @@ export const pluginJobRuns = pgTable(
     trigger: text("trigger").$type<PluginJobRunTrigger>().notNull(),
     /** Current lifecycle state of this run. */
     status: text("status").$type<PluginJobRunStatus>().notNull().default("pending"),
+    claimToken: uuid("claim_token"),
     /** Wall-clock duration in milliseconds. Null until the run finishes. */
     durationMs: integer("duration_ms"),
     /** Error message if `status === "failed"`. */

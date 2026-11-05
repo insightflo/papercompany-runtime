@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import { pluginJobRuns, pluginJobs, type Db } from "@paperclipai/db";
 import type { PluginJobRunStatus, PluginJobRunTrigger } from "@paperclipai/shared";
@@ -75,7 +76,7 @@ export function pluginJobRunStore(db: Db) {
           eq(pluginJobRuns.status, "running"),
         )).limit(1);
         if (running) return null;
-        const [claimed] = await tx.update(pluginJobRuns).set({ status: "running", startedAt }).where(and(
+        const [claimed] = await tx.update(pluginJobRuns).set({ status: "running", startedAt, claimToken: randomUUID() }).where(and(
           eq(pluginJobRuns.id, runId),
           eq(pluginJobRuns.status, "queued"),
           isNull(pluginJobRuns.startedAt),
@@ -85,11 +86,11 @@ export function pluginJobRunStore(db: Db) {
       });
     },
 
-    async releaseUnstartedClaim(runId: string, startedAt: Date): Promise<boolean> {
-      const [released] = await db.update(pluginJobRuns).set({ status: "queued", startedAt: null }).where(and(
+    async releaseUnstartedClaim(runId: string, claimToken: string): Promise<boolean> {
+      const [released] = await db.update(pluginJobRuns).set({ status: "queued", startedAt: null, claimToken: null }).where(and(
         eq(pluginJobRuns.id, runId),
         eq(pluginJobRuns.status, "running"),
-        eq(pluginJobRuns.startedAt, startedAt),
+        eq(pluginJobRuns.claimToken, claimToken),
         isNull(pluginJobRuns.finishedAt),
       )).returning({ id: pluginJobRuns.id });
       return Boolean(released);

@@ -876,6 +876,13 @@
       "when": 1775000000000,
       "tag": "0125_card_human_summaries",
       "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1792218600001,
+      "tag": "0126_plugin_job_claim_token",
+      "breakpoints": true
     }
   ]
 }
