@@ -24,7 +24,8 @@ export const producerToolPath = path.join(
 
 type ProcessFixture = Awaited<ReturnType<typeof startRuntimeShutdownProcessFixture>>;
 
-export async function runtimeShutdownScenario(f: ProcessFixture, name: string, withSecret = false) {
+export async function runtimeShutdownScenario(f: ProcessFixture, name: string, withSecret = false,
+  options: { deferProducer?: boolean } = {}) {
   const seeded = await seedSupervisionLifecycle(f.db, "active", null);
   // [P6 producer isolation] Paused blocks real agent-run admission (heartbeat start/enqueue, main-verified);
   // user-actor manual completion and the child server's real QA tool dispatch stay on existing paths.
@@ -80,7 +81,7 @@ export async function runtimeShutdownScenario(f: ProcessFixture, name: string, w
   await nativeProducer.configure();
   let producerRunId = "";
   let nativeFailure: unknown = null;
-  try {
+  if (!options.deferProducer) try {
     await heartbeatService(f.db).resumeQueuedRuns(producerSeed.agentId);
     const run = await nativeProducer.waitStarted();
     producerRunId = run.id;
@@ -105,6 +106,7 @@ export async function runtimeShutdownScenario(f: ProcessFixture, name: string, w
   }
   const readIssue = async () => (await f.db.select().from(issues).where(eq(issues.id, issue.id)))[0]!;
   const completeProducer = async () => {
+    if (!producerRunId) throw new Error("Deferred producer must be completed by the server");
     await completeWorkflowIssue({ db: f.db, issue: await readIssue(), actor: nativeProducer.actor(producerRunId), data: {} });
   };
   const qaStep = async () => (await f.db.select().from(workflowStepRuns).where(and(

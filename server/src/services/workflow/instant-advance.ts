@@ -17,6 +17,7 @@ import type { Db } from "@paperclipai/db";
 import { workflowRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
+import { runtimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
 import { isRunReopenGuardEnabled, RUN_REOPEN_TERMINAL_STATUSES } from "./run-reopen-guard-flag.js";
 import { syncWorkflowRunState } from "./dag-engine.js";
 
@@ -75,7 +76,7 @@ const dirtyWorkflowRunIds = new Set<string>();
  */
 export function requestInstantWorkflowAdvance(workflowRunId: string): void {
   try {
-    if (!isInstantWorkflowAdvanceEnabled()) return;
+    if (!isInstantWorkflowAdvanceEnabled() || runtimeExecutionLifecycle.shutdownState()) return;
     const db = configuredDb;
     if (!db) {
       logger.warn(
@@ -159,6 +160,11 @@ async function isTerminalRunForInstantAdvance(db: Db, workflowRunId: string): Pr
 }
 
 function startAdvance(db: Db, workflowRunId: string, chainCount: number, reopenGuardEnabled: boolean): void {
+  if (runtimeExecutionLifecycle.shutdownState()) {
+    dirtyWorkflowRunIds.delete(workflowRunId);
+    inflightByWorkflowRunId.delete(workflowRunId);
+    return;
+  }
   // 재진행 시작 시 dirty 해제 — 재진행 중에 다시 도착하는 요청만 다음 dirty 가 된다.
   // 연속 상한 검사는 settleAdvance 에서 체인을 넘기기 전에 한다(여기엔 항상 ≤ MAX 로만 온다).
   dirtyWorkflowRunIds.delete(workflowRunId);
@@ -173,6 +179,7 @@ function startAdvance(db: Db, workflowRunId: string, chainCount: number, reopenG
         );
         return;
       }
+      if (runtimeExecutionLifecycle.shutdownState()) return;
       await syncWorkflowRunState(db, workflowRunId, "workflow_execution", { requireRunning: true });
       logger.info({ tag: TAG, workflowRunId, chainCount }, "advance finished");
     } catch (err) {

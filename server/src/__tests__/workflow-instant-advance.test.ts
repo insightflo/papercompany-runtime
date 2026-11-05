@@ -13,8 +13,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 
-const { executeWorkflowRunMock } = vi.hoisted(() => ({
+const { executeWorkflowRunMock, shutdown } = vi.hoisted(() => ({
   executeWorkflowRunMock: vi.fn(),
+  shutdown: { active: false },
+}));
+vi.mock("../services/runtime-execution-lifecycle.js", () => ({
+  runtimeExecutionLifecycle: { shutdownState: () => shutdown.active ? { signal: "SIGTERM" } : null },
 }));
 
 vi.mock("../services/workflow/dag-engine.js", () => ({
@@ -50,6 +54,7 @@ async function flushMicrotasks(rounds = 10): Promise<void> {
 
 beforeEach(() => {
   executeWorkflowRunMock.mockReset();
+  shutdown.active = false;
   resetInstantWorkflowAdvanceForTests();
   configureInstantWorkflowAdvanceDb(DUMMY_DB);
   process.env[GATE] = "1";
@@ -90,6 +95,27 @@ describe("instant-advance gate", () => {
     expect(() => requestInstantWorkflowAdvance("wf-run-1")).not.toThrow();
     await flushMicrotasks();
     expect(executeWorkflowRunMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("instant-advance shutdown", () => {
+  it("does not start a new evaluation after shutdown", async () => {
+    shutdown.active = true;
+    requestInstantWorkflowAdvance("after-stop");
+    await flushMicrotasks();
+    expect(executeWorkflowRunMock).not.toHaveBeenCalled();
+  });
+
+  it("lets a started evaluation settle without starting its queued dirty follow-up", async () => {
+    const gate = deferred();
+    executeWorkflowRunMock.mockReturnValue(gate.promise);
+    requestInstantWorkflowAdvance("in-flight");
+    requestInstantWorkflowAdvance("in-flight");
+    expect(executeWorkflowRunMock).toHaveBeenCalledTimes(1);
+    shutdown.active = true;
+    gate.resolve();
+    await flushMicrotasks();
+    expect(executeWorkflowRunMock).toHaveBeenCalledTimes(1);
   });
 });
 
