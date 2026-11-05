@@ -264,6 +264,9 @@ export function createAppWorkflowToolStepExecutor(input: {
   };
 }
 
+export { createWorkflowToolExecutionTracker, createViteDevServerShutdownOwner, createRuntimeShutdownFlight, createAppRuntimeShutdownController } from "./services/runtime-shutdown-controller.js";
+export type { AppRuntimeShutdown, RuntimeShutdownSignal } from "./services/runtime-shutdown-controller.js";
+
 export async function createApp(
   db: Db,
   opts: {
