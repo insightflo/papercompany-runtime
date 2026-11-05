@@ -9,8 +9,7 @@ import { resolveRuntimeSessionParamsForWorkspace, type ResolvedWorkspaceForRun }
 export { resolveRuntimeSessionParamsForWorkspace } from "./heartbeat-workspace-session.js";
 export type { ResolvedWorkspaceForRun } from "./heartbeat-workspace-session.js";
 import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
-import { isDeepStrictEqual, promisify } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, is, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -53,12 +52,10 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { assertHeartbeatAdapterMayStart, createHeartbeatAdapterScope, isHeartbeatUnstartedDeferral, runWithinHeartbeatAdapterScope } from "./heartbeat-adapter-scope.js";
 import { runtimeExecutionLifecycle, type RuntimeExecutionScope } from "./runtime-execution-lifecycle.js";
-import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
+import { parseObject } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
-import { deriveRepoNameFromRepoUrl } from "./heartbeat-workspace-repo-name.js";
 import { normalizePaperclipApiUrl, resolveHostForPaperclipApiUrl } from "./heartbeat-api-address.js";
-import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { hasSatisfiedWorkProductRegistration } from "./heartbeat-artifact-registration.js";
 export { hasSatisfiedWorkProductRegistration, workProductReferencesClaimedArtifact } from "./heartbeat-artifact-registration.js";
@@ -87,7 +84,7 @@ import { buildRequestChangesValidationGateComment, buildMissingWorkflowValidatio
 export { classifyHeartbeatRunFailure, type HeartbeatFailureClassification } from "./heartbeat-failure-classification.js";
 import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
-import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import { capHeartbeatRunResultJsonForStorage, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
   attentionHeartbeatRuns,
@@ -105,7 +102,6 @@ import {
   persistAdapterManagedRuntimeServices,
   realizeExecutionWorkspace,
   releaseRuntimeServicesForRun,
-  sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
 import { writeQualityFinding } from "./quality-finding-writer.js";
@@ -421,8 +417,8 @@ function firstDependencyIssueFromDescription(description: string | null | undefi
   };
 }
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
-const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
-const execFile = promisify(execFileCallback);
+
+
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
   "codex_local",
@@ -439,67 +435,7 @@ const SESSIONED_LOCAL_ADAPTERS = new Set([
 
 
 
-async function ensureManagedProjectWorkspace(input: {
-  companyId: string;
-  agentId: string;
-  projectId: string;
-  repoUrl: string | null;
-  worktreeCheck?: (opts: { tool: string; args: Record<string, unknown>; cwd?: string; filePath?: string; command?: string }) => Promise<void>;
-}): Promise<{ cwd: string; warning: string | null }> {
-  const cwd = resolveManagedProjectWorkspaceDir({
-    companyId: input.companyId,
-    projectId: input.projectId,
-    repoName: deriveRepoNameFromRepoUrl(input.repoUrl),
-  });
-  await fs.mkdir(path.dirname(cwd), { recursive: true });
-  const stats = await fs.stat(cwd).catch(() => null);
 
-  if (!input.repoUrl) {
-    if (!stats) {
-      await fs.mkdir(cwd, { recursive: true });
-    }
-    return { cwd, warning: null };
-  }
-
-  const gitDirExists = await fs
-    .stat(path.resolve(cwd, ".git"))
-    .then((entry) => entry.isDirectory())
-    .catch(() => false);
-  if (gitDirExists) {
-    return { cwd, warning: null };
-  }
-
-  if (stats) {
-    const entries = await fs.readdir(cwd).catch(() => []);
-    if (entries.length > 0) {
-      return {
-        cwd,
-        warning: `Managed workspace path "${cwd}" already exists but is not a git checkout. Using it as-is.`,
-      };
-    }
-    await fs.rm(cwd, { recursive: true, force: true });
-  }
-
-  try {
-    // worktree: check command-execute before git clone
-    if (input.worktreeCheck) {
-      await input.worktreeCheck({
-        tool: "command-execute",
-        args: { command: "git clone", repoUrl: input.repoUrl ?? "" },
-        cwd,
-        command: `git clone ${input.repoUrl} ${cwd}`,
-      });
-    }
-    await execFile("git", ["clone", input.repoUrl, cwd], {
-      env: sanitizeRuntimeServiceBaseEnv(process.env),
-      timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
-    });
-    return { cwd, warning: null };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
-  }
-}
 
 const heartbeatRunListColumns = {
   id: heartbeatRuns.id,
@@ -2235,17 +2171,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   //   heartbeat-retry-enqueue.ts 로 기계적 이동했다(동작 무변경). deps 는 이 팩토리 클로저를 그대로 주입.
   const retryEnqueueDeps: HeartbeatRetryEnqueueDeps = { db, resolveSessionBeforeForWakeup, appendRunEvent };
 
-  function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
-    const runtimeConfig = parseObject(agent.runtimeConfig);
-    const heartbeat = parseObject(runtimeConfig.heartbeat);
 
-    return {
-      enabled: asBoolean(heartbeat.enabled, true),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
-    };
-  }
 
   async function countRunningRunsForAgent(agentId: string) {
     const activeClause = await lifecycleActiveClause(db);
@@ -3529,13 +3455,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
-  function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
-    publishLiveEvent({
-      companyId: run.companyId, type: "heartbeat.run.queued",
-      payload: { runId: run.id, agentId: run.agentId, invocationSource: run.invocationSource,
-        triggerDetail: run.triggerDetail, wakeupRequestId: run.wakeupRequestId },
-    });
-  }
+
 
   async function executeRun(runId: string) {
     let run = await getRun(runId);
@@ -8967,5 +8887,8 @@ import { truncateDisplayId, getAdapterSessionCodec, buildMissionSessionSecretNam
 import { enrichWakeContextSnapshot, mergeCoalescedContextSnapshot, type WakeupOptions } from "./heartbeat-wake-context.js";
 import { normalizeLedgerBillingType, resolveLedgerBiller, normalizeBilledCostCents, missionRuntimeCostCents, resolveLedgerScopeForRun } from "./heartbeat-cost-ledger-context.js";
 import { isTerminalAdapterFallbackConfigurationFailure, shouldQueueRunFailureAdapterFallback } from "./heartbeat-adapter-fallback.js";
+import { ensureManagedProjectWorkspace } from "./heartbeat-managed-workspace.js";
+import { parseHeartbeatPolicy } from "./heartbeat-concurrency-limit.js";
+import { publishQueuedRun } from "./heartbeat-queue-lifecycle.js";
 export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
 export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
