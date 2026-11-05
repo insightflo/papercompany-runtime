@@ -46,6 +46,7 @@ import { normalizeRecord, getMetadataRecord, readMetadataString } from "./dag-me
 import { renderWorkflowRunTextTemplate } from "./dag-run-text-template.js";
 import { buildWorkflowApiCloseoutLines, buildStepContractDescriptionLines, buildDependencyStepContractLines } from "./dag-contract-description.js";
 import { isValidationGateCandidate, buildPredFactsMap, findRunnableSteps, type ValidationVerdict, type ValidationVerdictObservation } from "./dag-readiness-facts.js";
+import { mapWorkflowExecutionResult } from "./workflow-execution-result.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
   normalizeWorkflowSyncSource,
@@ -2444,29 +2445,6 @@ export async function processQueuedWorkflowToolStepRuns(
   }
 
   return result;
-}
-
-function mapWorkflowExecutionResult(
-  run: typeof workflowRuns.$inferSelect,
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-): WorkflowExecutionResult {
-  return {
-    runId: run.id,
-    workflowId: run.workflowId,
-    missionId: run.missionId,
-    status: run.status as "running" | "completed" | "failed" | "cancelled",
-    completedAt: run.completedAt,
-    error: run.status === "failed" ? "One or more workflow steps failed" : undefined,
-    stepRuns: stepRuns.map((stepRun) => ({
-      id: stepRun.id,
-      workflowRunId: stepRun.workflowRunId,
-      stepId: stepRun.stepId,
-      issueId: stepRun.issueId,
-      status: stepRun.status as "pending" | "running" | "completed" | "failed" | "skipped",
-      startedAt: stepRun.startedAt,
-      completedAt: stepRun.completedAt,
-    })),
-  };
 }
 
 export async function getWorkflowExecutionResultSnapshot(
