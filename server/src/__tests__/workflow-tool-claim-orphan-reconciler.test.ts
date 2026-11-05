@@ -191,6 +191,21 @@ describe("workflow orphaned tool claim reconciliation", () => {
     expect((retriedMetadata.toolQueue as Record<string, unknown> | undefined)?.status).toBe("queued");
   });
 
+  it("does not reap an old claim with a retained completion marker, even if malformed", async () => {
+    const now = new Date("2026-08-30T18:00:00.000Z");
+    const seed = await seedRun({ acceptedAtAgoMs: 40 * 60_000, now, toolTimeoutMs: 300_000 });
+    const [before] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, seed.stepRunId));
+    const metadata = before.metadata as Record<string, unknown>;
+    await db.update(workflowStepRuns).set({ metadata: { ...metadata,
+      toolInvocation: { ...(metadata.toolInvocation as Record<string, unknown>), retainedCompletion: null },
+    } }).where(eq(workflowStepRuns.id, seed.stepRunId));
+    const result = await reconcileOrphanedWorkflowToolStepClaims(db, { now });
+    const [after] = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, seed.stepRunId));
+    expect(result.orphanedCount).toBe(0);
+    expect(after.status).toBe("running");
+    expect(after.lastDispatchErrorAt).toBeNull();
+  });
+
   it("does not reap a fresh claim (below min age)", async () => {
     const now = new Date("2026-08-30T18:00:00.000Z");
     const seed = await seedRun({ acceptedAtAgoMs: 60_000, now });
