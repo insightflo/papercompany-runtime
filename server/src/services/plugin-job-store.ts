@@ -30,16 +30,16 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
+import { plugins, pluginJobs } from "@paperclipai/db";
 import type {
   PluginJobDeclaration,
-  PluginJobRunStatus,
-  PluginJobRunTrigger,
   PluginJobRecord,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import { pluginJobRunStore } from "./plugin-job-run-store.js";
+export type { CompleteJobRunInput, CreateJobRunInput } from "./plugin-job-run-store.js";
 
 /**
  * The statuses used for job *definitions* in the `plugin_jobs` table.
@@ -47,34 +47,6 @@ import { notFound } from "../errors.js";
  * the domain type (`"active" | "paused" | "failed"`).
  */
 type JobDefinitionStatus = PluginJobRecord["status"];
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Input for creating a job run record.
- */
-export interface CreateJobRunInput {
-  /** FK to the plugin_jobs row. */
-  jobId: string;
-  /** FK to the plugins row. */
-  pluginId: string;
-  /** What triggered this run. */
-  trigger: PluginJobRunTrigger;
-}
-
-/**
- * Input for completing (or failing) a job run.
- */
-export interface CompleteJobRunInput {
-  /** Final run status. */
-  status: PluginJobRunStatus;
-  /** Error message if the run failed. */
-  error?: string | null;
-  /** Run duration in milliseconds. */
-  durationMs?: number | null;
-}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -101,6 +73,7 @@ export interface CompleteJobRunInput {
  * ```
  */
 export function pluginJobStore(db: Db) {
+  const runStore = pluginJobRunStore(db);
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
@@ -334,130 +307,7 @@ export function pluginJobStore(db: Db) {
         .where(eq(pluginJobs.pluginId, pluginId));
     },
 
-    // =====================================================================
-    // Job runs (plugin_job_runs)
-    // =====================================================================
-
-    /**
-     * Create a new job run record with status `queued`.
-     *
-     * The caller should create the run record *before* dispatching the
-     * `runJob` RPC to the worker, then update it to `running` once the
-     * worker begins execution.
-     *
-     * @param input - Job run input (jobId, pluginId, trigger)
-     * @returns The newly created run row
-     */
-    async createRun(
-      input: CreateJobRunInput,
-    ): Promise<typeof pluginJobRuns.$inferSelect> {
-      const rows = await db
-        .insert(pluginJobRuns)
-        .values({
-          jobId: input.jobId,
-          pluginId: input.pluginId,
-          trigger: input.trigger,
-          status: "queued",
-        })
-        .returning();
-
-      return rows[0]!;
-    },
-
-    /**
-     * Mark a run as `running` and set its `startedAt` timestamp.
-     *
-     * @param runId - UUID of the run row
-     */
-    async markRunning(runId: string): Promise<void> {
-      await db
-        .update(pluginJobRuns)
-        .set({
-          status: "running" as PluginJobRunStatus,
-          startedAt: new Date(),
-        })
-        .where(eq(pluginJobRuns.id, runId));
-    },
-
-    /**
-     * Complete a run — set its final status, error, duration, and
-     * `finishedAt` timestamp.
-     *
-     * @param runId - UUID of the run row
-     * @param input - Completion details
-     */
-    async completeRun(
-      runId: string,
-      input: CompleteJobRunInput,
-    ): Promise<void> {
-      await db
-        .update(pluginJobRuns)
-        .set({
-          status: input.status,
-          error: input.error ?? null,
-          durationMs: input.durationMs ?? null,
-          finishedAt: new Date(),
-        })
-        .where(eq(pluginJobRuns.id, runId));
-    },
-
-    /**
-     * Get a run by its primary key.
-     *
-     * @param runId - UUID of the run row
-     * @returns The run row, or `null` if not found
-     */
-    async getRunById(
-      runId: string,
-    ): Promise<(typeof pluginJobRuns.$inferSelect) | null> {
-      const rows = await db
-        .select()
-        .from(pluginJobRuns)
-        .where(eq(pluginJobRuns.id, runId));
-      return rows[0] ?? null;
-    },
-
-    /**
-     * List runs for a specific job, ordered by creation time descending.
-     *
-     * @param jobId - UUID of the job
-     * @param limit - Maximum number of rows to return (default: 50)
-     */
-    async listRunsByJob(
-      jobId: string,
-      limit = 50,
-    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
-      return db
-        .select()
-        .from(pluginJobRuns)
-        .where(eq(pluginJobRuns.jobId, jobId))
-        .orderBy(desc(pluginJobRuns.createdAt))
-        .limit(limit);
-    },
-
-    /**
-     * List runs for a plugin, optionally filtered by status.
-     *
-     * @param pluginId - UUID of the owning plugin
-     * @param status - Optional status filter
-     * @param limit - Maximum number of rows to return (default: 50)
-     */
-    async listRunsByPlugin(
-      pluginId: string,
-      status?: PluginJobRunStatus,
-      limit = 50,
-    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
-      const conditions = [eq(pluginJobRuns.pluginId, pluginId)];
-      if (status) {
-        conditions.push(eq(pluginJobRuns.status, status));
-      }
-      return db
-        .select()
-        .from(pluginJobRuns)
-        .where(and(...conditions))
-        .orderBy(desc(pluginJobRuns.createdAt))
-        .limit(limit);
-    },
+    ...runStore,
   };
 }
 
