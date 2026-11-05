@@ -39,7 +39,7 @@ import {
   projectWorkspaces,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { HttpError, conflict, notFound } from "../errors.js";
+import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { loadConfig } from "../config.js";
 import { publishLiveEvent } from "./live-events.js";
@@ -395,25 +395,9 @@ const DETACHED_GRACE_SEC = 5;
 const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 
-function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
-  if (!description) return null;
-  return description.match(/(?:^|\n)-?\s*stepId:\s*([a-z0-9_-]+)/i)?.[1] ?? null;
-}
 
-function firstDependencyIssueFromDescription(description: string | null | undefined): {
-  targetStepId: string;
-  targetIssueIdentifier: string;
-  targetIssueTitle: string;
-} | null {
-  if (!description) return null;
-  const match = description.match(/\n-\s*([a-z0-9_-]+):\s*([A-Z][A-Z0-9]{1,9}-\d+)\s*\([^)]*\)\s*—\s*([^\n]+)/i);
-  if (!match) return null;
-  return {
-    targetStepId: match[1],
-    targetIssueIdentifier: match[2],
-    targetIssueTitle: match[3].trim(),
-  };
-}
+
+
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 
@@ -487,10 +471,7 @@ type SessionCompactionDecision = {
   previousRunId: string | null;
 };
 
-interface ParsedIssueAssigneeAdapterOverrides {
-  adapterConfig: Record<string, unknown> | null;
-  useProjectWorkspace: boolean | null;
-}
+
 
 
 
@@ -578,23 +559,7 @@ export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect):
 
 
 
-function parseIssueAssigneeAdapterOverrides(
-  raw: unknown,
-): ParsedIssueAssigneeAdapterOverrides | null {
-  const parsed = parseObject(raw);
-  const parsedAdapterConfig = parseObject(parsed.adapterConfig);
-  const adapterConfig =
-    Object.keys(parsedAdapterConfig).length > 0 ? parsedAdapterConfig : null;
-  const useProjectWorkspace =
-    typeof parsed.useProjectWorkspace === "boolean"
-      ? parsed.useProjectWorkspace
-      : null;
-  if (!adapterConfig && useProjectWorkspace === null) return null;
-  return {
-    adapterConfig,
-    useProjectWorkspace,
-  };
-}
+
 
 
 
@@ -783,15 +748,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
-  function isMissionOwnerActionParentPlacementRejected(error: unknown) {
-    return error instanceof HttpError &&
-      error.status === 422 &&
-      (
-        error.message.includes("Mission downstream issue creation is not allowed") ||
-        error.message.includes("Mission nested child issue creation is not allowed") ||
-        error.message.includes("Mission child issue burst limit exceeded")
-      );
-  }
+
 
   async function createMissionOwnerActionIssue(companyId: string, data: IssueCreateInput) {
     if (!data.parentId) return issuesSvc.create(companyId, data);
@@ -3382,11 +3339,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { kind: result.kind, run };
   }
 
-  async function isCorrectionRun(execDb: Db, run: typeof heartbeatRuns.$inferSelect) {
-    if (!run.wakeupRequestId) return false;
-    const [wake] = await execDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
-    return !!wake && !!readQaCorrectionWakeRef(wake);
-  }
+
 
   async function deliverStoredQaCorrectionWake(wakeupRequestId: string,
     transactionProfile: "public_callback" | "recovery_skip_locked", resumeQueue: boolean) {
@@ -8848,6 +8801,9 @@ import { hasResumableSessionForRun } from "./heartbeat-workspace-session.js";
 import { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
 import { applyPaperclipApiContext } from "./heartbeat-api-address.js";
 import { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
+import { isMissionOwnerActionParentPlacementRejected } from "./heartbeat-mission-owner-context.js";
+import { isCorrectionRun } from "./heartbeat-correction-run.js";
+import { parseIssueAssigneeAdapterOverrides } from "./heartbeat-assignee-adapter-overrides.js";
 export { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
 export { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
 export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
