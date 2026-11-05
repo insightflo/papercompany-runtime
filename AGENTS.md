@@ -129,6 +129,8 @@ pnpm build
 
 If anything cannot be run, explicitly report what was not run and why.
 
+- When an isolated HOME is used with Corepack and networking is disabled, point COREPACK_HOME at an existing local cache, disable Corepack downloads, and verify `pnpm --version` before starting tests.
+
 ## 8. API and Auth Expectations
 
 - Base path: `/api`

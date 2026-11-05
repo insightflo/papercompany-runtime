@@ -401,3 +401,11 @@
 - Fix: Forward the callback through both layers; the isolated integration test verifies both recorded PIDs, cancellation after the records exist, the fail-closed conflict and retry after server drain, and another company's unaffected completion.
 - Prevention rule: When a local process adapter starts a child, forward its spawn callback through every wrapper and verify the database PID against the real child before relying on cross-process cancellation or recovery.
 - Evidence: `t16a-m08-diagnostic.log` and `t16a-m08-fix3.log` in the `c5-candidate-backups` workspace directory. Cancellation before asynchronous PID persistence and PID reuse were not tested.
+
+### 2026-11-06 — retain the package-manager cache in isolated test homes
+- Task: T16a final regression, with an isolated HOME and outbound network blocked.
+- What failed: Corepack attempted to download pnpm before the test runner started, and the sandbox blocked the connection; no tests had run.
+- Root cause: Changing HOME changed Corepack's default cache location, hiding the locally installed pnpm version.
+- Fix: Point COREPACK_HOME at the existing cache, set COREPACK_ENABLE_NETWORK=0, and verify the pinned pnpm version before launching the isolated test run.
+- Prevention rule: When isolating HOME for offline Corepack tests, verify the package manager against an existing local cache before starting the suite.
+- Evidence: `t16a-final-regression-launch-error.log` and `t16a-corepack-offline-version.log` in the `c5-candidate-backups` workspace.
