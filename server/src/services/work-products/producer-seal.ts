@@ -69,6 +69,8 @@ export async function sealProducerWrite(product: LocalProduct & { provider: stri
     if (!file) throw new Error("workproduct_producer_path_missing");
     const seal = await productionSeal(file);
     metadata.workflowProducer = { ...producer, ...seal };
+    // Cross-run seed/QA consumers read this digest; it must be the same measured bytes.
+    metadata.sha256 = seal.sha256;
     return { metadata, seal };
   } catch {
     // A new local write cannot silently become a legacy, unsealed record.

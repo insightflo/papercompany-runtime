@@ -57,6 +57,12 @@ export function preserveProducerMetadata(metadata: Record<string, unknown> | nul
     delete clean[key];
     if (existing && Object.hasOwn(existing, key)) clean[key] = existing[key];
   }
+  // A normal metadata patch cannot replace or remove the digest of a sealed producer attempt.
+  if (existing && producer && typeof producer === "object" && !Array.isArray(producer)) {
+    const sealed = producer as Record<string, unknown>;
+    if (sealed.schemaVersion === "workflow.work-product-producer.v1"
+      && typeof sealed.sha256 === "string" && /^[a-f0-9]{64}$/.test(sealed.sha256)) clean.sha256 = sealed.sha256;
+  }
   if (producer) clean.workflowProducer = producer;
   return clean;
 }
