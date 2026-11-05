@@ -294,4 +294,26 @@ describe("retained HTTP plugin tool consumer", () => {
     expect(first.body).toEqual({ source: "core", content: "ok" }); expect(replay.headers["x-idempotent-replay"]).toBe("true");
     expect(executeToolObserved).not.toHaveBeenCalled(); expect((await rows())[0]?.requestParameters).toEqual({});
   });
+  it("releases the keyed claim if the tool is unregistered after route lookup", async () => {
+    const dispatcher = createPluginToolDispatcher();
+    dispatcher.registerPluginTools("fixture.plugin", { tools: [{ name: "publish", displayName: "Publish",
+      description: "Fixture", parametersSchema: { type: "object" } }] } as never, PLUGIN_DB_ID);
+    const get = dispatcher.getTool.bind(dispatcher);
+    vi.spyOn(dispatcher, "getTool").mockImplementation((name) => {
+      const result = get(name); dispatcher.unregisterPluginTools("fixture.plugin"); return result;
+    });
+    const response = await post(app(db, dispatcher as never), { tool: TOOL, runContext: runContext(), idempotencyKey: "unregistered" });
+    expect(response.status).toBe(502);
+    expect(await rows()).toHaveLength(0);
+  });
+  it("releases a claim when no worker manager exists", async () => {
+    const dispatcher = createPluginToolDispatcher();
+    dispatcher.registerPluginTools("fixture.plugin", { tools: [{ name: "publish", displayName: "Publish",
+      description: "Fixture", parametersSchema: { type: "object" } }] } as never, PLUGIN_DB_ID);
+    const ctx = runContext(), server = app(db, dispatcher as never);
+    const body = { tool: TOOL, runContext: ctx, idempotencyKey: "no-manager" };
+    expect((await post(server, body)).status).toBe(502);
+    expect((await post(server, body)).status).toBe(502);
+    expect(await rows()).toHaveLength(0);
+  });
 });
