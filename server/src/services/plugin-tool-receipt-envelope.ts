@@ -13,6 +13,33 @@ const json: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.null(), z.boolean(), z.number().finite(), z.string(), z.array(json), z.record(json),
 ]));
 const nonempty = z.string().min(1);
+const producerTokenSchema = z.object({
+  producerStepId: nonempty,
+  iterationIndex: z.number().int().nonnegative().safe(),
+  completedAt: z.string().datetime({ offset: true }),
+}).strict();
+const childIdentitySchema = z.object({
+  companyId: z.string().uuid(),
+  parentRunId: z.string().uuid(),
+  parentStepRunId: z.string().uuid(),
+  stepId: nonempty,
+  invocationId: z.string().uuid(),
+  childRunId: z.string().uuid(),
+  generation: z.literal(1),
+}).strict();
+const specializedWorkflowSchema = z.object({
+  structural: z.object({
+    producerToken: producerTokenSchema,
+    iterationIndex: z.number().int().nonnegative().safe(),
+    completedAt: z.string().datetime({ offset: true }).nullable(),
+  }).strict().nullable(),
+  linkedChild: z.object({
+    identity: childIdentitySchema,
+    targetWorkflowId: z.string().uuid(),
+    parentMissionId: z.string().uuid().nullable(),
+  }).strict().nullable(),
+}).strict();
+export type SpecializedToolAuthority = z.infer<typeof specializedWorkflowSchema>;
 const workflowSchema = z.object({
   missionId: nonempty.nullable(),
   workflowRunId: nonempty,
@@ -24,6 +51,7 @@ const workflowSchema = z.object({
   runStatus: z.literal("running"),
   stepStatus: z.literal("running"),
   acceptedAt: z.string().datetime({ offset: true }),
+  specialized: specializedWorkflowSchema.optional(),
 }).strict();
 
 export type OriginalWorkflowAuthority = z.infer<typeof workflowSchema>;

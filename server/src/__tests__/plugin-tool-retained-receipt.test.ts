@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   claimRetainedKeyedToolReceipt, claimToolExecutionReceipt, completeRetainedToolReceipt,
   completeToolExecutionReceipt, decodeRetainedToolActual, decodeRetainedToolOutcome, insertInternalToolReceipt,
-  releaseToolExecutionReceipt, stageRetainedToolOutcome,
+  releaseRetainedHttpToolUnsentReceipt, releaseToolExecutionReceipt, stageRetainedToolOutcome,
   ToolReceiptPersistenceError, type OriginalWorkflowAuthority,
 } from "../services/plugin-tool-execution-receipt.js";
 import type { ToolOutcome } from "../services/plugin-job-rpc.js";
@@ -51,6 +51,28 @@ describe("retained tool receipt persistence", () => {
   afterAll(async () => {
     await db.$client.end({ timeout: 5 });
     await tempDb.cleanup();
+  });
+
+  it("releases an HTTP receipt only for the exact definitely-unsent observation", async () => {
+    const owner = await internal();
+    const identity = { requestId: owner.receiptId, executionId: owner.identity.runId,
+      attemptId: owner.receiptId, executionGeneration: 1 };
+    const proof = { kind: "definitely_unsent", pluginId: "plugin", toolName: "tool", identity } as const;
+    expect((await releaseRetainedHttpToolUnsentReceipt(db, owner,
+      { ...proof, identity: { ...identity, attemptId: randomUUID() } } as never)).kind).toBe("held");
+    expect(await rows()).toHaveLength(1);
+    expect((await releaseRetainedHttpToolUnsentReceipt(db, owner, proof as never)).kind).toBe("released");
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it("holds a receipt with a staged actual result even when an unsent claim is supplied", async () => {
+    const owner = await internal();
+    await stageRetainedToolOutcome(db, owner, actual);
+    const identity = { requestId: owner.receiptId, executionId: owner.identity.runId,
+      attemptId: owner.receiptId, executionGeneration: 1 };
+    expect((await releaseRetainedHttpToolUnsentReceipt(db, owner,
+      { kind: "definitely_unsent", pluginId: "plugin", toolName: "tool", identity } as never)).kind).toBe("held");
+    expect(await rows()).toHaveLength(1);
   });
 
   it("retries a colliding internal tuple without adopting envelope-shaped legacy JSON", async () => {
