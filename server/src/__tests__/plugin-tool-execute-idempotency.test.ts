@@ -8,8 +8,11 @@ import {
 } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import { errorHandler } from "../middleware/index.js";
 import { pluginRoutes } from "../routes/plugins.js";
+import { decodeRetainedToolOutcome } from "../services/plugin-tool-execution-receipt.js";
+import { requestForRow } from "../services/plugin-tool-receipt-envelope.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(), getByKey: vi.fn(), listInstalled: vi.fn(), listByStatus: vi.fn(),
@@ -38,14 +41,39 @@ type Dispatcher = {
   listToolsForAgent: ReturnType<typeof vi.fn>;
   getTool: ReturnType<typeof vi.fn>;
   executeTool: ReturnType<typeof vi.fn>;
+  executeToolObserved: ReturnType<typeof vi.fn>;
 };
 
-/** Dispatcher whose getTool resolves (plugin branch) or not (core branch). */
+/** Test adapter maps the legacy spy result into the dispatcher's actual RPC observation contract. */
 function makeDispatcher(tool: string | null, execute: Dispatcher["executeTool"]): Dispatcher {
+  let nextId = 1;
   return {
     listToolsForAgent: vi.fn(),
     getTool: vi.fn(() => (tool === null ? undefined : { namespacedName: tool })),
     executeTool: execute,
+    executeToolObserved: vi.fn((name: string, parameters: unknown, context: unknown, identity: unknown) => {
+      const id = nextId++;
+      let state: "pending" | "settled" | "unknown" = "pending", acknowledged = false;
+      const actual = Promise.resolve().then(() => execute(name, parameters, context)).then(
+        (result) => {
+          state = "settled";
+          return { kind: "result", result, response: { jsonrpc: "2.0", id, result } };
+        },
+        (error: unknown) => {
+          state = "settled";
+          const rpcError = error instanceof JsonRpcCallError
+            ? { code: error.code, message: error.message, ...(error.data === undefined ? {} : { data: error.data }) }
+            : { code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR, message: error instanceof Error ? error.message : String(error) };
+          return { kind: "error", error: rpcError, response: { jsonrpc: "2.0", id, error: rpcError } };
+        },
+      );
+      const initial = actual.then((outcome) => {
+        if (outcome.kind === "error") throw new JsonRpcCallError(outcome.error); return outcome.result;
+      });
+      return { pluginId: name.slice(0, name.indexOf(":")), toolName: name.slice(name.indexOf(":") + 1), identity,
+        kind: "sent_or_unknown", observation: { kind: "sent_or_unknown", initial, actual, state: () => state,
+          acknowledge: () => { if (state !== "settled" || acknowledged) return false; acknowledged = true; return true; } } };
+    }),
   };
 }
 
@@ -119,16 +147,16 @@ describe("plugin tool execution idempotency receipts", () => {
       tool, parameters: { q: "x" }, runContext, idempotencyKey: "K-A",
     });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ content: "ok", data: { n: 1 } });
+    expect(res.body).toEqual({ pluginId: "acme.linear", toolName: "search-issues", result: { content: "ok", data: { n: 1 } } });
     expect(dispatcher.executeTool).toHaveBeenCalledTimes(1);
 
     const rows = await receiptRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("completed");
     expect(rows[0].resultStatus).toBe(200);
-    expect(rows[0].resultBody).toEqual({ content: "ok", data: { n: 1 } });
+    expect(decodeRetainedToolOutcome(rows[0].resultBody)).toMatchObject({ actual: { kind: "result", result: { content: "ok", data: { n: 1 } }, response: { jsonrpc: "2.0", result: { content: "ok", data: { n: 1 } } } }, response: { status: 200, body: res.body } });
     expect(rows[0].completedAt).not.toBeNull();
-    expect(rows[0].requestParameters).toEqual({ q: "x" });
+    expect(requestForRow(rows[0])?.parameters).toEqual({ q: "x" });
   });
 
   it("(b) same key replays the stored body without re-execution", async () => {
@@ -178,15 +206,17 @@ describe("plugin tool execution idempotency receipts", () => {
     expect(rows[0].completedAt).toBeNull();
   });
 
-  it("(e) request without a key keeps legacy behavior and leaves no receipt rows", async () => {
+  it("(e) request without a key keeps the response shape and records an internal receipt", async () => {
     const tool = "acme.linear:no-key-tool";
     const dispatcher = makeDispatcher(tool, vi.fn().mockResolvedValue({ content: "plain" }));
     const res = await post(createApp(dispatcher), { tool, runContext });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ content: "plain" });
+    expect(res.body).toEqual({ pluginId: "acme.linear", toolName: "no-key-tool", result: { content: "plain" } });
     expect(res.headers["x-idempotent-replay"]).toBeUndefined();
     expect(dispatcher.executeTool).toHaveBeenCalledTimes(1);
-    expect(await receiptRows()).toHaveLength(0);
+    const [receipt] = await receiptRows();
+    expect(receipt).toMatchObject({ companyId: COMPANY_ID, runId: "run-1", tool, status: "completed", resultStatus: 200 });
+    expect(decodeRetainedToolOutcome(receipt.resultBody)?.response).toEqual({ status: 200, body: res.body });
   });
 
   it("(f) execution errors (502) are recorded and replayed without re-execution", async () => {
@@ -267,7 +297,7 @@ describe("plugin tool execution idempotency receipts", () => {
     const realDispatcher = makeDispatcher(real, vi.fn().mockResolvedValue({ content: "now runs" }));
     const ok = await post(createApp(realDispatcher), { tool: real, runContext, idempotencyKey: "K-I" });
     expect(ok.status).toBe(200);
-    expect(ok.body).toEqual({ content: "now runs" });
+    expect(ok.body).toEqual({ pluginId: "acme.linear", toolName: "later-tool", result: { content: "now runs" } });
     expect(realDispatcher.executeTool).toHaveBeenCalledTimes(1);
     expect(await receiptRows()).toHaveLength(1);
   });

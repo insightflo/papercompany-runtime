@@ -46,10 +46,13 @@ import { ingestWebhookDelivery } from "../services/plugin-webhook-receipt.js";
 import {
   claimToolExecutionReceipt,
   completeToolExecutionReceipt,
+  releaseToolExecutionReceipt,
   IDEMPOTENCY_KEY_MAX_LENGTH,
   normalizeIdempotencyKey,
-  releaseToolExecutionReceipt,
 } from "../services/plugin-tool-execution-receipt.js";
+import type { createHttpHandlerLifetime } from "../services/http-handler-lifetime.js";
+import type { RuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
+import { createPluginToolHttpConsumer } from "../services/plugin-tool-http-consumer.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
@@ -396,6 +399,10 @@ export function pluginRoutes(
   webhookDeps?: PluginRouteWebhookDeps,
   toolDeps?: PluginRouteToolDeps,
   bridgeDeps?: PluginRouteBridgeDeps,
+  runtimeOptions?: {
+    lifetime: ReturnType<typeof createHttpHandlerLifetime>;
+    runtimeLifecycle?: RuntimeExecutionLifecycle;
+  },
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -403,6 +410,9 @@ export function pluginRoutes(
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
+  const executePluginToolHttp = toolDeps
+    ? createPluginToolHttpConsumer({ db, dispatcher: toolDeps.toolDispatcher })
+    : null;
 
   /**
    * Compute plugin health checks, including the worker-reported `health` RPC.
@@ -968,7 +978,7 @@ export function pluginRoutes(
    * - `tool`: Fully namespaced tool name (e.g., "acme.linear:search-issues")
    * - `parameters`: Parameters matching the tool's declared JSON Schema
    * - `runContext`: Agent run context with agentId, runId, companyId, and optional projectId
-   * - `idempotencyKey`: Optional stable effect key — retries with the same key replay the recorded response (x-idempotent-replay) instead of re-executing
+   * - `idempotencyKey`: Optional stable effect key — retries replay a completed response; during a provisional worker timeout they receive 409 until the actual result is durable, then replay that result
    *
    * Response: `ToolExecutionResult`
    * Errors:
@@ -978,7 +988,7 @@ export function pluginRoutes(
    * - 501 if tool dispatcher is not configured
    * - 502 if the plugin worker is unavailable or the RPC call fails
    */
-  router.post("/plugins/tools/execute", async (req, res) => {
+  const executePluginToolHandler = async (req: Request, res: Response) => {
     const body = (req.body as PluginToolExecuteRequest | undefined);
     if (!body) {
       res.status(400).json({ error: "Request body is required" });
@@ -1006,7 +1016,7 @@ export function pluginRoutes(
     }
 
     // [tool execution idempotency] Optional caller-supplied effect key.
-    //   No key → legacy behavior, no receipt rows. Bad key → 400, no execution.
+    //   Plugin calls also use an internal receipt when no key is supplied; bad key → 400, no execution.
     let idempotencyKey: string | null = null;
     if (body.idempotencyKey !== undefined) {
       idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
@@ -1065,6 +1075,15 @@ export function pluginRoutes(
       workflowRunIssueId = run?.issueId ?? null;
     } else {
       assertBoard(req);
+    }
+
+    if (registeredTool) {
+      const result = await executePluginToolHttp!({
+        tool, parameters: parameters ?? {}, runContext, idempotencyKey,
+      });
+      if (result.replay) res.set("x-idempotent-replay", "true");
+      res.status(result.status).json(result.body);
+      return;
     }
 
     // [tool execution idempotency] Receipt adjudication runs after authorization
@@ -1134,36 +1153,6 @@ export function pluginRoutes(
       res.status(status).json(finalBody);
     };
 
-    if (registeredTool) {
-      try {
-        const result = await toolDeps!.toolDispatcher.executeTool(
-          tool,
-          parameters ?? {},
-          runContext,
-        );
-        if (result.deferredBeforeStart) {
-          if (receiptId !== null) await releaseToolExecutionReceipt(db, receiptId);
-          res.status(503).json({ deferredBeforeStart: result.deferredBeforeStart });
-          return;
-        }
-        // [tool result hygiene] 같은 run에서 같은 도구가 같은 에러를 반복하면 본문을 1줄 요약으로
-        //   축소해 에이전트 세션 히스토리 누적을 막는다(첫 발생은 전문 유지). 스텝 증거 경로와 무관.
-        await emitExecuted(200, result as unknown as Record<string, unknown>, {
-          errorPath: "result.error",
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-
-        // Distinguish between "worker not running" (502) and other errors (500)
-        if (message.includes("not running") || message.includes("worker")) {
-          await emitExecuted(502, { error: message });
-        } else {
-          await emitExecuted(500, { error: message });
-        }
-      }
-      return;
-    }
-
     try {
       const stepEnv = await resolveRunStepEnv(db, String(runContext.runId));
       const coreResult = await executePluginCoreToolCall({
@@ -1212,7 +1201,12 @@ export function pluginRoutes(
       return;
     }
     res.status(404).json({ error: `Tool "${tool}" not found` });
-  });
+  };
+
+  router.post(
+    "/plugins/tools/execute",
+    runtimeOptions ? runtimeOptions.lifetime.wrapTerminal(executePluginToolHandler) : executePluginToolHandler,
+  );
 
   /**
    * POST /api/plugins/install
