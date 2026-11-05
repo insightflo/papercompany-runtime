@@ -169,6 +169,12 @@ import { workflowChildStepIds, ensureStepRunRecords, buildWorkflowStepRunMetadat
 import { syncStepRunsFromIssueState } from "./workflow-issue-state-sync.js";
 import { type WorkflowToolCorrection, isQaCorrectionToolStep, readWorkflowToolCorrection, hasWorkflowToolCorrectionInvocation, withWorkflowToolCorrection } from "./workflow-tool-correction.js";
 import { applyConditionalSkipPropagation } from "./workflow-conditional-skip.js";
+import { cancelOutstandingWorkflowIssues } from "./workflow-cancellation.js";
+export { cancelWorkflowRunWithCleanup } from "./workflow-cancellation.js";
+import { workflowToolStepExecutor } from "./workflow-tool-executor-registry.js";
+export { setWorkflowToolStepExecutor, setWorkflowToolStepReadinessChecker, assertWorkflowToolStepsReady } from "./workflow-tool-executor-registry.js";
+import { failToolStepRunWithDispatchError, startIssueLessToolStepRun } from "./workflow-tool-start.js";
+import { releaseDeferredWorkflowToolClaim, DeferredWorkflowToolClaimScopeError } from "./workflow-tool-deferred-claim.js";
 export { markRetryDispatching };
 
 
@@ -339,37 +345,16 @@ export type WorkflowToolStepQueueDispatchResult = {
   skippedCount: number;
 };
 
-let workflowToolStepExecutor: WorkflowToolStepExecutor | null = null;
-let workflowToolStepReadinessChecker: WorkflowToolStepReadinessChecker | null = null;
-
-export function setWorkflowToolStepExecutor(executor: WorkflowToolStepExecutor | null): void {
-  workflowToolStepExecutor = executor;
-}
-
-export function setWorkflowToolStepReadinessChecker(checker: WorkflowToolStepReadinessChecker | null): void {
-  workflowToolStepReadinessChecker = checker;
-}
 
 
 
-export async function assertWorkflowToolStepsReady(input: {
-  companyId: string;
-  steps: WorkflowStep[];
-}): Promise<void> {
-  const toolNames = getWorkflowToolReferenceNames(input.steps);
-  if (toolNames.length === 0) return;
 
-  const readiness = workflowToolStepReadinessChecker
-    ? await workflowToolStepReadinessChecker({ companyId: input.companyId, toolNames })
-    : { available: true };
-  if (!readiness.available) {
-    throw new Error(`Workflow tools are unavailable: ${readiness.reason ?? "tool execution is not available."}`);
-  }
 
-  if (!workflowToolStepExecutor) {
-    throw new Error("Workflow tools are unavailable: Workflow tool step executor is not configured.");
-  }
-}
+
+
+
+
+
 
 export type WorkflowExecutionContext = {
   run: typeof workflowRuns.$inferSelect;
@@ -475,77 +460,11 @@ async function failMalformedCompletedControlNodes(
 
 
 
-async function blockToolStepRunForConcurrency(input: {
-  db: Db;
-  step: WorkflowStep;
-  stepRun: typeof workflowStepRuns.$inferSelect;
-  concurrencyKey: string;
-  concurrencyLimit: number;
-  runningCount: number;
-  now: Date;
-}): Promise<void> {
-  // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
-  await setWorkflowStepRunStatus(input.db, {
-    stepRunId: input.stepRun.id,
-    status: "pending",
-    patch: {
-      metadata: {
-        ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
-        concurrencyBlocked: {
-          concurrencyKey: input.concurrencyKey,
-          concurrencyLimit: input.concurrencyLimit,
-          runningCount: input.runningCount,
-          checkedAt: input.now.toISOString(),
-        },
-      },
-    },
-    expectedStatuses: [input.stepRun.status],
-  });
-}
 
-async function completeToolStepRunFromCache(input: {
-  db: Db;
-  stepRun: typeof workflowStepRuns.$inferSelect;
-  sourceStepRun: typeof workflowStepRuns.$inferSelect;
-  step: WorkflowStep;
-  toolName: string;
-  args: unknown;
-  now: Date;
-}): Promise<void> {
-  const sourceMetadata = normalizeRecord(input.sourceStepRun.metadata);
-  const sourceToolResult = normalizeRecord(sourceMetadata.toolResult);
-  const metadata = settleToolQueueMetadata({
-    ...buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata),
-    toolInvocation: {
-      toolName: input.toolName,
-      args: input.args,
-      cacheCheckedAt: input.now.toISOString(),
-    },
-    toolResult: sourceToolResult,
-    cacheHit: {
-      sourceStepRunId: input.sourceStepRun.id,
-      toolName: input.toolName,
-      completedAt: input.now.toISOString(),
-    },
-  }, input.now.toISOString());
-  delete metadata.concurrencyBlocked;
 
-  // [step-status fencing v1] 스냅샷 status CAS — 갱신 사이 다른 실행자가 상태를 옮겼으면 폐기.
-  await setWorkflowStepRunStatus(input.db, {
-    stepRunId: input.stepRun.id,
-    status: "completed",
-    patch: {
-      startedAt: input.stepRun.startedAt ?? input.now,
-      completedAt: input.now,
-      metadata,
-    },
-    expectedStatuses: [input.stepRun.status],
-  });
-}
 
-async function failToolStepRunWithDispatchError(input: Parameters<typeof persistFailedToolDispatch>[0]): Promise<void> {
-  await persistFailedToolDispatch(input, buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata));
-}
+
+
 
 
 
@@ -571,160 +490,7 @@ function workflowToolQueueCandidate() {
 
 
 
-async function startIssueLessToolStepRun(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  definition: typeof workflowDefinitions.$inferSelect;
-  step: WorkflowStep;
-  /** [Task5a2a] 캡처된 실행 steps(loader 결과) — raw definition.stepsJson 재정규화 금지. */
-  steps: WorkflowStep[];
-  stepRun: typeof workflowStepRuns.$inferSelect;
-  now: Date;
-}): Promise<boolean> {
-  const { db, run, definition, step, stepRun, now } = input;
 
-  const correction = stepRun.issueId ? await readWorkflowToolCorrection(db, run, stepRun, step) : null;
-  if (stepRun.issueId && (!correction || is(db, PgTransaction))) return true;
-  if (correction && hasWorkflowToolCorrectionInvocation(stepRun, correction)) return true;
-  const toolName = getSingleToolStepName(step);
-  const storedRequest = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
-  const reuseRequest = correction && same(storedRequest.qaCorrectionFollowup, correction.ref)
-    && typeof storedRequest.requestId === "string" && storedRequest.requestId === stepRun.lastDispatchRequestId;
-  const requestId = reuseRequest ? storedRequest.requestId as string
-    : correction?.ref.requestId ?? `${run.id}:${step.id}:${Date.now()}`;
-  const workflowSteps = input.steps;
-  let args: unknown;
-  let artifactExecution: Awaited<ReturnType<typeof freezeCompanyArtifactAttempt>>;
-  const failStart = async (error: unknown, failedArgs: unknown): Promise<boolean> => {
-    const write = async (writer: Db) => {
-      await failToolStepRunWithDispatchError({ db: writer, step,
-        stepRun: correction ? { ...stepRun, metadata: { ...stepRun.metadata,
-          qaCorrectionToolFollowup: correction.ref } } : stepRun,
-        now, requestId, toolName, args: failedArgs, error });
-      return false;
-    };
-    return correction ? (await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, write)) ?? true
-      : write(db);
-  };
-  try {
-    // Reuse request identity and contract, not prepared arguments: QA preparation needs original paths.
-    artifactExecution = reuseRequest
-      ? readFrozenArtifactAttempt(stepRun.metadata.artifactExecution,
-        { executionGeneration: stepRun.executionGeneration, requestId })
-      : await freezeCompanyArtifactAttempt({ db, companyId: run.companyId, toolName, step,
-        executionGeneration: stepRun.executionGeneration, requestId });
-    args = await resolveWorkflowToolStepArgs({
-      db, run, step: step as PersistedWorkflowStep, workflowSteps, consumerStepRunId: stepRun.id,
-      consumerArtifactContract: artifactExecution?.contract,
-    });
-    if (reuseRequest && !same(storedRequest.artifactExecution, artifactExecution)) {
-      throw new Error("artifact_contract_snapshot_stale");
-    }
-  } catch (error) {
-    return failStart(error, step.toolArgs ?? {});
-  }
-  const concurrencyKey = step.executionControls?.concurrencyKey;
-  const concurrencyLimit = step.executionControls?.concurrencyLimit;
-  if (concurrencyKey && typeof concurrencyLimit === "number" && concurrencyLimit > 0) {
-    const runningCount = await getRunningConcurrencyCount({
-      db,
-      run,
-      stepRun,
-      concurrencyKey,
-    });
-    if (runningCount >= concurrencyLimit) {
-      const block = (writer: Db) => blockToolStepRunForConcurrency({
-        db: writer,
-        step,
-        stepRun,
-        concurrencyKey,
-        concurrencyLimit,
-        runningCount,
-        now,
-      });
-      if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, block);
-      else await block(db);
-      return true;
-    }
-  }
-  // QA/artifact attempts need current request-bound evidence, never generic cached results.
-  if (!correction && !isStructuralGateStep(step) && !artifactExecution && !(step as PersistedWorkflowStep).toolArtifactContract) {
-    const cachedStepRun = await findCachedToolStepRun({
-      db,
-      run,
-      definition,
-      step,
-      toolName,
-      args,
-      now,
-    });
-    if (cachedStepRun) {
-      await completeToolStepRunFromCache({
-        db,
-        stepRun,
-        sourceStepRun: cachedStepRun,
-        step,
-        toolName,
-        args,
-        now,
-      });
-      return true;
-    }
-  }
-
-  if (toolName !== "delegate_to_company" && toolName !== STEP_MACHINE_CHECKS_TOOL && !workflowToolStepExecutor) {
-    return failStart("Workflow tool step executor is not configured.", args);
-  }
-
-  const structuralGateProducerToken = isStructuralGateStep(step)
-    ? await captureStructuralGateProducerToken({ db, workflowRunId: run.id, gate: step, steps: workflowSteps })
-    : null;
-  if (isStructuralGateStep(step) && !structuralGateProducerToken) {
-    return failStart("Structural gate producer generation is unavailable.", args);
-  }
-
-  const metadata: Record<string, unknown> = {
-    ...artifactAttemptMetadata(buildWorkflowStepRunMetadata(step, stepRun.metadata), artifactExecution),
-    ...(correction ? { qaCorrectionToolFollowup: correction.ref } : {}),
-    toolInvocation: {
-      requestId,
-      toolName,
-      args,
-      queuedAt: now.toISOString(),
-    },
-    toolQueue: {
-      status: "queued",
-      queuedAt: now.toISOString(),
-    },
-    ...(structuralGateProducerToken ? { structuralGateProducerToken } : {}),
-  };
-  delete metadata.concurrencyBlocked;
-
-  // [step-status fencing v1] 스냅샷 status CAS — 이미 다른 실행자가 전이시킨 행으로의
-  //   늦은 running 덮어쓰기(running 재기입 + requestId 교체)를 폐기한다.
-  const enqueue = (writer: Db) => setWorkflowStepRunStatus(writer, {
-    stepRunId: stepRun.id,
-    status: "running",
-    patch: {
-      startedAt: stepRun.startedAt ?? now,
-      completedAt: null,
-      lastDispatchAttemptAt: now,
-      lastDispatchAcceptedAt: null,
-      lastDispatchErrorAt: null,
-      lastDispatchErrorSummary: null,
-      lastDispatchRequestId: requestId,
-      metadata,
-    },
-    expectedStatuses: [stepRun.status],
-    extraConditions: correction ? [eq(workflowStepRuns.metadata, stepRun.metadata),
-      eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
-      eq(workflowStepRuns.retryCount, stepRun.retryCount), eq(workflowStepRuns.iterationIndex, stepRun.iterationIndex)] : [],
-  });
-  if (correction) await withWorkflowToolCorrection({ db, run, stepRun, step, correction }, enqueue);
-  else await enqueue(db);
-
-  return true;
-}
 
 // Reap orphaned running claims after timeout + grace through the existing failure/sync path.
 // Process-local executors/timers disappear on restart; queued, unclaimed rows are not orphans.
@@ -806,109 +572,9 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
   });
 }
 
-async function releaseDeferredWorkflowToolClaim(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  step: WorkflowStep;
-  claimedStepRun: typeof workflowStepRuns.$inferSelect;
-  requestId: string;
-  deferred: DeferredBeforeStart;
-  correction: WorkflowToolCorrection | null;
-}): Promise<boolean> {
-  const parsed = deferredBeforeStartSchema.safeParse(input.deferred);
-  if (!parsed.success
-    || parsed.data.requestId !== input.requestId
-    || parsed.data.executionId !== input.run.id
-    || parsed.data.attemptId !== input.claimedStepRun.id
-    || parsed.data.executionGeneration !== input.claimedStepRun.executionGeneration) {
-    throw new DeferredWorkflowToolClaimScopeError("workflow_deferred_before_start_scope_mismatch");
-  }
 
-  const release = async (
-    writer: Db,
-    currentRun: typeof workflowRuns.$inferSelect,
-    currentStep: typeof workflowStepRuns.$inferSelect | undefined,
-  ): Promise<boolean> => {
-    if (currentRun.id !== input.run.id || currentRun.companyId !== input.run.companyId
-      || currentRun.status !== "running" || !currentStep
-      || currentStep.workflowRunId !== currentRun.id || currentStep.stepId !== input.step.id
-      || currentStep.status !== "running" || currentStep.lastDispatchErrorAt !== null
-      || currentStep.lastDispatchRequestId !== input.requestId
-      || currentStep.executionGeneration !== input.claimedStepRun.executionGeneration
-      || currentStep.retryCount !== input.claimedStepRun.retryCount
-      || currentStep.iterationIndex !== input.claimedStepRun.iterationIndex
-      || currentStep.statusTransitionVersion !== input.claimedStepRun.statusTransitionVersion
-      || !same(currentStep.lastDispatchAcceptedAt, input.claimedStepRun.lastDispatchAcceptedAt)) return false;
-    // [P6 B/C release defect] Exact-authority QA preparation delta admission:
-    // prepareQaArtifactRequest may write a new toolArtifactRequest for this very
-    // claim AFTER the queue claim, so byte-equality with the claim-time snapshot
-    // would wrongly hold every deferred QA release. Only that single added
-    // same-request snapshot is admissible; replacements, removals, unknown keys
-    // and unrelated drift still hold the claim (deferred-claim-qa-delta.ts).
-    const releasedMetadata = admitClaimMetadataWithQaArtifactRequest(
-      currentStep.metadata, input.claimedStepRun.metadata, {
-        companyId: currentRun.companyId, missionId: currentRun.missionId,
-        workflowRunId: currentRun.id, stepId: currentStep.stepId, stepRunId: currentStep.id,
-        executionGeneration: currentStep.executionGeneration, retryCount: currentStep.retryCount,
-        iterationIndex: currentStep.iterationIndex, requestId: input.requestId,
-      });
-    if (!releasedMetadata) return false;
 
-    const metadata = releasedMetadata;
-    const toolQueue: Record<string, unknown> = {
-      ...getMetadataRecord(metadata, "toolQueue"), status: "queued",
-    };
-    const toolInvocation: Record<string, unknown> = {
-      ...getMetadataRecord(metadata, "toolInvocation"),
-    };
-    if (toolQueue.claimedAt === undefined || toolInvocation.dispatchedAt === undefined
-      || toolInvocation.requestId !== input.requestId) return false;
-    delete toolQueue.claimedAt;
-    delete toolInvocation.dispatchedAt;
 
-    const rows = await writer.update(workflowStepRuns).set({
-      lastDispatchAcceptedAt: null,
-      metadata: { ...metadata, toolQueue, toolInvocation },
-    }).where(and(
-      eq(workflowStepRuns.id, currentStep.id),
-      eq(workflowStepRuns.workflowRunId, currentRun.id),
-      eq(workflowStepRuns.stepId, input.step.id),
-      eq(workflowStepRuns.status, "running"),
-      eq(workflowStepRuns.lastDispatchRequestId, input.requestId),
-      eq(workflowStepRuns.lastDispatchAcceptedAt, currentStep.lastDispatchAcceptedAt!),
-      isNull(workflowStepRuns.lastDispatchErrorAt),
-      eq(workflowStepRuns.executionGeneration, currentStep.executionGeneration),
-      eq(workflowStepRuns.retryCount, currentStep.retryCount),
-      eq(workflowStepRuns.iterationIndex, currentStep.iterationIndex),
-      eq(workflowStepRuns.metadata, currentStep.metadata),
-    )).returning({ id: workflowStepRuns.id });
-    return rows.length === 1;
-  };
-
-  if (input.correction) {
-    return (await withWorkflowToolCorrection({ db: input.db, run: input.run,
-      stepRun: input.claimedStepRun, step: input.step, correction: input.correction },
-    async (writer) => release(writer, input.run, input.claimedStepRun))) === true;
-  }
-  if (input.run.missionId) {
-    return await withResumeSerialization(input.db, {
-      companyId: input.run.companyId, missionId: input.run.missionId, runId: input.run.id,
-    }, async (lock) => release(lock.tx as unknown as Db, lock.run,
-      lock.steps.find((candidate) => candidate.id === input.claimedStepRun.id)));
-  }
-  return input.db.transaction(async (tx) => {
-    const [currentRun] = await tx.select().from(workflowRuns).where(and(
-      eq(workflowRuns.id, input.run.id), eq(workflowRuns.companyId, input.run.companyId),
-    )).for("update");
-    if (!currentRun) return false;
-    const [currentStep] = await tx.select().from(workflowStepRuns).where(and(
-      eq(workflowStepRuns.id, input.claimedStepRun.id), eq(workflowStepRuns.workflowRunId, currentRun.id),
-    )).for("update");
-    return release(tx as unknown as Db, currentRun, currentStep);
-  });
-}
-
-class DeferredWorkflowToolClaimScopeError extends Error {}
 
 export async function processQueuedWorkflowToolStepRuns(
   db: Db,
@@ -1358,183 +1024,19 @@ export async function retryIssueLessToolWorkflowStep(
   });
 }
 
-async function cancelOutstandingWorkflowIssues(
-  db: Db,
-  runId: string,
-): Promise<void> {
-  const now = new Date();
-  await db
-    .update(issues)
-    .set({
-      status: "cancelled",
-      cancelledAt: now,
-      updatedAt: now,
-      checkoutRunId: null,
-      executionRunId: null,
-      executionLockedAt: null,
-    })
-    .where(and(
-      eq(issues.originKind, "workflow_execution"),
-      eq(issues.originRunId, runId),
-      sql`${issues.status} not in ('done', 'cancelled')`,
-    ));
-}
+
 
 
 const WORKFLOW_RUN_TERMINAL_STATUSES_SQL = sql`('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`;
-const WORKFLOW_RUN_TERMINAL_STATUSES = new Set(["completed", "cancelled", "aborted", "failed", "timed-out"]);
 
-export async function cancelWorkflowRunWithCleanup(
-  db: Db,
-  runId: string,
-  companyId: string,
-  options?: {
-    childParentFence: {
-      invocationId: string;
-      generation: number;
-      parentRunId: string;
-      parentStepRunId: string;
-    };
-  },
-): Promise<boolean> {
-  // [descope D5 — DAG:3604/3607] 회사는 항상 호출자가 명시한다(parentRunId 유추 금지). 링크 자식은
-  //   공유 전체 신원(BASE_ID/CURRENT) fence 취소 헬퍼로만 취소되고, 무효 표지 run 은 무변환 거부,
-  //   plain run 은 명시적 no-child 가드가 있는 기존 조건부 취소 UPDATE 다. 상세 분류는
-  //   workflow-cancel-bridge 가 담당한다(oversized 파일 밖 — 설계 §5).
-  const disposition = await cancelWorkflowRunWithChildFence(db, {
-    runId,
-    companyId,
-    suppliedFence: options?.childParentFence,
-  });
-  if (disposition.refusedInvalidReason) {
-    await logWorkflowRunCancellationRefused(db, companyId, runId, disposition.refusedInvalidReason);
-    return false;
-  }
-  const updatedRows: CancelledRunRef[] = disposition.rows;
 
-  const updatedRun = updatedRows[0];
-  if (!updatedRun) {
-    return false;
-  }
 
-  // [workflow child fix2 P1-6] 자손 run 취소 전파 — parent_run_id 링크 BFS(회사 범위).
-  //   종말 중간 run(완료된 fire-and-forget 자식 등)도 frontier 확장은 통과시키고, 취소는
-  //   비종말 노드에만 적용한다 — 단일 반복 순회라 visited/깊이 상한이 전역으로 유효하다.
-  //   자손을 먼저 취소해 자손 종말 hook 이 부모 waiting 스텝을 child_run_cancelled 로 마감하게 한다.
-  await cancelDescendantWorkflowRuns(db, {
-    rootRunId: updatedRun.id,
-    companyId: updatedRun.companyId,
-  });
 
-  await cleanupCancelledWorkflowRun(db, updatedRun);
-  return true;
-}
 
-/** 취소 확정된 run 1개의 정리: 이슈 취소 + 스텝 동기화 + 상위 훅 + 미션 런타임 중단. */
-async function cleanupCancelledWorkflowRun(
-  db: Db,
-  run: { id: string; companyId: string; missionId: string | null },
-): Promise<void> {
-  await cancelOutstandingWorkflowIssues(db, run.id);
-  await syncCancelledWorkflowRunState({
-    db,
-    run,
-    syncStepRunsFromIssueState,
-  });
-  // [workflow child step] 자식 run 취소 → 부모 waiting 스텝 child_run_cancelled 마감.
-  //   취소 경로의 run 상태는 항상 cancelled 이므로 리터럴로 훅을 발화한다.
-  try {
-    await runWorkflowChildCompletionHook(db, {
-      id: run.id,
-      companyId: run.companyId,
-      status: "cancelled",
-    });
-  } catch {
-    // swallowed: reconciler 가 회복한다.
-  }
-  if (run.missionId) {
-    await stopMissionRuntimesForMission(db, {
-      companyId: run.companyId,
-      missionId: run.missionId,
-      reason: `workflow ${run.id} cancelled`,
-    });
-  }
-}
 
-/**
- * [workflow child fix2 P1-6] parent_run_id 링크 전체를 순회하는 경계 취소 전파(회사 범위).
- * - 종말 중간 run 도 frontier 확장에 포함한다(그 아래 살아있는 손자 도달).
- * - 방문 집합과 깊이 상한이 순회 전체에서 공유된다(재귀 재진입으로 초기화되지 않는다).
- * - [descope D5 — DAG:3700] 링크 자식은 공유 전체 신원 fence 취소 헬퍼로만 변이하고, 무효 링크는
- *   감사 후 건너뛴다(mutate only valid links). plain 자손은 기존 조건부 UPDATE 를 유지한다.
- *   자손 1개 변이의 상세는 workflow-cancel-bridge 가 담당한다(oversized 파일 밖 — 설계 §5).
- * - 개별 자손 취소 실패는 조용히 삼키지 않고 구조화 activity 로 남긴다.
- */
-async function cancelDescendantWorkflowRuns(
-  db: Db,
-  input: { rootRunId: string; companyId: string },
-): Promise<void> {
-  const visited = new Set<string>([input.rootRunId]);
-  let frontier = [input.rootRunId];
-  // 전역 깊이 상한: 비정상 링크 데이터(사이클/무한 체인)에서도 선형 종료를 보장한다.
-  for (let depth = 0; depth < 8 && frontier.length > 0; depth++) {
-    const children = await db
-      .select({
-        id: workflowRuns.id,
-        companyId: workflowRuns.companyId,
-        missionId: workflowRuns.missionId,
-        status: workflowRuns.status,
-        parentRunId: workflowRuns.parentRunId,
-        parentStepRunId: workflowRuns.parentStepRunId,
-        triggeredBy: workflowRuns.triggeredBy,
-      })
-      .from(workflowRuns)
-      .where(and(
-        eq(workflowRuns.companyId, input.companyId),
-        inArray(workflowRuns.parentRunId, frontier),
-      ));
-    frontier = [];
-    for (const child of children) {
-      if (visited.has(child.id)) continue;
-      visited.add(child.id);
-      frontier.push(child.id);
-      if (WORKFLOW_RUN_TERMINAL_STATUSES.has(child.status)) continue;
-      try {
-        const propagated = await cancelDescendantWorkflowRunWithChildFence(db, child);
-        if (!propagated) continue;
-        await cleanupCancelledWorkflowRun(db, child);
-        // 취소 전파 관측 기록(.activity) — 루트 취소가 자손 run 을 함께 종료시켰음을 남긴다.
-        await logActivity(db, {
-          companyId: input.companyId,
-          actorType: "system",
-          actorId: "workflow-cancel",
-          action: "workflow_run.cancelled",
-          entityType: "workflow_run",
-          entityId: child.id,
-          details: {
-            propagatedFrom: input.rootRunId,
-            reason: "parent workflow run cancelled",
-          },
-        });
-      } catch (error) {
-        // [fix2 P1-6] 개별 자손 취소 실패를 조용히 삼키지 않는다 — 구조화 activity 로 남기고
-        // 남은 자손 전파는 계속한다(미정산 자손은 reconciler 강제 종결 경로로 회수).
-        await logActivity(db, {
-          companyId: input.companyId,
-          actorType: "system",
-          actorId: "workflow-cancel",
-          action: "workflow_run.cancellation_propagation_failed",
-          entityType: "workflow_run",
-          entityId: child.id,
-          details: {
-            propagatedFrom: input.rootRunId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        });
-      }
-    }
-  }
-}
+
+
+
 
 async function commentOnMainExecutorOversightForFailures(
   db: Db,
