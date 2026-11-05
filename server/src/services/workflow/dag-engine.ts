@@ -72,6 +72,7 @@ import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
 import { finalizeWorkflowRunState } from "./workflow-run-finalization.js";
 import { acceptWorkflowToolResult } from "./workflow-tool-result-acceptance.js";
 import { deferredBeforeStartSchema, type DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
+import { reconcileOrphanedWorkflowToolStepClaims as reconcileOrphanedToolClaims, type OrphanedWorkflowToolClaim, type OrphanedWorkflowToolClaimWork } from "./tool-claim-orphan-reconciliation.js";
 export { wakeExistingWorkflowStepIssue };
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { stopMissionRuntimesForMission, TERMINAL_WORKFLOW_STATUSES } from "../missions/mission-runtime-manager.js";
@@ -1908,84 +1909,48 @@ export async function reconcileOrphanedWorkflowToolStepClaims(
   db: Db,
   options: { limit?: number; now?: Date } = {},
 ): Promise<{ orphanedCount: number; skippedCount: number }> {
-  const limit = Math.max(1, Math.min(options.limit ?? 25, 100));
-  const now = options.now ?? new Date();
-  const minAgeCutoff = new Date(now.getTime() - ORPHANED_TOOL_CLAIM_MIN_AGE_MS);
-  const candidateRows = await db
-    .select({ stepRun: workflowStepRuns, run: workflowRuns, definition: workflowDefinitions })
-    .from(workflowStepRuns)
-    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .innerJoin(workflowDefinitions, eq(workflowRuns.workflowId, workflowDefinitions.id))
-    .where(and(
-      eq(workflowRuns.status, "running"),
-      eq(workflowStepRuns.status, "running"),
-      workflowToolQueueCandidate(),
-      isNull(workflowStepRuns.lastDispatchErrorAt),
-      isNotNull(workflowStepRuns.lastDispatchAcceptedAt),
-      isNotNull(workflowStepRuns.lastDispatchRequestId),
-      lte(workflowStepRuns.lastDispatchAcceptedAt, minAgeCutoff),
-    ))
-    .orderBy(asc(workflowStepRuns.lastDispatchAcceptedAt))
-    .limit(limit);
-
-  let orphanedCount = 0;
-  let skippedCount = 0;
-  for (const row of candidateRows) {
-    // [Task5a2a] step 선택/실패 mutation 전에 캡처 실행정의를 로드한다. 타임아웃 정책/카운터/
-    //   persisted invocation 권위/에러 fallback 은 변경 없다.
-    const steps = (await loadExecutionDefinition(db, row.run.id, { requireHistorical: false })).steps;
-    const step = steps.find((candidate) => candidate.id === row.stepRun.stepId);
-    if (!step || (!isIssueLessToolStep(step) && !(row.stepRun.issueId && isQaCorrectionToolStep(step)))) {
-      skippedCount += 1;
-      continue;
-    }
-    const correction = row.stepRun.issueId
-      ? await readWorkflowToolCorrection(db, row.run, row.stepRun, step) : null;
-    if (row.stepRun.issueId && (!correction || !hasWorkflowToolCorrectionInvocation(row.stepRun, correction))) {
-      skippedCount += 1;
-      continue;
-    }
-    const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
-    const requestId = readMetadataString(invocation.requestId)
-      ?? readMetadataString(row.stepRun.lastDispatchRequestId);
-    const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
-    const acceptedAtMs = row.stepRun.lastDispatchAcceptedAt instanceof Date
-      ? row.stepRun.lastDispatchAcceptedAt.getTime()
-      : new Date(row.stepRun.lastDispatchAcceptedAt as unknown as string).getTime();
-    if (!requestId || !toolName || !Number.isFinite(acceptedAtMs)) {
-      skippedCount += 1;
-      continue;
-    }
-    const timeoutMs = await resolveWorkflowToolStepClaimTimeoutMs(db, row.run.companyId, toolName);
-    const ageMs = now.getTime() - acceptedAtMs;
-    if (ageMs < timeoutMs + ORPHANED_TOOL_CLAIM_GRACE_MS) {
-      skippedCount += 1;
-      continue;
-    }
-    const failOrphan = async (writer: Db) => {
-      await failToolStepRunWithDispatchError({
-        db: writer,
-        step,
-        stepRun: row.stepRun,
-        now,
-        requestId,
-        toolName,
+  return reconcileOrphanedToolClaims(db, options, {
+    prepare: async (candidate: OrphanedWorkflowToolClaim): Promise<OrphanedWorkflowToolClaimWork | null> => {
+      const steps = (await loadExecutionDefinition(db, candidate.run.id, { requireHistorical: false })).steps;
+      const step = steps.find((entry) => entry.id === candidate.stepRun.stepId);
+      if (!step || (!isIssueLessToolStep(step)
+        && !(candidate.stepRun.issueId && isQaCorrectionToolStep(step)))) return null;
+      const correction = candidate.stepRun.issueId
+        ? await readWorkflowToolCorrection(db, candidate.run, candidate.stepRun, step) : null;
+      if (candidate.stepRun.issueId && (!correction
+        || !hasWorkflowToolCorrectionInvocation(candidate.stepRun, correction))) return null;
+      const invocation = getMetadataRecord(candidate.stepRun.metadata, "toolInvocation");
+      const requestId = readMetadataString(invocation.requestId)
+        ?? readMetadataString(candidate.stepRun.lastDispatchRequestId);
+      const toolName = readMetadataString(invocation.toolName) ?? getSingleToolStepName(step);
+      if (!requestId || requestId !== candidate.stepRun.lastDispatchRequestId || !toolName) return null;
+      const timeoutMs = await resolveWorkflowToolStepClaimTimeoutMs(db, candidate.run.companyId, toolName);
+      return {
+        step, requestId, toolName, timeoutMs,
         args: Object.prototype.hasOwnProperty.call(invocation, "args") ? invocation.args : null,
-        error: `Workflow tool step claim orphaned: no completion since claim at ${new Date(acceptedAtMs).toISOString()} (age ${Math.round(ageMs / 1000)}s exceeded timeout ${timeoutMs}ms + ${ORPHANED_TOOL_CLAIM_GRACE_MS}ms grace). Executor restart or stuck dispatch; failed by orphan-claim reaper so onFailure/rerun recovery can proceed.`,
-        provenance: { run: row.run, source: "workflow_tool_queue" },
+        ...(correction ? { correction } : {}),
+      };
+    },
+    fail: async ({ db: writer, run, stepRun, work, now, error }) => {
+      await failToolStepRunWithDispatchError({ db: writer, step: work.step, stepRun, now,
+        requestId: work.requestId, toolName: work.toolName, args: work.args, error,
+        provenance: { run, source: "workflow_tool_queue" } });
+    },
+    sync: async (runId) => { await syncWorkflowRunState(db, runId, "workflow_tool_queue"); },
+    withCorrectionAuthority: async (candidate, work, write) => {
+      if (!work.correction) return null;
+      return await withWorkflowToolCorrection({ db, run: candidate.run, stepRun: candidate.stepRun,
+        step: work.step, correction: work.correction as WorkflowToolCorrection }, async (writer) => {
+        const [currentRun] = await writer.select().from(workflowRuns).where(eq(workflowRuns.id, candidate.run.id)).for("update");
+        if (!currentRun) return false;
+        const [stepRun] = await writer.select().from(workflowStepRuns).where(and(
+          eq(workflowStepRuns.id, candidate.stepRun.id),
+          eq(workflowStepRuns.workflowRunId, currentRun.id),
+        )).for("update");
+        return write(writer, currentRun, stepRun);
       });
-      return true;
-    };
-    if (correction) {
-      if (!await withWorkflowToolCorrection({ db, run: row.run, stepRun: row.stepRun, step, correction }, failOrphan)) {
-        skippedCount += 1;
-        continue;
-      }
-    } else await failOrphan(db);
-    await syncWorkflowRunState(db, row.run.id, "workflow_tool_queue");
-    orphanedCount += 1;
-  }
-  return { orphanedCount, skippedCount };
+    },
+  });
 }
 
 async function releaseDeferredWorkflowToolClaim(input: {
