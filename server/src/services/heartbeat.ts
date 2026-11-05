@@ -49,7 +49,7 @@ import { getRunLogStore } from "./run-log-store.js";
 import { createHeartbeatRunLog } from "./heartbeat-run-log.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./heartbeat-agent-cancellation.js";
-import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate, UsageSummary } from "../adapters/index.js";
+import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
@@ -76,6 +76,11 @@ import { secretService } from "./secrets.js";
 import { resolveWorkflowStepToolContext } from "./heartbeat-workflow-tool-context.js";
 import { resolveWorkflowStepKnowledgeContext } from "./heartbeat-workflow-knowledge-context.js";
 import { resolveMaintenanceGuidanceContext } from "./heartbeat-maintenance-guidance.js";
+import { classifyHeartbeatRunFailure, heartbeatRunFailureText, type HeartbeatFailureClassification } from "./heartbeat-failure-classification.js";
+import { normalizeUsageTotals, readRawUsageTotals, deriveNormalizedUsageDelta, formatCount, type UsageTotals } from "./heartbeat-usage-totals.js";
+import { MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS, runText, buildMissionChildRunOutputComment, buildSuccessfulIssueRunAutoCompletedComment, buildNoProgressAutoBlockedComment, buildMissionWorkerNoProgressOversightComment, buildFailedIssueRunAutoBlockedComment, buildMissionWorkerFailureOversightComment, buildMissionOversightRunFailureComment, buildMissionOversightRunSucceededReleaseComment } from "./heartbeat-run-presentation.js";
+import { buildRequestChangesValidationGateComment, buildMissingWorkflowValidationVerdictGateComment, buildInsufficientEvidenceWorkflowVerdictGateComment, buildRequestChangesOwnerActionDescription, type RequestChangesVerdict } from "./heartbeat-validation-presentation.js";
+export { classifyHeartbeatRunFailure, type HeartbeatFailureClassification } from "./heartbeat-failure-classification.js";
 import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
 import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
@@ -172,7 +177,6 @@ import { blockMissionPlanQaCompletionWithoutLedger, hasMissionPlanQaCompletionLe
 import { buildMissionOwnerPlanningContext } from "./missions/mission-owner-planning-context.js";
 import { createPlanQaWakeupHandler, createPlanningIssueWakeupHandler } from "./missions/plan-qa-wakeup.js";
 import { buildMissionExecutionDigest } from "./missions/mission-execution-digest.js";
-import { buildMainExecutorBrief } from "./missions/mission-owner-recovery-comments.js";
 import { buildMissingWorkProductRegistrationGateComment } from "./work-products/artifact-registration-instructions.js";
 import { handleDelegatedArtifactHandback } from "./delegated-artifact-handback.js";
 import {
@@ -375,7 +379,7 @@ export {
 
 type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1];
 
-const MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS = 12 * 1024;
+
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 // [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
@@ -755,11 +759,6 @@ interface WakeupOptions {
   contextSnapshot?: Record<string, unknown>;
 }
 
-type UsageTotals = {
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-};
 
 type SessionCompactionDecision = {
   rotate: boolean;
@@ -1519,68 +1518,6 @@ async function resolveLedgerScopeForRun(
   };
 }
 
-function normalizeUsageTotals(usage: UsageSummary | null | undefined): UsageTotals | null {
-  if (!usage) return null;
-  return {
-    inputTokens: Math.max(0, Math.floor(asNumber(usage.inputTokens, 0))),
-    cachedInputTokens: Math.max(0, Math.floor(asNumber(usage.cachedInputTokens, 0))),
-    outputTokens: Math.max(0, Math.floor(asNumber(usage.outputTokens, 0))),
-  };
-}
-
-function readRawUsageTotals(usageJson: unknown): UsageTotals | null {
-  const parsed = parseObject(usageJson);
-  if (Object.keys(parsed).length === 0) return null;
-
-  const inputTokens = Math.max(
-    0,
-    Math.floor(asNumber(parsed.rawInputTokens, asNumber(parsed.inputTokens, 0))),
-  );
-  const cachedInputTokens = Math.max(
-    0,
-    Math.floor(asNumber(parsed.rawCachedInputTokens, asNumber(parsed.cachedInputTokens, 0))),
-  );
-  const outputTokens = Math.max(
-    0,
-    Math.floor(asNumber(parsed.rawOutputTokens, asNumber(parsed.outputTokens, 0))),
-  );
-
-  if (inputTokens <= 0 && cachedInputTokens <= 0 && outputTokens <= 0) {
-    return null;
-  }
-
-  return {
-    inputTokens,
-    cachedInputTokens,
-    outputTokens,
-  };
-}
-
-function deriveNormalizedUsageDelta(current: UsageTotals | null, previous: UsageTotals | null): UsageTotals | null {
-  if (!current) return null;
-  if (!previous) return { ...current };
-
-  const inputTokens = current.inputTokens >= previous.inputTokens
-    ? current.inputTokens - previous.inputTokens
-    : current.inputTokens;
-  const cachedInputTokens = current.cachedInputTokens >= previous.cachedInputTokens
-    ? current.cachedInputTokens - previous.cachedInputTokens
-    : current.cachedInputTokens;
-  const outputTokens = current.outputTokens >= previous.outputTokens
-    ? current.outputTokens - previous.outputTokens
-    : current.outputTokens;
-
-  return {
-    inputTokens: Math.max(0, inputTokens),
-    cachedInputTokens: Math.max(0, cachedInputTokens),
-    outputTokens: Math.max(0, outputTokens),
-  };
-}
-
-function formatCount(value: number | null | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US");
-}
 
 export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
   return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
@@ -1968,33 +1905,8 @@ function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelec
   return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
 }
 
-const runText = (run: typeof heartbeatRuns.$inferSelect, ko: string, en: string) => parseObject(run.contextSnapshot).paperclipUserFacingLanguage === "ko" ? ko : en; function buildMissionChildRunOutputComment(run: typeof heartbeatRuns.$inferSelect) {
-  const stdout = (run.stdoutExcerpt ?? "").trim();
-  const stderr = (run.stderrExcerpt ?? "").trim();
-  const output = [stdout, stderr ? `stderr:\n${stderr}` : ""]
-    .filter((value) => value.length > 0)
-    .join("\n\n")
-    .trim();
-  const excerpt =
-    output.length > MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS
-      ? `${output.slice(output.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)}`
-      : output;
-  return [
-    "## 자동 캡처: delegated run output",
-    runText(run, `- 실행 기록(runId): \`${run.id}\``, `- Run record (runId): \`${run.id}\``),
-    runText(run, "- 이유: 위임 업무 실행은 성공(succeeded)으로 종료됐지만 업무 마감 기록이 없었습니다.", "- Reason: the delegated run succeeded, but the issue had no closeout record."),
-    runText(run, "- 처리: 실행 출력 원문을 아래에 보존하고 업무를 완료(done) 상태로 변경합니다. 필요한 근거는 아래 기록에서 확인해 주세요.", "- Action: preserve the raw output below and mark the issue done. Review the captured evidence below."),
-    "",
-    "### Captured output",
-    "```text",
-    excerpt || "(no stdout/stderr excerpt captured)",
-    "```",
-  ].join("\n");
-}
 
-type RequestChangesVerdict = {
-  excerpt: string;
-};
+
 
 function stringifyRunResultJson(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -2036,91 +1948,6 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
   };
 }
 
-function buildRequestChangesValidationGateComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  verdict: RequestChangesVerdict;
-}) {
-  return [
-    "## Mission validation gate: REQUEST_CHANGES",
-    `- 실행 runId: \`${input.run.id}\``,
-    "- 감지: validator/QA run은 succeeded로 종료됐지만 산출물 verdict가 `REQUEST_CHANGES`입니다.",
-    "- 조치: delivery를 통과시키지 않고 source issue를 `blocked`로 전이합니다.",
-    "- follow-up: mission owner unblock issue를 생성/재사용하고 owner agent를 wakeup합니다.",
-    "",
-    "### Verdict excerpt",
-    "```text",
-    input.verdict.excerpt || "REQUEST_CHANGES",
-    "```",
-  ].join("\n");
-}
-
-function buildMissingWorkflowValidationVerdictGateComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-}) {
-  return [
-    runText(input.run, "## Completion blocked: workflow_validation_verdict_missing\n실행은 끝났지만 공식 검증 결과가 없어 완료를 보류했습니다. 다음 행동: Workflow API로 구조화된 검증 결과를 제출해 주세요. 댓글은 검증 결과를 대신할 수 없습니다.", "## Completion blocked: workflow_validation_verdict_missing\nThe run ended, but an official validation result is missing. Next action: submit the structured verdict through the Workflow API; a comment is not a verdict."),
-    `- 실행 runId: \`${input.run.id}\``,
-    "- Reason: this workflow QA/validator issue cannot be marked done until the official workflow_validation_verdict ledger contains PASS or REQUEST_CHANGES.",
-    "- Required evidence: a workflow_transition_events row with eventType=workflow_validation_verdict for this issue.",
-    "- If the artifact cannot be judged with the evidence available, submit the official INSUFFICIENT_EVIDENCE verdict with the missing evidence listed in `reason` instead of leaving no verdict.",
-  ].join("\n");
-}
-
-function buildInsufficientEvidenceWorkflowVerdictGateComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  reason: string | null;
-}) {
-  const reasonText = typeof input.reason === "string" && input.reason.trim().length > 0
-    ? input.reason.trim().slice(0, 2000)
-    : null;
-  return [
-    runText(input.run, "## Completion blocked: workflow_validation_insufficient_evidence\n검증에 필요한 근거가 부족해 완료를 보류했습니다. 재작업 반려는 아닙니다. 다음 행동: 아래 부족한 근거를 제출하고 새 공식 검증 결과를 받아 주세요.", "## Completion blocked: workflow_validation_insufficient_evidence\nThe official review needs more evidence; completion is on hold, not rejected for rework. Next action: provide the missing evidence below and obtain a new official verdict."),
-    `- 실행 runId: \`${input.run.id}\``,
-    "- Reason: the QA validator submitted an official INSUFFICIENT_EVIDENCE verdict — the current artifacts cannot be judged with the evidence available.",
-    "- This is NOT a REQUEST_CHANGES rework verdict: no producer rework iteration or QA cap is consumed by this block.",
-    "- Completion requires a follow-up official PASS or REQUEST_CHANGES verdict after the missing evidence below is provided.",
-    reasonText
-      ? `- Missing evidence requested by the validator:\n\`\`\`text\n${reasonText}\n\`\`\``
-      : "- Missing evidence: the validator did not include a reason in the verdict payload.",
-  ].join("\n");
-}
-
-function buildRequestChangesOwnerActionDescription(input: {
-  mission: Pick<typeof missions.$inferSelect, "title">;
-  sourceIssue: Pick<typeof issues.$inferSelect, "id" | "identifier" | "title">;
-  run: typeof heartbeatRuns.$inferSelect;
-  verdict: RequestChangesVerdict;
-  missionExecutionDigest?: string[];
-}) {
-  const sourceLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
-  const missionExecutionDigest = (input.missionExecutionDigest ?? [])
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  return [
-    "Mission-owner signal from validation gate. Automation has not selected a recovery action.",
-    "",
-    `Source issue: ${sourceLabel} — ${input.sourceIssue.title}`,
-    `Source runId: ${input.run.id}`,
-    "",
-    "Signal:",
-    "- kind: validation_request_changes",
-    "- local hint only; the raw validation excerpt is preserved below",
-    "",
-    missionExecutionDigest.length > 0
-      ? ["Mission execution digest:", ...missionExecutionDigest.map((line) => `- ${line}`)].join("\n")
-      : "Mission execution digest: unavailable for this owner action template.",
-    "",
-    buildMainExecutorBrief({
-      missionGoal: input.mission.title,
-      currentSituation: `Source issue ${sourceLabel} produced REQUEST_CHANGES after run ${input.run.id}; downstream delivery remains gated until owner judgement.`,
-    }),
-    "",
-    "### Validation excerpt",
-    "```text",
-    input.verdict.excerpt || "REQUEST_CHANGES",
-    "```",
-  ].join("\n");
-}
 
 export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
   const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
@@ -2129,338 +1956,7 @@ export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$infe
   return extractClaimedArtifactPathsFromText(text);
 }
 
-export type HeartbeatFailureClassification = {
-  category: "timeout" | "cancelled" | "overload" | "quota" | "auth" | "command" | "adapter";
-  reasonCode: string;
-  summary: string;
-  fallbackCandidates: string[];
-};
 
-function heartbeatRunFailureText(input: {
-  errorCode?: string | null;
-  errorMessage?: string | null;
-  stdoutExcerpt?: string | null;
-  stderrExcerpt?: string | null;
-}) {
-  return [input.errorCode, input.errorMessage, input.stdoutExcerpt, input.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n")
-    .trim();
-}
-
-export function classifyHeartbeatRunFailure(input: {
-  status: string;
-  adapterType?: string | null;
-  errorCode?: string | null;
-  errorMessage?: string | null;
-  stdoutExcerpt?: string | null;
-  stderrExcerpt?: string | null;
-  provider?: string | null;
-  model?: string | null;
-  command?: string | null;
-}): HeartbeatFailureClassification {
-  const haystack = heartbeatRunFailureText(input);
-  const normalized = haystack.toLowerCase();
-  const providerModelCommand = [input.provider, input.model, input.command, input.adapterType]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join(" ")
-    .toLowerCase();
-  const fallbackCandidates: string[] = [];
-  const pushFallback = (candidate: string) => {
-    if (!fallbackCandidates.includes(candidate)) fallbackCandidates.push(candidate);
-  };
-  const looksKimiOrMimo = /\b(kimi|moonshot|mimo)\b/i.test(`${providerModelCommand}\n${haystack}`);
-  if (looksKimiOrMimo) {
-    pushFallback("mimo26pro command/model if configured with available quota");
-    pushFallback("same-role alternate agent on a non-Kimi provider");
-  }
-
-  if (input.status === "timed_out") {
-    return { category: "timeout", reasonCode: "RUN_TIMED_OUT", summary: "Heartbeat run timed out.", fallbackCandidates };
-  }
-  if (input.status === "cancelled") {
-    return { category: "cancelled", reasonCode: "RUN_CANCELLED", summary: "Heartbeat run was cancelled.", fallbackCandidates };
-  }
-  // API overload(500/503/529): errorCode 를 우선 매칭한다. stderr 의 무해한
-  // "ENOENT: no such"(참조 instructions 파일 누락 워닝) 가 haystack 에 섞여 아래 command
-  // 분기로 오판되는 것(gazua 코난 529 run 사례) 을 막기 위해 errorCode 기반으로 먼저 잡는다.
-  // 일시 overload 는 adapter 의 backoff 재시도로 극복 가능(transient) 하므로 command 가 아님.
-  // 429 는 아래 quota 분기가 처리하도록 둔다.
-  const overloadApiStatus = /claude_api_error_(\d+)/i.exec(input.errorCode ?? "")?.[1];
-  const isOverloadApiStatus = overloadApiStatus === "500" || overloadApiStatus === "503" || overloadApiStatus === "529";
-  const isOverloadMessage = /overloaded|temporarily overloaded|service is currently/i.test(input.errorMessage ?? "");
-  if (isOverloadApiStatus || isOverloadMessage) {
-    return {
-      category: "overload",
-      reasonCode: overloadApiStatus ? `PROVIDER_OVERLOADED_${overloadApiStatus}` : "PROVIDER_OVERLOADED",
-      summary: "Provider temporarily overloaded (transient). Retry/backoff applicable; not a command/path/permission issue.",
-      fallbackCandidates,
-    };
-  }
-  const strongEvidenceText = [input.errorCode, input.errorMessage, input.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n")
-    .toLowerCase();
-  if (
-    /step input manifest|runtime broad scan|broad scan (command|instruction)|\bfind \.|git ls-files|\bls -r|\btree\b|\bgrep -r/.test(
-      strongEvidenceText,
-    )
-  ) {
-    return {
-      category: "command",
-      reasonCode: "STEP_INPUT_MANIFEST_GUARDRAIL",
-      summary:
-        "Run blocked by a Step Input Manifest / runtime broad-scan guardrail (command-policy/input-contract). Not a provider quota/auth failure; replan the command or adjust the manifest.",
-      fallbackCandidates,
-    };
-  }
-  if (/\b(403|429)\b/.test(normalized) && /quota|rate.?limit|rate limit|insufficient|billing|capacity|exceeded/.test(normalized)) {
-    return {
-      category: "quota",
-      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_QUOTA_OR_AUTH_403" : "PROVIDER_QUOTA_OR_RATE_LIMIT",
-      summary: "Provider quota/rate-limit/auth-capacity failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  if (/quota|insufficient_quota|rate.?limit|rate limit|billing hard limit|credits? exhausted|capacity exceeded/.test(normalized)) {
-    return {
-      category: "quota",
-      reasonCode: "PROVIDER_QUOTA_OR_RATE_LIMIT",
-      summary: "Provider quota or rate-limit failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  if (/\b401\b|unauthorized|invalid api key|invalid token|authentication failed|reauth|required|login required|forbidden/.test(normalized)) {
-    return {
-      category: "auth",
-      reasonCode: /\b403\b/.test(normalized) ? "PROVIDER_AUTH_OR_FORBIDDEN_403" : "PROVIDER_AUTH_FAILURE",
-      summary: "Provider authentication/authorization failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  if (/enoent|command not found|spawn .* enoent|no such file or directory|eacces|permission denied|not executable/.test(normalized)) {
-    return {
-      category: "command",
-      reasonCode: "COMMAND_EXECUTION_FAILURE",
-      summary: "Adapter command/path/permission failure detected from run output.",
-      fallbackCandidates,
-    };
-  }
-  return {
-    category: "adapter",
-    reasonCode: input.errorCode?.trim() || "ADAPTER_RUN_FAILED",
-    summary: "Adapter run failed without a more specific local classification.",
-    fallbackCandidates,
-  };
-}
-
-function buildSuccessfulIssueRunAutoCompletedComment(run: typeof heartbeatRuns.$inferSelect) {
-  const output = [run.stdoutExcerpt, run.stderrExcerpt ? `stderr:\n${run.stderrExcerpt}` : ""]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n\n")
-    .trim();
-  const planDecisionOutput = extractMissionOwnerPlanDecisionOutput(output);
-  return [
-    runText(run, "## 업무를 자동 완료했습니다 (checked-out run succeeded)", "## Issue automatically completed (checked-out run succeeded)"),
-    runText(run, `- 실행 기록(runId): \`${run.id}\``, `- Run record (runId): \`${run.id}\``),
-    runText(run, "- 이유: 이 업무를 맡은 에이전트 실행(heartbeat run)이 성공(succeeded)으로 종료됐습니다.", "- Reason: the assigned agent run (heartbeat run) succeeded."),
-    runText(run, "- 처리: 일반 업무는 담당 실행 성공 시 완료(done)로 마감하는 정책을 적용했습니다. 별도 검증 통과를 뜻하지는 않습니다.", "- Action: ordinary issues close as done after the assigned run succeeds. This does not imply independent validation passed."),
-    runText(run, "- 다음 행동: 계속 열린 상태로 협업할 업무는 별도 업무 유형이나 상태로 구분해 주세요.", "- Next action: use a separate issue type or status for work that must remain open for collaboration."),
-    planDecisionOutput
-      ? [
-          "",
-          "### Captured PLAN decision output",
-          planDecisionOutput,
-        ].join("\n")
-      : "",
-  ]
-    .filter((line) => line.length > 0)
-    .join("\n");
-}
-
-function extractMissionOwnerPlanDecisionOutput(output: string): string | null {
-  const candidates: string[] = [];
-  for (const line of output.split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (!parsed || typeof parsed !== "object") continue;
-      const record = parsed as Record<string, unknown>;
-      if (typeof record.result === "string") {
-        candidates.push(record.result);
-      }
-      const message = record.message;
-      if (message && typeof message === "object") {
-        const content = (message as Record<string, unknown>).content;
-        if (Array.isArray(content)) {
-          for (const entry of content) {
-            if (entry && typeof entry === "object" && typeof (entry as Record<string, unknown>).text === "string") {
-              candidates.push((entry as Record<string, string>).text);
-            }
-          }
-        }
-      }
-    } catch {
-      // Non-JSON log lines are expected in adapter output.
-    }
-  }
-  candidates.push(output);
-
-  for (const candidate of candidates.reverse()) {
-    const extracted = extractMissionOwnerPlanDecisionBlock(candidate);
-    if (extracted) return extracted;
-  }
-  return null;
-}
-
-function extractMissionOwnerPlanDecisionBlock(text: string): string | null {
-  const normalizedText = normalizeEscapedMissionOwnerPlanDecisionMarkdown(text);
-  const headingIndex = normalizedText.lastIndexOf("### Mission owner plan decision");
-  if (headingIndex < 0) return null;
-  const block = normalizedText.slice(headingIndex).trim();
-  const fenceIndex = block.search(/```json\s*/iu);
-  if (fenceIndex < 0) return block;
-  const openingFenceEnd = block.indexOf("\n", fenceIndex);
-  if (openingFenceEnd < 0) return block;
-  const closingFenceIndex = block.indexOf("```", openingFenceEnd + 1);
-  if (closingFenceIndex < 0) return block;
-  return block.slice(0, closingFenceIndex + 3).trim();
-}
-
-function normalizeEscapedMissionOwnerPlanDecisionMarkdown(text: string): string {
-  if (!text.includes("### Mission owner plan decision") || !text.includes("\\n")) return text;
-  return text
-    .replace(/\\r\\n/g, "\n")
-    .replace(/\\n/g, "\n")
-    .replace(/\\"/g, "\"")
-    .replace(/\\\\/g, "\\");
-}
-
-
-function buildNoProgressAutoBlockedComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  assessment: NoProgressAssessment;
-  advisoryThreshold: number;
-  autoBlockThreshold: number;
-}) {
-  const { run, assessment, advisoryThreshold, autoBlockThreshold } = input;
-  return [
-    runText(run, "## 자동 차단: 연속 무진행 실행 (consecutive no-progress)", "## Automatically blocked: consecutive no-progress runs (연속 무진행 실행)"),
-    `- 트리거 runId: \`${run.id}\``,
-    `- 연속 무진행 성공 run: ${assessment.count}회 (차단 기준 ${autoBlockThreshold}회, 경고 기준 ${advisoryThreshold}회)`,
-    `- 판정 창: ${assessment.windowStart.toISOString()} 이후 (구조화 DB 증거로 재계산)`,
-    `- 마지막 무진행 run: \`${assessment.lastRunId ?? "-"}\``,
-    `- 확인 증거: 실제 산출물 생성·변경 ${assessment.evidenceSummary.workProductRuns}개 실행 / 공식 도구 증가 ${assessment.evidenceSummary.toolProgressRuns}개 실행 (최근 ${assessment.evidenceSummary.runs}개 실행 조회)`,
-    "- 정책: 성공했지만 아무 변화 없는 실행이 반복되어 자동 디스패치를 멈춤. blocked는 owner-action/native-resume으로만 재개됩니다.",
-    "- 재개 전 확인: 이슈 범위 재조정, 산출물 계약 재명시, 또는 담당 재할당. 같은 상태로 재개하면 같은 연쇄가 이어집니다.",
-  ].join("\n");
-}
-
-function buildMissionWorkerNoProgressOversightComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  sourceIssue: { id: string; identifier: string | null; title: string };
-  assessment: NoProgressAssessment;
-  autoBlockThreshold: number;
-}) {
-  const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
-  return [
-    runText(input.run, "## Mission oversight: worker consecutive no-progress observed\n실행이 반복됐지만 진행 근거가 없어 담당 업무를 차단했습니다. 다음 행동: 복구 요청 전에 업무 범위, 산출물 요구 사항, 담당자를 확인해 주세요.", "## Mission oversight: worker consecutive no-progress observed\nThe worker is blocked because repeated runs produced no recorded progress. Next action: review scope, artifact requirements, or assignment before requesting recovery."),
-    `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
-    `- latest succeeded runId: \`${input.run.id}\``,
-    `- consecutive no-progress runs: ${input.assessment.count} (auto-block threshold ${input.autoBlockThreshold})`,
-    `- evidence checked: measured work-product creation/change in ${input.assessment.evidenceSummary.workProductRuns} runs, accepted tool advances in ${input.assessment.evidenceSummary.toolProgressRuns} runs (window from ${input.assessment.windowStart.toISOString()})`,
-    "- policy: the worker issue was auto-blocked after repeated successful runs with no structured change; owner action is required to resume (re-scope, restate the deliverable contract, or reassign).",
-  ].join("\n");
-}
-
-function buildFailedIssueRunAutoBlockedComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  classification: HeartbeatFailureClassification;
-}) {
-  const { run, classification } = input;
-  const rawReason = (run.error ?? run.stderrExcerpt ?? run.stdoutExcerpt ?? "").trim();
-  const reasonExcerpt = rawReason.length > 1200 ? rawReason.slice(0, 1200) : rawReason;
-  const recoveryLines = buildRunRecoveryLines(run);
-  return [
-    runText(run, "## 실행 실패로 업무를 차단했습니다 (linked run ended with failure)\n다음 행동: 아래 오류와 복구 기록을 확인한 뒤 업무 책임자가 재시도·담당 변경 여부를 결정해 주세요. 이 댓글은 재실행 요청이 아닙니다.", "## Issue blocked after linked run failure\nNext action: review the errors and recovery record below, then let the owner decide whether to retry or reassign. This comment does not request another run."),
-    `- 실행 runId: \`${run.id}\``,
-    `- run status: \`${run.status}\``,
-    `- 분류: \`${classification.reasonCode}\` (${classification.category})`,
-    `- 요약: ${classification.summary}`,
-    ...recoveryLines,
-    classification.fallbackCandidates.length > 0
-      ? `- fallback/대체 후보: ${classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
-      : "- fallback/대체 후보: 자동 선택 안 함 — owner/oversight 재검토 필요",
-    reasonExcerpt ? ["", "### Failure excerpt", "```text", reasonExcerpt, "```"].join("\n") : "",
-  ].filter((line) => line.length > 0).join("\n");
-}
-
-function buildRunRecoveryLines(run: typeof heartbeatRuns.$inferSelect) {
-  const context = parseObject(run.contextSnapshot);
-  const lines: string[] = [];
-  if (run.errorCode === "process_lost") {
-    const retryCount = run.processLossRetryCount ?? 0;
-    const fallbackAttempt = resolveAdapterFallbackAttempt(context);
-    lines.push(`- 복구 상태: process_lost retry ${retryCount}/1, adapter fallback ${fallbackAttempt}회 시도됨`);
-    if (run.retryOfRunId) lines.push(`- 이전 run: \`${run.retryOfRunId}\``);
-    const fallbackOfRunId = readNonEmptyString(context.fallbackOfRunId);
-    if (fallbackOfRunId) lines.push(`- fallback 기준 run: \`${fallbackOfRunId}\``);
-    if (retryCount >= 1 && fallbackAttempt > 0) {
-      lines.push("- 판정: 자동 retry/fallback 한도를 소진하여 동일 issue를 계속 반복 실행하지 않고 차단함");
-    } else if (retryCount >= 1) {
-      lines.push("- 판정: 자동 retry 한도를 소진하여 동일 issue를 계속 반복 실행하지 않고 차단함");
-    }
-  }
-  return lines;
-}
-
-function buildMissionWorkerFailureOversightComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  sourceIssue: { id: string; identifier: string | null; title: string };
-  classification: HeartbeatFailureClassification;
-}) {
-  const issueLabel = input.sourceIssue.identifier ?? input.sourceIssue.id;
-  return [
-    runText(input.run, "## Mission oversight: worker run failure observed\n담당 업무의 실행이 실패했습니다. 다음 행동: 아래 실패 근거를 확인하고 복구 방법을 결정해 주세요. 이 보고는 재시도 실행을 확인한 기록이 아닙니다.", "## Mission oversight: worker run failure observed\nThe worker run failed. Next action: inspect the failure evidence below and decide recovery; no retry is confirmed by this report."),
-    `- source issue: \`${issueLabel}\` — ${input.sourceIssue.title}`,
-    `- failed runId: \`${input.run.id}\``,
-    `- run status: \`${input.run.status}\``,
-    `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
-    `- summary: ${input.classification.summary}`,
-    ...buildRunRecoveryLines(input.run),
-    input.classification.fallbackCandidates.length > 0
-      ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
-      : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
-    "- policy: issue was moved out of in_progress so the mission owner can inspect and decide next action.",
-  ].join("\n");
-}
-
-function buildMissionOversightRunFailureComment(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  classification: HeartbeatFailureClassification;
-}) {
-  return [
-    runText(input.run, "## Mission oversight run failed but the supervisor issue remains open\n감독 실행이 실패했으며 전체 미션 실패를 뜻하지는 않습니다. 감독 업무는 열려 있습니다. 다음 행동: 아래 실패 기록을 검토해 주세요.", "## Mission oversight run failed but the supervisor issue remains open\nThe oversight run failed, not the entire mission. Next action: review the failure below; the supervisor remains available for a later run."),
-    `- failed runId: \`${input.run.id}\``,
-    `- run status: \`${input.run.status}\``,
-    `- classification: \`${input.classification.reasonCode}\` (${input.classification.category})`,
-    `- summary: ${input.classification.summary}`,
-    input.classification.fallbackCandidates.length > 0
-      ? `- fallback candidates: ${input.classification.fallbackCandidates.map((candidate) => `\`${candidate}\``).join(", ")}`
-      : "- fallback candidates: none auto-selected; owner should decide retry/reassign/escalate.",
-    "- policy: mission oversight is the supervisor for this mission, so a failed oversight run releases the issue back to todo instead of blocking the supervisor itself.",
-  ].join("\n");
-}
-
-function buildMissionOversightRunSucceededReleaseComment(run: typeof heartbeatRuns.$inferSelect, missionStatus: string) {
-  return [
-    runText(run, "## Mission oversight run succeeded and the supervisor issue remains open\n이번 감독 실행은 성공했지만 전체 미션 완료를 뜻하지는 않습니다. 감독 업무는 열려 있습니다. 다음 행동: 남은 미션 업무를 계속 확인해 주세요.", "## Mission oversight run succeeded and the supervisor issue remains open\nThis supervision cycle ended successfully; the mission is not necessarily complete. Next action: continue monitoring the remaining mission work."),
-    `- succeeded runId: \`${run.id}\``,
-    `- mission status: \`${missionStatus}\``,
-    "- policy: mission oversight stays alive until the mission is completed or cancelled, so this successful cycle releases the issue back to todo instead of closing it.",
-  ].join("\n");
-}
 
 /**
  * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
