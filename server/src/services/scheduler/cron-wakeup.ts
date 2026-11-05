@@ -273,11 +273,22 @@ export function createScheduler(db: Db, deps: SchedulerDeps) {
   };
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollGeneration = 0;
+  const activePolls = new Set<Promise<void>>();
+
+  function trackPoll(poll: Promise<void>): Promise<void> {
+    activePolls.add(poll);
+    void poll.then(
+      () => activePolls.delete(poll),
+      () => activePolls.delete(poll),
+    );
+    return poll;
+  }
 
   /**
    * Execute a single polling cycle.
    */
-  async function pollCycle(): Promise<void> {
+  async function performPollCycle(): Promise<void> {
     const startTime = new Date();
 
     await withSpan("scheduler.claimAndWakeup", {}, async (span) => {
@@ -334,6 +345,17 @@ export function createScheduler(db: Db, deps: SchedulerDeps) {
     });
   }
 
+  function pollCycle(): Promise<void> {
+    return trackPoll(performPollCycle());
+  }
+
+  function runAutomaticPoll(generation: number, initial = false): void {
+    if (!state.running || pollGeneration !== generation) return;
+    pollCycle().catch((err) => {
+      console.error(initial ? "[Scheduler] Initial poll error:" : "[Scheduler] Poll error:", err);
+    });
+  }
+
   /**
    * Start the scheduler polling loop.
    */
@@ -344,15 +366,14 @@ export function createScheduler(db: Db, deps: SchedulerDeps) {
     }
 
     state.running = true;
+    const generation = ++pollGeneration;
     console.log(`[Scheduler] Started polling every ${SCHEDULER_POLL_INTERVAL_MS}ms`);
 
     // Run first poll immediately
-    pollCycle().catch((err) => console.error("[Scheduler] Initial poll error:", err));
+    runAutomaticPoll(generation, true);
 
     // Set up recurring polls
-    pollTimer = setInterval(() => {
-      pollCycle().catch((err) => console.error("[Scheduler] Poll error:", err));
-    }, SCHEDULER_POLL_INTERVAL_MS);
+    pollTimer = setInterval(() => runAutomaticPoll(generation), SCHEDULER_POLL_INTERVAL_MS);
   }
 
   /**
@@ -364,12 +385,19 @@ export function createScheduler(db: Db, deps: SchedulerDeps) {
     }
 
     state.running = false;
+    pollGeneration += 1;
     if (pollTimer !== null) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
 
     console.log("[Scheduler] Stopped");
+  }
+
+  async function drain(): Promise<void> {
+    while (activePolls.size > 0) {
+      await Promise.allSettled([...activePolls]);
+    }
   }
 
   /**
@@ -382,6 +410,7 @@ export function createScheduler(db: Db, deps: SchedulerDeps) {
   return {
     start,
     stop,
+    drain,
     getState,
     pollCycle,
   };
