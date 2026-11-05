@@ -7,6 +7,7 @@ vi.mock("@paperclipai/db", () => ({
   workflowStepRuns: {},
   // [cycle A] 자식 시작 모듈이 import 하는 invocation 스키마 — 모킹 누락 방지.
   workflowStepInvocations: {},
+  pluginToolExecutionReceipts: {},
   issues: {},
   heartbeatRuns: {
     id: {},

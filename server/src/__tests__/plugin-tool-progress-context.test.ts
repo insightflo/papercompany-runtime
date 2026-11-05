@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import type { Request } from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -51,7 +52,22 @@ function fixture(actor: Request["actor"], run: RunToolAuthorizationRun | null = 
     where: vi.fn(() => query),
     limit: vi.fn(async () => run ? [run] : []),
   };
-  const db = { select: vi.fn(() => query) };
+  let receipt: Record<string, unknown> | null = null;
+  const tx = {
+    select: vi.fn(() => ({ from: () => ({ where: () => ({ for: async () => receipt ? [receipt] : [] }) }) })),
+    update: vi.fn(() => ({ set: (values: Record<string, unknown>) => ({ where: () => ({
+      returning: async () => { receipt = { ...receipt, ...values }; return [receipt]; },
+    }) }) })),
+    delete: vi.fn(() => ({ where: async () => { receipt = null; } })),
+  };
+  const db = {
+    select: vi.fn(() => query),
+    insert: vi.fn(() => ({ values: (values: Record<string, unknown>) => ({ onConflictDoNothing: () => ({
+      returning: async () => { receipt = { id: randomUUID(), resultBody: null, resultStatus: null,
+        completedAt: null, workflowRunId: null, stepId: null, ...values }; return [{ id: receipt.id }]; },
+    }) }) })),
+    transaction: vi.fn(async (operation: (connection: typeof tx) => Promise<unknown>) => operation(tx)),
+  };
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { req.actor = actor; next(); });
