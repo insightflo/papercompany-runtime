@@ -544,8 +544,8 @@ export function pluginLifecycleManager(
       // If already uninstalled and removeData, hard-delete
       if (plugin.status === "uninstalled") {
         if (removeData) {
-          await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
           const deleted = await registry.uninstall(pluginId, true);
+          await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
           log.info(
             { pluginId, pluginKey: plugin.pluginKey },
             "plugin lifecycle: hard-deleted already-uninstalled plugin",
@@ -569,15 +569,15 @@ export function pluginLifecycleManager(
           const current = await requirePlugin(pluginId);
           if (current.status === "uninstalled") {
             if (!removeData) throw badRequest(`Plugin ${current.pluginKey} is already uninstalled. Use removeData=true to permanently delete it.`);
-            await pluginLoaderInstance.cleanupInstallArtifacts(current);
             const deleted = await registry.uninstall(pluginId, true);
+            await pluginLoaderInstance.cleanupInstallArtifacts(current);
             emitDomain("plugin.unloaded", { pluginId, pluginKey: current.pluginKey, removeData: true });
             return deleted as PluginRecord | null;
           }
-          await pluginLoaderInstance.cleanupInstallArtifacts(current);
+          if (!removeData) await pluginLoaderInstance.cleanupInstallArtifacts(current);
 
-          // Perform the uninstall via registry (handles soft/hard delete)
           const result = await registry.uninstall(pluginId, removeData);
+          if (removeData) await pluginLoaderInstance.cleanupInstallArtifacts(current);
 
           log.info(
             { pluginId, pluginKey: plugin.pluginKey, removeData },
