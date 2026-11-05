@@ -26,6 +26,7 @@ import type {
 } from "@paperclipai/shared";
 import type { ToolRunContext, ToolResult, ExecuteToolParams } from "@paperclipai/plugin-sdk";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { observePluginTool, resolvePluginTool, type ObservedToolExecution } from "./plugin-tool-observation.js";
 import { logger } from "../middleware/logger.js";
 import {
   runtimeExecutionLifecycle,
@@ -192,6 +193,16 @@ export interface PluginToolRegistry {
     runContext: ToolRunContext,
     executionIdentity?: RuntimeExecutionIdentity,
   ): Promise<ToolExecutionResult>;
+
+  /**
+   * Return a retained observation for a caller-owned execution identity.
+   * The caller must provide inert JSON-origin parameters and runContext, without
+   * executable getters, toJSON functions, or proxies. This is not enforced here.
+   */
+  executeToolObserved(
+    namespacedName: string, parameters: unknown, runContext: ToolRunContext,
+    identity: RuntimeExecutionIdentity,
+  ): ObservedToolExecution;
 
   /**
    * Get the number of registered tools, optionally scoped to a plugin.
@@ -386,36 +397,12 @@ export function createPluginToolRegistry(
       runContext: ToolRunContext,
       executionIdentity?: RuntimeExecutionIdentity,
     ): Promise<ToolExecutionResult> {
-      // 1. Resolve the namespaced name
-      const parsed = parseName(namespacedName);
-      if (!parsed) {
-        throw new Error(
-          `Invalid tool name "${namespacedName}". Expected format: "<pluginId>${TOOL_NAMESPACE_SEPARATOR}<toolName>"`,
-        );
-      }
-
-      const { pluginId, toolName } = parsed;
-
-      // 2. Verify the tool is registered
-      const tool = byNamespace.get(namespacedName);
-      if (!tool) {
-        throw new Error(
-          `Tool "${namespacedName}" is not registered. ` +
-          `The plugin may not be installed or its worker may not be running.`,
-        );
-      }
-
-      // 3. Verify the worker manager is available
-      if (!workerManager) {
-        throw new Error(
-          `Cannot execute tool "${namespacedName}" — no worker manager configured. ` +
-          `Tool execution requires a PluginWorkerManager.`,
-        );
-      }
+      const { pluginId, toolName, dbId, workerManager: manager } = resolvePluginTool({
+        namespacedName, parseName, byNamespace, workerManager,
+      });
 
       // 4. Verify the plugin worker is running (use DB UUID for worker lookup)
-      const dbId = tool.pluginDbId;
-      if (!workerManager.isRunning(dbId)) {
+      if (!manager.isRunning(dbId)) {
         throw new Error(
           `Cannot execute tool "${namespacedName}" — ` +
           `worker for plugin "${pluginId}" is not running.`,
@@ -441,7 +428,7 @@ export function createPluginToolRegistry(
         attemptId: requestId,
         executionGeneration: 0,
       });
-      const decision = runtimeScope.start(() => workerManager.call(dbId, "executeTool", rpcParams));
+      const decision = runtimeScope.start(() => manager.call(dbId, "executeTool", rpcParams));
       if (decision.kind === "deferred_before_start") {
         return { pluginId, toolName, result: {}, deferredBeforeStart: decision.deferred };
       }
@@ -463,6 +450,12 @@ export function createPluginToolRegistry(
       );
 
       return { pluginId, toolName, result };
+    },
+
+    executeToolObserved(namespacedName, parameters, runContext, identity) {
+      return observePluginTool({
+        namespacedName, parameters, runContext, identity, parseName, byNamespace, workerManager, runtimeLifecycle,
+      });
     },
 
     toolCount(pluginId?: string): number {
