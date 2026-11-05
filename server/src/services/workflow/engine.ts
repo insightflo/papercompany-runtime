@@ -79,6 +79,7 @@ function formatWorkflowMissionTitle(
 async function ensureMissionForWorkflowRun(
   db: Db,
   input: CreateWorkflowRunInput,
+  options?: { deferWorkingNote?: boolean },
 ): Promise<CreateWorkflowRunInput> {
   if (input.missionId) return input;
 
@@ -106,7 +107,7 @@ async function ensureMissionForWorkflowRun(
     //   step-input-manifest 의 broadScanAllowed 가 켜진다(find . / rg 허용). 없으면 broad scan guard 가
     //   workflow 단계의 정상적인 파일 탐색까지 차단해 첫 단계부터 실패함.
     projectId: workflow.projectId ?? undefined,
-  });
+  }, options);
   await missionService(db).ensureMainExecutorOversightIssue(mission, workflow.name, {
     workflowStepIds: workflow.steps.map((step) => step.id),
   });
@@ -379,6 +380,19 @@ export const workflowService = {
     input: CreateWorkflowRunInput,
     policy: WorkflowRunInputPolicy = {},
   ): Promise<WorkflowExecutionResult> {
+    const prepared = await workflowService.prepareTrigger(db, input, policy);
+    return prepared.replay
+      ? (await getWorkflowExecutionResultSnapshot(db, prepared.run.id))!
+      : workflowService.startPreparedRun(db, prepared.run.id);
+  },
+
+  /** Prepare durable rows before starting any workflow step. */
+  async prepareTrigger(
+    db: Db,
+    input: CreateWorkflowRunInput,
+    policy: WorkflowRunInputPolicy = {},
+    options?: { deferWorkingNote?: boolean },
+  ): Promise<{ run: WorkflowRun; replay: boolean }> {
     assertSeedActor(input, policy.actor);
     const workflow = await getWorkflowDefinitionById(db, input.workflowId);
     if (!workflow) {
@@ -390,8 +404,7 @@ export const workflowService = {
     await assertRevisionBoardStart(db, input, policy.actor);
     await assertAgentReplacementRequired(db, input, policy.actor);
     if (input.replacementIntent) {
-      const admitted = await admitReplacement(db, input, policy.actor);
-      return admitted.replay ? (await getWorkflowExecutionResultSnapshot(db, admitted.run.id))! : executeWorkflowRun(db, admitted.run.id);
+      return admitReplacement(db, input, policy.actor);
     }
     input = { ...input, metadata: normalizeWorkflowRunInputs(workflow.runInputs, input.metadata, policy) };
     await assertWorkflowToolReadiness(db, input.companyId, workflow.steps);
@@ -405,10 +418,14 @@ export const workflowService = {
       ?? (timezone ? formatDateKeyInTimezone(new Date(), timezone) : null)
       ?? new Date().toISOString().slice(0, 10);
     await assertNoImplicitDuplicateScheduledWorkflowRun(db, input, workflow, runDate);
-    const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate });
+    const runInput = await ensureMissionForWorkflowRun(db, { ...input, runDate }, options);
     const run = await createAdmittedWorkflowRun(db, runInput, policy.actor);
     await ensureCreatedRunOversight(db, run);
-    return executeWorkflowRun(db, run.id);
+    return { run, replay: false };
+  },
+
+  async startPreparedRun(db: Db, runId: string): Promise<WorkflowExecutionResult> {
+    return executeWorkflowRun(db, runId);
   },
   /** Scheduler-only: claim a slot before run creation to prevent duplicate scheduled runs. */
   async claimScheduledRun(

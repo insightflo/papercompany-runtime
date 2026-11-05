@@ -23,7 +23,8 @@ import { freshCompany } from "./helpers/bounded-reads-test-utils.js";
 const mockEngine = vi.hoisted(() => ({
   workflowService: {
     getDefinition: vi.fn(),
-    trigger: vi.fn(),
+    prepareTrigger: vi.fn(),
+    startPreparedRun: vi.fn(),
   },
 }));
 vi.mock("../services/workflow/engine.js", () => mockEngine);
@@ -126,14 +127,10 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
   beforeEach(() => {
     vi.resetAllMocks();
     mockEngine.workflowService.getDefinition.mockResolvedValue(definition());
-    mockEngine.workflowService.trigger.mockImplementation(async () => ({
-      runId: mockedRunId(),
-      workflowId,
-      missionId: null,
-      status: "running",
-      completedAt: null,
-      stepRuns: [],
+    mockEngine.workflowService.prepareTrigger.mockImplementation(async () => ({
+      run: { id: mockedRunId(), missionId: null }, replay: false,
     }));
+    mockEngine.workflowService.startPreparedRun.mockResolvedValue({});
   });
 
   it("accepts a signed delivery: 202, run created with triggerSource webhook + metadata, receipt bound, activity logged", async () => {
@@ -142,11 +139,11 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ runId: lastRunId, idempotencyKey: "happy-key-1" });
     // [care] 전체 호출 비교 금지(첫 인자 DB 포함, 실패 시 diff 포맷 OOM 위험).
-    // 3-인자 계약(원본 payload + 레거시 웹훅 정책)을 경계 projection으로 단언한다.
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(1);
-    const triggerCall = mockEngine.workflowService.trigger.mock.calls[0]!;
-    expect(triggerCall.length).toBe(3);
-    expect(triggerCall[0] === db).toBe(true);
+    // 트랜잭션 DB, 원본 payload, 레거시 웹훅 정책과 커밋 후 파일 생성을 확인한다.
+    expect(mockEngine.workflowService.prepareTrigger).toHaveBeenCalledTimes(1);
+    const triggerCall = mockEngine.workflowService.prepareTrigger.mock.calls[0]!;
+    expect(triggerCall.length).toBe(4);
+    expect(triggerCall[0] === db).toBe(false);
     expect(triggerCall[1]).toMatchObject({
       workflowId,
       companyId,
@@ -155,6 +152,8 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     });
     expect(triggerCall[1].metadata).toEqual({ topic: "release", url: "https://example.com/v" });
     expect(triggerCall[2]).toEqual({ legacyTextRequired: true });
+    expect(triggerCall[3]).toEqual({ deferWorkingNote: true });
+    expect(mockEngine.workflowService.startPreparedRun).toHaveBeenCalledTimes(1);
     const [delivery] = await db
       .select()
       .from(workflowWebhookDeliveries)
@@ -176,7 +175,8 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     const second = await signedPost(payload, { key: "replay-key-1" });
     expect(second.status).toBe(202);
     expect(second.body).toEqual({ runId: firstRunId, idempotencyKey: "replay-key-1" });
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(1);
+    expect(mockEngine.workflowService.prepareTrigger).toHaveBeenCalledTimes(1);
+    expect(mockEngine.workflowService.startPreparedRun).toHaveBeenCalledTimes(1);
   });
 
   it("404 for an unknown workflow", async () => {
@@ -236,7 +236,7 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
       ...definition(),
       runInputs: [{ key: "topic", label: "Topic", required: true }],
     });
-    mockEngine.workflowService.trigger.mockRejectedValueOnce(
+    mockEngine.workflowService.prepareTrigger.mockRejectedValueOnce(
       new WorkflowRunInputValidationError([{ key: "topic", code: "required", message: "'Topic' 항목은 필수 입력입니다." }]),
     );
 
@@ -247,9 +247,9 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
       code: "invalid_workflow_run_inputs",
       fieldErrors: [{ key: "topic", code: "required", message: "'Topic' 항목은 필수 입력입니다." }],
     });
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(1);
-    const rejectedCall = mockEngine.workflowService.trigger.mock.calls[0]!;
-    expect(rejectedCall.length).toBe(3);
+    expect(mockEngine.workflowService.prepareTrigger).toHaveBeenCalledTimes(1);
+    const rejectedCall = mockEngine.workflowService.prepareTrigger.mock.calls[0]!;
+    expect(rejectedCall.length).toBe(4);
     expect(rejectedCall[2]).toEqual({ legacyTextRequired: true });
     const [rejectedDelivery] = await db
       .select()
@@ -259,8 +259,8 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
 
     const ok = await signedPost(JSON.stringify({ topic: "release", url: "x" }), { key: "typed-required-key-2" });
     expect(ok.status).toBe(202);
-    expect(mockEngine.workflowService.trigger).toHaveBeenCalledTimes(2);
-    const okCall = mockEngine.workflowService.trigger.mock.calls[1]!;
+    expect(mockEngine.workflowService.prepareTrigger).toHaveBeenCalledTimes(2);
+    const okCall = mockEngine.workflowService.prepareTrigger.mock.calls[1]!;
     expect(okCall[1].metadata).toEqual({ topic: "release", url: "x" });
     expect(okCall[2]).toEqual({ legacyTextRequired: true });
   });
@@ -275,6 +275,6 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     }
     const res = await signedPost("{}");
     expect(res.status).toBe(429);
-    expect(mockEngine.workflowService.trigger).not.toHaveBeenCalled();
+    expect(mockEngine.workflowService.prepareTrigger).not.toHaveBeenCalled();
   });
 });
