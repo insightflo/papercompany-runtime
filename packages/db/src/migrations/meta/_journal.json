@@ -883,6 +883,13 @@
       "when": 1792218600001,
       "tag": "0126_plugin_job_claim_token",
       "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1792218600002,
+      "tag": "0127_plugin_job_scheduled_at",
+      "breakpoints": true
     }
   ]
 }

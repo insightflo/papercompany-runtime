@@ -8,8 +8,10 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { plugins } from "./plugins.js";
 import type { PluginJobStatus, PluginJobRunStatus, PluginJobRunTrigger } from "@paperclipai/shared";
+import type { PluginJobRunCompletionUncertainty } from "@paperclipai/shared/types/plugin";
 
 /**
  * `plugin_jobs` table — registration and runtime configuration for
@@ -85,6 +87,9 @@ export const pluginJobRuns = pgTable(
     /** Current lifecycle state of this run. */
     status: text("status").$type<PluginJobRunStatus>().notNull().default("pending"),
     claimToken: uuid("claim_token"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    scheduledCron: text("scheduled_cron"),
+    completionUncertainty: text("completion_uncertainty").$type<PluginJobRunCompletionUncertainty>(),
     /** Wall-clock duration in milliseconds. Null until the run finishes. */
     durationMs: integer("duration_ms"),
     /** Error message if `status === "failed"`. */
@@ -99,5 +104,8 @@ export const pluginJobRuns = pgTable(
     jobIdx: index("plugin_job_runs_job_idx").on(table.jobId),
     pluginIdx: index("plugin_job_runs_plugin_idx").on(table.pluginId),
     statusIdx: index("plugin_job_runs_status_idx").on(table.status),
+    scheduledSlotIdx: uniqueIndex("plugin_job_runs_scheduled_slot_idx")
+      .on(table.jobId, table.scheduledAt)
+      .where(sql`${table.trigger} = 'schedule' and ${table.scheduledAt} is not null`),
   }),
 );

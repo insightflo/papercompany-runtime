@@ -430,6 +430,9 @@ export interface PluginJobRecord {
 // Plugin Job Run – represents a row in the `plugin_job_runs` table
 // ---------------------------------------------------------------------------
 
+/** An external execution may have started and its result is not yet safely finalized. */
+export type PluginJobRunCompletionUncertainty = "external_execution_sent_or_unknown";
+
 /**
  * Domain type for a job execution history record.
  */
@@ -444,6 +447,12 @@ export interface PluginJobRunRecord {
   trigger: "schedule" | "manual" | "retry";
   /** Current run status. */
   status: "pending" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  /** Original due time for a scheduled run, if known. */
+  scheduledAt: Date | null;
+  /** Schedule captured for the original due time, if known. */
+  scheduledCron: string | null;
+  /** Reason automatic replay is unsafe until the external result is finalized. */
+  completionUncertainty: PluginJobRunCompletionUncertainty | null;
   /** Run duration in milliseconds. */
   durationMs: number | null;
   /** Error message if the run failed. */
