@@ -34,14 +34,14 @@
  * @see ./cron.ts — Cron parsing utilities
  */
 
-import { and, desc, eq, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
-import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
-import { executeQueuedPluginJob } from "./plugin-job-replay.js";
+import { advanceDisabledPluginSchedule, ensurePluginJobSchedules, executeQueuedPluginJob, listEligibleQueuedPluginRuns } from "./plugin-job-replay.js";
+import { createSchedulerAdmission, type SchedulerAdmissionSnapshot } from "./plugin-job-scheduler-admission.js";
 import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
@@ -141,10 +141,13 @@ export interface PluginJobScheduler {
   /**
    * Stop the scheduler tick loop.
    *
-   * In-flight job runs are NOT cancelled — they are allowed to finish
-   * naturally. The tick loop simply stops firing.
+   * Close new scheduler admission synchronously and stop the timer. In-flight
+   * runs are not cancelled; use drain() before tearing down their resources.
    */
   stop(): void;
+
+  /** Wait for scheduler operations; pass a plugin ID after unregistering it. */
+  drain(pluginId?: string): Promise<void>;
 
   /**
    * Register a plugin with the scheduler.
@@ -160,7 +163,8 @@ export interface PluginJobScheduler {
   /**
    * Unregister a plugin from the scheduler.
    *
-   * In-flight runs remain tracked and may finish naturally.
+   * Future starts are revoked synchronously. In-flight runs remain tracked;
+   * await drain(pluginId) separately before tearing down plugin resources.
    *
    * @param pluginId - UUID of the plugin
    */
@@ -235,6 +239,7 @@ export function createPluginJobScheduler(
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
+  const admission = createSchedulerAdmission();
 
   // -----------------------------------------------------------------------
   // State
@@ -266,9 +271,12 @@ export function createPluginJobScheduler(
    * A single scheduler tick. Queries for due jobs and dispatches them.
    */
   async function tick(): Promise<void> {
+    const operation = admission.enter();
+    if (!operation) return;
     // Prevent overlapping ticks (in case a tick takes longer than the interval)
     if (tickInProgress) {
       log.debug("skipping tick — previous tick still in progress");
+      operation.done();
       return;
     }
 
@@ -282,7 +290,7 @@ export function createPluginJobScheduler(
       const queuedPlugins = await db.select({ pluginId: pluginJobRuns.pluginId })
         .from(pluginJobRuns).where(eq(pluginJobRuns.status, "queued"));
       for (const pluginId of new Set(queuedPlugins.map((row) => row.pluginId))) {
-        await replayQueuedRuns(pluginId);
+        await replayQueuedRuns(pluginId, operation.snapshot);
       }
 
       // Query for jobs whose nextRunAt has passed and are active.
@@ -311,6 +319,7 @@ export function createPluginJobScheduler(
 
       for (const dueJob of dueJobs) {
         const job = dueJob.job;
+        if (!admission.valid(operation.snapshot, job.pluginId)) continue;
         if (isScheduledPluginJobDisabled(
           { pluginKey: dueJob.pluginKey, jobKey: job.jobKey },
           disabledScheduledJobs,
@@ -319,7 +328,16 @@ export function createPluginJobScheduler(
             { jobId: job.id, jobKey: job.jobKey, pluginId: job.pluginId, pluginKey: dueJob.pluginKey },
             "skipping scheduled plugin job because native owner is active",
           );
-          await advanceSchedulePointer(job);
+          const disabledOperation = admission.enterPlugin(operation.snapshot, job.pluginId);
+          if (!disabledOperation) continue;
+          try {
+            const [queued] = await db.select({ id: pluginJobRuns.id }).from(pluginJobRuns).where(and(
+              eq(pluginJobRuns.jobId, job.id), eq(pluginJobRuns.trigger, "schedule"), eq(pluginJobRuns.status, "queued"),
+            )).limit(1);
+            if (!queued && admission.valid(operation.snapshot, job.pluginId) && isScheduledPluginJobDisabled(
+              { pluginKey: dueJob.pluginKey, jobKey: job.jobKey }, disabledScheduledJobs,
+            )) await advanceDisabledPluginSchedule(jobStore, job);
+          } finally { disabledOperation.done(); }
           continue;
         }
 
@@ -359,7 +377,7 @@ export function createPluginJobScheduler(
           continue;
         }
 
-        dispatches.push(dispatchJob(job));
+        dispatches.push(dispatchJob(job, operation.snapshot));
       }
 
       if (dispatches.length > 0) {
@@ -372,6 +390,7 @@ export function createPluginJobScheduler(
       );
     } finally {
       tickInProgress = false;
+      operation.done();
     }
   }
 
@@ -382,13 +401,22 @@ export function createPluginJobScheduler(
   async function dispatchRun(
     job: typeof pluginJobs.$inferSelect,
     run: typeof pluginJobRuns.$inferSelect,
+    snapshot: SchedulerAdmissionSnapshot,
   ): Promise<void> {
     if (activeJobs.has(job.id) || activeJobs.size >= maxConcurrentJobs) return;
+    const operation = admission.enterPlugin(snapshot, job.pluginId);
+    if (!operation) return;
     const jobLog = log.child({ jobId: job.id, pluginId: job.pluginId, jobKey: job.jobKey, runId: run.id });
     activeJobs.add(job.id);
     try {
+      const [owner] = run.trigger === "schedule"
+        ? await db.select({ pluginKey: plugins.pluginKey }).from(plugins).where(eq(plugins.id, job.pluginId)).limit(1)
+        : [];
+      const admitted = () => admission.valid(snapshot, job.pluginId) && (run.trigger !== "schedule" ||
+        Boolean(owner && !isScheduledPluginJobDisabled({ pluginKey: owner.pluginKey, jobKey: job.jobKey }, disabledScheduledJobs)));
+      if (!admitted()) return;
       const result = await executeQueuedPluginJob({
-        job, run, jobStore, workerManager, jobTimeoutMs, runtimeLifecycle,
+        job, run, jobStore, workerManager, jobTimeoutMs, runtimeLifecycle, admitted,
       });
       if (result.kind === "settled") {
         jobLog[result.status === "succeeded" ? "info" : "error"](
@@ -403,22 +431,31 @@ export function createPluginJobScheduler(
       throw err;
     } finally {
       activeJobs.delete(job.id);
+      operation.done();
     }
   }
 
-  async function replayQueuedRuns(pluginId: string): Promise<void> {
-    const queued = await jobStore.listQueuedRunsByPlugin(pluginId, maxConcurrentJobs);
-    for (const run of queued) {
-      if (activeJobs.size >= maxConcurrentJobs) break;
-      const job = await jobStore.getJobByIdForPlugin(pluginId, run.jobId);
-      if (!job || job.status !== "active") continue;
-      await dispatchRun(job, run);
-    }
+  async function replayQueuedRuns(pluginId: string, snapshot: SchedulerAdmissionSnapshot): Promise<void> {
+    const operation = admission.enterPlugin(snapshot, pluginId);
+    if (!operation) return;
+    try {
+      const queued = await listEligibleQueuedPluginRuns(db, pluginId, maxConcurrentJobs, disabledScheduledJobs);
+      for (const run of queued) {
+        if (!admission.valid(snapshot, pluginId) || activeJobs.size >= maxConcurrentJobs) break;
+        const job = await jobStore.getJobByIdForPlugin(pluginId, run.jobId);
+        if (!job || job.status !== "active") continue;
+        await dispatchRun(job, run, snapshot);
+      }
+    } finally { operation.done(); }
   }
 
-  async function dispatchJob(job: typeof pluginJobs.$inferSelect): Promise<void> {
-    const admission = await jobStore.createOrReuseQueuedScheduledRun({ jobId: job.id, pluginId: job.pluginId });
-    if (admission.kind === "available") await dispatchRun(job, admission.run);
+  async function dispatchJob(job: typeof pluginJobs.$inferSelect, snapshot: SchedulerAdmissionSnapshot): Promise<void> {
+    const operation = admission.enterPlugin(snapshot, job.pluginId);
+    if (!operation) return;
+    try {
+      const result = await jobStore.createOrReuseQueuedScheduledRun({ jobId: job.id, pluginId: job.pluginId });
+      if (result.kind === "available") await dispatchRun(job, result.run, snapshot);
+    } finally { operation.done(); }
   }
 
   // -----------------------------------------------------------------------
@@ -429,128 +466,66 @@ export function createPluginJobScheduler(
     jobId: string,
     trigger: "manual" | "retry" = "manual",
   ): Promise<TriggerJobResult> {
-    const job = await jobStore.getJobById(jobId);
-    if (!job) {
-      throw new Error(`Job not found: ${jobId}`);
-    }
-
-    if (job.status !== "active") {
-      throw new Error(
-        `Job "${job.jobKey}" is not active (status: ${job.status})`,
-      );
-    }
-
-    // Overlap prevention
-    if (activeJobs.has(jobId)) {
-      throw new Error(
-        `Job "${job.jobKey}" is already running — cannot trigger while in progress`,
-      );
-    }
-
-    // Also check DB for running runs (defensive — covers multi-instance)
-    const existingRuns = await db
-      .select()
-      .from(pluginJobRuns)
-      .where(
-        and(
-          eq(pluginJobRuns.jobId, jobId),
-          eq(pluginJobRuns.status, "running"),
-        ),
-      );
-
-    if (existingRuns.length > 0) {
-      throw new Error(
-        `Job "${job.jobKey}" already has a running execution — cannot trigger while in progress`,
-      );
-    }
-
-    // Check worker availability
-    if (!workerManager.isRunning(job.pluginId)) {
-      throw new Error(
-        `Worker for plugin "${job.pluginId}" is not running — cannot trigger job`,
-      );
-    }
-
-    // Create the run and dispatch (non-blocking)
-    const run = await jobStore.createRun({
-      jobId,
-      pluginId: job.pluginId,
-      trigger,
-    });
-
-    // Dispatch in background — don't block the caller
-    void dispatchRun(job, run).catch(() => {});
-
-    return { runId: run.id, jobId };
-  }
-
-  // -----------------------------------------------------------------------
-  // Schedule pointer management
-  // -----------------------------------------------------------------------
-
-  /**
-   * Advance the `lastRunAt` and `nextRunAt` timestamps on a job after a run.
-   */
-  async function advanceSchedulePointer(
-    job: typeof pluginJobs.$inferSelect,
-  ): Promise<void> {
-    const now = new Date();
-    let nextRunAt: Date | null = null;
-
-    if (job.schedule) {
-      const validationError = validateCron(job.schedule);
-      if (validationError) {
-        log.warn(
-          { jobId: job.id, schedule: job.schedule, error: validationError },
-          "invalid cron schedule — cannot compute next run",
-        );
-      } else {
-        const cron = parseCron(job.schedule);
-        nextRunAt = nextCronTick(cron, now);
+    const operation = admission.enterLookup();
+    if (!operation) throw new Error("plugin_job_scheduler_stopped");
+    try {
+      const job = await jobStore.getJobById(jobId);
+      if (!job) {
+        throw new Error(`Job not found: ${jobId}`);
       }
-    }
 
-    await jobStore.updateRunTimestamps(job.id, now, nextRunAt);
-  }
+      if (!admission.pluginValid(operation.snapshot, job.pluginId)) throw new Error("plugin_job_scheduler_plugin_unregistered");
+      operation.bind(job.pluginId);
 
-  /**
-   * Ensure all active jobs for a plugin have a `nextRunAt` value.
-   * Called when a plugin is registered with the scheduler.
-   */
-  async function ensureNextRunTimestamps(pluginId: string): Promise<void> {
-    const jobs = await jobStore.listJobs(pluginId, "active");
+      if (job.status !== "active") {
+        throw new Error(
+          `Job "${job.jobKey}" is not active (status: ${job.status})`,
+        );
+      }
 
-    for (const job of jobs) {
-      // An existing due time is a slot identity; jobs without schedules cannot advance.
-      if (job.nextRunAt || !job.schedule) continue;
-      await db.transaction(async (tx) => {
-        // Admission and finalization also lock the job before inspecting its runs.
-        const [current] = await tx.select().from(pluginJobs)
-          .where(and(eq(pluginJobs.id, job.id), eq(pluginJobs.pluginId, pluginId))).for("update").limit(1);
-        if (!current || current.status !== "active" || current.nextRunAt || !current.schedule || current.schedule !== job.schedule) return;
-        const validationError = validateCron(current.schedule);
-        if (validationError) {
-          log.warn(
-            { jobId: current.id, jobKey: current.jobKey, schedule: current.schedule, error: validationError },
-            "skipping job with invalid cron schedule",
-          );
-          return;
-        }
-        const [latest] = await tx.select({ scheduledAt: pluginJobRuns.scheduledAt }).from(pluginJobRuns)
-          .where(and(eq(pluginJobRuns.jobId, current.id), eq(pluginJobRuns.trigger, "schedule"), isNotNull(pluginJobRuns.scheduledAt)))
-          .orderBy(desc(pluginJobRuns.scheduledAt)).limit(1);
-        const now = new Date();
-        const after = new Date(Math.max(now.getTime(), latest?.scheduledAt?.getTime() ?? now.getTime()));
-        const nextRunAt = nextCronTick(parseCron(current.schedule), after);
-        if (!nextRunAt) return;
-        const updated = await tx.update(pluginJobs).set({ nextRunAt, updatedAt: new Date() }).where(and(
-          eq(pluginJobs.id, current.id), isNull(pluginJobs.nextRunAt), eq(pluginJobs.schedule, current.schedule),
-          eq(pluginJobs.status, "active"),
-        )).returning({ id: pluginJobs.id });
-        if (updated.length) log.debug({ jobId: current.id, jobKey: current.jobKey, nextRunAt: nextRunAt.toISOString() },
-          "computed nextRunAt for job");
+      // Overlap prevention
+      if (activeJobs.has(jobId)) {
+        throw new Error(
+          `Job "${job.jobKey}" is already running — cannot trigger while in progress`,
+        );
+      }
+
+      // Also check DB for running runs (defensive — covers multi-instance)
+      const existingRuns = await db
+        .select()
+        .from(pluginJobRuns)
+        .where(
+          and(
+            eq(pluginJobRuns.jobId, jobId),
+            eq(pluginJobRuns.status, "running"),
+          ),
+        );
+
+      if (existingRuns.length > 0) {
+        throw new Error(
+          `Job "${job.jobKey}" already has a running execution — cannot trigger while in progress`,
+        );
+      }
+
+      // Check worker availability
+      if (!workerManager.isRunning(job.pluginId)) {
+        throw new Error(
+          `Worker for plugin "${job.pluginId}" is not running — cannot trigger job`,
+        );
+      }
+
+      // Create the run and dispatch (non-blocking)
+      const run = await jobStore.createRun({
+        jobId,
+        pluginId: job.pluginId,
+        trigger,
       });
-    }
+
+      // Dispatch in background — don't block the caller
+      void dispatchRun(job, run, operation.snapshot).catch(() => {});
+
+      return { runId: run.id, jobId };
+    } finally { operation.done(); }
   }
 
   // -----------------------------------------------------------------------
@@ -558,12 +533,22 @@ export function createPluginJobScheduler(
   // -----------------------------------------------------------------------
 
   async function registerPlugin(pluginId: string): Promise<void> {
+    if (admission.isClosed()) return;
+    const previous = admission.register(pluginId);
+    const operation = admission.enter(pluginId);
+    if (!operation) return;
     log.info({ pluginId }, "registering plugin with job scheduler");
-    await replayQueuedRuns(pluginId);
-    await ensureNextRunTimestamps(pluginId);
+    try {
+      await previous;
+      await replayQueuedRuns(pluginId, operation.snapshot);
+      if (admission.valid(operation.snapshot, pluginId)) {
+        await ensurePluginJobSchedules(db, jobStore, pluginId, () => admission.valid(operation.snapshot, pluginId));
+      }
+    } finally { operation.done(); }
   }
 
   async function unregisterPlugin(pluginId: string): Promise<void> {
+    admission.revoke(pluginId);
     log.info({ pluginId }, "unregistering plugin from job scheduler");
   }
 
@@ -577,6 +562,7 @@ export function createPluginJobScheduler(
       return;
     }
 
+    admission.reopen();
     running = true;
     tickTimer = setInterval(() => {
       void tick();
@@ -589,6 +575,7 @@ export function createPluginJobScheduler(
   }
 
   function stop(): void {
+    admission.close();
     // Always clear the timer defensively, even if `running` is already false,
     // to prevent leaked interval timers.
     if (tickTimer !== null) {
@@ -626,6 +613,7 @@ export function createPluginJobScheduler(
   return {
     start,
     stop,
+    drain: admission.drain,
     registerPlugin,
     unregisterPlugin,
     triggerJob,
