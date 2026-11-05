@@ -8,6 +8,8 @@ import { captureQaCorrectionExecutionIdentity, isClaimDiscoveryHold, QaCorrectio
 import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type QaRemediationSharedAdmissionRuntime }
   from "./workflow/control-flow/qa-remediation-admission-root.js";
 import { conflict, HttpError } from "../errors.js";
+import { assertHeartbeatAdapterMayStart, createHeartbeatAdapterScope } from "./heartbeat-adapter-scope.js";
+import { runtimeExecutionLifecycle } from "./runtime-execution-lifecycle.js";
 import { budgetService } from "./budgets.js";
 import { assertRunNotReplaced } from "./workflow/run-replacement-guard.js";
 import { budgetBlockers } from "./workflow/resume/preview-facts.js";
@@ -175,6 +177,9 @@ export async function executeHeartbeatWithRecoveryGuard<T>(db: Db, run: typeof h
     if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(run)) {
       throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });
     }
+    assertHeartbeatAdapterMayStart(createHeartbeatAdapterScope(runtimeExecutionLifecycle, { runId: run.id,
+      wakeupRequestId: run.wakeupRequestId, executorOwnerLeaseToken: run.executorOwnerLeaseToken,
+      executionEpoch: run.executionEpoch, workflowExecutionGeneration: run.workflowExecutionGeneration }), runtimeExecutionLifecycle);
     const result = execute();
     // Attach immediately so an adapter's synchronous rejection cannot be unhandled while committing.
     void result.catch(() => {});
@@ -212,6 +217,9 @@ export async function startHeartbeatWithC5ExecutionGuard<T>(db: Db,
         if (!current || current.status !== "running" || executionIdentity(current) !== executionIdentity(currentRun)) {
           throw Object.assign(conflict("heartbeat_execution_cancelled_or_scope_changed"), { code: "heartbeat_recovery_blocked" });
         }
+        assertHeartbeatAdapterMayStart(createHeartbeatAdapterScope(runtimeExecutionLifecycle, { runId: currentRun.id,
+          wakeupRequestId: currentRun.wakeupRequestId, executorOwnerLeaseToken: currentRun.executorOwnerLeaseToken,
+          executionEpoch: currentRun.executionEpoch, workflowExecutionGeneration: currentRun.workflowExecutionGeneration }), runtimeExecutionLifecycle);
         return invokeOnce(execute);
       },
     });

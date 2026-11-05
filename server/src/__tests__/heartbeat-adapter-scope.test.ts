@@ -1,12 +1,36 @@
 import { startChildProcessAtBoundary } from "@paperclipai/adapter-utils/server-utils";
 import { describe, expect, it, vi } from "vitest";
-import { createHeartbeatAdapterScope, isHeartbeatUnstartedDeferral, runWithinHeartbeatAdapterScope } from "../services/heartbeat-adapter-scope.js";
+import { assertHeartbeatAdapterMayStart, createHeartbeatAdapterScope, isHeartbeatUnstartedDeferral, runWithinHeartbeatAdapterScope } from "../services/heartbeat-adapter-scope.js";
 import { createRuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 
 const run = { runId: "run-a", wakeupRequestId: "wake-a", executorOwnerLeaseToken: "owner-a",
   executionEpoch: 3, workflowExecutionGeneration: 2 };
 
 describe("heartbeat adapter scope", () => {
+  it("allows normal adapter entry without marking an external process started", () => {
+    const lifecycle = createRuntimeExecutionLifecycle(), scope = createHeartbeatAdapterScope(lifecycle, run);
+    assertHeartbeatAdapterMayStart(scope, lifecycle);
+    expect(scope.hasExternalStart()).toBe(false);
+  });
+
+  it("rejects adapter entry after shutdown with the exact unstarted identity", () => {
+    const lifecycle = createRuntimeExecutionLifecycle(), scope = createHeartbeatAdapterScope(lifecycle, run);
+    lifecycle.beginShutdown("SIGTERM");
+    let caught: unknown;
+    try { assertHeartbeatAdapterMayStart(scope, lifecycle); } catch (error) { caught = error; }
+    expect(isHeartbeatUnstartedDeferral(caught, scope, run, lifecycle)).toBe(true);
+    expect(scope.hasExternalStart()).toBe(false);
+  });
+
+  it("does not describe a previously started process as unstarted", () => {
+    const lifecycle = createRuntimeExecutionLifecycle(), scope = createHeartbeatAdapterScope(lifecycle, run);
+    runWithinHeartbeatAdapterScope(scope, () => startChildProcessAtBoundary(() => undefined));
+    lifecycle.beginShutdown("SIGTERM");
+    let caught: unknown;
+    try { assertHeartbeatAdapterMayStart(scope, lifecycle); } catch (error) { caught = error; }
+    expect(isHeartbeatUnstartedDeferral(caught, scope, run, lifecycle)).toBe(false);
+    expect(scope.hasExternalStart()).toBe(true);
+  });
   it("recognizes only the matching unstarted run after shutdown", async () => {
     const lifecycle = createRuntimeExecutionLifecycle(), scope = createHeartbeatAdapterScope(lifecycle, run), start = vi.fn();
     lifecycle.beginShutdown("SIGTERM");

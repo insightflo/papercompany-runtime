@@ -51,6 +51,8 @@ import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import { createHeartbeatAgentCancellation, publishHeartbeatRunStatus } from "./heartbeat-agent-cancellation.js";
 import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec, AdapterSessionUpdate } from "../adapters/index.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
+import { assertHeartbeatAdapterMayStart, createHeartbeatAdapterScope, isHeartbeatUnstartedDeferral, runWithinHeartbeatAdapterScope } from "./heartbeat-adapter-scope.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionScope } from "./runtime-execution-lifecycle.js";
 import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
@@ -1993,16 +1995,29 @@ export async function setHeartbeatRunStatus(
   runId: string,
   status: string,
   patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-  opts?: { expectedStatuses?: string[]; deferLiveEvent?: boolean },
+  opts?: { expectedStatuses?: string[]; deferLiveEvent?: boolean; expectedRun?: typeof heartbeatRuns.$inferSelect },
 ) {
   const expectedStatuses = opts?.expectedStatuses?.length ? opts.expectedStatuses : null;
   const updated = await db
     .update(heartbeatRuns)
     .set({ status, ...patch, updatedAt: new Date() })
     .where(
-      expectedStatuses
-        ? and(eq(heartbeatRuns.id, runId), inArray(heartbeatRuns.status, expectedStatuses))
-        : eq(heartbeatRuns.id, runId),
+      and(eq(heartbeatRuns.id, runId),
+        expectedStatuses ? inArray(heartbeatRuns.status, expectedStatuses) : undefined,
+        opts?.expectedRun ? eq(heartbeatRuns.companyId, opts.expectedRun.companyId) : undefined,
+        opts?.expectedRun ? eq(heartbeatRuns.agentId, opts.expectedRun.agentId) : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.issueId} is not distinct from ${opts.expectedRun.issueId}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.wakeupRequestId} is not distinct from ${opts.expectedRun.wakeupRequestId}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.workflowStepRunId} is not distinct from ${opts.expectedRun.workflowStepRunId}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.workflowExecutionGeneration} is not distinct from ${opts.expectedRun.workflowExecutionGeneration}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executionScopeKind} is not distinct from ${opts.expectedRun.executionScopeKind}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executionEpoch} is not distinct from ${opts.expectedRun.executionEpoch}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executionToken} is not distinct from ${opts.expectedRun.executionToken}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executorOwnerId} is not distinct from ${opts.expectedRun.executorOwnerId}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executorOwnerLeaseToken} is not distinct from ${opts.expectedRun.executorOwnerLeaseToken}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.executorOwnerLeaseEpoch} is not distinct from ${opts.expectedRun.executorOwnerLeaseEpoch}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.retryOfRunId} is not distinct from ${opts.expectedRun.retryOfRunId}` : undefined,
+        opts?.expectedRun ? sql`${heartbeatRuns.processLossRetryCount} is not distinct from ${opts.expectedRun.processLossRetryCount}` : undefined),
     )
     .returning()
     .then((rows) => rows[0] ?? null);
@@ -3190,7 +3205,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
-    opts?: { expectedStatuses?: string[] },
+    opts?: { expectedStatuses?: string[]; expectedRun?: typeof heartbeatRuns.$inferSelect },
   ) {
     return setHeartbeatRunStatus(db, runId, status, patch, opts);
   }
@@ -4769,6 +4784,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
     const pauseExecution = createPauseExecutionObservation();
     const actualObservation = createHeartbeatActualObservation<AdapterExecutionResult>();
+    let adapterStartIdentity: Parameters<typeof createHeartbeatAdapterScope>[1] | null = null;
+    let adapterStartScope: RuntimeExecutionScope | null = null;
+    let unstartedShutdownDeferral = false;
     let c5RootNotifications: ReplacementRootNotifications | null = null;
     let c5RootSettlementConfirmed = false;
     let c5AdmissionEntered = false;
@@ -6282,6 +6300,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       //   code=fenced_effect_replay_skipped 예외로 실패 종결한다. 일시 재시도·fallback
       //   큐잉은 errorCode==='adapter_failed' 조건이므로 이 코드에서 자동 억제된다.
       let adapterProcessStarted = false;
+      adapterStartIdentity = { runId: run.id, wakeupRequestId: run.wakeupRequestId,
+        executorOwnerLeaseToken: run.executorOwnerLeaseToken, executionEpoch: run.executionEpoch,
+        workflowExecutionGeneration: run.workflowExecutionGeneration };
+      adapterStartScope = createHeartbeatAdapterScope(runtimeExecutionLifecycle, adapterStartIdentity);
       try {
         actualDrainIdentity = await freezeHeartbeatActualDrainIdentity(db, run, context);
       } catch (identityErr) {
@@ -6320,10 +6342,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           provider: readNonEmptyString(runtimeConfig.provider) ?? null,
         },
         attemptRunId: run.id,
+        isDeferredBeforeStart: error => !!adapterStartScope && !!adapterStartIdentity
+          && isHeartbeatUnstartedDeferral(error, adapterStartScope, adapterStartIdentity, runtimeExecutionLifecycle),
         execute: () => {
           const executeActual = () => pauseExecution.execute(run, () => {
+          assertHeartbeatAdapterMayStart(adapterStartScope!, runtimeExecutionLifecycle);
           executionFrame.adapterInvocationAttempted = true;
-          const actualPromise = actualObservation.invoke(() => adapter.execute({
+          const actualPromise = actualObservation.invoke(() => runWithinHeartbeatAdapterScope(adapterStartScope!, () => adapter.execute({
             runId: run.id,
             agent: { ...agent, adapterConfig: runtimeConfig },
             runtime: runtimeForAdapter,
@@ -6337,7 +6362,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               await persistRunProcessMetadata(run.id, meta);
             },
             authToken: authToken ?? undefined,
-          }));
+          })));
           executionFrame.actualCaptured = actualObservation.wasInvoked();
           return actualPromise;
           });
@@ -6843,10 +6868,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // The transaction/guard can reject before the adapter Promise settles. Wait only for
       // the actual Promise captured at adapter.execute; an uninvoked adapter stays unknown.
       const actual = await actualObservation.awaitSettled();
-      const c5Held = err instanceof C5NotInvokedExecutionError
-        && executionFrame.c5NotInvoked?.proof === err.proof;
       c5RefusalConfirmed = !c5AdmissionEntered || (!(err instanceof QaRemediationAdmissionHold)
         && (err instanceof QaCorrectionClaimRejected || isC5PreInvocationRollback(err, db, captureQaCorrectionExecutionIdentity(run), "adapter_start")));
+      if (c5RefusalConfirmed && adapterStartScope && adapterStartIdentity && actual === null
+        && !actualObservation.wasInvoked() && !executionFrame.adapterInvocationAttempted
+        && isHeartbeatUnstartedDeferral(err, adapterStartScope, adapterStartIdentity, runtimeExecutionLifecycle)) {
+        await runLog.finalizeAfterError();
+        const queued = await db.transaction(async (tx) => {
+          if (run.wakeupRequestId) {
+            const wake = await tx.update(agentWakeupRequests).set({ status: "queued", claimedAt: null, updatedAt: new Date() })
+              .where(and(eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId),
+                eq(agentWakeupRequests.agentId, run.agentId), eq(agentWakeupRequests.runId, run.id), eq(agentWakeupRequests.status, "claimed")))
+              .returning({ id: agentWakeupRequests.id });
+            if (wake.length !== 1) throw new Error("heartbeat_deferral_wakeup_scope_changed");
+          }
+          const restored = await setHeartbeatRunStatus(tx as unknown as Db, run.id, "queued", { startedAt: null },
+            { expectedStatuses: ["running"], expectedRun: run, deferLiveEvent: true });
+          if (!restored) throw new Error("heartbeat_deferral_run_scope_changed");
+          return restored;
+        });
+        if (queued) { publishHeartbeatRunStatus(publishLiveEvent, queued); unstartedShutdownDeferral = true; return; }
+      }
+      const c5Held = err instanceof C5NotInvokedExecutionError
+        && executionFrame.c5NotInvoked?.proof === err.proof;
       if (executionFrame.c5ExecutionOptedIn && !c5Held && !c5RefusalConfirmed && actual === null
         && !executionFrame.adapterInvocationAttempted) {
         executionFrame.ownerReleaseBlocked = true;
@@ -7108,7 +7152,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               }
             },
             activeRunExecutions, getRun,
-            deferQueuePromotion: terminalReleaseOptedIn
+            deferQueuePromotion: unstartedShutdownDeferral || terminalReleaseOptedIn
               || (executionFrame.ownerReleaseBlocked
                 && !(executionFrame.c5ExecutionOptedIn && executionFrame.c5NotInvoked
                   && executionFrame.noActualInvocationConfirmed)),
