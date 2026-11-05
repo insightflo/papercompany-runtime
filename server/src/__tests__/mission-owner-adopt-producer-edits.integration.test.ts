@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
@@ -70,8 +70,8 @@ describeEP("mission owner adopt_producer_edits", () => {
     await db.insert(heartbeatRuns).values([
       { id: heartbeatRunId, companyId, agentId: ownerAgentId, issueId: ownerIssueId, status: "succeeded" },
     ]);
-    const script = path.join(root, "inspect.mjs");
-    await writeFile(script, "import fs from 'node:fs';const file=process.argv[process.argv.indexOf('--report-path')+1];console.log(JSON.stringify({report:JSON.parse(fs.readFileSync(file,'utf8')).report}));");
+    const script = path.join(root, "inspect.mjs"), callLog = path.join(root, "inspect-calls.log");
+    await writeFile(script, "import fs from 'node:fs';const file=process.argv[process.argv.indexOf('--report-path')+1];fs.appendFileSync(" + JSON.stringify(callLog) + ", 'called\\n');console.log(JSON.stringify({report:JSON.parse(fs.readFileSync(file,'utf8')).report}));");
     const tools = await db.insert(toolDefinitions).values([
       { companyId, name: "mission_owner_execute", adapterType: "builtin", adapterConfig: { kind: "mission-owner-execute" } },
       { companyId, name: "inspect-report", adapterType: "builtin", adapterConfig: {
@@ -147,7 +147,7 @@ describeEP("mission owner adopt_producer_edits", () => {
     const events = () => db.select().from(workflowTransitionEvents).where(eq(workflowTransitionEvents.workflowRunId, run.id));
     const authorities = () => db.select().from(workflowRecoveryAuthorities).where(eq(workflowRecoveryAuthorities.workflowRunId, run.id));
     return { companyId, missionId, ownerAgentId, sourceIssueId, ownerIssueId, heartbeatRunId, run, consumer,
-      product, file, body, call, readProduct, events, authorities };
+      product, file, callLog, body, call, readProduct, events, authorities };
   }
 
   it("adopts owner-attested edited bytes and recovers the exact failed consumer, with idempotent replay", async () => {
@@ -158,6 +158,9 @@ describeEP("mission owner adopt_producer_edits", () => {
     expect(action.state).toBe("executing");
     const row = await s.readProduct();
     expect((row.metadata!.workflowProducer as Record<string, unknown>).executionGeneration).toBe(0);
+    expect(row).toMatchObject({ companyId: s.companyId, issueId: s.sourceIssueId,
+      createdByRunId: s.product.createdByRunId, metadata: { path: s.file } });
+    expect(await readFile(s.file, "utf8")).toBe(FIXED);
     expect(row.metadata!.workflowProducerRebind).toMatchObject({
       reason: "owner_attested_producer_rework",
       reboundBy: { actorType: "mission_owner", actorId: s.ownerAgentId },
@@ -172,6 +175,9 @@ describeEP("mission owner adopt_producer_edits", () => {
     expect((await getMissionOwnerActionResult({ db, companyId: s.companyId, agentId: s.ownerAgentId,
       heartbeatRunId: s.heartbeatRunId }, { schemaVersion: 1, missionId: s.missionId, actionId: action.actionId })).state).toBe("resolved");
     expect((await s.call()).body.data).toMatchObject({ actionId: action.actionId, state: "resolved" });
+    await processQueuedWorkflowToolStepRuns(db);
+    expect(await readFile(s.callLog, "utf8")).toBe("called\n");
+    expect(await stepRow(s.consumer.id)).toEqual(completed);
     expect(await s.authorities()).toHaveLength(1);
   });
 
