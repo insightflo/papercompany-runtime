@@ -7,7 +7,7 @@ import { fixedHttpTimeout, progressCallbackBase, progressTokenHash, readToolProg
 import { createToolProgressStore } from "../tools/progress-store.js";
 import { withToolProgress } from "../tools/progress-monitor.js";
 import { httpDispatcher, undiciFetch } from "./http-tool-dispatcher.js";
-import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle, type RuntimeExecutionScope } from "../runtime-execution-lifecycle.js";
 export { redactSecret, persistArtifact } from "./http-tool-response.js";
 
 export type HttpWorkflowToolExecutionInput = {
@@ -21,6 +21,8 @@ export type HttpWorkflowToolExecutionDeps = {
   fetchImpl?: typeof fetch;
   resolveSecretValue: (companyId: string, secretId: string, version: number | "latest") => Promise<string>;
   progress?: { db: Db; toolId: string; workflowRunId?: string | null; stepId?: string | null; callbackBaseUrl?: string };
+  /** Core passes its native-first selection, including null when no validated authority exists. */
+  runtimeScope?: RuntimeExecutionScope | null;
   runtimeLifecycle?: RuntimeExecutionLifecycle;
 };
 function resolveHeaderAuth(auth: unknown): { headerName: string; secretId: string; version: number | "latest" } | null {
@@ -82,14 +84,15 @@ export async function executeHttpWorkflowTool(input: HttpWorkflowToolExecutionIn
       [auth.headerName]: headerValue, "X-Papercompany-Request-Id": input.requestId };
     // Serialize/validate transport input before creating a durable execution record.
     const body = JSON.stringify(input.parameters ?? {});
-    const execution = deps.progress?.workflowRunId && deps.progress.stepId
+    const directExecution = deps.runtimeScope === undefined && deps.progress?.workflowRunId && deps.progress.stepId
       ? await deps.progress.db.select({ id: workflowStepRuns.id, generation: workflowStepRuns.executionGeneration })
         .from(workflowStepRuns).where(and(eq(workflowStepRuns.workflowRunId, deps.progress.workflowRunId),
           eq(workflowStepRuns.stepId, deps.progress.stepId), eq(workflowStepRuns.lastDispatchRequestId, input.requestId)))
         .limit(1).then(([attempt]) => attempt) : null;
-    const runtimeScope = execution && (deps.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
-      requestId: input.requestId, executionId: deps.progress!.workflowRunId!, attemptId: execution.id,
-      executionGeneration: execution.generation,
+    const runtimeScope = deps.runtimeScope !== undefined ? deps.runtimeScope : directExecution &&
+      (deps.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
+      requestId: input.requestId, executionId: deps.progress!.workflowRunId!, attemptId: directExecution.id,
+      executionGeneration: directExecution.generation,
     });
     const operation = async (signal: AbortSignal) => {
       signal.throwIfAborted();

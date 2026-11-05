@@ -10,6 +10,7 @@ import { executeHttpWorkflowTool } from "./http-tool-adapter.js";
 import { executeMcpWorkflowTool } from "./mcp-tool-adapter.js";
 import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
 import { isPathInsideOrEqual } from "../work-products/output-paths.js";
+import type { RuntimeExecutionLifecycle, RuntimeExecutionScope } from "../runtime-execution-lifecycle.js";
 
 export type CoreWorkflowToolRemoteDeps = {
   fetchImpl?: typeof fetch;
@@ -51,6 +52,8 @@ export async function executeRemoteWorkflowTool(input: {
   requestId: string;
   workflowRunId?: string | null;
   stepId?: string | null;
+  runtimeScope?: RuntimeExecutionScope | null;
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
   adapterType: string;
   adapterConfig: unknown;
   remoteDeps?: CoreWorkflowToolRemoteDeps;
@@ -76,7 +79,9 @@ export async function executeRemoteWorkflowTool(input: {
   };
 
   const result = input.adapterType === "http"
-    ? (input.remoteDeps?.executeHttp ?? executeHttpWorkflowTool)(adapterInput, deps)
+    ? (input.remoteDeps?.executeHttp ?? executeHttpWorkflowTool)(adapterInput, {
+      ...deps, runtimeScope: input.runtimeScope, runtimeLifecycle: input.runtimeLifecycle,
+    })
     : (input.remoteDeps?.executeMcp ?? executeMcpWorkflowTool)(adapterInput, deps);
   const adapterResult = await result;
   if (adapterResult.deferredBeforeStart) return adapterResult;

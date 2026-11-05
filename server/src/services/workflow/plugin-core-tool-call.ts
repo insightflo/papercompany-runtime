@@ -3,6 +3,11 @@ import type { Request } from "express";
 import type { Db } from "@paperclipai/db";
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { executeCoreWorkflowTool } from "./core-tool-executor.js";
+import {
+  runtimeExecutionIdentitySchema,
+  type RuntimeExecutionIdentity,
+  type RuntimeExecutionLifecycle,
+} from "../runtime-execution-lifecycle.js";
 
 /** Assemble the authorized route's core call without changing its execution scope. */
 export function executePluginCoreToolCall(input: {
@@ -13,8 +18,13 @@ export function executePluginCoreToolCall(input: {
   tool: string;
   parameters: unknown;
   stepEnv: Record<string, string>;
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
+  /** Server-owned identity only; callers must not copy this from tool parameters. */
+  httpRequestIdentity?: RuntimeExecutionIdentity;
 }) {
   const { db, actor, runContext, workflowRunIssueId, tool, parameters, stepEnv } = input;
+  const parsedIdentity = runtimeExecutionIdentitySchema.safeParse(input.httpRequestIdentity);
+  const httpRequestIdentity = parsedIdentity.success ? parsedIdentity.data : undefined;
   return executeCoreWorkflowTool({
     db,
     companyId: runContext.companyId,
@@ -23,10 +33,12 @@ export function executePluginCoreToolCall(input: {
     heartbeatRunId: actor.type === "agent" ? String(runContext.runId) : undefined,
     toolName: tool,
     parameters: parameters ?? {},
-    requestId: randomUUID(),
+    requestId: httpRequestIdentity?.requestId ?? randomUUID(),
     workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
     stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
     stepEnv,
+    runtimeLifecycle: input.runtimeLifecycle,
+    ...(httpRequestIdentity ? { httpRequestIdentity } : {}),
     // Authentication supplies only this snapshot; body parameters and env never fill gaps.
     progressEvidenceContext: {
       actor: {
