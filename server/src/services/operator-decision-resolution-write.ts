@@ -1,6 +1,6 @@
 import { and, eq, getTableColumns, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, companies, issueComments, missions, operatorDecisionContinuations, operatorDecisions, workflowRuns } from "@paperclipai/db";
+import { activityLog, companies, issueComments, operatorDecisionContinuations, operatorDecisions } from "@paperclipai/db";
 import type { CreateOperatorDecisionInput } from "@paperclipai/shared/types/operator-decision";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -25,6 +25,7 @@ import { assertExactBoardWorkflowRestartPolicy, holdUnprovenRestart,
   startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
 import { evaluateRecoveryAdviceIdentity, loadRecoveryAdviceIdentityFacts } from "./operator-decision-recovery-advice.js";
 import { lockQaRecoveryCollectionAdmission } from "./operator-decision-qa-recovery-admission.js";
+import { withOperatorRestartTransaction } from "./operator-decision-restart-transaction.js";
 import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_SCOPE,
@@ -251,19 +252,8 @@ export function operatorDecisionResolutionWriteService(
         runId: before.sourceContext.workflowRunId!,
       }, (context) => resolveInsideTransaction(context.tx, context))
       : directRestartSelected
-        ? await db.transaction(async (tx) => {
-          const [lockedMission] = await tx.select({ id: missions.id }).from(missions).where(and(
-            eq(missions.id, before.sourceContext.missionId!),
-            eq(missions.companyId, before.companyId),
-          )).for("update");
-          if (!lockedMission) throw conflict("workflow_restart_scope_missing");
-          await tx.select({ id: workflowRuns.id }).from(workflowRuns).where(and(
-            eq(workflowRuns.id, before.sourceContext.workflowRunId!),
-            eq(workflowRuns.companyId, before.companyId),
-            eq(workflowRuns.missionId, before.sourceContext.missionId!),
-          )).for("update");
-          return resolveInsideTransaction(tx);
-        })
+        ? await withOperatorRestartTransaction(db, { companyId: before.companyId,
+          missionId: before.sourceContext.missionId!, sourceRunId: before.sourceContext.workflowRunId! }, resolveInsideTransaction)
         : await db.transaction((tx) => resolveInsideTransaction(tx));
     const decision = await read.getRequired(id);
     // [delivery bridge] applied(첫 적용)에만 코멘트를 남긴다 — replay 는 이미 코멘트가 존재한다.
