@@ -19,6 +19,7 @@ import { assertPluginWorkflowActionAccess, nativeWorkflowActionKeys, normalizedW
  * @see doc/plugins/PLUGIN_SPEC.md for the full plugin specification
  */
 
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { and, desc, eq } from "drizzle-orm";
@@ -37,7 +38,6 @@ import type {
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { pluginLoader } from "../services/plugin-loader.js";
-import { condenseDuplicateToolErrorBody } from "../services/tool-result-hygiene.js";
 import { registerPluginCatalogRoutes } from "./plugin-catalog.js";
 import { registerPluginConfigRoutes } from "./plugin-config-routes.js";
 import { registerPluginDiagnosticsRoutes } from "./plugin-diagnostics-routes.js";
@@ -45,13 +45,12 @@ import { registerPluginLifecycleRoutes } from "./plugin-lifecycle-routes.js";
 import { ingestWebhookDelivery } from "../services/plugin-webhook-receipt.js";
 import {
   claimToolExecutionReceipt,
-  completeToolExecutionReceipt,
-  releaseToolExecutionReceipt,
   IDEMPOTENCY_KEY_MAX_LENGTH,
   normalizeIdempotencyKey,
 } from "../services/plugin-tool-execution-receipt.js";
 import type { createHttpHandlerLifetime } from "../services/http-handler-lifetime.js";
-import type { RuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
+import { finalizeHttpCoreResponse, isPositiveHttpDeferral } from "../services/http-core-response-finalization.js";
+import type { RuntimeExecutionIdentity, RuntimeExecutionLifecycle } from "../services/runtime-execution-lifecycle.js";
 import { createPluginToolHttpConsumer } from "../services/plugin-tool-http-consumer.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
@@ -1086,76 +1085,44 @@ export function pluginRoutes(
       return;
     }
 
-    // [tool execution idempotency] Receipt adjudication runs after authorization
-    //   but before any execution: the unique (company, run, tool, key) claim insert
-    //   makes exactly one concurrent request the executor. A completed receipt
-    //   replays its recorded response; a fresh executing receipt answers 409; a
-    //   stale one (crashed execution) is taken over and re-executed.
-    let receiptId: string | null = null;
-    if (idempotencyKey !== null) {
-      const decision = await claimToolExecutionReceipt(db, {
-        companyId: runContext.companyId,
-        runId: String(runContext.runId),
-        tool,
-        idempotencyKey,
-        parameters,
-      });
-      if (decision.kind === "replay") {
-        res.status(decision.status).set("x-idempotent-replay", "true").json(decision.body);
-        return;
-      }
-      if (decision.kind === "in-progress") {
-        res
-          .status(409)
-          .json({ error: "Tool execution already in progress for this idempotency key" });
-        return;
-      }
-      receiptId = decision.receiptId;
+    // Claim only after authorization. Omitted caller keys get a private one-request key.
+    const claimedIdempotencyKey = idempotencyKey ?? randomUUID();
+    const decision = await claimToolExecutionReceipt(db, {
+      companyId: runContext.companyId,
+      runId: String(runContext.runId),
+      tool,
+      idempotencyKey: claimedIdempotencyKey,
+      parameters,
+    });
+    if (decision.kind === "replay") {
+      res.status(decision.status).set("x-idempotent-replay", "true").json(decision.body);
+      return;
+    }
+    if (decision.kind === "in-progress") {
+      res.status(409).json({ error: "Tool execution already in progress for this idempotency key" });
+      return;
     }
 
-    /**
-     * Single emission point for terminal responses produced by real tool
-     * execution (plugin dispatcher or core workflow tool). Applies tool-result
-     * hygiene exactly where the legacy path applied it, records the terminal
-     * response on the idempotency receipt (condensed body — replay equals the
-     * first response), then emits. Early returns that never execute anything
-     * (validation / authorization / not-found / unconfigured dispatcher) stay
-     * outside this helper and never complete a receipt.
-     */
-    const emitExecuted = async (
-      status: number,
-      body: Record<string, unknown>,
-      options: {
-        errorPath?: "error" | "result.error";
-        condense?: boolean;
-        workflowRunId?: string | null;
-        stepId?: string | null;
-      } = {},
-    ) => {
-      const finalBody =
-        options.condense === false
-          ? body
-          : condenseDuplicateToolErrorBody({
-              runId: runContext.runId,
-              tool,
-              status,
-              body,
-              errorPath: options.errorPath,
-            }).body;
-      if (receiptId !== null) {
-        await completeToolExecutionReceipt(db, receiptId, {
-          status,
-          body: finalBody,
-          workflowRunId: options.workflowRunId ?? null,
-          stepId: options.stepId ?? null,
-        });
-      }
-      res.status(status).json(finalBody);
+    const receipt = {
+      id: decision.receiptId,
+      companyId: runContext.companyId,
+      runId: String(runContext.runId),
+      tool,
     };
+    const requestIdentity: RuntimeExecutionIdentity | undefined = runtimeOptions ? {
+      requestId: receipt.id,
+      executionId: receipt.runId,
+      attemptId: receipt.id,
+      executionGeneration: 1,
+    } : undefined;
 
+    let stepEnv: Record<string, string> = {};
+    let coreResult: Awaited<ReturnType<typeof executePluginCoreToolCall>> | null = null;
+    let executionError: unknown;
+    let executionFailed = false;
     try {
-      const stepEnv = await resolveRunStepEnv(db, String(runContext.runId));
-      const coreResult = await executePluginCoreToolCall({
+      stepEnv = await resolveRunStepEnv(db, String(runContext.runId));
+      coreResult = await executePluginCoreToolCall({
         db,
         actor: req.actor,
         runContext,
@@ -1163,44 +1130,84 @@ export function pluginRoutes(
         tool,
         parameters,
         stepEnv,
+        ...(requestIdentity ? { httpRequestIdentity: requestIdentity } : {}),
+        runtimeLifecycle: runtimeOptions?.runtimeLifecycle,
       });
-      if (coreResult.deferredBeforeStart) {
-        if (receiptId !== null) await releaseToolExecutionReceipt(db, receiptId);
-        res.status(503).json({ deferredBeforeStart: coreResult.deferredBeforeStart });
-        return;
-      }
-      // 409 artifact_tool_step_call_in_progress: nothing executed (another call holds the step).
-      // Release this request's claim so a same-key retry can execute once the step is free.
-      if (coreResult.status === 409 && coreResult.body.error === "artifact_tool_step_call_in_progress" && receiptId !== null) {
-        await releaseToolExecutionReceipt(db, receiptId);
-        receiptId = null;
-      }
-      if (coreResult.status !== 404 || coreResult.body.source === "core") {
-        await emitExecuted(coreResult.status, coreResult.body as Record<string, unknown>, {
-          workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
-          stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
+    } catch (error) {
+      executionFailed = true;
+      executionError = error;
+    }
+
+    const workflowAuditScope = {
+      workflowRunId: stepEnv.PAPERCLIP_WORKFLOW_RUN_ID ?? null,
+      stepId: stepEnv.PAPERCLIP_WORKFLOW_STEP_ID ?? null,
+    };
+    const finalizationBase = {
+      db,
+      req,
+      res,
+      lifetime: runtimeOptions?.lifetime,
+      receipt,
+      requestIdentity,
+      workflowAuditScope,
+    };
+
+    if (executionFailed) {
+      const message = executionError instanceof Error ? executionError.message : String(executionError);
+      await finalizeHttpCoreResponse({
+        ...finalizationBase,
+        originalResult: { kind: "execution_error", error: executionError },
+        response: { status: 500, body: { error: message } },
+        disposition: "complete",
+        condense: false,
+      });
+      return;
+    }
+    if (!coreResult) throw new Error("HTTP core tool execution returned no result");
+
+    if (coreResult.deferredBeforeStart) {
+      const response = { status: 503, body: { deferredBeforeStart: coreResult.deferredBeforeStart } };
+      if (!isPositiveHttpDeferral(coreResult.deferredBeforeStart, requestIdentity)) {
+        runtimeOptions?.lifetime.holdFinalization(req, {
+          receipt,
+          requestIdentity: requestIdentity ?? null,
+          originalResult: coreResult,
+          response,
+          workflowAuditScope,
+          disposition: "held",
+          reason: "positive_unstarted_proof_invalid",
         });
-        return;
+        throw new Error("HTTP core tool deferral did not carry matching positive unstarted proof");
       }
-      // 404 without core source: no tool matched, nothing executed. Release
-      // this request's own claim so the same key stays usable for a valid call.
-      if (receiptId !== null) {
-        await releaseToolExecutionReceipt(db, receiptId);
-        receiptId = null;
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // Fail closed: the execution branch failed after claiming, so record the
-      // 500 (replay on same-key retry) instead of risking a re-execution.
-      await emitExecuted(500, { error: message }, { condense: false });
+      await finalizeHttpCoreResponse({ ...finalizationBase, originalResult: coreResult, response, disposition: "release", condense: false });
       return;
     }
 
-    if (!toolDeps) {
-      res.status(501).json({ error: "Plugin tool dispatch is not enabled and no core workflow tool matched" });
+    // This result means another exact artifact step call owns the start; the current claim is safe to release.
+    if (coreResult.status === 409 && coreResult.body.error === "artifact_tool_step_call_in_progress") {
+      await finalizeHttpCoreResponse({
+        ...finalizationBase,
+        originalResult: coreResult,
+        response: { status: coreResult.status, body: coreResult.body as Record<string, unknown> },
+        disposition: "release",
+      });
       return;
     }
-    res.status(404).json({ error: `Tool "${tool}" not found` });
+
+    if (coreResult.status === 404 && coreResult.body.source !== "core") {
+      const response = !toolDeps
+        ? { status: 501, body: { error: "Plugin tool dispatch is not enabled and no core workflow tool matched" } }
+        : { status: 404, body: { error: `Tool "${tool}" not found` } };
+      await finalizeHttpCoreResponse({ ...finalizationBase, originalResult: coreResult, response, disposition: "release", condense: false });
+      return;
+    }
+
+    await finalizeHttpCoreResponse({
+      ...finalizationBase,
+      originalResult: coreResult,
+      response: { status: coreResult.status, body: coreResult.body as Record<string, unknown> },
+      disposition: "complete",
+    });
   };
 
   router.post(

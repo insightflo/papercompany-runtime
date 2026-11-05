@@ -1,8 +1,14 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { pluginToolExecutionReceipts } from "@paperclipai/db";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { errorHandler } from "../middleware/index.js";
 import { pluginRoutes } from "../routes/plugins.js";
+import {
+  observeExecuteToolSpy,
+  PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
+  startPluginRouteReceiptFixture,
+} from "./helpers/plugin-route-receipt-fixture.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -58,20 +64,12 @@ function createApp(toolDispatcher: {
     req.actor = (options.actor ?? {
       type: "board",
       userId: "board-user-1",
-      companyIds: ["company-1"],
+      companyIds: [PLUGIN_ROUTE_RECEIPT_COMPANY_ID],
       source: "session",
     }) as never;
     next();
   });
-  const rowQueue = [...(options.dbRowQueue ?? [])];
-  const query = {
-    from: vi.fn(() => query),
-    where: vi.fn(() => query),
-    limit: vi.fn(() => Promise.resolve(rowQueue.length > 0 ? rowQueue.shift() : (options.dbRows ?? []))),
-  };
-  const db = {
-    select: vi.fn(() => query),
-  };
+  const db = receiptFixture.routeDb({ rows: options.dbRows, rowQueue: options.dbRowQueue });
   app.use(
     "/api",
     pluginRoutes(
@@ -79,7 +77,7 @@ function createApp(toolDispatcher: {
       {} as never,
       undefined,
       undefined,
-      { toolDispatcher: toolDispatcher as never },
+      { toolDispatcher: observeExecuteToolSpy(toolDispatcher) as never },
       undefined,
     ),
   );
@@ -87,9 +85,20 @@ function createApp(toolDispatcher: {
   return app;
 }
 
+let receiptFixture: Awaited<ReturnType<typeof startPluginRouteReceiptFixture>>;
+
 describe("plugin tool execution projectless run context", () => {
-  beforeEach(() => {
+  beforeAll(async () => {
+    receiptFixture = await startPluginRouteReceiptFixture();
+  }, 120_000);
+
+  afterAll(async () => {
+    await receiptFixture?.cleanup();
+  });
+
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await receiptFixture.db.delete(pluginToolExecutionReceipts);
   });
 
   it("executes agent tools when a projectless mission run has no projectId", async () => {
@@ -105,7 +114,7 @@ describe("plugin tool execution projectless run context", () => {
     const runContext = {
       agentId: "agent-1",
       runId: "run-1",
-      companyId: "company-1",
+      companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
     };
 
     const res = await request(createApp(toolDispatcher))
@@ -117,7 +126,11 @@ describe("plugin tool execution projectless run context", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.data.rawEngine.name).toBe("vane-headless");
+    expect(res.body).toEqual({
+      pluginId: "insightflo.research-workbench",
+      toolName: "research-search",
+      result: { content: "ok", data: { rawEngine: { name: "vane-headless" } } },
+    });
     expect(toolDispatcher.executeTool).toHaveBeenCalledWith(
       "insightflo.research-workbench:research-search",
       { topic: "Oklo SMR" },
@@ -131,14 +144,14 @@ describe("plugin tool execution projectless run context", () => {
       getTool: vi.fn().mockReturnValue({ namespacedName: "daily-tech-scout" }),
       executeTool: vi.fn().mockResolvedValue({ content: "ok" }),
     };
-    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID };
 
     const res = await request(createApp(toolDispatcher, {
-      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      actor: { type: "agent", agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID, source: "agent_key" },
       dbRows: [{
         id: "run-1",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
         status: "running",
         contextSnapshot: {
           paperclipWorkflowStepToolContract: {
@@ -161,7 +174,7 @@ describe("plugin tool execution projectless run context", () => {
       getTool: vi.fn().mockReturnValue({ namespacedName: "second-tool", enabled: true }),
       executeTool: vi.fn().mockResolvedValue({ content: "ok" }),
     };
-    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID };
     mockToolCatalog.listWorkflowToolCatalog.mockReturnValueOnce({
       tools: [{ name: "second-tool", source: "plugin", enabled: true }],
       grants: [{ agentId: "agent-1", agentName: "Agent One", toolName: "second-tool", source: "plugin" }],
@@ -169,11 +182,11 @@ describe("plugin tool execution projectless run context", () => {
     });
 
     const res = await request(createApp(toolDispatcher, {
-      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      actor: { type: "agent", agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID, source: "agent_key" },
       dbRows: [{
         id: "run-1",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
         status: "running",
         issueId: "issue-1",
         contextSnapshot: {
@@ -206,11 +219,11 @@ describe("plugin tool execution projectless run context", () => {
       executeTool: vi.fn(),
     };
     const res = await request(createApp(toolDispatcher, {
-      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      actor: { type: "agent", agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID, source: "agent_key" },
       dbRows: [{
         id: "run-1",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
         status: "running",
         issueId: "issue-1",
         contextSnapshot: {
@@ -226,7 +239,7 @@ describe("plugin tool execution projectless run context", () => {
     }))
       .post("/api/plugins/tools/execute")
       .send({ tool: "daily-tech-scout", parameters: {}, runContext: {
-        agentId: "agent-1", runId: "run-1", companyId: "company-1",
+        agentId: "agent-1", runId: "run-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
       } });
 
     expect(res.status).toBe(403);
@@ -239,15 +252,15 @@ describe("plugin tool execution projectless run context", () => {
       getTool: vi.fn().mockReturnValue(null),
       executeTool: vi.fn(),
     };
-    const runContext = { agentId: "agent-1", runId: "run-1", companyId: "company-1" };
+    const runContext = { agentId: "agent-1", runId: "run-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID };
 
     const res = await request(createApp(toolDispatcher, {
-      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      actor: { type: "agent", agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID, source: "agent_key" },
       dbRowQueue: [
         [{
           id: "run-1",
           agentId: "agent-1",
-          companyId: "company-1",
+          companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
           status: "running",
           issueId: "issue-1",
           contextSnapshot: {
@@ -260,7 +273,7 @@ describe("plugin tool execution projectless run context", () => {
         [{
           id: "run-1",
           agentId: "agent-1",
-          companyId: "company-1",
+          companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
           issueId: null,
         }],
         [{
@@ -295,11 +308,11 @@ describe("plugin tool execution projectless run context", () => {
     };
 
     const res = await request(createApp(toolDispatcher, {
-      actor: { type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" },
+      actor: { type: "agent", agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID, source: "agent_key" },
       dbRows: [{
         id: "run-1",
         agentId: "agent-1",
-        companyId: "company-1",
+        companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID,
         status: "running",
         contextSnapshot: {
           paperclipWorkflowStepToolContract: {
@@ -312,7 +325,7 @@ describe("plugin tool execution projectless run context", () => {
       .send({
         tool: "manual-publisher",
         parameters: {},
-        runContext: { agentId: "agent-1", runId: "run-1", companyId: "company-1" },
+        runContext: { agentId: "agent-1", runId: "run-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID },
       });
 
     expect(res.status).toBe(403);
@@ -331,7 +344,7 @@ describe("plugin tool execution projectless run context", () => {
       .send({
         tool: "insightflo.research-workbench:research-search",
         parameters: { topic: "Oklo SMR" },
-        runContext: { agentId: "agent-1", companyId: "company-1" },
+        runContext: { agentId: "agent-1", companyId: PLUGIN_ROUTE_RECEIPT_COMPANY_ID },
       });
 
     expect(res.status).toBe(400);
