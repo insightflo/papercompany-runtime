@@ -43,8 +43,9 @@ function executor(options: {
     db: {} as Db,
     toolDispatcher: {
       getTool: vi.fn().mockReturnValue(options.plugin ? {} : null),
-      executeTool: executePlugin,
+      executeToolObserved: vi.fn(),
     } as never,
+    pluginToolConsumer: executePlugin,
     executeCoreTool: executeCore,
     completeToolStep: complete,
     resolveStepEnv: resolveEnv,
@@ -53,21 +54,11 @@ function executor(options: {
 }
 
 describe("app workflow tool shutdown lifecycle", () => {
-  it("returns a plugin deferral before reading its result or submitting completion", async () => {
-    const execution = {
-      pluginId: "plugin-1",
-      toolName: request.toolName,
-      deferredBeforeStart,
-      get result(): never {
-        throw new Error("plugin result must not be read for a deferral");
-      },
-    };
-    const scenario = executor({
-      plugin: true,
-      executePlugin: vi.fn().mockResolvedValue(execution),
-    });
-
-    await expect(scenario.run(request)).resolves.toEqual({ deferredBeforeStart });
+  it("delegates plugin deferral handling without invoking core completion", async () => {
+    const release = { kind: "held", receiptId: "receipt-1", workflow: {}, reason: "release_failed" };
+    const scenario = executor({ plugin: true, executePlugin: vi.fn().mockResolvedValue({ accepted: true, retainedUnsentRelease: release }) });
+    await expect(scenario.run(request)).resolves.toEqual({ accepted: true, retainedUnsentRelease: release });
+    expect(scenario.executePlugin).toHaveBeenCalledWith(request);
     expect(scenario.complete).not.toHaveBeenCalled();
     expect(scenario.executeCore).not.toHaveBeenCalled();
   });
@@ -87,24 +78,11 @@ describe("app workflow tool shutdown lifecycle", () => {
     expect(scenario.resolveEnv).toHaveBeenCalledOnce();
   });
 
-  it("preserves normal plugin result completion", async () => {
-    const scenario = executor({
-      plugin: true,
-      executePlugin: vi.fn().mockResolvedValue({
-        pluginId: "plugin-1",
-        toolName: request.toolName,
-        result: { content: "published", data: { id: 9 } },
-      }),
-    });
-
+  it("delegates plugin completion to the retained consumer", async () => {
+    const scenario = executor({ plugin: true, executePlugin: vi.fn().mockResolvedValue({ accepted: true }) });
     await expect(scenario.run(request)).resolves.toEqual({ accepted: true });
-    expect(scenario.complete).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      requestId: request.requestId,
-      success: true,
-      stdout: "published",
-      data: { id: 9 },
-      exitCode: 0,
-    }));
+    expect(scenario.executePlugin).toHaveBeenCalledWith(request);
+    expect(scenario.complete).not.toHaveBeenCalled();
   });
 
   it("preserves core failures and thrown exceptions", async () => {
