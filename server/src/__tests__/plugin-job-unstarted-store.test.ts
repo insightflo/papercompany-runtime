@@ -43,6 +43,14 @@ describe("plugin queued run ownership", () => {
     await db.delete(pluginJobRuns);
   });
 
+  it("protects a scheduled slot without blocking manual runs", async () => {
+    const scheduledAt = new Date("2026-10-28T12:00:00.000Z");
+    const slot = { jobId: JOB_ID, pluginId: PLUGIN_ID, trigger: "schedule" as const, scheduledAt };
+    await db.insert(pluginJobRuns).values(slot);
+    await expect(db.insert(pluginJobRuns).values(slot)).rejects.toThrow();
+    await expect(db.insert(pluginJobRuns).values({ ...slot, trigger: "manual" })).resolves.toBeDefined();
+  });
+
   it("serializes scheduled admission and reuses one queued row", async () => {
     const store = pluginJobStore(db);
     const input = { jobId: JOB_ID, pluginId: PLUGIN_ID };
