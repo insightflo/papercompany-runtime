@@ -25,20 +25,15 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
   JSONRPC_VERSION,
   JSONRPC_ERROR_CODES,
-  PLUGIN_RPC_ERROR_CODES,
-  createRequest,
   createErrorResponse,
   parseMessage,
   serializeMessage,
   isJsonRpcResponse,
   isJsonRpcRequest,
   isJsonRpcNotification,
-  isJsonRpcSuccessResponse,
   JsonRpcParseError,
-  JsonRpcCallError,
 } from "@paperclipai/plugin-sdk";
 import type {
-  JsonRpcId,
   JsonRpcResponse,
   JsonRpcRequest,
   JsonRpcNotification,
@@ -49,6 +44,7 @@ import type {
   InitializeParams,
 } from "@paperclipai/plugin-sdk";
 import { logger } from "../middleware/logger.js";
+import { createJobRetention, createWorkerRpc, type ObservedJob, type PendingRequest } from "./plugin-job-rpc.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -183,22 +179,6 @@ export interface WorkerStartOptions {
   onStreamNotification?: (method: string, params: Record<string, unknown>) => void;
 }
 
-/**
- * A pending RPC call waiting for a response from the worker.
- */
-interface PendingRequest {
-  /** The request ID. */
-  id: JsonRpcId;
-  /** Method name (for logging). */
-  method: string;
-  /** Resolve the promise with the response. */
-  resolve: (response: JsonRpcResponse) => void;
-  /** Timeout timer handle. */
-  timer: ReturnType<typeof setTimeout>;
-  /** Timestamp when the request was sent. */
-  sentAt: number;
-}
-
 // ---------------------------------------------------------------------------
 // PluginWorkerHandle — manages a single worker process
 // ---------------------------------------------------------------------------
@@ -253,6 +233,10 @@ export interface PluginWorkerHandle {
    * Send a fire-and-forget notification to the worker (no response expected).
    */
   notify(method: string, params: unknown): void;
+
+  observeJob(params: HostToWorkerMethods["runJob"][0], timeoutMs?: number): ObservedJob;
+  drainJobs(): Promise<void>;
+  retainedJobCount(): number;
 
   /** Subscribe to worker events. */
   on<K extends WorkerHandleEventName>(
@@ -332,6 +316,11 @@ export interface PluginWorkerManager {
    */
   diagnostics(): WorkerDiagnostics[];
 
+  observeJob(pluginId: string, params: HostToWorkerMethods["runJob"][0], timeoutMs?: number): ObservedJob;
+  /** Call after closing admission; waits through RPC settlement and DB acknowledgement. */
+  drainJobs(): Promise<void>;
+  retainedJobCount(): number;
+
   /**
    * Send an RPC call to a specific plugin worker.
    *
@@ -357,6 +346,7 @@ export interface PluginWorkerManager {
 export function createPluginWorkerHandle(
   pluginId: string,
   options: WorkerStartOptions,
+  canStart: () => boolean = () => true,
 ): PluginWorkerHandle {
   const log = logger.child({ service: "plugin-worker", pluginId });
   const emitter = new EventEmitter();
@@ -376,7 +366,10 @@ export function createPluginWorkerHandle(
 
   // Pending RPC requests awaiting a response
   const pendingRequests = new Map<string | number, PendingRequest>();
-  let nextRequestId = 1;
+  const jobRetention = createJobRetention();
+  let stopRequested = false;
+  let stopPromise: Promise<void> | null = null;
+  let stopGeneration = 0;
 
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
@@ -628,6 +621,10 @@ export function createPluginWorkerHandle(
   }
 
   function attachStdioHandlers(child: ChildProcess): void {
+    // An asynchronous pipe error is transport loss, not a worker response.
+    child.stdin?.on("error", (err) => {
+      log.warn({ err: err.message }, "worker stdin error");
+    });
     // Read NDJSON from stdout
     if (child.stdout) {
       readline = createInterface({ input: child.stdout });
@@ -644,7 +641,8 @@ export function createPluginWorkerHandle(
     }
 
     // Handle process exit
-    child.on("exit", (code, signal) => {
+    // close follows stdout draining; exit alone can precede the final response.
+    child.on("close", (code, signal) => {
       handleProcessExit(code, signal);
     });
 
@@ -745,15 +743,9 @@ export function createPluginWorkerHandle(
   }
 
   function rejectAllPending(error: Error): void {
-    for (const [id, pending] of pendingRequests) {
+    for (const pending of pendingRequests.values()) {
       clearTimeout(pending.timer);
-      pending.resolve(
-        createErrorResponse(
-          pending.id,
-          PLUGIN_RPC_ERROR_CODES.WORKER_UNAVAILABLE,
-          error.message,
-        ) as JsonRpcResponse,
-      );
+      pending.fail(error);
     }
     pendingRequests.clear();
   }
@@ -786,6 +778,8 @@ export function createPluginWorkerHandle(
       backoffTimer = null;
       nextRestartAt = null;
       try {
+        await jobRetention.drain();
+        if (stopRequested || !canStart()) return;
         await startInternal();
       } catch (err) {
         log.error(
@@ -849,6 +843,7 @@ export function createPluginWorkerHandle(
       throw new Error(`Worker initialize failed for "${pluginId}": ${msg}`);
     }
 
+    if (stopRequested || !canStart()) throw new Error(`Worker start cancelled by stop for "${pluginId}"`);
     // Reset crash counter on successful start
     consecutiveCrashes = 0;
     setStatus("running");
@@ -933,7 +928,7 @@ export function createPluginWorkerHandle(
         resolve();
       }, timeoutMs);
 
-      childProcess.once("exit", () => {
+      childProcess.once("close", () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -956,7 +951,7 @@ export function createPluginWorkerHandle(
         resolve();
       }, waitMs);
 
-      childProcess.once("exit", () => {
+      childProcess.once("close", () => {
         clearTimeout(timer);
         resolve();
       });
@@ -987,7 +982,7 @@ export function createPluginWorkerHandle(
       const timer = setTimeout(() => {
         resolve();
       }, 1_000);
-      childProcess.once("exit", () => {
+      childProcess.once("close", () => {
         clearTimeout(timer);
         resolve();
       });
@@ -998,81 +993,31 @@ export function createPluginWorkerHandle(
   // RPC call implementation
   // -----------------------------------------------------------------------
 
-  function callInternal<M extends HostToWorkerMethodName>(
-    method: M,
-    params: HostToWorkerMethods[M][0],
-    timeoutMs?: number,
-  ): Promise<HostToWorkerMethods[M][1]> {
-    return new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
-      if (!childProcess?.stdin?.writable) {
-        reject(
-          new Error(
-            `Cannot call "${method}" — worker for "${pluginId}" is not running`,
-          ),
-        );
-        return;
-      }
+  const rpc = createWorkerRpc({
+    pluginId, pending: pendingRequests,
+    canSend: () => Boolean(childProcess?.stdin?.writable),
+    send: (serialized) => {
+      if (!childProcess?.stdin?.writable) throw new Error(`Worker process for plugin "${pluginId}" is not writable`);
+      childProcess.stdin.write(serialized);
+    },
+    defaultTimeoutMs: rpcTimeoutMs, maxTimeoutMs: MAX_RPC_TIMEOUT_MS, retention: jobRetention,
+  });
+  const callInternal = rpc.call;
 
-      const id = nextRequestId++;
-      const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
+  function stopAfterJobs(): Promise<void> {
+    if (stopPromise) return stopPromise;
+    stopRequested = true;
+    stopPromise = (async () => { await jobRetention.drain(); await stopInternal(); })();
+    return stopPromise;
+  }
 
-      // Guard against double-settlement. When a process exits all pending
-      // requests are rejected via rejectAllPending(), but the timeout timer
-      // may still be running. Without this guard the timer's reject fires on
-      // an already-settled promise, producing an unhandled rejection.
-      let settled = false;
-
-      const settle = <T>(fn: (value: T) => void, value: T): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        pendingRequests.delete(id);
-        fn(value);
-      };
-
-      const timer = setTimeout(() => {
-        settle(
-          reject,
-          new JsonRpcCallError({
-            code: PLUGIN_RPC_ERROR_CODES.TIMEOUT,
-            message: `RPC call "${method}" timed out after ${timeout}ms`,
-          }),
-        );
-      }, timeout);
-
-      const pending: PendingRequest = {
-        id,
-        method,
-        resolve: (response: JsonRpcResponse) => {
-          if (isJsonRpcSuccessResponse(response)) {
-            settle(resolve, response.result as HostToWorkerMethods[M][1]);
-          } else if ("error" in response && response.error) {
-            settle(reject, new JsonRpcCallError(response.error));
-          } else {
-            settle(reject, new Error(`Unexpected response format for "${method}"`));
-          }
-        },
-        timer,
-        sentAt: Date.now(),
-      };
-
-      pendingRequests.set(id, pending);
-
-      try {
-        const request = createRequest(method, params, id);
-        sendMessage(request);
-      } catch (err) {
-        clearTimeout(timer);
-        pendingRequests.delete(id);
-        reject(
-          new Error(
-            `Failed to send "${method}" to worker: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          ),
-        );
-      }
-    });
+  async function startAfterStop(generation: number): Promise<void> {
+    if (stopPromise) await stopPromise;
+    if (generation !== stopGeneration || !canStart()) throw new Error(`Worker start cancelled by stop for "${pluginId}"`);
+    stopRequested = false;
+    stopPromise = null;
+    await startInternal();
+    if (generation !== stopGeneration || !canStart()) throw new Error(`Worker start cancelled by stop for "${pluginId}"`);
   }
 
   // -----------------------------------------------------------------------
@@ -1092,18 +1037,20 @@ export function createPluginWorkerHandle(
       return supportedMethods;
     },
 
-    async start() {
-      await startInternal();
-    },
-
-    async stop() {
-      await stopInternal();
-    },
-
+    start: () => startAfterStop(stopGeneration),
+    stop() { stopGeneration++; return stopAfterJobs(); },
     async restart() {
-      await stopInternal();
-      await startInternal();
+      const generation = stopGeneration;
+      await stopAfterJobs();
+      await startAfterStop(generation);
     },
+
+    observeJob(params, timeoutMs) {
+      if (stopRequested || status !== "running") return { kind: "definitely_unsent" };
+      return rpc.observeJob(params, timeoutMs);
+    },
+    drainJobs: () => jobRetention.drain(),
+    retainedJobCount: () => jobRetention.count(),
 
     call<M extends HostToWorkerMethodName>(
       method: M,
@@ -1220,14 +1167,18 @@ export function createPluginWorkerManager(
 ): PluginWorkerManager {
   const log = logger.child({ service: "plugin-worker-manager" });
   const workers = new Map<string, PluginWorkerHandle>();
+  // A retiring or replaced handle must not spawn outside manager ownership.
+  const retiring = new WeakSet<PluginWorkerHandle>();
   /** Per-plugin startup locks to prevent concurrent spawn races. */
   const startupLocks = new Map<string, Promise<PluginWorkerHandle>>();
+  let stoppingAll: Promise<void> | null = null;
 
   return {
     async startWorker(
       pluginId: string,
       options: WorkerStartOptions,
     ): Promise<PluginWorkerHandle> {
+      if (stoppingAll) throw new Error("Cannot start a plugin worker while stopAll is in progress");
       // Mutex: if a start is already in-flight for this plugin, wait for it
       const inFlight = startupLocks.get(pluginId);
       if (inFlight) {
@@ -1242,7 +1193,8 @@ export function createPluginWorkerManager(
         );
       }
 
-      const handle = createPluginWorkerHandle(pluginId, options);
+      const handle = createPluginWorkerHandle(pluginId, options, () =>
+        workers.get(pluginId) === handle && !retiring.has(handle));
       workers.set(pluginId, handle);
 
       // Subscribe to crash/ready events for live event forwarding
@@ -1272,24 +1224,22 @@ export function createPluginWorkerManager(
       log.info({ pluginId }, "starting plugin worker");
 
       // Set the lock before awaiting start() to prevent concurrent spawns
-      const startPromise = handle.start().then(() => handle).finally(() => {
-        startupLocks.delete(pluginId);
-      });
+      const startPromise = handle.start().then(() => handle).finally(() => { startupLocks.delete(pluginId); });
       startupLocks.set(pluginId, startPromise);
 
       return startPromise;
     },
-
     async stopWorker(pluginId: string): Promise<void> {
       const handle = workers.get(pluginId);
       if (!handle) {
-        log.warn({ pluginId }, "no worker registered for plugin, nothing to stop");
-        return;
+        log.warn({ pluginId }, "no worker registered for plugin, nothing to stop"); return;
       }
 
+      const startup = startupLocks.get(pluginId);
+      retiring.add(handle);
       log.info({ pluginId }, "stopping plugin worker");
-      await handle.stop();
-      workers.delete(pluginId);
+      await handle.stop(); await startup?.catch(() => undefined);
+      if (workers.get(pluginId) === handle) workers.delete(pluginId);
     },
 
     getWorker(pluginId: string): PluginWorkerHandle | undefined {
@@ -1302,27 +1252,32 @@ export function createPluginWorkerManager(
     },
 
     async stopAll(): Promise<void> {
+      if (stoppingAll) return stoppingAll;
       log.info({ count: workers.size }, "stopping all plugin workers");
-      const promises = Array.from(workers.values()).map(async (handle) => {
-        try {
-          await handle.stop();
-        } catch (err) {
-          log.error(
-            {
-              pluginId: handle.pluginId,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            "error stopping worker during shutdown",
-          );
-        }
-      });
-      await Promise.all(promises);
-      workers.clear();
+      stoppingAll = (async () => {
+        const results = await Promise.allSettled(Array.from(workers.values()).map(async (handle) => {
+          const startup = startupLocks.get(handle.pluginId);
+          retiring.add(handle);
+          await handle.stop(); await startup?.catch(() => undefined);
+          if (workers.get(handle.pluginId) === handle) workers.delete(handle.pluginId);
+        }));
+        const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+        if (failures.length) throw new AggregateError(failures, "Failed to stop plugin workers");
+      })();
+      try { await stoppingAll; } finally { stoppingAll = null; }
     },
 
     diagnostics(): WorkerDiagnostics[] {
       return Array.from(workers.values()).map((h) => h.diagnostics());
     },
+
+    observeJob(pluginId, params, timeoutMs) {
+      return workers.get(pluginId)?.observeJob(params, timeoutMs) ?? { kind: "definitely_unsent" };
+    },
+    async drainJobs() {
+      await Promise.all([...workers.values()].map((handle) => handle.drainJobs()));
+    },
+    retainedJobCount: () => [...workers.values()].reduce((sum, handle) => sum + handle.retainedJobCount(), 0),
 
     call<M extends HostToWorkerMethodName>(
       pluginId: string,
