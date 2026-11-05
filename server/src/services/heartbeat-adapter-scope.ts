@@ -1,4 +1,4 @@
-import { isChildProcessStartRejectedError, withChildProcessStartBoundary } from "@paperclipai/adapter-utils/server-utils";
+import { ChildProcessStartRejectedError, isChildProcessStartRejectedError, withChildProcessStartBoundary } from "@paperclipai/adapter-utils/server-utils";
 import { isDeepStrictEqual } from "node:util";
 import type { RuntimeExecutionLifecycle, RuntimeExecutionScope } from "./runtime-execution-lifecycle.js";
 
@@ -18,6 +18,17 @@ export function createHeartbeatAdapterScope(lifecycle: RuntimeExecutionLifecycle
 
 export function runWithinHeartbeatAdapterScope<T>(scope: RuntimeExecutionScope, execute: () => T): T {
   return withChildProcessStartBoundary(scope, execute);
+}
+
+/** Check without marking an external start; the actual child boundary records that fact. */
+export function assertHeartbeatAdapterMayStart(scope: RuntimeExecutionScope, lifecycle: RuntimeExecutionLifecycle): void {
+  if (!lifecycle.shutdownState()) return;
+  if (scope.hasExternalStart()) {
+    throw new ChildProcessStartRejectedError({ kind: "additional_start_blocked", reasonCode: "runtime_shutting_down", externalStarted: true });
+  }
+  throw new ChildProcessStartRejectedError({ kind: "deferred_before_start", deferred: {
+    ...scope.identity, kind: "deferred_before_start", version: 1, reasonCode: "runtime_shutting_down", externalStarted: false,
+  } });
 }
 
 /** A deferral is valid only for this exact run, before any external attempt. */
