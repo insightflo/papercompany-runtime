@@ -32,6 +32,7 @@ export interface NativeWorkflowReconcilerState {
 export interface NativeWorkflowReconciler {
   start: () => void;
   stop: () => void;
+  drain: () => Promise<void>;
   reconcile: (now?: Date) => Promise<void>;
   getState: () => NativeWorkflowReconcilerState;
 }
@@ -52,6 +53,9 @@ export function createNativeWorkflowReconciler(
   const timeoutMinutes = options.timeoutMinutes ?? 60;
   const log = options.logger ?? defaultLogger;
   let interval: ReturnType<typeof setInterval> | null = null;
+  let automaticAdmissionOpen = false;
+  let automaticGeneration = 0;
+  const activeTasks = new Set<Promise<unknown>>();
   let tickInFlight = false;
   let tickCount = 0;
   let lastTickAt: string | null = null;
@@ -62,7 +66,20 @@ export function createNativeWorkflowReconciler(
   let lastGraceWaitingControlNodesReevaluated = 0;
   let lastError: string | null = null;
 
-  async function reconcile(now = new Date()): Promise<void> {
+  function trackTask<T>(task: Promise<T>): Promise<T> {
+    activeTasks.add(task);
+    void task.then(
+      () => activeTasks.delete(task),
+      () => activeTasks.delete(task),
+    );
+    return task;
+  }
+
+  function isCurrentAutomaticGeneration(generation: number): boolean {
+    return automaticAdmissionOpen && automaticGeneration === generation;
+  }
+
+  async function runReconcile(now = new Date()): Promise<void> {
     if (tickInFlight) {
       log.warn({ timeoutMinutes }, "Native workflow reconciler tick skipped because previous tick is still running");
       return;
@@ -196,19 +213,37 @@ export function createNativeWorkflowReconciler(
     }
   }
 
+  function reconcile(now = new Date()): Promise<void> {
+    return trackTask(runReconcile(now));
+  }
+
+  function runAutomaticReconcile(generation: number): void {
+    if (!isCurrentAutomaticGeneration(generation)) return;
+    void trackTask(runReconcile(new Date()));
+  }
+
   return {
     start() {
       if (interval) return;
+      automaticAdmissionOpen = true;
+      const generation = ++automaticGeneration;
       log.info({ timeoutMinutes, intervalMs }, "Native workflow reconciler started");
-      void reconcile();
-      interval = setInterval(() => void reconcile(), intervalMs);
+      runAutomaticReconcile(generation);
+      interval = setInterval(() => runAutomaticReconcile(generation), intervalMs);
       interval.unref?.();
     },
     stop() {
+      automaticAdmissionOpen = false;
+      automaticGeneration += 1;
       if (!interval) return;
       clearInterval(interval);
       interval = null;
       log.info({ timeoutMinutes }, "Native workflow reconciler stopped");
+    },
+    async drain() {
+      while (activeTasks.size > 0) {
+        await Promise.allSettled([...activeTasks]);
+      }
     },
     reconcile,
     getState() {

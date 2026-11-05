@@ -47,6 +47,7 @@ export interface NativeWorkflowSchedulerState {
 export interface NativeWorkflowScheduler {
   start: () => void;
   stop: () => void;
+  drain: () => Promise<void>;
   tick: (now?: Date) => Promise<void>;
   getState: () => NativeWorkflowSchedulerState;
 }
@@ -121,6 +122,9 @@ export function createNativeWorkflowScheduler(
   // [activity-driven fit scheduler] 런 활동 서명 — 런이 있으면 10분 스케줄 유지,
   //   한 주기 동안 새 런이 없으면 스케줄 자기중단(disarm), 다음 런 활동이 재가동(arm).
   let fitProfileActivitySignature: string | null = null;
+  let automaticAdmissionOpen = false;
+  let automaticGeneration = 0;
+  const activeTasks = new Set<Promise<unknown>>();
   let tickInFlight = false;
   let toolStepQueueTickInFlight = false;
   let tickCount = 0;
@@ -135,6 +139,19 @@ export function createNativeWorkflowScheduler(
   let lastResumeClaimedCount = 0;
   let lastResumeCompletedCount = 0;
   let lastResumeFailedCount = 0;
+
+  function trackTask<T>(task: Promise<T>): Promise<T> {
+    activeTasks.add(task);
+    void task.then(
+      () => activeTasks.delete(task),
+      () => activeTasks.delete(task),
+    );
+    return task;
+  }
+
+  function isCurrentAutomaticGeneration(generation: number): boolean {
+    return automaticAdmissionOpen && automaticGeneration === generation;
+  }
 
   async function dispatchToolStepQueue(now = new Date()): Promise<WorkflowToolStepQueueDispatchResult> {
     if (options.mode !== "active") {
@@ -204,10 +221,11 @@ export function createNativeWorkflowScheduler(
     return `${row.c ?? "0"}:${row.m ?? ""}`;
   }
 
-  function armFitProfileInterval(): void {
-    if (fitProfileInterval) return;
+  function armFitProfileInterval(generation: number): void {
+    if (!isCurrentAutomaticGeneration(generation) || fitProfileInterval) return;
     fitProfileInterval = setInterval(() => {
-      void dispatchFitProfileRefresh();
+      if (!isCurrentAutomaticGeneration(generation)) return;
+      void trackTask(dispatchFitProfileRefresh(generation));
     }, DEFAULT_FIT_PROFILE_INTERVAL_MS);
     fitProfileInterval.unref?.();
   }
@@ -219,8 +237,8 @@ export function createNativeWorkflowScheduler(
     }
   }
 
-  async function dispatchFitProfileRefresh(now = new Date()): Promise<void> {
-    if (options.mode !== "active") return;
+  async function dispatchFitProfileRefresh(generation: number, now = new Date()): Promise<void> {
+    if (options.mode !== "active" || !isCurrentAutomaticGeneration(generation)) return;
     if (fitProfileTickInFlight) return;
     fitProfileTickInFlight = true;
     try {
@@ -260,7 +278,7 @@ export function createNativeWorkflowScheduler(
     }
   }
 
-  async function tick(now = new Date()): Promise<void> {
+  async function runTick(now = new Date(), generation?: number): Promise<void> {
     if (tickInFlight) {
       log.warn({ mode: options.mode }, "Native workflow scheduler tick skipped because previous tick is still running");
       return;
@@ -322,9 +340,13 @@ export function createNativeWorkflowScheduler(
         if (!fitProfileInterval) {
           try {
             const signature = await readRunActivitySignature(options.db);
-            if (fitProfileActivitySignature === null || signature !== fitProfileActivitySignature) {
-              armFitProfileInterval();
-              void dispatchFitProfileRefresh();
+            if (
+              generation !== undefined
+              && isCurrentAutomaticGeneration(generation)
+              && (fitProfileActivitySignature === null || signature !== fitProfileActivitySignature)
+            ) {
+              armFitProfileInterval(generation);
+              void trackTask(dispatchFitProfileRefresh(generation));
             }
           } catch {
             // 활동 프로브 실패는 재가동 스킵 — 다음 틱이 재시도
@@ -379,21 +401,32 @@ export function createNativeWorkflowScheduler(
     }
   }
 
+  function tick(now = new Date()): Promise<void> {
+    const generation = automaticAdmissionOpen ? automaticGeneration : undefined;
+    return trackTask(runTick(now, generation));
+  }
+
+  function runAutomaticTick(generation: number): void {
+    if (!isCurrentAutomaticGeneration(generation)) return;
+    void trackTask(runTick(new Date(), generation));
+  }
+
   return {
     start() {
       if (interval) return;
+      automaticAdmissionOpen = true;
+      const generation = ++automaticGeneration;
       log.info({
         mode: options.mode,
         tickIntervalMs,
       }, "Native workflow scheduler started");
-      void tick();
-      interval = setInterval(() => {
-        void tick();
-      }, tickIntervalMs);
+      runAutomaticTick(generation);
+      interval = setInterval(() => runAutomaticTick(generation), tickIntervalMs);
       interval.unref?.();
       if (options.mode === "active") {
         toolStepQueueInterval = setInterval(() => {
-          void dispatchToolStepQueue().then((result) => {
+          if (!isCurrentAutomaticGeneration(generation)) return;
+          void trackTask(dispatchToolStepQueue().then((result) => {
             if (
               result.claimedCount === 0
               && result.executedCount === 0
@@ -407,13 +440,14 @@ export function createNativeWorkflowScheduler(
               failedCount: result.failedCount,
               skippedCount: result.skippedCount,
             }, "Native workflow tool-step queue tick");
-          });
+          }));
         }, toolStepQueueIntervalMs);
         toolStepQueueInterval.unref?.();
         // [Task6b-2] durable resume delivery tick — pending 요청/만료 실행 임대 → accept → sync.
         //   tool 큐와 동일한 interval+in-flight guard 패턴, active 전용, 자체 로그 라인.
         resumeDispatchInterval = setInterval(() => {
-          void dispatchResumeWorkTick().then((result) => {
+          if (!isCurrentAutomaticGeneration(generation)) return;
+          void trackTask(dispatchResumeWorkTick().then((result) => {
             if (
               result.claimedCount === 0
               && result.acceptedCount === 0
@@ -433,16 +467,18 @@ export function createNativeWorkflowScheduler(
               failedCount: result.failedCount,
               skippedCount: result.skippedCount,
             }, "Native workflow resume dispatch tick");
-          });
+          }));
         }, resumeDispatchIntervalMs);
         resumeDispatchInterval.unref?.();
         // [agent fit observation] 런 종료 후 수 분 내 자동 누계·제안 계산 (metadata 관찰 전용,
         //   실패해도 어떤 실행 경로에도 영향 없음). 활동 구동: 조용하면 자기중단.
-        armFitProfileInterval();
-        void dispatchFitProfileRefresh();
+        armFitProfileInterval(generation);
+        void trackTask(dispatchFitProfileRefresh(generation));
       }
     },
     stop() {
+      automaticAdmissionOpen = false;
+      automaticGeneration += 1;
       if (interval) {
         clearInterval(interval);
         interval = null;
@@ -457,6 +493,11 @@ export function createNativeWorkflowScheduler(
       }
       disarmFitProfileInterval();
       log.info({ mode: options.mode }, "Native workflow scheduler stopped");
+    },
+    async drain() {
+      while (activeTasks.size > 0) {
+        await Promise.allSettled([...activeTasks]);
+      }
     },
     tick,
     getState() {
