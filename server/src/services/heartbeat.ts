@@ -6965,6 +6965,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           message,
         });
         let queuedAdapterFallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
+        let transientAdapterRetryQueued = false;
+        // The adapter was invoked, but the scoped child boundary proves no child started.
+        // Keep the failed reason and use the existing one-attempt transient retry budget.
+        const retryMaxSec = resolveAdapterFailedTransientRetryMaxSec();
+        const failedDurationSec = failedRun.startedAt
+          ? Math.max(0, ((failedRun.finishedAt ?? new Date()).getTime() - failedRun.startedAt.getTime()) / 1000)
+          : Number.POSITIVE_INFINITY;
+        if (!c5Held && actual?.outcome === "rejected" && actual.error === err
+          && errorCode === "child_process_start_rejected" && adapterStartScope && adapterStartIdentity
+          && isHeartbeatUnstartedDeferral(err, adapterStartScope, adapterStartIdentity, runtimeExecutionLifecycle)
+          && retryMaxSec > 0 && failedDurationSec <= retryMaxSec && (failedRun.processLossRetryCount ?? 0) < 1
+          && !isTerminalAdapterFallbackConfigurationFailure(failedRun)
+          && !readNonEmptyString(parseObject(failedRun.contextSnapshot).fallbackOfRunId)) {
+          transientAdapterRetryQueued = Boolean(await enqueueProcessLossRetry(retryEnqueueDeps, failedRun, agent, new Date(),
+            { kind: "adapter_failed_transient" }).catch(() => null));
+        }
         if (!c5Held && (actual === null || (actual.outcome === "rejected" && actual.error === err))
         && errorCode === "adapter_failed") {
           const fb = resolveAdapterFallbackConfig(agent.adapterConfig);
@@ -7019,7 +7035,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             logger.warn({ err: runtimeErr, runId, agentId: agent.id }, "failed to mark mission runtime failed");
           });
         }
-        if (!queuedAdapterFallbackRun) {
+        if (!queuedAdapterFallbackRun && !transientAdapterRetryQueued) {
           const releaseDisposition = await releaseFinishedRun(failedRun);
           // [instant-advance v1.2] 실패도 진행 트리거 — 실패 정산(이슈 blocked/스텝 failed) 커밋 후 즉시 재평가.
           if (!c5Held && releaseDisposition.kind === "legacy") fireInstantWorkflowAdvanceForTerminalRun(failedRun);

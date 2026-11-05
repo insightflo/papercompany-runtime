@@ -10,6 +10,7 @@ import { joinPromptSections, renderTemplate } from "./prompt-utils.js";
 import { materializeProviderSkills, resolveProviderSkillsDir } from "./skills.js";
 import { sanitizeInheritedPaperclipEnv } from "./paperclip-env.js";
 import { createChildProcessOutput } from "./child-process-output.js";
+import { startChildProcessAtBoundary } from "./child-process-start-boundary.js";
 
 export * from "./child-process-start-boundary.js";
 
@@ -890,12 +891,12 @@ export async function runChildProcess(
         // detached:true 를 다시 넣으려면 onSpawn/persistRunProcessMetadata 의 processGroupId 파이프라인도
         // 함께 연결해야 함(참고: published npm @paperclipai/adapter-utils@2026.529.0 은 detached:true 를 쓰지만,
         // 본 workspace 런타임은 package exports 가 src 를 물어 detached 없음으로 동작 — src/dist 간 불일치 아님).
-        const child = spawn(target.command, target.args, {
+        const child = startChildProcessAtBoundary(() => spawn(target.command, target.args, {
           cwd: opts.cwd,
           env: mergedEnv,
           shell: false,
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
-        }) as ChildProcessWithEvents;
+        })) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
 
         if (opts.stdin != null && child.stdin) {
