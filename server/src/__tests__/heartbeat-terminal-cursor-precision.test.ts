@@ -2,7 +2,9 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import { agentWakeupRequests, heartbeatRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { heartbeatService } from "../services/heartbeat.js";
+import { loadConfig } from "../config.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
+import { createQaFileOwnerRuntime } from "../services/workflow/control-flow/qa-remediation-runtime.js";
 import { readTerminalReleaseAcknowledgment, readTerminalReleaseManifest,
   readReadyTerminalReleaseContinuation, TERMINAL_RELEASE_EVENT_TYPE } from "../services/heartbeat-terminal-release-continuation.js";
 import { createHeartbeatC5PublicFixture, within } from "./helpers/heartbeat-c5-public-fixture.js";
@@ -23,9 +25,10 @@ vi.mock("../services/heartbeat-terminal-release-continuation.js", async importOr
 it("preserves microseconds and UUID ties, reaches empty reset, and revisits pending continuations in three sweeps", async () => {
   const fixture = await createHeartbeatC5PublicFixture();
   const db = fixture.db;
+  const configuredOwnerPython = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
   const lifecycles: Array<Awaited<ReturnType<typeof createHeartbeatC5PublicLifecycle>>> = [];
   try {
-    const seeded = [];
+    const seeded: Array<{ id: string; manifest: unknown; effectKey: string; actualOutcome: string }> = [];
     for (let index = 0; index < 3; index += 1) {
       const lifecycle = await createHeartbeatC5PublicLifecycle(fixture);
       lifecycles.push(lifecycle);
@@ -43,6 +46,11 @@ it("preserves microseconds and UUID ties, reaches empty reset, and revisits pend
         expect(drains).toHaveLength(1);
       }, { timeout: 30_000, interval: 20 });
       expect((await lifecycle.prepare()).outcome).toBe("prepared");
+      if (index === 0) {
+        // Keep the real publication owner unavailable while scanning, so its pending work cannot settle.
+        delete process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+        expect((await createQaFileOwnerRuntime(loadConfig()).capability).status).toBe("unavailable");
+      }
       lifecycle.releaseQaActual();
       await waitForHeartbeatExecutionsToDrain(db, 30_000);
       const events = await db.select().from(workflowTransitionEvents).where(and(
@@ -75,6 +83,11 @@ it("preserves microseconds and UUID ties, reaches empty reset, and revisits pend
     expect(timestamps.map(row => row.microseconds).sort()).toEqual(["123100", "123900", "123900"]);
     const beforeRuns = await db.select().from(heartbeatRuns);
     const beforeWakes = await db.select().from(agentWakeupRequests);
+    const companyIds = lifecycles.map(lifecycle => lifecycle.companyId);
+    const completions = () => db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      inArray(workflowTransitionEvents.companyId, companyIds),
+      eq(workflowTransitionEvents.eventType, "qa_remediation_completed")));
+    expect(await completions()).toEqual([]);
     const service = heartbeatService(db);
     const reads = vi.mocked(readTerminalReleaseManifest);
     const scanReadbacks: string[][] = [];
@@ -92,6 +105,7 @@ it("preserves microseconds and UUID ties, reaches empty reset, and revisits pend
     }
     expect(await db.select().from(heartbeatRuns)).toEqual(beforeRuns);
     expect(await db.select().from(agentWakeupRequests)).toEqual(beforeWakes);
+    expect(await completions()).toEqual([]);
     console.log("CURSOR_PRECISION_PROOF", JSON.stringify({ scanReadbacks, pending: 3, sweeps: 3 }));
     // No V2 completion was published: lifecycle assertAuthorizedQaRefire (232-278) requires it.
     // Only the requested producer and original QA may run; a speculative refire is not an allowed setup run.
@@ -104,6 +118,8 @@ it("preserves microseconds and UUID ties, reaches empty reset, and revisits pend
       expect(runs.map(run => run.status)).toEqual(["succeeded", "succeeded"]);
     }
   } finally {
+    if (configuredOwnerPython === undefined) delete process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON;
+    else process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON = configuredOwnerPython;
     for (const lifecycle of lifecycles) { lifecycle.releaseProducerActual(); lifecycle.releaseQaActual(); }
     await fixture.cleanup();
   }
