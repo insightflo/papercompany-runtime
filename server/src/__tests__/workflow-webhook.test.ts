@@ -255,7 +255,8 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
       .select()
       .from(workflowWebhookDeliveries)
       .where(eq(workflowWebhookDeliveries.idempotencyKey, "typed-required-key-1"));
-    expect(rejectedDelivery?.runId ?? null).toBeNull();
+    expect(rejectedDelivery).toBeDefined();
+    expect(rejectedDelivery!.runId).toBeNull();
 
     const ok = await signedPost(JSON.stringify({ topic: "release", url: "x" }), { key: "typed-required-key-2" });
     expect(ok.status).toBe(202);

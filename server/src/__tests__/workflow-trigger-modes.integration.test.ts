@@ -155,7 +155,8 @@ it("serializes concurrent identical signed webhook deliveries before starting an
       throw new Error("webhook transaction did not reach the observed lock");
     };
     const firstPid = await waitForBlocked([Number(pid)]);
-    expect(await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.workflowId, workflow.id))).toHaveLength(0);
+    const admitted = await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.workflowId, workflow.id));
+    expect(admitted).toHaveLength(1); expect(admitted[0]!.runId).toBeNull();
     expect(await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, workflow.id))).toHaveLength(0);
     expect(existsSync(f.marker)).toBe(false);
     second = Promise.resolve(f.postWebhook(workflow.id, "same-delivery"));
@@ -174,6 +175,7 @@ it("serializes concurrent identical signed webhook deliveries before starting an
     expect(responses.map(r => r.status)).toEqual([202, 202]);
     expect(responses[0]!.body.runId).toBe(responses[1]!.body.runId);
     expect(runs).toHaveLength(1); expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.id).toBe(admitted[0]!.id);
     expect(deliveries[0]!.runId).toBe(runs[0]!.id); expect(dispatch.executedCount).toBe(1);
     expect(calls).toEqual(["webhook-race"]);
   } finally {
@@ -185,16 +187,19 @@ it("serializes concurrent identical signed webhook deliveries before starting an
   }
 }, 60_000);
 
-it("rolls back the receipt with run creation and accepts the same key after a failed insert", async () => {
+it("retains the receipt and accepts the same key after a failed run insert", async () => {
   const f = await world(), workflow = await f.definition("webhook-rollback");
   await f.enableWebhook(workflow.id);
   const trigger = `webhook_fail_${workflow.id.replaceAll("-", "")}`;
   await db.$client.unsafe(`create function ${trigger}() returns trigger language plpgsql as $$ begin if NEW.workflow_id = '${workflow.id}' then raise exception 'injected run insert failure'; end if; return NEW; end $$`);
   await db.$client.unsafe(`create trigger ${trigger} before insert on workflow_runs for each row execute function ${trigger}()`);
+  let receiptId: string | undefined;
   try {
     const failed = await f.postWebhook(workflow.id, "retry-after-rollback");
     expect(failed.status).toBe(500);
-    expect(await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.workflowId, workflow.id))).toHaveLength(0);
+    const admitted = await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.workflowId, workflow.id));
+    expect(admitted).toHaveLength(1); expect(admitted[0]!.runId).toBeNull();
+    receiptId = admitted[0]!.id;
     expect(await db.select().from(workflowRuns).where(eq(workflowRuns.workflowId, workflow.id))).toHaveLength(0);
     expect(existsSync(f.marker)).toBe(false);
   } finally {
@@ -206,7 +211,8 @@ it("rolls back the receipt with run creation and accepts the same key after a fa
   expect((await processQueuedWorkflowToolStepRuns(db)).executedCount).toBe(1);
   expect(await f.calls()).toEqual(["webhook-rollback"]);
   const receipts = await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.workflowId, workflow.id));
-  expect(receipts).toHaveLength(1); expect(receipts[0]!.runId).toBe(retry.body.runId);
+  expect(receipts).toHaveLength(1); expect(receipts[0]!.id).toBe(receiptId);
+  expect(receipts[0]!.runId).toBe(retry.body.runId);
 }, 60_000);
 
 it("reuses and starts a committed pending run after an interrupted first start", async () => {
