@@ -361,3 +361,35 @@
 - Fix: Extract ids server-side (API GET + jq) into shell vars and interpolate; never manually copy uuids into live mutation commands. Cross-check with `SELECT count(*) WHERE id='<uuid>'` before concluding infra faults.
 - Prevention rule: For any live mutation URL, id values must come from programmatic extraction in the same script, not from agent memory or chat transcripts.
 - Reuse trigger: Any live API mutation keyed by uuid/id; any "not found" on a row that read paths can see.
+
+### 2026-11-06 — approved restart wakes need the root commit owner
+- Task: T16a M06, approved workflow restart.
+- What failed: An approved restart with an assigned agent step rolled back with `qa_correction_root_owner_required`; the decision remained pending, the issue blocked, and no replacement run existed.
+- Root cause: The decision transaction created a wake without a root notification owner to deliver it after commit.
+- Fix: PR #550 collects transaction-scoped notifications and drains them after the owning commit; nested savepoints transfer to an existing owner or fail closed.
+- Prevention rule: Register restart wakes with the root commit owner and never start them from an uncommitted transaction or savepoint.
+- Evidence: PR #550; `t16a-m06-diagnostic.log` and `t16a-m06-final.log` in the `c5-candidate-backups` workspace directory.
+
+### 2026-11-06 — serialize webhook run creation on its receipt
+- Task: T16a M09, concurrent signed webhook deliveries.
+- What failed: Two simultaneous requests with the same key produced one receipt but two runs and two local tool executions.
+- Root cause: Receipt admission committed before run creation and binding without locking the receipt during creation; a replay could observe no run and start another.
+- Fix: PR #555 locks the receipt and commits the run binding before starting; a replay can start the same still-pending run after an interrupted start.
+- Prevention rule: Serialize each webhook receipt through atomic run binding and start only after commit.
+- Evidence: PR #555; `t16a-m09-candidate1.log` and `t16a-m09-fix1.log` in the `c5-candidate-backups` workspace directory. The independent unsigned-key signature issue was open when this was recorded.
+
+### 2026-11-06 — preserve rejected webhook receipts while fixing a race
+- Task: T16a M09, webhook admission regression.
+- What failed: After PR #555, invalid run input returned 400 but no longer left the existing unbound delivery receipt required by the HTTP contract.
+- Root cause: The new transaction included receipt admission as well as validation and run creation, so a validation rollback also erased the receipt; the selected local suites omitted the existing invalid-control HTTP case.
+- Fix candidate: Commit admission first, then lock that receipt while creating and binding the run; validation failure leaves the same receipt available for a corrected retry. This follow-up was pending when recorded.
+- Prevention rule: Test invalid input, receipt and quota preservation, corrected same-key retry, and concurrent duplicate prevention together when changing webhook admission.
+- Evidence: `workflow-run-input-http.integration.test.ts:235` and `t16a-555-ci-shard3.log` in the `c5-candidate-backups` workspace directory.
+
+### 2026-11-06 — check legacy file growth before a PR
+- Task: T16a M09, webhook fix.
+- What failed: PR #555 grew two existing files that already exceeded the repository's line limit.
+- Root cause: The implementation did not compare changed legacy file lengths with the base before creating the PR.
+- Fix candidate: PR #558 moves cohesive trigger preparation into a small module and restores the mission file to its original length; review and merge were pending when this was recorded.
+- Prevention rule: Compare each oversized legacy file with its base before editing and before the PR; do not grow it without an explicit exception.
+- Evidence: PR #555 and PR #558; `t16a-m09-structure-baseline.log` and `t16a-m09-structure-candidate.log` in the `c5-candidate-backups` workspace directory.
