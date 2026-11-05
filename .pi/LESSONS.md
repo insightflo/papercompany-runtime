@@ -409,3 +409,11 @@
 - Fix: Point COREPACK_HOME at the existing cache, set COREPACK_ENABLE_NETWORK=0, and verify the pinned pnpm version before launching the isolated test run.
 - Prevention rule: When isolating HOME for offline Corepack tests, verify the package manager against an existing local cache before starting the suite.
 - Evidence: `t16a-final-regression-launch-error.log` and `t16a-corepack-offline-version.log` in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — scope process observers to every query used by the suite
+- Task: T16a final regression with a sandboxed process-status observer.
+- What failed: The observer supported the narrow `stat=` query but returned an unsupported-command status for `command=`; a cleanup helper could interpret that status as a process having exited.
+- Root cause: A shim validated for a focused test was reused for a wider suite without checking the other process-status calls.
+- Fix: Preserve the original observer, enumerate the suite's query forms, and validate a revised observer against real live and exited children, parent PID, command identity, and zombie state before use. Earlier cleanup evidence remains unverified.
+- Prevention rule: Inventory and validate every process-status query before reusing an observer for a broader suite; unsupported calls must not count as process-death evidence.
+- Evidence: `t16a-proc-observer-v1.py` and `t16a-proc-observer-v2-check.log` in the `c5-candidate-backups` workspace.

@@ -130,6 +130,7 @@ pnpm build
 If anything cannot be run, explicitly report what was not run and why.
 
 - When an isolated HOME is used with Corepack and networking is disabled, point COREPACK_HOME at an existing local cache, disable Corepack downloads, and verify `pnpm --version` before starting tests.
+- When replacing process-status commands in isolated tests, inventory every invocation and validate the required state, parent and command-identity queries; an unsupported query must not be treated as proof that a process exited.
 
 ## 8. API and Auth Expectations
 
