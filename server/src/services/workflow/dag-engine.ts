@@ -72,6 +72,7 @@ import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
 import { finalizeWorkflowRunState } from "./workflow-run-finalization.js";
 import { acceptWorkflowToolResult } from "./workflow-tool-result-acceptance.js";
 import { deferredBeforeStartSchema, type DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
+import { admitClaimMetadataWithQaArtifactRequest } from "./deferred-claim-qa-delta.js";
 import type { OriginalWorkflowAuthority } from "../plugin-tool-execution-receipt.js";
 import { validRequest } from "../plugin-tool-receipt-envelope.js";
 import { bindRetainedWorkflowTool as bindRetainedWorkflowToolPrimitive, finalizeRetainedWorkflowTool as finalizeRetainedWorkflowToolPrimitive } from "./retained-tool-completion.js";
@@ -2013,10 +2014,24 @@ async function releaseDeferredWorkflowToolClaim(input: {
       || currentStep.executionGeneration !== input.claimedStepRun.executionGeneration
       || currentStep.retryCount !== input.claimedStepRun.retryCount
       || currentStep.iterationIndex !== input.claimedStepRun.iterationIndex
-      || !same(currentStep.lastDispatchAcceptedAt, input.claimedStepRun.lastDispatchAcceptedAt)
-      || !same(currentStep.metadata, input.claimedStepRun.metadata)) return false;
+      || currentStep.statusTransitionVersion !== input.claimedStepRun.statusTransitionVersion
+      || !same(currentStep.lastDispatchAcceptedAt, input.claimedStepRun.lastDispatchAcceptedAt)) return false;
+    // [P6 B/C release defect] Exact-authority QA preparation delta admission:
+    // prepareQaArtifactRequest may write a new toolArtifactRequest for this very
+    // claim AFTER the queue claim, so byte-equality with the claim-time snapshot
+    // would wrongly hold every deferred QA release. Only that single added
+    // same-request snapshot is admissible; replacements, removals, unknown keys
+    // and unrelated drift still hold the claim (deferred-claim-qa-delta.ts).
+    const releasedMetadata = admitClaimMetadataWithQaArtifactRequest(
+      currentStep.metadata, input.claimedStepRun.metadata, {
+        companyId: currentRun.companyId, missionId: currentRun.missionId,
+        workflowRunId: currentRun.id, stepId: currentStep.stepId, stepRunId: currentStep.id,
+        executionGeneration: currentStep.executionGeneration, retryCount: currentStep.retryCount,
+        iterationIndex: currentStep.iterationIndex, requestId: input.requestId,
+      });
+    if (!releasedMetadata) return false;
 
-    const metadata = normalizeRecord(currentStep.metadata);
+    const metadata = releasedMetadata;
     const toolQueue: Record<string, unknown> = {
       ...getMetadataRecord(metadata, "toolQueue"), status: "queued",
     };
