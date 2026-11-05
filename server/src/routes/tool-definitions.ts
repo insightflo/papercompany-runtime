@@ -15,12 +15,14 @@ import { logActivity } from "../services/activity-log.js";
 import { toolService } from "../services/tools/registry.js";
 import { assertHttpArtifactAssertionFloor } from "../services/tools/response-contract-floor.js";
 import { executeToolTest, type ToolTestDispatcher, type ToolTestExecutor } from "../services/tools/test-executor.js";
+import type { createHttpHandlerLifetime } from "../services/http-handler-lifetime.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 type ToolDefinitionRoutesOptions = {
   strictSecretsMode?: boolean;
   toolDispatcher?: ToolTestDispatcher;
   executeTest?: ToolTestExecutor;
+  httpHandlerLifetime?: ReturnType<typeof createHttpHandlerLifetime>;
 };
 
 async function requireCompanyTool(db: Db, companyId: string, toolId: string) {
@@ -74,7 +76,7 @@ export function toolDefinitionRoutes(db: Db, options: ToolDefinitionRoutesOption
     return { ...tool, adapterConfig };
   };
   const router = Router();
-  router.use(toolProgressRoutes(db));
+  router.use(toolProgressRoutes(db, { httpHandlerLifetime: options.httpHandlerLifetime }));
 
   router.get("/companies/:companyId/tools", async (req, res) => {
     const companyId = req.params.companyId as string;
