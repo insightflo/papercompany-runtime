@@ -492,15 +492,13 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     // [주의] INSERT 이후 단계이므로 scratch note fs 실패가 생성 자체를 중단/롤백시키면 안 된다.
     //   swallow + log 한다. compiler의 idempotent 호출(wx 플래그, EEXIST 무시)이 다음 런에 self-heal.
     // [수정시 영향] ensureMissionWorkingNote 경로(PAPERCLIP_HOME/mission-working-notes) 변경 시 함께 검토.
-    if (!options?.deferWorkingNote) {
-      try {
-        await ensureMissionWorkingNote({ companyId: mission.companyId, missionId: mission.id });
-      } catch (err) {
-        logger.warn(
-          { err, missionId: mission.id, companyId: mission.companyId },
-          "failed to provision mission working note at create",
-        );
-      }
+    try {
+      if (!options?.deferWorkingNote) await ensureMissionWorkingNote({ companyId: mission.companyId, missionId: mission.id });
+    } catch (err) {
+      logger.warn(
+        { err, missionId: mission.id, companyId: mission.companyId },
+        "failed to provision mission working note at create",
+      );
     }
 
     return getById(mission.id);
