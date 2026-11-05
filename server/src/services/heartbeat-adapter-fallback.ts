@@ -1,6 +1,8 @@
 import type { heartbeatRuns } from "@paperclipai/db";
 import { asNumber, parseObject } from "../adapters/utils.js";
-import { readNonEmptyString } from "./heartbeat-run-context.js";
+import { readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
+import { heartbeatRunFailureText } from "./heartbeat-failure-classification.js";
+import { stringifyRunResultJson } from "./heartbeat-run-result-text.js";
 
 const DEFAULT_ADAPTER_FALLBACK_MAX_ATTEMPTS = 1;
 
@@ -99,4 +101,53 @@ export function applyAdapterFallbackRuntimeConfig(input: {
     ...(model ? { model } : {}),
     ...(thinking ? { thinking } : {}),
   };
+}
+
+export function isTerminalAdapterFallbackConfigurationFailure(run: typeof heartbeatRuns.$inferSelect) {
+  const text = [
+    heartbeatRunFailureText({
+      errorCode: run.errorCode,
+      errorMessage: run.error,
+      stdoutExcerpt: run.stdoutExcerpt,
+      stderrExcerpt: run.stderrExcerpt,
+    }),
+    stringifyRunResultJson(run.resultJson),
+    stringifyRunResultJson(run.usageJson),
+  ].join("\n").toLowerCase();
+
+  return (
+    /api error:\s*400\b[\s\S]*param incorrect/.test(text) ||
+    /\bparam incorrect\b/.test(text) ||
+    /\bnot supported model\b/.test(text) ||
+    /\bunsupported model\b/.test(text) ||
+    /\binvalid model\b/.test(text) ||
+    /\bunknown model\b/.test(text) ||
+    /\bmodel\b[\s\S]{0,80}\bnot (?:found|supported)\b/.test(text)
+  );
+}
+
+export function shouldQueueRunFailureAdapterFallback(input: {
+  run: typeof heartbeatRuns.$inferSelect;
+  fallback: Pick<AdapterFallbackConfig, "command" | "provider" | "model" | "maxAttempts">;
+}) {
+  const context = parseObject(input.run.contextSnapshot);
+  const fallbackAttempt = resolveAdapterFallbackAttempt(context);
+  if (fallbackAttempt >= input.fallback.maxAttempts) return false;
+
+  const activeFallbackCommand = readNonEmptyString(context.fallbackCommand);
+  const activeFallbackProvider = readNonEmptyString(context.fallbackProvider);
+  const activeFallbackModel = readNonEmptyString(context.fallbackModel);
+  const fallbackProvider = input.fallback.provider ?? null;
+  const fallbackModel = input.fallback.model ?? null;
+  const isSameFallbackCommand = activeFallbackCommand === input.fallback.command;
+  const isSameFallbackRoute =
+    isSameFallbackCommand &&
+    activeFallbackProvider === fallbackProvider &&
+    activeFallbackModel === fallbackModel;
+  const isFallbackRun = readNonEmptyString(context.wakeReason) === "adapter_fallback";
+  if (isFallbackRun && isSameFallbackRoute && isTerminalAdapterFallbackConfigurationFailure(input.run)) {
+    return false;
+  }
+
+  return true;
 }
