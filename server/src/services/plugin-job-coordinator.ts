@@ -67,6 +67,9 @@ export interface PluginJobCoordinator {
    * Removes all event subscriptions added by `start()`.
    */
   stop(): void;
+
+  /** Join lifecycle handlers admitted before stop; call after closing admission. */
+  drain(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,18 +219,29 @@ export function createPluginJobCoordinator(
   // State
   // -----------------------------------------------------------------------
   let attached = false;
+  let stopped = false;
+  const activeHandlers = new Set<Promise<void>>();
+
+  function trackHandler(handler: Promise<void>): void {
+    activeHandlers.add(handler);
+    void handler.then(() => activeHandlers.delete(handler), () => activeHandlers.delete(handler));
+  }
 
   // We need stable references for on/off since the lifecycle manager
   // uses them for matching. We wrap the async handlers in sync wrappers
   // that fire-and-forget (swallowing unhandled rejections via the try/catch
   // inside each handler).
-  const boundOnLoaded = (payload: { pluginId: string; pluginKey: string }) =>
-    void onPluginLoaded(payload, lifecycle.getRuntimeGeneration?.(payload.pluginId));
+  const boundOnLoaded = (payload: { pluginId: string; pluginKey: string }) => {
+    if (stopped) return;
+    trackHandler(onPluginLoaded(payload, lifecycle.getRuntimeGeneration?.(payload.pluginId)));
+  };
   const boundOnDisabled = (payload: { pluginId: string; pluginKey: string; reason?: string }) => {
-    void onPluginDisabled(payload);
+    if (stopped) return;
+    trackHandler(onPluginDisabled(payload));
   };
   const boundOnUnloaded = (payload: { pluginId: string; pluginKey: string; removeData: boolean }) => {
-    void onPluginUnloaded(payload);
+    if (stopped) return;
+    trackHandler(onPluginUnloaded(payload));
   };
 
   // -----------------------------------------------------------------------
@@ -236,7 +250,7 @@ export function createPluginJobCoordinator(
 
   return {
     start(): void {
-      if (attached) return;
+      if (attached || stopped) return;
       attached = true;
 
       lifecycle.on("plugin.loaded", boundOnLoaded);
@@ -247,6 +261,8 @@ export function createPluginJobCoordinator(
     },
 
     stop(): void {
+      if (stopped) return;
+      stopped = true;
       if (!attached) return;
       attached = false;
 
@@ -255,6 +271,10 @@ export function createPluginJobCoordinator(
       lifecycle.off("plugin.unloaded", boundOnUnloaded);
 
       log.info("plugin job coordinator stopped");
+    },
+
+    async drain(): Promise<void> {
+      while (activeHandlers.size > 0) await Promise.all([...activeHandlers]);
     },
   };
 }
