@@ -1,7 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { registerHeartbeatFailureClassificationCase } from "./helpers/heartbeat-failure-classification-case.js";
 import { startTempDatabase, type EmbeddedPostgresInstance } from "./helpers/heartbeat-budget-database-fixture.js";
 import { cleanupHeartbeatBudgetFixture } from "./helpers/heartbeat-budget-cleanup-fixture.js";
+import { seedMissionOwnerTaskContextFixture } from "./helpers/heartbeat-owner-context-fixture.js";
+import { createInstructionRotationFixture } from "./helpers/heartbeat-instruction-rotation-fixture.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -43,7 +45,6 @@ import {
 } from "@paperclipai/db";
 import {
   applyInstructionInjectionPolicy,
-  hashLoadedInstructions,
   loadInstructionsWithInlinedReferences,
 } from "@paperclipai/adapter-utils/instructions";
 
@@ -61,8 +62,6 @@ vi.mock("../adapters/index.js", () => ({
 }));
 
 import { classifyHeartbeatRunFailure, heartbeatService } from "../services/heartbeat.ts";
-import { buildWorkflowIssueExecutionCard } from "../services/issue-execution-cards/builder.ts";
-import { hashStructuredValue } from "../services/issue-execution-cards/hash.ts";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.ts";
 import { secretService } from "../services/secrets.ts";
 
@@ -223,106 +222,6 @@ function validOwnerPlanDecision(missionId: string, workflowDefinitionId: string)
   };
 }
 
-async function seedMissionOwnerTaskContextFixture(db: ReturnType<typeof createDb>, issueKind: string, description?: string) {
-  const companyId = randomUUID();
-  const agentId = randomUUID();
-  const missionId = randomUUID();
-  const sourceIssueId = randomUUID();
-  const ownerTaskIssueId = randomUUID();
-
-  await db.insert(companies).values({
-    id: companyId,
-    name: "Paperclip",
-    issuePrefix: "PAP",
-    requireBoardApprovalForNewAgents: false,
-  });
-  await db.insert(agents).values({
-    id: agentId,
-    companyId,
-    name: "Shared Worker",
-    role: "engineer",
-    status: "active",
-    adapterType: "codex_local",
-    adapterConfig: { promptTemplate: "Follow the issue." },
-    runtimeConfig: {},
-    permissions: {},
-  });
-  await db.insert(missions).values({
-    id: missionId,
-    companyId,
-    ownerAgentId: agentId,
-    title: "Mission owner context mission",
-    status: "active",
-  });
-  await db.insert(issues).values({
-    id: sourceIssueId,
-    companyId,
-    missionId,
-    identifier: "PAP-SOURCE",
-    title: "Blocked source issue",
-    description: "source issue private detail should stay bounded",
-    status: "blocked",
-    assigneeAgentId: agentId,
-    originKind: "workflow_execution",
-  });
-  await db.insert(issues).values({
-    id: ownerTaskIssueId,
-    companyId,
-    missionId,
-    identifier: `PAP-${issueKind.toUpperCase().slice(0, 8)}`,
-    title: `${issueKind} current issue`,
-    description: description ?? "Mission owner task description",
-    status: "todo",
-    assigneeAgentId: agentId,
-    originKind: issueKind,
-    originId: issueKind === "mission_main_executor_unblock" ? sourceIssueId : null,
-  });
-  // Display-only comment remains allowed for audit UI, but is never decision authority.
-  await db.insert(issueComments).values({
-    companyId,
-    issueId: ownerTaskIssueId,
-    authorAgentId: agentId,
-    body: [
-      "### Mission owner decision",
-      "Decision: retry_source_issue",
-      `Source issue: ${sourceIssueId}`,
-      "Reason: source is now unblockable",
-      "Next action: re-dispatch later after approval",
-      "Evidence: bounded owner comment",
-    ].join("\n"),
-  });
-  // Structured recovery ledger is the only authority for latestOwnerActionDecision in heartbeat context.
-  if (issueKind === "mission_main_executor_unblock") {
-    const { recordMissionOwnerDecision } = await import("../services/missions/mission-owner-recovery-ledger.js");
-    const heartbeatRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: heartbeatRunId,
-      companyId,
-      agentId,
-      issueId: ownerTaskIssueId,
-      status: "succeeded",
-      invocationSource: "automation",
-      startedAt: new Date("2026-07-01T00:00:00.000Z"),
-      finishedAt: new Date("2026-07-01T00:01:00.000Z"),
-      createdAt: new Date("2026-07-01T00:01:00.000Z"),
-    });
-    await recordMissionOwnerDecision({
-      db,
-      issue: { id: ownerTaskIssueId, companyId, missionId },
-      sourceIssueId,
-      heartbeatRunId,
-      submission: {
-        decision: "retry_source_issue",
-        sourceIssueRef: sourceIssueId,
-        reason: "source is now unblockable",
-        nextAction: "re-dispatch later after approval",
-        evidence: "structured owner recovery ledger",
-      },
-    });
-  }
-
-  return { companyId, agentId, missionId, sourceIssueId, ownerTaskIssueId };
-}
 
 describe("heartbeat context budget preflight", () => {
   let db!: ReturnType<typeof createDb>;
@@ -360,129 +259,7 @@ describe("heartbeat context budget preflight", () => {
     }
   });
 
-  async function seedInstructionRotationFixture(input: {
-    maxEstimatedChars: number;
-    staleFile: boolean;
-  }) {
-    const companyId = randomUUID();
-    const agentId = randomUUID();
-    const issueId = randomUUID();
-    const previousRunId = randomUUID();
-    const sessionId = `session-${randomUUID()}`;
-    const taskKey = `issue:${issueId}`;
-    const workspace = path.join(dataDir, `instruction-rotation-${randomUUID()}`);
-    fs.mkdirSync(workspace, { recursive: true });
-    const instructionsPath = path.join(workspace, "AGENTS.md");
-    const viewedPath = path.join(workspace, "viewed.txt");
-    fs.writeFileSync(instructionsPath, "FULL_INSTRUCTION_BODY_".repeat(3_000));
-    fs.writeFileSync(viewedPath, "before");
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Instruction Rotation",
-      issuePrefix: `IR${companyId.replace(/-/g, "").slice(0, 5).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "Instruction Rotation Agent",
-      role: "engineer",
-      status: "active",
-      adapterType: "codex_local",
-      adapterConfig: {
-        cwd: workspace,
-        instructionsFilePath: instructionsPath,
-        promptTemplate: "Continue the issue.",
-      },
-      runtimeConfig: {
-        heartbeat: {
-          contextBudgetPreflight: { maxEstimatedChars: input.maxEstimatedChars },
-          fileViewStalenessRotation: { enabled: true },
-        },
-      },
-      permissions: {},
-    });
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      identifier: `IR-${issueId.slice(0, 6)}`,
-      title: "Preserve full instructions across rotation",
-      status: "todo",
-      assigneeAgentId: agentId,
-    });
-    const card = buildWorkflowIssueExecutionCard({
-      title: "Preserve full instructions across rotation",
-      description: "Complete the assigned work.\n[ARTIFACT]: <absolute path>",
-      companyId,
-      issueId,
-      workflowDefinitionId: randomUUID(),
-      workflowRunId: randomUUID(),
-      step: { id: "work", dependencies: [], graphWorkProductRequired: true },
-      isQaStep: false,
-    });
-    await db.insert(issueExecutionCards).values({
-      companyId,
-      issueId,
-      contentHash: hashStructuredValue(card),
-      cardJson: card,
-    });
-    await db.insert(heartbeatRuns).values({
-      id: previousRunId,
-      companyId,
-      agentId,
-      issueId,
-      status: "succeeded",
-      invocationSource: "on_demand",
-      sessionIdAfter: sessionId,
-      contextSnapshot: {
-        taskKey,
-        paperclipWorkspace: { cwd: workspace },
-        paperclipFileViews: [{
-          relativePath: "viewed.txt",
-          contentHash: createHash("sha256").update("before").digest("hex"),
-          exists: true,
-        }],
-      },
-      startedAt: new Date("2026-01-01T00:00:00.000Z"),
-      finishedAt: new Date("2026-01-01T00:01:00.000Z"),
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:01:00.000Z"),
-    });
-    await db.insert(agentTaskSessions).values({
-      companyId,
-      agentId,
-      adapterType: "codex_local",
-      taskKey,
-      sessionParamsJson: { sessionId, cwd: workspace },
-      sessionDisplayId: sessionId,
-      lastRunId: previousRunId,
-    });
-    const loaded = await loadInstructionsWithInlinedReferences(instructionsPath);
-    const contentHash = hashLoadedInstructions(loaded);
-    await db.insert(agentInstructionInjections).values({
-      companyId,
-      issueId,
-      agentId,
-      adapterType: "codex_local",
-      instructionsPath,
-      contentHash,
-      injectionCount: 1,
-      lastInjectionJson: {
-        entryPath: loaded.entryPath,
-        includedPaths: loaded.includedPaths,
-        deferredPaths: loaded.deferredPaths,
-        warnings: loaded.warnings,
-        contentHash,
-        providerSessionId: sessionId,
-        deliveryToken: "seed-delivery",
-        mode: "full",
-        deliveredAt: "2026-01-01T00:01:00.000Z",
-      },
-    });
-    if (input.staleFile) fs.writeFileSync(viewedPath, "after");
-    return { agentId, issueId, taskKey };
-  }
+  const seedInstructionRotationFixture = createInstructionRotationFixture(() => db, () => dataDir);
 
   it("injects the current control-plane API URL into heartbeat adapter context", async () => {
     const previousPaperclipApiUrl = process.env.PAPERCLIP_API_URL;
