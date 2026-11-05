@@ -50,9 +50,10 @@ async function fixture(provider = "local_file") {
 it("seals newly registered local workflow bytes instead of caller-forged provenance", async () => {
   const f = await fixture();
   await writeFile(f.file, Buffer.from([0, 255, 195, 169]));
-  const product = await f.create({ workflowProducer: { ...abcSeal, heartbeatRunId: randomUUID() } });
+  const product = await f.create({ sha256: "0".repeat(64), workflowProducer: { ...abcSeal, heartbeatRunId: randomUUID() } });
   const [stored] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, product!.id));
   expect(stored.metadata?.workflowProducer).toMatchObject({ ...binarySeal, heartbeatRunId: f.heartbeatId, executionGeneration: 4 });
+  expect(stored.metadata?.sha256).toBe(binarySeal.sha256);
   expect(product?.metadata?.workflowProducer).toEqual(stored.metadata?.workflowProducer);
 });
 
@@ -60,6 +61,7 @@ it("seals newly registered local workflow bytes instead of caller-forged provena
 it("restamps the current admitted attempt with a new seal and clears obsolete authority markers", async () => {
   const f = await fixture();
   const product = await f.create({ note: "keep" });
+  expect(product?.metadata?.sha256).toBe(abcSeal.sha256);
   const markers = Object.fromEntries(authorityKeys.map(key => [key, { authorityIdempotencyKey: "old-attempt" }]));
   await db.update(issueWorkProducts).set({ metadata: { ...product!.metadata, ...markers } }).where(eq(issueWorkProducts.id, product!.id));
   await db.update(workflowStepRuns).set({ iterationIndex: 1 }).where(eq(workflowStepRuns.id, f.stepRunId));
@@ -69,7 +71,7 @@ it("restamps the current admitted attempt with a new seal and clears obsolete au
   const restamped = await f.svc.restampProducer(product!.id, nextHeartbeatId,
     { workflowProducer: { ...abcSeal }, ...markers, registeredByRunId: nextHeartbeatId });
   expect(restamped?.metadata?.workflowProducer).toMatchObject({ ...binarySeal, heartbeatRunId: nextHeartbeatId, iterationIndex: 1 });
-  expect(restamped?.metadata).toMatchObject({ note: "keep", registeredByRunId: nextHeartbeatId });
+  expect(restamped?.metadata).toMatchObject({ note: "keep", registeredByRunId: nextHeartbeatId, sha256: binarySeal.sha256 });
   for (const key of authorityKeys) expect(restamped?.metadata).not.toHaveProperty(key);
   const [stored] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, product!.id));
   expect(stored.createdByRunId).toBe(nextHeartbeatId);
@@ -88,13 +90,13 @@ it("ordinary metadata patches preserve the seal and DB authority, not supplied r
   const f = await fixture(), product = await f.create();
   const markers = Object.fromEntries(authorityKeys.map(key => [key, { authorityIdempotencyKey: "trusted-existing" }]));
   await db.update(issueWorkProducts).set({ metadata: { ...product!.metadata, ...markers } }).where(eq(issueWorkProducts.id, product!.id));
-  const updated = await f.svc.update(product!.id, { metadata: { path: f.file, note: "patched",
+  const updated = await f.svc.update(product!.id, { metadata: { path: f.file, note: "patched", sha256: "0".repeat(64),
     workflowProducer: { sha256: "0".repeat(64), byteSize: 999 },
     ...Object.fromEntries(authorityKeys.map(key => [key, { forged: true }])) } });
   expect(updated?.metadata?.workflowProducer).toEqual(product?.metadata?.workflowProducer);
-  expect(updated?.metadata).toMatchObject({ ...markers, note: "patched" });
+  expect(updated?.metadata).toMatchObject({ ...markers, note: "patched", sha256: abcSeal.sha256 });
   const withoutMarkers = await f.svc.update(product!.id, { metadata: { path: f.file } });
-  expect(withoutMarkers?.metadata).toMatchObject(markers);
+  expect(withoutMarkers?.metadata).toMatchObject({ ...markers, sha256: abcSeal.sha256 });
 });
 
 // Break: a missing local file becomes an unsealed new producer with legacy treatment.
@@ -120,6 +122,7 @@ it("does not invent producer seals for ordinary issues or remote products", asyn
   const remote = await fixture("github");
   const product = await remote.create();
   expect(product?.metadata?.workflowProducer).toMatchObject({ heartbeatRunId: remote.heartbeatId });
+  expect(product?.metadata).not.toHaveProperty("sha256");
   expect(product?.metadata?.workflowProducer).not.toHaveProperty("sha256");
   expect(product?.metadata?.workflowProducer).not.toHaveProperty("byteSize");
 });

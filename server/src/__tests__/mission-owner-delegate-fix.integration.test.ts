@@ -8,13 +8,13 @@
 //   ⑨ [C1] source-only + collection.plan(변경 수집) — 실행 응답과 get-result 투영 일치(오보고 없음).
 //   fence 일반화: 일반 미션 recollect changed_collection 계획 시작이 소유자 intent 펜스에 걸린다.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
-  agentToolGrants, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues,
+  agentToolGrants, agentWakeupRequests, agents, companies, createDb, heartbeatRuns, issues, issueWorkProducts,
   missionPlanDecisionSubmissions, missions, toolDefinitions, workflowDefinitions, workflowRuns,
   workflowStepRuns, workflowTerminalDecisions, workflowTransitionEvents } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -29,6 +29,9 @@ import {
 import { getMissionOwnerActionResult } from "../services/missions/mission-owner-execute.js";
 import { recordWorkflowValidationVerdict } from "../services/workflow/validation-verdict-ledger.js";
 import { submitMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-agent-api.js";
+import { completeWorkflowIssue, registerWorkflowArtifact } from "../services/workflow/agent-api.js";
+import { selectSameRunWorkProduct } from "../services/workflow/workproduct-same-run.js";
+import { verifySeedProductBytes } from "../services/workflow/workflow-seed-evidence.js";
 
 const TOOL_COMMAND = `node -e "console.log(JSON.stringify({status:'success',attempt:'delegate-fix-stage7-current'}))" --`;
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -96,10 +99,11 @@ async function qaWorld(options: { findings: Array<{ id: string; summary: string;
   const seedHeartbeatId = randomUUID();
   const seeded = await admittedProducer(db, { companyId, agentId: ownerAgentId, issueId: producerIssueId, stepRunId: producerStepRunId, heartbeatId: seedHeartbeatId });
   await db.update(agentWakeupRequests).set({ status: "completed", finishedAt: new Date() }).where(eq(agentWakeupRequests.id, seeded.wakeId));
-  const seedArtifact = path.join(root, "missions", missionId, "seed", "content.json"), seedBytes = Buffer.from('{"blocks":["seed"]}');
+  const seedArtifact = path.join(root, "missions", missionId, "produce", "content.json"), seedBytes = Buffer.from('{"blocks":["seed"]}');
   await mkdir(path.dirname(seedArtifact), { recursive: true }); await writeFile(seedArtifact, seedBytes);
-  await workProductService(db).createForIssue(producerIssueId, companyId, { provider: "local_file", type: "document",
-    title: "content.json", status: "active", createdByRunId: seedHeartbeatId, metadata: { path: seedArtifact, sha256: createHash("sha256").update(seedBytes).digest("hex") } });
+  const seedProduct = await workProductService(db).createForIssue(producerIssueId, companyId, { provider: "local_file", type: "document",
+    externalId: seedArtifact, title: "content.json", status: "active", createdByRunId: seedHeartbeatId,
+    metadata: { path: seedArtifact, sha256: createHash("sha256").update(seedBytes).digest("hex") } });
   // 공식 QA 반려 판정: 독립 QA actor 의 QA 이슈 스코프 heartbeat → workflow_api request_changes + findings.
   const qaHeartbeatId = randomUUID();
   await db.insert(heartbeatRuns).values({ id: qaHeartbeatId, companyId, agentId: qaAgentId, issueId: qaIssueId, status: "succeeded" });
@@ -115,7 +119,7 @@ async function qaWorld(options: { findings: Array<{ id: string; summary: string;
   const row = async (stepRunId: string) => (await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, stepRunId)))[0]!;
   const getResult = (actionId: string) => getMissionOwnerActionResult({ db, companyId, agentId: ownerAgentId, heartbeatRunId }, { schemaVersion: 1, missionId, actionId });
   return { companyId, ownerAgentId, qaAgentId, missionId, workflowRunId, definitionId: definition!.id, collectorStepRunId,
-    producerStepRunId, producerIssueId, qaIssueId, heartbeatRunId, verdictEventId: verdictEvent!.id, call, row, getResult, producerTarget: { kind: "issue_step" as const, workflowRunId, stepRunId: producerStepRunId, issueId: producerIssueId,
+    producerStepRunId, producerIssueId, qaIssueId, heartbeatRunId, seedArtifact, seedBytes, seedProduct: seedProduct!, verdictEventId: verdictEvent!.id, call, row, getResult, producerTarget: { kind: "issue_step" as const, workflowRunId, stepRunId: producerStepRunId, issueId: producerIssueId,
       expectedAuthorityVersion: 0, expectedExecutionGeneration: 0, failedDispatchRequestId: null } };
 }
 
@@ -133,6 +137,9 @@ const planDecisionFor = (w: Awaited<ReturnType<typeof qaWorld>>) => ({
 
 it("[①GREEN] artifact finding reworks the real producer and resolves only via a fresh independent QA pass", async () => {
   const w = await qaWorld({ findings: FINDING_ARTIFACT });
+  expect(await readFile(w.seedArtifact)).toEqual(w.seedBytes);
+  const oldHash = createHash("sha256").update(w.seedBytes).digest("hex");
+  expect(record(w.seedProduct.metadata?.workflowProducer).sha256).toBe(oldHash);
   const action = pendingResult(await w.call({ operation: "delegate_fix", producerTarget: w.producerTarget, qaVerdictEventId: w.verdictEventId, findingIds: ["chart-wrong"] }));
   expect(action.state).toBe("executing"); // native back-edge 재작업 발사(실제 wake 존재)
   const producer = await w.row(w.producerStepRunId);
@@ -140,17 +147,31 @@ it("[①GREEN] artifact finding reworks the real producer and resolves only via 
   expect(producer.iterationIndex).toBe(1);
   const [wake] = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, w.companyId), eq(agentWakeupRequests.issueId, w.producerIssueId), eq(agentWakeupRequests.reason, "workflow_step_runnable")));
   expect(wake).toBeTruthy(); // 시드 승입 웨이크(reason=null)와 구분된 실제 재작업 웨이크
-  // 생산자 실재실행: 승인 입장 → 새 산출물 등록 → 이슈 완료 → 엔진 동기화가 완료를 소유
+  // 실제 입장 writer를 쓰되 heartbeat와 파일 쓰기는 fixture가 수행한다(외부 AI 공급자 실행 아님).
   await db.update(workflowStepRuns).set({ status: "running", startedAt: new Date() }).where(eq(workflowStepRuns.id, w.producerStepRunId));
   const producerHeartbeat = randomUUID();
   await admittedProducer(db, { companyId: w.companyId, agentId: w.ownerAgentId, issueId: w.producerIssueId, stepRunId: w.producerStepRunId, heartbeatId: producerHeartbeat });
-  const file = path.join(root, "missions", w.missionId, "produce", "content.json"), bytes = Buffer.from('{"blocks":["reworked"]}');
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, bytes);
-  await workProductService(db).createForIssue(w.producerIssueId, w.companyId, { provider: "local_file", type: "document", title: "content.json", status: "active", createdByRunId: producerHeartbeat, metadata: { path: file, sha256: createHash("sha256").update(bytes).digest("hex") } });
-  await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, w.producerIssueId));
+  const bytes = Buffer.from('{"blocks":["reworked"]}'), newHash = createHash("sha256").update(bytes).digest("hex");
+  await writeFile(w.seedArtifact, bytes);
+  const [producerIssue] = await db.select().from(issues).where(eq(issues.id, w.producerIssueId));
+  const restamped = await registerWorkflowArtifact({ db, issue: producerIssue!,
+    actor: { actorType: "agent", actorId: w.ownerAgentId, agentId: w.ownerAgentId, runId: producerHeartbeat },
+    data: { path: w.seedArtifact, type: "document" } });
+  expect(restamped.id).toBe(w.seedProduct.id);
+  expect(await readFile(w.seedArtifact)).toEqual(bytes);
+  const [storedProduct] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, w.seedProduct.id));
+  expect(storedProduct).toMatchObject({ companyId: w.companyId, issueId: w.producerIssueId, createdByRunId: producerHeartbeat,
+    metadata: { path: w.seedArtifact, sha256: newHash, registeredByRunId: producerHeartbeat,
+      workflowProducer: { heartbeatRunId: producerHeartbeat, iterationIndex: 1, sha256: newHash } } });
+  expect(newHash).not.toBe(oldHash);
+  const [currentProducerIssue] = await db.select().from(issues).where(eq(issues.id, w.producerIssueId));
+  await completeWorkflowIssue({ db, issue: currentProducerIssue!,
+    actor: { actorType: "agent", actorId: w.ownerAgentId, agentId: w.ownerAgentId, runId: producerHeartbeat }, data: {} });
   await syncWorkflowRunState(db, w.workflowRunId); // 생산자 재완료 동기화 → QA 재발화
   expect((await w.row(w.producerStepRunId)).status).toBe("completed");
+  const selected = await selectSameRunWorkProduct(db, { companyId: w.companyId, workflowRunId: w.workflowRunId,
+    stepId: "produce", selector: { type: "document", title: "content.json" } });
+  expect((await verifySeedProductBytes(db, selected)).sha256).toBe(newHash);
   // 옛 판정은 resolved 근거가 아니다 — 새 산출물 이후 관측된 독립 QA pass 만 근거다
   const before = await w.getResult(action.actionId);
   expect(before).toMatchObject({ state: "needs_evidence" });
@@ -165,6 +186,12 @@ it("[①GREEN] artifact finding reworks the real producer and resolves only via 
   expect(resolved).toMatchObject({ state: "resolved", operation: "delegate_fix" });
   expect(resolved.evidence).toContainEqual(expect.objectContaining({ kind: "qa" }));
   expect(resolved.evidence).toContainEqual(expect.objectContaining({ kind: "artifact" }));
+  await syncWorkflowRunState(db, w.workflowRunId);
+  const [finishedRun] = await db.select().from(workflowRuns).where(eq(workflowRuns.id, w.workflowRunId));
+  expect(finishedRun?.status).toBe("completed");
+  console.info("T16A_M03_EVIDENCE", JSON.stringify({ companyId: w.companyId, missionId: w.missionId,
+    workflowRunId: w.workflowRunId, producerStepRunId: w.producerStepRunId, productId: restamped.id,
+    producerHeartbeat, qaHeartbeat: freshQaHeartbeat, oldHash, newHash, actionId: action.actionId }));
 }, 60000);
 
 it("[②GREEN] source_data finding routes to the real collection path without touching the producer", async () => {
