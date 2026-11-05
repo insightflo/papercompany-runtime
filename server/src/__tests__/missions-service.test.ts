@@ -40,16 +40,13 @@ import {
 import { missionPluginManifest } from "./helpers/mission-service-fixtures.js";
 import { cleanMissionServiceFixture } from "./helpers/mission-service-cleanup-fixture.js";
 import { registerMissionOwnerCreationCase } from "./helpers/mission-owner-creation-case.js";
+import { createMissionOwnerDecisionFixture } from "./helpers/mission-owner-decision-fixture.js";
 import { extractMissionOwnerDecisionFromText, missionService } from "../services/missions.js";
 import { buildQaReworkCapDescription } from "../services/missions/qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "../services/missions/qa-rework-cap-oversight-detection.js";
 import { issueService } from "../services/issues.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
-import {
-  recordMissionOwnerDecision,
-  type MissionOwnerDecisionSubmission,
-} from "../services/missions/mission-owner-recovery-ledger.js";
 import { hashOwnerPlanDecision } from "../services/mission-owner-plan-decisions.js";
 import { upsertMissionPlanDecisionSubmission } from "../services/missions/mission-plan-decision-ledger.js";
 import { recordMissionPlanQaVerdict } from "../services/missions/mission-plan-qa-verdicts.js";
@@ -135,35 +132,8 @@ describeEmbeddedPostgres("mission service mission-linked subresources", () => {
     await tempDb?.cleanup();
   });
 
-  async function recordOwnerDecision(input: {
-    companyId: string;
-    missionId: string;
-    ownerActionIssueId: string;
-    ownerAgentId: string;
-    sourceIssueId: string;
-    submission: MissionOwnerDecisionSubmission;
-  }) {
-    const now = new Date();
-    const [run] = await db.insert(heartbeatRuns).values({
-      companyId: input.companyId,
-      agentId: input.ownerAgentId,
-      issueId: input.ownerActionIssueId,
-      status: "succeeded",
-      startedAt: now,
-      finishedAt: now,
-    }).returning({ id: heartbeatRuns.id });
-    return recordMissionOwnerDecision({
-      db,
-      issue: {
-        id: input.ownerActionIssueId,
-        companyId: input.companyId,
-        missionId: input.missionId,
-      },
-      submission: input.submission,
-      sourceIssueId: input.sourceIssueId,
-      heartbeatRunId: run!.id,
-    });
-  }
+  const recordOwnerDecision = createMissionOwnerDecisionFixture(() => db);
+
   registerMissionOwnerCreationCase(() => db);
 
   it("creates and finalizes a cross-company mission delegation", async () => {
