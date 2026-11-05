@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ChildProcessStartRejectedError,
+  runChildProcess,
   isChildProcessStartRejectedError,
   startChildProcessAtBoundary,
   withChildProcessStartBoundary,
@@ -126,6 +127,29 @@ describe("child process start boundary context", () => {
         reasonCode: "runtime_shutting_down",
         externalStarted: true,
       });
+    });
+  });
+
+  it("gates the real process start after asynchronous command resolution", async () => {
+    const active = scope("real-blocked", false);
+    const onSpawn = vi.fn(async () => {});
+    await expect(withChildProcessStartBoundary(active, () => runChildProcess(
+      "boundary-blocked", process.execPath, ["-e", "process.exit(0)"],
+      { cwd: process.cwd(), env: {}, timeoutSec: 5, graceSec: 1, onLog: async () => {}, onSpawn },
+    ))).rejects.toBeInstanceOf(ChildProcessStartRejectedError);
+    expect(onSpawn).not.toHaveBeenCalled();
+    expect(active.hasExternalStart()).toBe(false);
+  });
+
+  it("preserves the started process result when a later start is blocked", async () => {
+    const active = scope("real-retry");
+    const run = (id: string) => runChildProcess(id, process.execPath, ["-e", "process.stdout.write('done')"],
+      { cwd: process.cwd(), env: {}, timeoutSec: 5, graceSec: 1, onLog: async () => {} });
+    await withChildProcessStartBoundary(active, async () => {
+      const first = await run("boundary-first");
+      expect(first.stdout).toBe("done");
+      expect(active.hasExternalStart()).toBe(true);
+      await expect(run("boundary-retry")).rejects.toMatchObject({ decision: { kind: "additional_start_blocked" } });
     });
   });
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import { eq } from "drizzle-orm";
 import { agentWakeupRequests, agents, companies, createDb, effectIntents, instanceSettings, issues } from "@paperclipai/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -89,6 +90,26 @@ const support = await getEmbeddedPostgresTestSupport();
     await waitForHeartbeatExecutionsToDrain(db);
     expect(await heartbeat.getRun(run!.id)).toMatchObject({ status: "succeeded" });
     expect(state.execute).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
+  it("requeues when shutdown arrives inside adapter preparation before its first child", async () => {
+    const companyId = randomUUID(), agentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Child boundary", issuePrefix: `B${companyId.replace(/-/g, "").slice(0, 7).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    state.lifecycle = createRuntimeExecutionLifecycle(); state.stopAtLookup = false;
+    const onSpawn = vi.fn(async () => {});
+    state.execute.mockReset().mockImplementation(async () => {
+      state.lifecycle!.beginShutdown("SIGTERM");
+      await runChildProcess("boundary-integration", process.execPath, ["-e", "process.exit(0)"],
+        { cwd: process.cwd(), env: {}, timeoutSec: 5, graceSec: 1, onLog: async () => {}, onSpawn });
+      return successfulAdapterResult();
+    });
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual", { actorType: "system", actorId: "test" });
+    await vi.waitFor(() => expect(state.execute).toHaveBeenCalledOnce());
+    await waitForHeartbeatExecutionsToDrain(db);
+    expect(onSpawn).not.toHaveBeenCalled();
+    expect(await heartbeat.getRun(run!.id)).toMatchObject({ status: "queued", errorCode: null });
   }, 60_000);
 
 });
