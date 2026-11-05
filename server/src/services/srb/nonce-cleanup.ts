@@ -46,6 +46,14 @@ export async function cleanupExpiredNonces(db: Db): Promise<number> {
  */
 export function createNonceCleanupJob(db: Db) {
   let timer: ReturnType<typeof setInterval> | null = null;
+  let generation = 0;
+  const activeRuns = new Set<Promise<void>>();
+
+  function trackRun(promise: Promise<void>): Promise<void> {
+    activeRuns.add(promise);
+    void promise.then(() => activeRuns.delete(promise), () => activeRuns.delete(promise));
+    return promise;
+  }
 
   async function run(): Promise<void> {
     try {
@@ -61,15 +69,25 @@ export function createNonceCleanupJob(db: Db) {
   return {
     start() {
       if (timer) return;
-      timer = setInterval(() => void run(), CLEANUP_INTERVAL_MS);
+      const currentGeneration = ++generation;
+      timer = setInterval(() => {
+        if (timer && currentGeneration === generation) void trackRun(run());
+      }, CLEANUP_INTERVAL_MS);
       // Run immediately on start
-      void run();
+      void trackRun(run());
     },
 
     stop() {
+      generation++;
       if (timer) {
         clearInterval(timer);
         timer = null;
+      }
+    },
+
+    async drain(): Promise<void> {
+      while (activeRuns.size > 0) {
+        await Promise.allSettled([...activeRuns]);
       }
     },
   };
