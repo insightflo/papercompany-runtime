@@ -89,13 +89,13 @@ export async function finalizeClaimedRun(
     }
 
     if (run.trigger === "schedule" && run.scheduledAt && run.scheduledCron &&
-        job.nextRunAt?.getTime() === run.scheduledAt.getTime() && job.schedule === run.scheduledCron &&
-        !validateCron(run.scheduledCron)) {
-      const nextRunAt = nextCronTick(parseCron(run.scheduledCron), finishedAt);
+        job.nextRunAt?.getTime() === run.scheduledAt.getTime()) {
+      const after = new Date(Math.max(finishedAt.getTime(), run.scheduledAt.getTime()));
+      const nextRunAt = validateCron(job.schedule) ? null : nextCronTick(parseCron(job.schedule), after);
       await tx.update(pluginJobs).set({ lastRunAt: finishedAt, nextRunAt, updatedAt: finishedAt })
         .where(and(
           eq(pluginJobs.id, run.jobId), eq(pluginJobs.nextRunAt, run.scheduledAt),
-          eq(pluginJobs.schedule, run.scheduledCron),
+          eq(pluginJobs.schedule, job.schedule),
         ));
     }
     return "finalized";

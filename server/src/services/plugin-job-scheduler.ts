@@ -34,7 +34,7 @@
  * @see ./cron.ts — Cron parsing utilities
  */
 
-import { and, eq, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
@@ -521,37 +521,35 @@ export function createPluginJobScheduler(
     const jobs = await jobStore.listJobs(pluginId, "active");
 
     for (const job of jobs) {
-      // An existing due time is the identity of a scheduled slot.
-      if (job.nextRunAt) {
-        continue;
-      }
-
-      // Skip jobs without a schedule
-      if (!job.schedule) {
-        continue;
-      }
-
-      const validationError = validateCron(job.schedule);
-      if (validationError) {
-        log.warn(
-          { jobId: job.id, jobKey: job.jobKey, schedule: job.schedule, error: validationError },
-          "skipping job with invalid cron schedule",
-        );
-        continue;
-      }
-
-      const cron = parseCron(job.schedule);
-      const nextRunAt = nextCronTick(cron, new Date());
-
-      if (nextRunAt) {
-        await db.update(pluginJobs).set({ nextRunAt, updatedAt: new Date() }).where(and(
-          eq(pluginJobs.id, job.id), isNull(pluginJobs.nextRunAt), eq(pluginJobs.schedule, job.schedule),
-        ));
-        log.debug(
-          { jobId: job.id, jobKey: job.jobKey, nextRunAt: nextRunAt.toISOString() },
-          "computed nextRunAt for job",
-        );
-      }
+      // An existing due time is a slot identity; jobs without schedules cannot advance.
+      if (job.nextRunAt || !job.schedule) continue;
+      await db.transaction(async (tx) => {
+        // Admission and finalization also lock the job before inspecting its runs.
+        const [current] = await tx.select().from(pluginJobs)
+          .where(and(eq(pluginJobs.id, job.id), eq(pluginJobs.pluginId, pluginId))).for("update").limit(1);
+        if (!current || current.status !== "active" || current.nextRunAt || !current.schedule || current.schedule !== job.schedule) return;
+        const validationError = validateCron(current.schedule);
+        if (validationError) {
+          log.warn(
+            { jobId: current.id, jobKey: current.jobKey, schedule: current.schedule, error: validationError },
+            "skipping job with invalid cron schedule",
+          );
+          return;
+        }
+        const [latest] = await tx.select({ scheduledAt: pluginJobRuns.scheduledAt }).from(pluginJobRuns)
+          .where(and(eq(pluginJobRuns.jobId, current.id), eq(pluginJobRuns.trigger, "schedule"), isNotNull(pluginJobRuns.scheduledAt)))
+          .orderBy(desc(pluginJobRuns.scheduledAt)).limit(1);
+        const now = new Date();
+        const after = new Date(Math.max(now.getTime(), latest?.scheduledAt?.getTime() ?? now.getTime()));
+        const nextRunAt = nextCronTick(parseCron(current.schedule), after);
+        if (!nextRunAt) return;
+        const updated = await tx.update(pluginJobs).set({ nextRunAt, updatedAt: new Date() }).where(and(
+          eq(pluginJobs.id, current.id), isNull(pluginJobs.nextRunAt), eq(pluginJobs.schedule, current.schedule),
+          eq(pluginJobs.status, "active"),
+        )).returning({ id: pluginJobs.id });
+        if (updated.length) log.debug({ jobId: current.id, jobKey: current.jobKey, nextRunAt: nextRunAt.toISOString() },
+          "computed nextRunAt for job");
+      });
     }
   }
 
