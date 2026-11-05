@@ -1,4 +1,5 @@
 import type { pluginJobRuns, pluginJobs } from "@paperclipai/db";
+import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import {
@@ -14,6 +15,7 @@ export type PluginJobReplayResult =
   | { kind: "not_claimed" }
   | { kind: "unavailable_before_start" }
   | { kind: "deferred_before_start"; deferred: DeferredBeforeStart }
+  | { kind: "completion_uncertain" }
   | { kind: "settled"; status: "succeeded" | "failed"; durationMs: number; error?: string };
 
 export async function executeQueuedPluginJob(input: {
@@ -26,11 +28,18 @@ export async function executeQueuedPluginJob(input: {
 }): Promise<PluginJobReplayResult> {
   const claimed = await input.jobStore.claimQueuedRun(input.run.id);
   if (!claimed?.startedAt || !claimed.claimToken) return { kind: "not_claimed" };
+  const claimToken = claimed.claimToken;
 
   const release = async () => {
-    if (!await input.jobStore.releaseUnstartedClaim(claimed.id, claimed.claimToken!)) {
+    if (!await input.jobStore.releaseUnstartedClaim(claimed.id, claimToken)) {
       throw new Error("plugin_job_unstarted_claim_release_lost");
     }
+  };
+  const uncertain = async (): Promise<PluginJobReplayResult> => {
+    if (!await input.jobStore.markCompletionUncertain(claimed.id, claimToken)) {
+      throw new Error("plugin_job_uncertain_claim_lost");
+    }
+    return { kind: "completion_uncertain" };
   };
   if (!input.workerManager.isRunning(input.job.pluginId)) {
     await release();
@@ -51,28 +60,37 @@ export async function executeQueuedPluginJob(input: {
       jobKey: input.job.jobKey,
       runId: claimed.id,
       trigger: claimed.trigger,
-      scheduledAt: claimed.createdAt.toISOString(),
+      scheduledAt: (claimed.trigger === "schedule" ? claimed.scheduledAt! : claimed.startedAt!).toISOString(),
     } },
     input.jobTimeoutMs,
   );
-  const decision = scope.start(start);
+  let decision: ReturnType<typeof scope.start<ReturnType<typeof start>>>;
+  try {
+    decision = scope.start(start);
+  } catch {
+    return uncertain();
+  }
   if (decision.kind === "deferred_before_start") {
     await release();
     return { kind: "deferred_before_start", deferred: decision.deferred };
   }
   if (decision.kind === "additional_start_blocked") {
-    throw new Error("runtime_additional_start_blocked");
+    return uncertain();
   }
 
+  let outcome: { status: "succeeded" | "failed"; error?: string };
   try {
     await decision.value;
-    const durationMs = Date.now() - claimed.startedAt.getTime();
-    await input.jobStore.completeRun(claimed.id, { status: "succeeded", durationMs });
-    return { kind: "settled", status: "succeeded", durationMs };
+    outcome = { status: "succeeded" };
   } catch (error) {
-    const durationMs = Date.now() - claimed.startedAt.getTime();
-    const message = error instanceof Error ? error.message : String(error);
-    await input.jobStore.completeRun(claimed.id, { status: "failed", error: message, durationMs });
-    return { kind: "settled", status: "failed", error: message, durationMs };
+    if (!(error instanceof JsonRpcCallError) || error.code === PLUGIN_RPC_ERROR_CODES.TIMEOUT ||
+        error.code === PLUGIN_RPC_ERROR_CODES.WORKER_UNAVAILABLE) {
+      return uncertain();
+    }
+    outcome = { status: "failed", error: error.message };
   }
+  const durationMs = Date.now() - claimed.startedAt.getTime();
+  const finalized = await input.jobStore.finalizeClaimedRun(claimed.id, claimToken, { ...outcome, durationMs });
+  if (finalized === "rejected") throw new Error("plugin_job_finalization_claim_lost");
+  return { kind: "settled", ...outcome, durationMs };
 }

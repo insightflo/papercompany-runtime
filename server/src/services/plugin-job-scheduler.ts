@@ -34,7 +34,7 @@
  * @see ./cron.ts — Cron parsing utilities
  */
 
-import { and, eq, lte, or } from "drizzle-orm";
+import { and, eq, isNull, lte } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
@@ -160,7 +160,7 @@ export interface PluginJobScheduler {
   /**
    * Unregister a plugin from the scheduler.
    *
-   * Cancels any in-flight runs for the plugin and removes tracking state.
+   * In-flight runs remain tracked and may finish naturally.
    *
    * @param pluginId - UUID of the plugin
    */
@@ -286,8 +286,6 @@ export function createPluginJobScheduler(
       }
 
       // Query for jobs whose nextRunAt has passed and are active.
-      // We include jobs with null nextRunAt since they may have just been
-      // registered and need their first run calculated.
       const dueJobs = await db
         .select({
           job: pluginJobs,
@@ -397,8 +395,12 @@ export function createPluginJobScheduler(
           { durationMs: result.durationMs, ...(result.error ? { err: result.error } : {}) },
           `job ${result.status}`,
         );
-        if (run.trigger === "schedule") await advanceSchedulePointer(job);
+      } else if (result.kind === "completion_uncertain") {
+        jobLog.warn("job completion is uncertain; automatic replay is blocked");
       }
+    } catch (err) {
+      jobLog.error({ err: err instanceof Error ? err.message : String(err) }, "job dispatch or finalization failed");
+      throw err;
     } finally {
       activeJobs.delete(job.id);
     }
@@ -415,8 +417,8 @@ export function createPluginJobScheduler(
   }
 
   async function dispatchJob(job: typeof pluginJobs.$inferSelect): Promise<void> {
-    const { run } = await jobStore.createOrReuseQueuedScheduledRun({ jobId: job.id, pluginId: job.pluginId });
-    await dispatchRun(job, run);
+    const admission = await jobStore.createOrReuseQueuedScheduledRun({ jobId: job.id, pluginId: job.pluginId });
+    if (admission.kind === "available") await dispatchRun(job, admission.run);
   }
 
   // -----------------------------------------------------------------------
@@ -477,7 +479,7 @@ export function createPluginJobScheduler(
     });
 
     // Dispatch in background — don't block the caller
-    void dispatchRun(job, run);
+    void dispatchRun(job, run).catch(() => {});
 
     return { runId: run.id, jobId };
   }
@@ -519,8 +521,8 @@ export function createPluginJobScheduler(
     const jobs = await jobStore.listJobs(pluginId, "active");
 
     for (const job of jobs) {
-      // Skip jobs that already have a valid nextRunAt in the future
-      if (job.nextRunAt && job.nextRunAt.getTime() > Date.now()) {
+      // An existing due time is the identity of a scheduled slot.
+      if (job.nextRunAt) {
         continue;
       }
 
@@ -542,11 +544,9 @@ export function createPluginJobScheduler(
       const nextRunAt = nextCronTick(cron, new Date());
 
       if (nextRunAt) {
-        await jobStore.updateRunTimestamps(
-          job.id,
-          job.lastRunAt ?? new Date(0),
-          nextRunAt,
-        );
+        await db.update(pluginJobs).set({ nextRunAt, updatedAt: new Date() }).where(and(
+          eq(pluginJobs.id, job.id), isNull(pluginJobs.nextRunAt), eq(pluginJobs.schedule, job.schedule),
+        ));
         log.debug(
           { jobId: job.id, jobKey: job.jobKey, nextRunAt: nextRunAt.toISOString() },
           "computed nextRunAt for job",
@@ -567,47 +567,6 @@ export function createPluginJobScheduler(
 
   async function unregisterPlugin(pluginId: string): Promise<void> {
     log.info({ pluginId }, "unregistering plugin from job scheduler");
-
-    // Cancel any in-flight run records for this plugin that are still
-    // queued or running. Active jobs in-memory will finish naturally.
-    try {
-      const runningRuns = await db
-        .select()
-        .from(pluginJobRuns)
-        .where(
-          and(
-            eq(pluginJobRuns.pluginId, pluginId),
-            or(
-              eq(pluginJobRuns.status, "running"),
-              eq(pluginJobRuns.status, "queued"),
-            ),
-          ),
-        );
-
-      for (const run of runningRuns) {
-        await jobStore.completeRun(run.id, {
-          status: "cancelled",
-          error: "Plugin unregistered",
-          durationMs: run.startedAt
-            ? Date.now() - run.startedAt.getTime()
-            : null,
-        });
-      }
-    } catch (err) {
-      log.error(
-        {
-          pluginId,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        "error cancelling in-flight runs during unregister",
-      );
-    }
-
-    // Remove any active tracking for jobs owned by this plugin
-    const jobs = await jobStore.listJobs(pluginId);
-    for (const job of jobs) {
-      activeJobs.delete(job.id);
-    }
   }
 
   // -----------------------------------------------------------------------
