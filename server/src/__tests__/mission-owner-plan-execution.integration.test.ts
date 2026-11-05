@@ -9,13 +9,13 @@
 //   다른 owner → 사전 거부, sourceMissionId → board_revision_start, QA와 시작 사이 intent 변경 → 시작 없음.
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import {
-  agentToolGrants, agents, companies, createDb, heartbeatRuns, issues, missionPlanDecisionSubmissions,
+  agentToolGrants, agents, companies, createDb, heartbeatRuns, issues, issueWorkProducts, missionPlanDecisionSubmissions,
   missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents,
 } from "@paperclipai/db";
 import type { ArtifactContract } from "@paperclipai/shared";
@@ -24,6 +24,8 @@ import { admittedProducer } from "./helpers/admitted-producer.js";
 import { slice1Decision, slice1Unit, slice1World } from "./helpers/mission-revision-slice1-world.js";
 import { workProductService } from "../services/work-products.js";
 import { missionPlanArtifactService } from "../services/mission-plan-artifacts.js";
+import { missionService } from "../services/missions.js";
+import { issueService } from "../services/issues.js";
 import { executeCoreWorkflowTool } from "../services/workflow/core-tool-executor.js";
 import {
   completeWorkflowToolStepFromResult, processQueuedWorkflowToolStepRuns, setWorkflowToolStepExecutor,
@@ -130,6 +132,9 @@ it("[GREEN] owner revise_plan runs the real chain: submission → independent PL
   expect(record(refs.planQa).decisionHash).toBe(ledger.decisionHash);
   // 독립 PLAN-QA pass(별도 actor, 실제 verdict API) → materialization → native run 생성·실행
   await qaVerdict(w.companyId, w.mission.id, action.requiredAction.targetId);
+  // The fixture seeds a successful owner heartbeat; complete its planning issue through the real issue service.
+  expect(await issueService(db).update(w.planning.id, { status: "done" }))
+    .toMatchObject({ id: w.planning.id, missionId: w.mission.id, status: "done" });
   const [run] = await w.runs();
   expect(run).toBeTruthy();
   expect(run!.metadata).toMatchObject({ ownerPlanExecution: { decisionHash: ledger.decisionHash } }); // action correlation 저장
@@ -176,6 +181,25 @@ it("[GREEN] owner revise_plan runs the real chain: submission → independent PL
     { schemaVersion: 1, missionId: w.mission.id, actionId: action.actionId });
   expect(resolved).toMatchObject({ state: "resolved", operation: "revise_plan" });
   expect(resolved.evidence).toContainEqual(expect.objectContaining({ kind: "plan", recordId: ledger.decisionHash, workflowRunId: run.id }));
+  const [product] = await db.select().from(issueWorkProducts).where(eq(issueWorkProducts.issueId, write.issueId!));
+  const artifactPath = path.join(root, "missions", w.mission.id, "write", "content.json");
+  const artifactBytes = Buffer.from('{"blocks":["write"]}');
+  expect(product).toMatchObject({ companyId: w.companyId, issueId: write.issueId,
+    createdByRunId: expect.any(String), metadata: { path: artifactPath, sha256: sha(artifactBytes) } });
+  expect(await readFile(artifactPath)).toEqual(artifactBytes);
+  const finishedRuns = await w.runs();
+  expect(finishedRuns).toHaveLength(1);
+  expect(finishedRuns[0]).toMatchObject({ id: run.id, missionId: w.mission.id, status: "completed" });
+  await missionService(db).runActiveMissionOwnerSupervision({ companyId: w.companyId,
+    missionIds: [w.mission.id], applySafeActions: true });
+  const [completedMission] = await db.select().from(missions).where(eq(missions.id, w.mission.id));
+  const missionIssues = await db.select({ id: issues.id, status: issues.status, originKind: issues.originKind })
+    .from(issues).where(eq(issues.missionId, w.mission.id));
+  expect(completedMission, JSON.stringify(missionIssues))
+    .toMatchObject({ companyId: w.companyId, status: "completed", completedAt: expect.any(Date) });
+  await missionService(db).runActiveMissionOwnerSupervision({ companyId: w.companyId,
+    missionIds: [w.mission.id], applySafeActions: true });
+  expect(await w.runs()).toEqual(finishedRuns);
 }, 60000);
 
 it("[RED] request_changes PLAN-QA never starts a run and demands a corrected plan", async () => {
