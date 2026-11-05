@@ -517,6 +517,10 @@ export interface PluginLoader {
    * Whether runtime services are available for plugin activation.
    */
   hasRuntimeServices(): boolean;
+  /** Snapshot for suppressing activation that predates a runtime teardown. */
+  getRuntimeGeneration(pluginId: string, duringDeactivation?: boolean): number | null;
+  /** Hold the teardown boundary through lifecycle finalization; release is idempotent. */
+  beginRuntimeDeactivation(pluginId: string): () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +772,19 @@ export function pluginLoader(
   const capabilityValidator = pluginCapabilityValidator();
   const log = logger.child({ service: "plugin-loader" });
   const hostVersion = runtimeServices?.instanceInfo.hostVersion;
+  let shutdownRequested = false;
+  const generations = new Map<string, number>();
+  const unloading = new Map<string, number>();
+  const getRuntimeGeneration = (id: string, duringDeactivation = false) => shutdownRequested || (!duringDeactivation && unloading.has(id)) ? null : generations.get(id) ?? 0;
+  function beginRuntimeDeactivation(id: string): () => void {
+    generations.set(id, (generations.get(id) ?? 0) + 1); unloading.set(id, (unloading.get(id) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return; released = true;
+      const count = unloading.get(id)! - 1;
+      if (count) unloading.set(id, count); else unloading.delete(id);
+    };
+  }
 
   async function assertPageRoutePathsAvailable(manifest: PaperclipPluginManifestV1): Promise<void> {
     const requestedRoutePaths = getDeclaredPageRoutePaths(manifest);
@@ -1461,21 +1478,14 @@ export function pluginLoader(
     hasRuntimeServices(): boolean {
       return runtimeServices !== undefined;
     },
+    getRuntimeGeneration,
+    beginRuntimeDeactivation,
 
     // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
     // loadAll
     // -----------------------------------------------------------------------
 
-    /**
-     * loadAll — Loads and activates all plugins that are currently in 'ready' status.
-     *
-     * This method is typically called during server startup. It fetches all ready
-     * plugins from the registry and attempts to activate them in parallel using
-     * Promise.allSettled. Failures in individual plugins do not prevent others from loading.
-     *
-     * @returns A promise that resolves with summary statistics of the load operation.
-     */
     async loadAll(): Promise<PluginLoadAllResult> {
       if (!runtimeServices) {
         throw new Error(
@@ -1483,6 +1493,9 @@ export function pluginLoader(
             "Pass runtime services as the third argument to pluginLoader().",
         );
       }
+      if (shutdownRequested) throw new Error("Plugin runtime is shutting down");
+      const snapshot = new Map(generations);
+      const blocked = new Set(unloading.keys());
 
       log.info("plugin-loader: loading all ready plugins");
 
@@ -1501,7 +1514,7 @@ export function pluginLoader(
 
       // Load plugins in parallel
       const results = await Promise.allSettled(
-        readyPlugins.map((plugin) => activatePlugin(plugin))
+        readyPlugins.map((plugin) => activatePlugin(plugin, blocked.has(plugin.id) ? null : snapshot.get(plugin.id) ?? 0))
       );
 
       const loadResults = results.map((r, i) => {
@@ -1538,16 +1551,6 @@ export function pluginLoader(
     // loadSingle
     // -----------------------------------------------------------------------
 
-    /**
-     * loadSingle — Loads and activates a single plugin by its ID.
-     *
-     * This method retrieves the plugin from the registry, ensures it's in a valid
-     * state, and then calls activatePlugin to start its worker and register its
-     * capabilities (tools, jobs, etc.).
-     *
-     * @param pluginId - The UUID of the plugin to load.
-     * @returns A promise that resolves with the result of the activation.
-     */
     async loadSingle(pluginId: string): Promise<PluginLoadResult> {
       if (!runtimeServices) {
         throw new Error(
@@ -1555,11 +1558,14 @@ export function pluginLoader(
             "Pass runtime services as the third argument to pluginLoader().",
         );
       }
+      const generation = getRuntimeGeneration(pluginId);
+      if (generation === null) throw new Error("Plugin runtime is shutting down");
 
       const plugin = (await registry.getById(pluginId)) as PluginRecord | null;
       if (!plugin) {
         throw new Error(`Plugin not found: ${pluginId}`);
       }
+      if (getRuntimeGeneration(pluginId) !== generation) throw new Error("Plugin activation was superseded");
 
       // If the plugin is in 'installed' status, transition it to 'ready' first.
       // lifecycleManager.load() transitions the status AND activates the plugin
@@ -1570,6 +1576,7 @@ export function pluginLoader(
         await runtimeServices.lifecycleManager.load(pluginId);
         const updated = (await registry.getById(pluginId)) as PluginRecord | null;
         if (!updated) throw new Error(`Plugin not found after status update: ${pluginId}`);
+        if (getRuntimeGeneration(pluginId) !== generation) throw new Error("Plugin activation was superseded");
         return {
           plugin: updated,
           success: true,
@@ -1584,7 +1591,7 @@ export function pluginLoader(
         );
       }
 
-      return activatePlugin(plugin);
+      return activatePlugin(plugin, generation);
     },
 
     // -----------------------------------------------------------------------
@@ -1610,32 +1617,16 @@ export function pluginLoader(
         toolDispatcher,
       } = runtimeServices;
 
-      // 1. Unregister from job scheduler (cancels in-flight runs)
+      // Invalidate old activations before revoking scheduler admission.
+      const release = beginRuntimeDeactivation(pluginId);
       try {
         await jobScheduler.unregisterPlugin(pluginId);
-      } catch (err) {
-        log.warn(
-          { pluginId, err: err instanceof Error ? err.message : String(err) },
-          "plugin-loader: failed to unregister from job scheduler (best-effort)",
-        );
-      }
-
-      // 2. Clear event subscriptions
-      eventBus.clearPlugin(pluginKey);
-
-      // 3. Unregister agent tools
-      toolDispatcher.unregisterPluginTools(pluginKey);
-
-      // 4. Stop the worker process
-      try {
-        if (workerManager.isRunning(pluginId)) {
-          await workerManager.stopWorker(pluginId);
-        }
-      } catch (err) {
-        log.warn(
-          { pluginId, err: err instanceof Error ? err.message : String(err) },
-          "plugin-loader: failed to stop worker during unload (best-effort)",
-        );
+        await jobScheduler.drain(pluginId);
+        await workerManager.stopWorker(pluginId);
+        eventBus.clearPlugin(pluginKey);
+        toolDispatcher.unregisterPluginTools(pluginKey);
+      } finally {
+        release();
       }
 
       log.info(
@@ -1659,10 +1650,11 @@ export function pluginLoader(
 
       const { workerManager, jobScheduler } = runtimeServices;
 
-      // 1. Stop the job scheduler tick loop
+      // Close admission before waiting for scheduler DB work and retained job results.
+      shutdownRequested = true;
       jobScheduler.stop();
-
-      // 2. Stop all worker processes
+      await jobScheduler.drain();
+      await workerManager.drainJobs();
       await workerManager.stopAll();
 
       log.info("plugin-loader: all plugins shut down");
@@ -1681,7 +1673,7 @@ export function pluginLoader(
    * Failures are caught and reported in the result; the plugin is marked as
    * `error` in the database when activation fails.
    */
-  async function activatePlugin(plugin: PluginRecord): Promise<PluginLoadResult> {
+  async function activatePlugin(plugin: PluginRecord, generation: number | null): Promise<PluginLoadResult> {
     const manifest = plugin.manifestJson;
     const pluginId = plugin.id;
     const pluginKey = plugin.pluginKey;
@@ -1693,6 +1685,9 @@ export function pluginLoader(
       webhooks: 0,
       tools: 0,
     };
+    const current = () => generation !== null && getRuntimeGeneration(pluginId) === generation;
+    const superseded = () => ({ plugin, success: false, error: "Plugin activation was superseded", registered });
+    if (!current()) return superseded();
 
     // Guard: runtime services must exist (callers already checked)
     if (!runtimeServices) {
@@ -1774,8 +1769,10 @@ export function pluginLoader(
         workerOptions.execArgv = ["--import", devTsxLoaderPath];
       }
 
+      if (!current()) return superseded();
       await workerManager.startWorker(pluginId, workerOptions);
       registered.worker = true;
+      if (!current()) return superseded();
 
       log.info(
         { pluginId, pluginKey },
@@ -1788,7 +1785,9 @@ export function pluginLoader(
       const jobDeclarations = manifest.jobs ?? [];
       if (jobDeclarations.length > 0) {
         await jobStore.syncJobDeclarations(pluginId, jobDeclarations);
+        if (!current()) return superseded();
         await jobScheduler.registerPlugin(pluginId);
+        if (!current()) return superseded();
         registered.jobs = jobDeclarations.length;
 
         log.info(
@@ -1870,6 +1869,7 @@ export function pluginLoader(
       return { plugin, success: true, registered };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      if (!current()) return { plugin, success: false, error: errorMessage, registered };
 
       log.error(
         { pluginId, pluginKey, err: errorMessage },

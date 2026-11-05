@@ -109,13 +109,15 @@ export function createPluginJobCoordinator(
    * 2. Sync job declarations from the manifest into the DB
    * 3. Register the plugin with the scheduler (computes nextRunAt)
    */
-  async function onPluginLoaded(payload: { pluginId: string; pluginKey: string }): Promise<void> {
+  async function onPluginLoaded(payload: { pluginId: string; pluginKey: string }, generation: number | null | undefined): Promise<void> {
     const { pluginId, pluginKey } = payload;
+    if (generation === null) return;
     log.info({ pluginId, pluginKey }, "plugin loaded — syncing jobs and registering with scheduler");
 
     try {
       // Get the manifest from the registry
       const plugin = await registry.getById(pluginId);
+      if (generation !== undefined && lifecycle.getRuntimeGeneration?.(pluginId) !== generation) return;
       if (!plugin?.manifestJson) {
         log.warn({ pluginId, pluginKey }, "plugin loaded but no manifest found — skipping job sync");
         return;
@@ -132,8 +134,8 @@ export function createPluginJobCoordinator(
         );
         await jobStore.syncJobDeclarations(pluginId, jobDeclarations);
       }
-
       // Register with the scheduler (computes nextRunAt for active jobs)
+      if (generation !== undefined && lifecycle.getRuntimeGeneration?.(pluginId) !== generation) return;
       await scheduler.registerPlugin(pluginId);
     } catch (err) {
       log.error(
@@ -213,16 +215,14 @@ export function createPluginJobCoordinator(
   // -----------------------------------------------------------------------
   // State
   // -----------------------------------------------------------------------
-
   let attached = false;
 
   // We need stable references for on/off since the lifecycle manager
   // uses them for matching. We wrap the async handlers in sync wrappers
   // that fire-and-forget (swallowing unhandled rejections via the try/catch
   // inside each handler).
-  const boundOnLoaded = (payload: { pluginId: string; pluginKey: string }) => {
-    void onPluginLoaded(payload);
-  };
+  const boundOnLoaded = (payload: { pluginId: string; pluginKey: string }) =>
+    void onPluginLoaded(payload, lifecycle.getRuntimeGeneration?.(payload.pluginId));
   const boundOnDisabled = (payload: { pluginId: string; pluginKey: string; reason?: string }) => {
     void onPluginDisabled(payload);
   };
