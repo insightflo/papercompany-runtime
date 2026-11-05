@@ -31,20 +31,36 @@ export async function runAuditLogCleanup(db: Db): Promise<{
 }> {
   const now = Date.now();
 
-  const [wt, tool, srb] = await Promise.all([
-    db
+  let firstError: unknown;
+  let hasError = false;
+  const waitForDelete = <T>(promise: Promise<T>): Promise<T> => promise.catch((error) => {
+    if (!hasError) {
+      hasError = true;
+      firstError = error;
+    }
+    throw error;
+  });
+  const settled = await Promise.allSettled([
+    waitForDelete(db
       .delete(worktreeAuditLog)
       .where(lt(worktreeAuditLog.createdAt, new Date(now - WORKTREE_AUDIT_LOG_TTL_MS)))
-      .returning({ id: worktreeAuditLog.id }),
-    db
+      .returning({ id: worktreeAuditLog.id })),
+    waitForDelete(db
       .delete(toolAuditLog)
       .where(lt(toolAuditLog.createdAt, new Date(now - TOOL_AUDIT_LOG_TTL_MS)))
-      .returning({ id: toolAuditLog.id }),
-    db
+      .returning({ id: toolAuditLog.id })),
+    waitForDelete(db
       .delete(srbDeliveryLog)
       .where(lt(srbDeliveryLog.createdAt, new Date(now - SRB_DELIVERY_LOG_TTL_MS)))
-      .returning({ id: srbDeliveryLog.id }),
+      .returning({ id: srbDeliveryLog.id })),
   ]);
+  if (hasError) throw firstError;
+  const [wtResult, toolResult, srbResult] = settled;
+  if (wtResult.status === "rejected") throw wtResult.reason;
+  if (toolResult.status === "rejected") throw toolResult.reason;
+  if (srbResult.status === "rejected") throw srbResult.reason;
+
+  const [wt, tool, srb] = [wtResult.value, toolResult.value, srbResult.value];
 
   return {
     worktreeAuditLogDeleted: wt.length,
@@ -58,6 +74,14 @@ export async function runAuditLogCleanup(db: Db): Promise<{
  */
 export function createAuditLogCleanupJob(db: Db) {
   let timer: ReturnType<typeof setInterval> | null = null;
+  let generation = 0;
+  const activeRuns = new Set<Promise<void>>();
+
+  function trackRun(promise: Promise<void>): Promise<void> {
+    activeRuns.add(promise);
+    void promise.then(() => activeRuns.delete(promise), () => activeRuns.delete(promise));
+    return promise;
+  }
 
   async function run(): Promise<void> {
     try {
@@ -74,13 +98,22 @@ export function createAuditLogCleanupJob(db: Db) {
   return {
     start() {
       if (timer) return;
-      timer = setInterval(() => void run(), CLEANUP_INTERVAL_MS);
-      void run();
+      const currentGeneration = ++generation;
+      timer = setInterval(() => {
+        if (timer && currentGeneration === generation) void trackRun(run());
+      }, CLEANUP_INTERVAL_MS);
+      trackRun(run());
     },
     stop() {
+      generation++;
       if (timer) {
         clearInterval(timer);
         timer = null;
+      }
+    },
+    async drain(): Promise<void> {
+      while (activeRuns.size > 0) {
+        await Promise.allSettled([...activeRuns]);
       }
     },
   };

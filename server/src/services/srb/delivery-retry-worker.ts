@@ -17,10 +17,11 @@
 
 import type { Db } from "@paperclipai/db";
 import { srbDeliveryLog, srbLinks } from "@paperclipai/db";
-import { eq, and, lte, inArray, or, asc, desc } from "drizzle-orm";
+import { eq, and, lte, inArray, or, asc, desc, isNull } from "drizzle-orm";
 import { logger } from "../../middleware/logger.js";
 import { srbRetryTransitions } from "../../routes/metrics.js";
 import { secretService } from "../secrets.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
 import {
   buildSrbHeaders,
   buildSrbHmacSignature,
@@ -87,7 +88,10 @@ export interface DeliveryRetryWorkerState {
  * @param db - Database instance
  * @returns Worker control interface
  */
-export function createDeliveryRetryWorker(db: Db) {
+export function createDeliveryRetryWorker(
+  db: Db,
+  runtimeLifecycle: RuntimeExecutionLifecycle = runtimeExecutionLifecycle,
+) {
   const secrets = secretService(db);
 
   let state: DeliveryRetryWorkerState = {
@@ -99,6 +103,29 @@ export function createDeliveryRetryWorker(db: Db) {
   };
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let automaticGeneration = 0;
+  const activePolls = new Set<Promise<void>>();
+  let pollFailure: unknown;
+  let hasPollFailure = false;
+
+  function trackPoll(promise: Promise<void>): Promise<void> {
+    activePolls.add(promise);
+    void promise.then(
+      () => activePolls.delete(promise),
+      (error) => {
+        if (!hasPollFailure) {
+          hasPollFailure = true;
+          pollFailure = error;
+        }
+        activePolls.delete(promise);
+      },
+    );
+    return promise;
+  }
+
+  function launchPoll(errorMessage: string): void {
+    void trackPoll(pollCycle()).catch((err) => logger.error({ err }, errorMessage));
+  }
 
   /**
    * Attempt to deliver a single srb_delivery_log row.
@@ -106,7 +133,8 @@ export function createDeliveryRetryWorker(db: Db) {
    */
   async function attemptDelivery(
     row: typeof srbDeliveryLog.$inferSelect,
-  ): Promise<"delivered" | "retryable" | "abandoned"> {
+    onExternalStart: () => void,
+  ): Promise<"delivered" | "retryable" | "abandoned" | "deferred_before_start"> {
     // Load the link to get remoteServerUrl and sharedSecretId
     const [link] = await db
       .select()
@@ -150,7 +178,12 @@ export function createDeliveryRetryWorker(db: Db) {
       signature: signature ?? undefined,
     });
 
+    // Shutdown is a synchronous final-start boundary: preparation above may
+    // finish after stop, so do not let it initiate a new external request.
+    if (runtimeLifecycle.shutdownState()) return "deferred_before_start";
+
     try {
+      onExternalStart();
       const resp = await sendSrbWebhookRequest({
         url: link.remoteServerUrl,
         headers,
@@ -197,9 +230,10 @@ export function createDeliveryRetryWorker(db: Db) {
     if (due.length === 0) return;
 
     for (const row of due) {
+      const claimUpdatedAt = new Date();
       const claimed = await db
         .update(srbDeliveryLog)
-        .set({ status: "retrying", updatedAt: now })
+        .set({ status: "retrying", updatedAt: claimUpdatedAt })
         .where(
           and(
             eq(srbDeliveryLog.id, row.id),
@@ -213,10 +247,45 @@ export function createDeliveryRetryWorker(db: Db) {
         continue;
       }
 
-      srbRetryTransitions.inc({ event: row.status === "retrying" ? "reclaimed_retrying" : "claimed_failed" });
+      let attemptCounted = false;
+      const countAttempt = () => {
+        if (attemptCounted) return;
+        attemptCounted = true;
+        state.totalAttempts++;
+        srbRetryTransitions.inc({ event: row.status === "retrying" ? "reclaimed_retrying" : "claimed_failed" });
+      };
+      const outcome = await attemptDelivery(row, countAttempt);
 
-      state.totalAttempts++;
-      const outcome = await attemptDelivery(row);
+      if (outcome === "deferred_before_start") {
+        await db
+          .update(srbDeliveryLog)
+          .set({ status: row.status, updatedAt: row.updatedAt })
+          .where(
+            and(
+              eq(srbDeliveryLog.id, row.id),
+              eq(srbDeliveryLog.status, "retrying"),
+              eq(srbDeliveryLog.updatedAt, claimUpdatedAt),
+              eq(srbDeliveryLog.linkId, row.linkId),
+              eq(srbDeliveryLog.event, row.event),
+              eq(srbDeliveryLog.payloadHash, row.payloadHash),
+              row.idempotencyKey === null
+                ? isNull(srbDeliveryLog.idempotencyKey)
+                : eq(srbDeliveryLog.idempotencyKey, row.idempotencyKey),
+              eq(srbDeliveryLog.attemptCount, row.attemptCount ?? 0),
+              row.lastAttemptAt === null
+                ? isNull(srbDeliveryLog.lastAttemptAt)
+                : eq(srbDeliveryLog.lastAttemptAt, row.lastAttemptAt),
+              row.nextRetryAt === null
+                ? isNull(srbDeliveryLog.nextRetryAt)
+                : eq(srbDeliveryLog.nextRetryAt, row.nextRetryAt),
+            ),
+          );
+        continue;
+      }
+
+      // Keep the historical claim accounting for ordinary outcomes, including
+      // preparation failures; a shutdown-only refusal consumes no attempt.
+      countAttempt();
       const newAttemptCount = (row.attemptCount ?? 0) + 1;
 
       if (outcome === "delivered") {
@@ -283,23 +352,29 @@ export function createDeliveryRetryWorker(db: Db) {
     start() {
       if (state.running) return;
       state.running = true;
+      const generation = ++automaticGeneration;
       pollTimer = setInterval(() => {
-        void pollCycle().catch((err) => {
-          logger.error({ err }, "SRB delivery retry worker: poll cycle failed");
-        });
+        if (!state.running || generation !== automaticGeneration) return;
+        launchPoll("SRB delivery retry worker: poll cycle failed");
       }, POLL_INTERVAL_MS);
       // Run immediately on start
-      void pollCycle().catch((err) => {
-        logger.error({ err }, "SRB delivery retry worker: initial poll failed");
-      });
+      launchPoll("SRB delivery retry worker: initial poll failed");
     },
 
     stop() {
+      state.running = false;
+      automaticGeneration++;
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
-      state.running = false;
+    },
+
+    async drain(): Promise<void> {
+      while (activePolls.size > 0) {
+        await Promise.allSettled([...activePolls]);
+      }
+      if (hasPollFailure) throw pollFailure;
     },
 
     getState(): DeliveryRetryWorkerState {
