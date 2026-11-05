@@ -15,7 +15,7 @@ import { QaArtifactRejectionError, toolDeploymentHashes, verifyQaArtifact } from
 import type { ToolArtifactReceipt } from "@paperclipai/shared/validators/workflow-artifact";
 import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
-import { agentToolGrants, agents, toolDefinitions, workflowStepRuns } from "@paperclipai/db";
+import { agentToolGrants, agents, toolDefinitions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { executeRemoteWorkflowTool, type CoreWorkflowToolRemoteDeps } from "./remote-tool-executor.js";
 import { resolveWorkflowRunStepOutputDir } from "./remote-tool-context.js";
@@ -29,7 +29,8 @@ import { missionOwnerExecuteSchema } from "@paperclipai/shared/validators/missio
 import { executeHtmlPreflightTool } from "../judgment/html-preflight-executor.js";
 import { secretService } from "../secrets.js";
 import type { JudgmentService } from "../judgment/judgment-service.js";
-import { runtimeExecutionLifecycle, type DeferredBeforeStart, type RuntimeExecutionLifecycle } from "../runtime-execution-lifecycle.js";
+import { createCoreToolRuntimeStart, resolveCoreToolRuntimeScope } from "./core-tool-runtime-start.js";
+import type { DeferredBeforeStart, RuntimeExecutionLifecycle, RuntimeExecutionIdentity } from "../runtime-execution-lifecycle.js";
 export { parametersToCliArgs, resolveRunStepEnv, resolveWorkflowRunStepEnv } from "./core-tool-context.js";
 
 const execFile = promisify(execFileCallback);
@@ -58,7 +59,7 @@ export async function executeCoreWorkflowTool(input: {
   db: Db; companyId: string; agentId?: string | null; agentName?: string | null; issueId?: string | null;
   toolName: string; parameters: unknown; requestId: string; workflowRunId?: string | null; stepRunId?: string | null; stepId?: string | null;
   stepEnv?: Record<string, string>; remoteDeps?: CoreWorkflowToolRemoteDeps; judgmentService?: JudgmentService;
-  runtimeLifecycle?: RuntimeExecutionLifecycle;
+  runtimeLifecycle?: RuntimeExecutionLifecycle; httpRequestIdentity?: RuntimeExecutionIdentity;
   /** Authenticated server route only; never taken from tool parameters. */
   heartbeatRunId?: string;
   /** Attribution context only; never an additional execution authorization gate. */
@@ -145,10 +146,19 @@ export async function executeCoreWorkflowTool(input: {
     if (isJudgmentTool) return executeAgentJudgmentTool({ ...sharedInput, judgmentService: input.judgmentService });
     return executeHtmlPreflightTool(sharedInput);
   }
+  let remoteRuntimeScope: Awaited<ReturnType<typeof resolveCoreToolRuntimeScope>> | undefined;
+  if (tool.adapterType === "http") {
+    try { remoteRuntimeScope = await resolveCoreToolRuntimeScope(input); }
+    catch (error) {
+      return { status: 500, body: { error: error instanceof Error ? error.message : String(error),
+        tool: input.toolName, source: "core" } };
+    }
+  }
   const remoteResult = await executeRemoteWorkflowTool({ db: input.db, companyId: input.companyId,
     toolId: tool.id, toolName: input.toolName, parameters: input.parameters, requestId: input.requestId,
-    workflowRunId: input.workflowRunId, stepId: input.stepId, adapterType: tool.adapterType,
-    adapterConfig: tool.adapterConfig, remoteDeps: input.remoteDeps });
+    workflowRunId: input.workflowRunId, stepId: input.stepId,
+    runtimeScope: remoteRuntimeScope, runtimeLifecycle: input.runtimeLifecycle,
+    adapterType: tool.adapterType, adapterConfig: tool.adapterConfig, remoteDeps: input.remoteDeps });
   if (remoteResult?.deferredBeforeStart) return remoteResult;
   if (remoteResult) return remoteResult;
   if (tool.adapterType !== "builtin") return { status: 501,
@@ -185,11 +195,9 @@ export async function executeCoreWorkflowTool(input: {
     const qaRequest = await prepareQaArtifactRequest({ ...input, artifactExecution, dispatch: initialDispatch });
     const deploymentFiles = artifactExecution?.contract.deploymentFiles;
     const deployment = deploymentFiles ? await toolDeploymentHashes(deploymentFiles, cwd) : null;
-    const prepared = qaRequest ?? await prepareQaConsumer({ ...input, artifactExecution, dispatch: initialDispatch });
-    const dispatch = prepared.dispatch;
-    const allArgs = [...commandParts.slice(1), ...parametersToCliArgs(prepared.parameters)];
-    const consumerRoot = "resultRoot" in prepared ? prepared.resultRoot : undefined;
-    const publicationScope = "publicationScope" in prepared ? prepared.publicationScope : undefined;
+    const prepared = qaRequest ?? await prepareQaConsumer({ ...input, artifactExecution, dispatch: initialDispatch }), dispatch = prepared.dispatch;
+    const allArgs = [...commandParts.slice(1), ...parametersToCliArgs(prepared.parameters)], consumerRoot = "resultRoot" in prepared ? prepared.resultRoot : undefined,
+      publicationScope = "publicationScope" in prepared ? prepared.publicationScope : undefined;
     const policy = readToolProgressPolicy(adapterConfig);
     const env: NodeJS.ProcessEnv = { ...inheritedEnv, ...resolvedEnv,
       PAPERCLIP_COMPANY_ID: input.companyId,
@@ -230,27 +238,7 @@ export async function executeCoreWorkflowTool(input: {
         return !!pinned && !!observed?.sha256 && observed.sha256 === pinned.sha256 && observed.byteSize === pinned.byteSize;
       }));
     await recordToolCallProvenance(input.db, invocationProvenance, "prepared");
-    const workflowRunId = input.workflowRunId?.trim();
-    const stepRunId = input.stepRunId?.trim();
-    const stepId = input.stepId?.trim();
-    const workflowIdentity = workflowRunId && stepRunId && stepId;
-    const runtimeAttempt = workflowIdentity
-      ? await input.db.select({ executionGeneration: workflowStepRuns.executionGeneration }).from(workflowStepRuns).where(and(
-        eq(workflowStepRuns.id, stepRunId), eq(workflowStepRuns.workflowRunId, workflowRunId),
-        eq(workflowStepRuns.stepId, stepId), eq(workflowStepRuns.lastDispatchRequestId, input.requestId),
-      )).limit(1).then(([attempt]) => attempt) : null;
-    if (workflowIdentity && !runtimeAttempt) throw new Error("workflow_tool_attempt_stale");
-    const runtimeScope = runtimeAttempt && (input.runtimeLifecycle ?? runtimeExecutionLifecycle).createScope({
-      requestId: input.requestId, executionId: workflowRunId!, attemptId: stepRunId!,
-      executionGeneration: runtimeAttempt.executionGeneration,
-    });
-    const launch = async <T>(start: () => T): Promise<Awaited<T> | { deferredBeforeStart: DeferredBeforeStart }> => {
-      const initiate = () => runtimeScope?.start(start) ?? { kind: "started" as const, value: start(), externalStarted: true as const };
-      const decision = dispatch ? (await dispatch.launch(initiate)).result : initiate();
-      if (decision.kind === "deferred_before_start") return { deferredBeforeStart: decision.deferred };
-      if (decision.kind === "additional_start_blocked") throw new Error("runtime_additional_start_blocked");
-      return await decision.value;
-    };
+    const launch = await createCoreToolRuntimeStart(input, dispatch);
     // Fence owner-execute-linked attempts right before the real child process launch;
     // unrelated tools pass through with existing behavior.
     const invocation = () => withCurrentOwnerToolAttempt<
@@ -302,8 +290,7 @@ export async function executeCoreWorkflowTool(input: {
       return { status: 200, artifactPath: verified.artifactPath,
         body: { content: stdout.trim(), stderr: stderr.trim(), data: verified, tool: input.toolName, source: "core", invocationProvenance } };
     }
-    const trimmedStdout = stdout.trim();
-    const trimmedStderr = stderr.trim();
+    const trimmedStdout = stdout.trim(), trimmedStderr = stderr.trim();
     let parsed: unknown;
     if (trimmedStdout) {
       try { parsed = JSON.parse(trimmedStdout); } catch { parsed = undefined; }
@@ -313,10 +300,8 @@ export async function executeCoreWorkflowTool(input: {
   } catch (error) {
     if (invocationProvenance?.phase === "prepared") await recordToolCallProvenance(input.db, invocationProvenance, "threw");
     const typed = error as Error & { code?: string | number; exitCode?: number; stdout?: unknown; stderr?: unknown };
-    const stdout = typeof typed.stdout === "string" ? typed.stdout.trim() : "";
-    const stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
-    const code = typed.code === undefined ? "" : ` (exit: ${String(typed.code)})`;
-    const status = (error instanceof ToolProgressError && error.status === 422) || typed.message.startsWith("artifact_contract_") ? 422 : 500;
+    const stdout = typeof typed.stdout === "string" ? typed.stdout.trim() : "", stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
+    const code = typed.code === undefined ? "" : ` (exit: ${String(typed.code)})`, status = (error instanceof ToolProgressError && error.status === 422) || typed.message.startsWith("artifact_contract_") ? 422 : 500;
     const message = adapterConfig.progress !== undefined && !(error instanceof ToolProgressError) && !(error instanceof QaArtifactRejectionError) && !typed.message.startsWith("artifact_contract_")
       ? "tool_progress_execution_failed" : typed.message;
     return { status, body: { error: `${message}${code}`, data: { stdout, ...(typed.exitCode === undefined ? {} : { exitCode: typed.exitCode }) }, stderr, tool: input.toolName, source: "core", invocationProvenance } };
