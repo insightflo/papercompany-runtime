@@ -57,7 +57,6 @@ export function observePluginTool(input: ToolLookup & {
   identity: RuntimeExecutionIdentity;
   runtimeLifecycle: RuntimeExecutionLifecycle;
 }): ObservedToolExecution {
-  const { pluginId, toolName, dbId, workerManager } = resolvePluginTool(input);
   const scope = input.runtimeLifecycle.createScope(input.identity);
   if (scope.identity.requestId !== input.identity.requestId ||
     scope.identity.executionId !== input.identity.executionId ||
@@ -67,6 +66,12 @@ export function observePluginTool(input: ToolLookup & {
   if (scope.identity.executionId !== input.runContext.runId) {
     throw new Error("Tool execution identity does not match run context");
   }
+  const parsed = input.parseName(input.namespacedName);
+  if (!parsed) return resolvePluginTool(input) as never;
+  let resolved: ReturnType<typeof resolvePluginTool>;
+  try { resolved = resolvePluginTool(input); }
+  catch { return { ...parsed, identity: scope.identity, kind: "definitely_unsent" }; }
+  const { pluginId, toolName, dbId, workerManager } = resolved;
   const rpcParams: ExecuteToolParams = {
     toolName, parameters: input.parameters, runContext: input.runContext,
   };
