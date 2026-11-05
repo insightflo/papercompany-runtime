@@ -30,6 +30,8 @@ import type {
 import type { ToolRunContext, ToolResult } from "@paperclipai/plugin-sdk";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
+import type { ObservedToolExecution } from "./plugin-tool-observation.js";
+import type { RuntimeExecutionIdentity } from "./runtime-execution-lifecycle.js";
 import {
   createPluginToolRegistry,
   type PluginToolRegistry,
@@ -40,7 +42,6 @@ import {
 import { pluginRegistryService } from "./plugin-registry.js";
 import { isCoreIntegratedPluginKey } from "./core-integrated-plugins.js";
 import { logger } from "../middleware/logger.js";
-import type { RuntimeExecutionIdentity } from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,6 +147,16 @@ export interface PluginToolDispatcher {
     runContext: ToolRunContext,
     executionIdentity?: RuntimeExecutionIdentity,
   ): Promise<ToolExecutionResult>;
+
+  /**
+   * Route a retained observation without finalizing or acknowledging it.
+   * Parameters and runContext must be inert JSON-origin values without executable
+   * getters, toJSON functions, or proxies; this precondition is not enforced here.
+   */
+  executeToolObserved(
+    namespacedName: string, parameters: unknown, runContext: ToolRunContext,
+    identity: RuntimeExecutionIdentity,
+  ): ObservedToolExecution;
 
   /**
    * Register all tools from a plugin manifest.
@@ -456,6 +467,10 @@ export function createPluginToolDispatcher(
       );
 
       return result;
+    },
+
+    executeToolObserved(namespacedName, parameters, runContext, identity) {
+      return registry.executeToolObserved(namespacedName, parameters, runContext, identity);
     },
 
     registerPluginTools(
