@@ -41,6 +41,8 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import { executeQueuedPluginJob } from "./plugin-job-replay.js";
+import { runtimeExecutionLifecycle, type RuntimeExecutionLifecycle } from "./runtime-execution-lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -77,6 +79,8 @@ export interface PluginJobSchedulerOptions {
   maxConcurrentJobs?: number;
   /** Scheduled plugin jobs to suppress while another native owner handles the work. */
   disabledScheduledJobs?: DisabledScheduledPluginJob[];
+  /** Process shutdown fence; injectable for deterministic boundary tests. */
+  runtimeLifecycle?: RuntimeExecutionLifecycle;
 }
 
 export interface DisabledScheduledPluginJob {
@@ -227,6 +231,7 @@ export function createPluginJobScheduler(
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
     disabledScheduledJobs = [],
+    runtimeLifecycle = runtimeExecutionLifecycle,
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
@@ -273,6 +278,12 @@ export function createPluginJobScheduler(
 
     try {
       const now = new Date();
+
+      const queuedPlugins = await db.select({ pluginId: pluginJobRuns.pluginId })
+        .from(pluginJobRuns).where(eq(pluginJobRuns.status, "queued"));
+      for (const pluginId of new Set(queuedPlugins.map((row) => row.pluginId))) {
+        await replayQueuedRuns(pluginId);
+      }
 
       // Query for jobs whose nextRunAt has passed and are active.
       // We include jobs with null nextRunAt since they may have just been
@@ -370,100 +381,42 @@ export function createPluginJobScheduler(
   // Core: dispatch a single job
   // -----------------------------------------------------------------------
 
-  /**
-   * Dispatch a single job run — create the run record, call the worker,
-   * record the result, and advance the schedule pointer.
-   */
-  async function dispatchJob(
+  async function dispatchRun(
     job: typeof pluginJobs.$inferSelect,
+    run: typeof pluginJobRuns.$inferSelect,
   ): Promise<void> {
-    const { id: jobId, pluginId, jobKey, schedule } = job;
-    const jobLog = log.child({ jobId, pluginId, jobKey });
-
-    // Mark as active (overlap prevention)
-    activeJobs.add(jobId);
-
-    let runId: string | undefined;
-    const startedAt = Date.now();
-
+    if (activeJobs.has(job.id) || activeJobs.size >= maxConcurrentJobs) return;
+    const jobLog = log.child({ jobId: job.id, pluginId: job.pluginId, jobKey: job.jobKey, runId: run.id });
+    activeJobs.add(job.id);
     try {
-      // 1. Create run record
-      const run = await jobStore.createRun({
-        jobId,
-        pluginId,
-        trigger: "schedule",
+      const result = await executeQueuedPluginJob({
+        job, run, jobStore, workerManager, jobTimeoutMs, runtimeLifecycle,
       });
-      runId = run.id;
-
-      jobLog.info({ runId }, "dispatching scheduled job");
-
-      // 2. Mark run as running
-      await jobStore.markRunning(runId);
-
-      // 3. Call worker via RPC
-      await workerManager.call(
-        pluginId,
-        "runJob",
-        {
-          job: {
-            jobKey,
-            runId,
-            trigger: "schedule" as const,
-            scheduledAt: (job.nextRunAt ?? new Date()).toISOString(),
-          },
-        },
-        jobTimeoutMs,
-      );
-
-      // 4. Mark run as succeeded
-      const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
-        status: "succeeded",
-        durationMs,
-      });
-
-      jobLog.info({ runId, durationMs }, "job completed successfully");
-    } catch (err) {
-      const durationMs = Date.now() - startedAt;
-      const errorMessage = err instanceof Error ? err.message : String(err);
-
-      jobLog.error(
-        { runId, durationMs, err: errorMessage },
-        "job execution failed",
-      );
-
-      // Record the failure
-      if (runId) {
-        try {
-          await jobStore.completeRun(runId, {
-            status: "failed",
-            error: errorMessage,
-            durationMs,
-          });
-        } catch (completeErr) {
-          jobLog.error(
-            {
-              runId,
-              err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-            },
-            "failed to record job failure",
-          );
-        }
+      if (result.kind === "settled") {
+        jobLog[result.status === "succeeded" ? "info" : "error"](
+          { durationMs: result.durationMs, ...(result.error ? { err: result.error } : {}) },
+          `job ${result.status}`,
+        );
+        if (run.trigger === "schedule") await advanceSchedulePointer(job);
       }
     } finally {
-      // Remove from active set
-      activeJobs.delete(jobId);
-
-      // 5. Always advance the schedule pointer (even on failure)
-      try {
-        await advanceSchedulePointer(job);
-      } catch (err) {
-        jobLog.error(
-          { err: err instanceof Error ? err.message : String(err) },
-          "failed to advance schedule pointer",
-        );
-      }
+      activeJobs.delete(job.id);
     }
+  }
+
+  async function replayQueuedRuns(pluginId: string): Promise<void> {
+    const queued = await jobStore.listQueuedRunsByPlugin(pluginId, maxConcurrentJobs);
+    for (const run of queued) {
+      if (activeJobs.size >= maxConcurrentJobs) break;
+      const job = await jobStore.getJobByIdForPlugin(pluginId, run.jobId);
+      if (!job || job.status !== "active") continue;
+      await dispatchRun(job, run);
+    }
+  }
+
+  async function dispatchJob(job: typeof pluginJobs.$inferSelect): Promise<void> {
+    const { run } = await jobStore.createOrReuseQueuedScheduledRun({ jobId: job.id, pluginId: job.pluginId });
+    await dispatchRun(job, run);
   }
 
   // -----------------------------------------------------------------------
@@ -524,71 +477,9 @@ export function createPluginJobScheduler(
     });
 
     // Dispatch in background — don't block the caller
-    void dispatchManualRun(job, run.id, trigger);
+    void dispatchRun(job, run);
 
     return { runId: run.id, jobId };
-  }
-
-  /**
-   * Dispatch a manually triggered job run.
-   */
-  async function dispatchManualRun(
-    job: typeof pluginJobs.$inferSelect,
-    runId: string,
-    trigger: "manual" | "retry",
-  ): Promise<void> {
-    const { id: jobId, pluginId, jobKey } = job;
-    const jobLog = log.child({ jobId, pluginId, jobKey, runId, trigger });
-
-    activeJobs.add(jobId);
-    const startedAt = Date.now();
-
-    try {
-      await jobStore.markRunning(runId);
-
-      await workerManager.call(
-        pluginId,
-        "runJob",
-        {
-          job: {
-            jobKey,
-            runId,
-            trigger,
-            scheduledAt: new Date().toISOString(),
-          },
-        },
-        jobTimeoutMs,
-      );
-
-      const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
-        status: "succeeded",
-        durationMs,
-      });
-
-      jobLog.info({ durationMs }, "manual job completed successfully");
-    } catch (err) {
-      const durationMs = Date.now() - startedAt;
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      jobLog.error({ durationMs, err: errorMessage }, "manual job failed");
-
-      try {
-        await jobStore.completeRun(runId, {
-          status: "failed",
-          error: errorMessage,
-          durationMs,
-        });
-      } catch (completeErr) {
-        jobLog.error(
-          {
-            err: completeErr instanceof Error ? completeErr.message : String(completeErr),
-          },
-          "failed to record manual job failure",
-        );
-      }
-    } finally {
-      activeJobs.delete(jobId);
-    }
   }
 
   // -----------------------------------------------------------------------
@@ -670,6 +561,7 @@ export function createPluginJobScheduler(
 
   async function registerPlugin(pluginId: string): Promise<void> {
     log.info({ pluginId }, "registering plugin with job scheduler");
+    await replayQueuedRuns(pluginId);
     await ensureNextRunTimestamps(pluginId);
   }
 
