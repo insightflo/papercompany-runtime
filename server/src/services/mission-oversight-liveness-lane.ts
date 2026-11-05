@@ -28,8 +28,18 @@ export function createMissionOversightLivenessLane(db: Db, options: LivenessLane
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
   let lifecycle = 0;
+  const activeRuns = new Set<Promise<void>>();
 
-  async function run(): Promise<void> {
+  function trackRun(task: Promise<void>): Promise<void> {
+    activeRuns.add(task);
+    void task.then(
+      () => activeRuns.delete(task),
+      () => activeRuns.delete(task),
+    );
+    return task;
+  }
+
+  async function runTick(): Promise<void> {
     if (running) return;
     running = true;
     const epoch = lifecycle;
@@ -69,16 +79,31 @@ export function createMissionOversightLivenessLane(db: Db, options: LivenessLane
     }
   }
 
+  function run(): Promise<void> {
+    return trackRun(runTick());
+  }
+
+  async function drain(): Promise<void> {
+    while (activeRuns.size > 0) {
+      await Promise.allSettled([...activeRuns]);
+    }
+  }
+
   return {
     start() {
       if (timer) return;
-      timer = setInterval(() => void run(), intervalMs);
+      const generation = lifecycle;
+      timer = setInterval(() => {
+        if (generation !== lifecycle) return;
+        void run();
+      }, intervalMs);
     },
     stop() {
       if (timer) clearInterval(timer);
       timer = null;
       lifecycle++; // Fence already-awaiting ticks before they can wake an owner.
     },
+    drain,
     run,
   };
 }

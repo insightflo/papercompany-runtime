@@ -42,6 +42,9 @@ export function createMissionOwnerSupervisionMonitor(
   const applySafeActions = options.applySafeActions ?? true;
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
+  let automaticAdmissionOpen = false;
+  let automaticGeneration = 0;
+  const activeRuns = new Set<Promise<void>>();
   const failureLane = options.onMissionOversightFailureWakeRequested ? createMissionOversightFailureLane(db, {
     failureLaneIntervalMs: options.failureLaneIntervalMs,
     onMissionOversightFailureWakeRequested: options.onMissionOversightFailureWakeRequested,
@@ -52,7 +55,16 @@ export function createMissionOwnerSupervisionMonitor(
     onMissionOversightLivenessGhostWakeRequested: options.onMissionOversightLivenessGhostWakeRequested,
   }) : null;
 
-  async function run(): Promise<void> {
+  function trackRun(task: Promise<void>): Promise<void> {
+    activeRuns.add(task);
+    void task.then(
+      () => activeRuns.delete(task),
+      () => activeRuns.delete(task),
+    );
+    return task;
+  }
+
+  async function runCycle(): Promise<void> {
     if (running) return;
     running = true;
     try {
@@ -143,21 +155,53 @@ export function createMissionOwnerSupervisionMonitor(
     }
   }
 
+  function run(): Promise<void> {
+    return trackRun(runCycle());
+  }
+
+  function isCurrentAutomaticGeneration(generation: number): boolean {
+    return automaticAdmissionOpen && automaticGeneration === generation;
+  }
+
+  function runAutomatically(generation: number): void {
+    if (!isCurrentAutomaticGeneration(generation)) return;
+    void run();
+  }
+
+  async function drainOwnRuns(): Promise<void> {
+    while (activeRuns.size > 0) {
+      await Promise.allSettled([...activeRuns]);
+    }
+  }
+
+  async function drain(): Promise<void> {
+    await Promise.all([
+      drainOwnRuns(),
+      failureLane?.drain() ?? Promise.resolve(),
+      livenessLane?.drain() ?? Promise.resolve(),
+    ]);
+  }
+
   return {
     start() {
       if (timer) return;
-      timer = setInterval(() => void run(), intervalMs);
+      automaticAdmissionOpen = true;
+      const generation = ++automaticGeneration;
+      timer = setInterval(() => runAutomatically(generation), intervalMs);
       failureLane?.start();
       livenessLane?.start();
-      if (runImmediately) void run();
+      if (runImmediately) runAutomatically(generation);
     },
     stop() {
+      automaticAdmissionOpen = false;
+      automaticGeneration += 1;
       failureLane?.stop();
       livenessLane?.stop();
       if (!timer) return;
       clearInterval(timer);
       timer = null;
     },
+    drain,
     run,
   };
 }
