@@ -393,3 +393,11 @@
 - Fix candidate: PR #558 moves cohesive trigger preparation into a small module and restores the mission file to its original length; review and merge were pending when this was recorded.
 - Prevention rule: Compare each oversized legacy file with its base before editing and before the PR; do not grow it without an explicit exception.
 - Evidence: PR #555 and PR #558; `t16a-m09-structure-baseline.log` and `t16a-m09-structure-candidate.log` in the `c5-candidate-backups` workspace directory.
+
+### 2026-11-06 — process adapters must forward spawn metadata
+- Task: T16a M08, cross-process budget and cancellation race.
+- What failed: Two real process-adapter children were running, but both heartbeat rows had null process PIDs; another process could not use the recorded-PID cancellation path.
+- Root cause: The process adapter and its server wrapper omitted the existing `onSpawn` callback supplied by heartbeat.
+- Fix: Forward the callback through both layers; the isolated integration test verifies both recorded PIDs, cancellation after the records exist, the fail-closed conflict and retry after server drain, and another company's unaffected completion.
+- Prevention rule: When a local process adapter starts a child, forward its spawn callback through every wrapper and verify the database PID against the real child before relying on cross-process cancellation or recovery.
+- Evidence: `t16a-m08-diagnostic.log` and `t16a-m08-fix3.log` in the `c5-candidate-backups` workspace directory. Cancellation before asynchronous PID persistence and PID reuse were not tested.
