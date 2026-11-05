@@ -164,16 +164,18 @@ export function workflowWebhookRoutes(db: Db) {
 
     let binding: { runId: string; replay: boolean; missionId: string | null };
     try {
+      // Admission is durable even when validation or run preparation fails: it
+      // represents the delivery and its quota debit, not a successful run.
+      const { delivery } = await admitWebhookDelivery(db, {
+        companyId: config.companyId,
+        workflowId,
+        idempotencyKey,
+        quota: { max: 60, windowMs: 3_600_000 },
+      });
       binding = await db.transaction(async (tx) => {
         const t = tx as unknown as Db;
-        const { delivery } = await admitWebhookDelivery(t, {
-          companyId: config.companyId,
-          workflowId,
-          idempotencyKey,
-          quota: { max: 60, windowMs: 3_600_000 },
-        });
-        // The receipt lock also covers legacy receipts with no bound run. A concurrent
-        // insert or replay cannot create another run until this transaction commits.
+        // Lock both new and unbound existing receipts until creation and binding
+        // commit. A concurrent replay cannot create a second run.
         const [locked] = await tx.select().from(workflowWebhookDeliveries)
           .where(eq(workflowWebhookDeliveries.id, delivery.id)).for("update");
         if (!locked) throw new Error("webhook delivery receipt vanished before binding");

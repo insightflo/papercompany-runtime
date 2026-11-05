@@ -236,6 +236,17 @@ describeEP("workflow run input HTTP boundary", () => {
     expect(deliveries[0]!.runId).toBeNull();
     const after = await countCompanyRunState(db, fixture.companyId, heartbeatWakeup.mock.calls.length);
     expect(after).toEqual(before);
+    const corrected = await signedWebhookJson(
+      fixture,
+      { section: "manuals", url: "https://youtu.be/dQw4w9WgXcQ", videoId: "dQw4w9WgXcQ" },
+      "webhook-invalid-control-1",
+    );
+    expect(corrected.status).toBe(202);
+    const retried = await webhookDeliveriesByKey(db, "webhook-invalid-control-1");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]!.id).toBe(deliveries[0]!.id);
+    expect(retried[0]!.runId).toBe(corrected.body.runId);
+    expect((await countCompanyRunState(db, fixture.companyId, heartbeatWakeup.mock.calls.length)).runs).toBe(1);
   });
 
   it("webhook bad signature returns 401 without admission", async () => {
