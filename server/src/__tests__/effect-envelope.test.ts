@@ -178,4 +178,16 @@ describeEP("effect envelope (executeFencedEffect)", () => {
     expect(outcomes).toEqual(["executed", "skipped_replay"]);
     expect(execute).toHaveBeenCalledTimes(1);
   });
+
+  it("preserves an unstarted deferral without recording it as an execution error", async () => {
+    const deferred = new Error("deferred"), input = {
+      ...baseInput(), effectKind: "test.effect.deferred", attemptRunId: "run-deferred",
+      execute: async () => { throw deferred; }, isDeferredBeforeStart: (error: unknown) => error === deferred,
+    };
+    await expect(executeFencedEffect(db, input)).rejects.toBe(deferred);
+    const { row } = await recordEffectIntent(db, input);
+    expect(row.status).toBe("intent");
+    expect(row.resultSummary).toBeNull();
+    expect(row.attemptRunId).toBe("run-deferred");
+  });
 });

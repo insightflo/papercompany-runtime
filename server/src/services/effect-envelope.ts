@@ -60,6 +60,7 @@ export type FencedEffectResult<T> =
 export type ExecuteFencedEffectInput<T> = RecordEffectIntentInput & {
   execute: () => Promise<T>;
   resultSummary?: Record<string, unknown>;
+  isDeferredBeforeStart?: (error: unknown) => boolean;
 };
 
 /** 키 순서와 무관한 정규화 JSON — 자연키의 결정성을 보장한다. */
@@ -201,6 +202,7 @@ export async function executeFencedEffect<T>(
   try {
     value = await input.execute();
   } catch (error) {
+    if (input.isDeferredBeforeStart?.(error)) throw error;
     const message = error instanceof Error ? error.message : String(error);
     await db
       .update(effectIntents)
