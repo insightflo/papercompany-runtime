@@ -18,9 +18,11 @@
 import type { ErrorRequestHandler, Request, Response } from "express";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
-import { workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { workflowRuns, workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
 import { logActivity } from "../services/activity-log.js";
+import { logger } from "../middleware/logger.js";
+import { ensureMissionWorkingNote } from "../services/missions/mission-working-note.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import {
@@ -160,62 +162,69 @@ export function workflowWebhookRoutes(db: Db) {
       throw badRequest("Body must be a JSON object");
     }
 
-    let delivery;
-    let replay: boolean;
+    let binding: { runId: string; replay: boolean; missionId: string | null };
     try {
-      const admitted = await admitWebhookDelivery(db, {
-        companyId: config.companyId,
-        workflowId,
-        idempotencyKey,
-        quota: { max: 60, windowMs: 3_600_000 },
+      binding = await db.transaction(async (tx) => {
+        const t = tx as unknown as Db;
+        const { delivery } = await admitWebhookDelivery(t, {
+          companyId: config.companyId,
+          workflowId,
+          idempotencyKey,
+          quota: { max: 60, windowMs: 3_600_000 },
+        });
+        // The receipt lock also covers legacy receipts with no bound run. A concurrent
+        // insert or replay cannot create another run until this transaction commits.
+        const [locked] = await tx.select().from(workflowWebhookDeliveries)
+          .where(eq(workflowWebhookDeliveries.id, delivery.id)).for("update");
+        if (!locked) throw new Error("webhook delivery receipt vanished before binding");
+        if (locked.runId) return { runId: locked.runId, replay: true, missionId: null };
+        const prepared = await workflowService.prepareTrigger(t, {
+          workflowId,
+          companyId: config.companyId,
+          triggerSource: "webhook",
+          triggeredBy: "webhook",
+          metadata: payload,
+        }, { legacyTextRequired: true }, { deferWorkingNote: true });
+        await tx.update(workflowWebhookDeliveries).set({ runId: prepared.run.id })
+          .where(eq(workflowWebhookDeliveries.id, locked.id));
+        return { runId: prepared.run.id, replay: false, missionId: prepared.run.missionId };
       });
-      delivery = admitted.delivery;
-      replay = admitted.replay;
     } catch (error) {
       if (error instanceof WebhookQuotaExceededError) {
         res.status(429).json({ error: error.message });
         return;
       }
-      throw error;
-    }
-
-    if (replay && delivery.runId) {
-      res.status(202).json({ runId: delivery.runId, idempotencyKey });
-      return;
-    }
-
-    // [runInputs] 필수/파생/검증은 엔진 trigger 경계에서 공통 수행한다. 웹훅만 내부
-    // 정책 {legacyTextRequired:true}를 세 번째 인자로 전달한다(공개 플래그 아님,
-    // triggerSource 추론 아님). 원본 payload를 그대로 metadata로 넘긴다.
-    let result;
-    try {
-      result = await workflowService.trigger(db, {
-        workflowId,
-        companyId: config.companyId,
-        triggerSource: "webhook",
-        triggeredBy: "webhook",
-        metadata: payload,
-      }, { legacyTextRequired: true });
-    } catch (error) {
       translateWorkflowDomainError(error);
     }
 
-    await db
-      .update(workflowWebhookDeliveries)
-      .set({ runId: result.runId })
-      .where(eq(workflowWebhookDeliveries.id, delivery.id));
+    const [boundRun] = await db.select({ status: workflowRuns.status, missionId: workflowRuns.missionId })
+      .from(workflowRuns).where(and(eq(workflowRuns.id, binding.runId),
+        eq(workflowRuns.companyId, config.companyId), eq(workflowRuns.workflowId, workflowId),
+        eq(workflowRuns.triggerSource, "webhook"))).limit(1);
+    // A replay after a crash between commit and start may start the same pending run.
+    // claimPlainWorkflowStart serializes concurrent starts of that run.
+    if (!binding.replay || boundRun?.status === "pending") {
+      const missionId = binding.missionId ?? boundRun?.missionId;
+      if (missionId) {
+        try { await ensureMissionWorkingNote({ companyId: config.companyId, missionId }); }
+        catch (err) { logger.warn({ err, missionId, companyId: config.companyId }, "failed to provision mission working note at create"); }
+      }
+      try { await workflowService.startPreparedRun(db, binding.runId); }
+      catch (error) { translateWorkflowDomainError(error); }
+    }
+    if (!binding.replay) {
+      await logActivity(db, {
+        companyId: config.companyId,
+        actorType: "system",
+        actorId: "webhook",
+        action: "workflow_run.created",
+        entityType: "workflow_run",
+        entityId: binding.runId,
+        details: { triggerSource: "webhook", idempotencyKey },
+      });
+    }
 
-    await logActivity(db, {
-      companyId: config.companyId,
-      actorType: "system",
-      actorId: "webhook",
-      action: "workflow_run.created",
-      entityType: "workflow_run",
-      entityId: result.runId,
-      details: { triggerSource: "webhook", idempotencyKey },
-    });
-
-    res.status(202).json({ runId: result.runId, idempotencyKey });
+    res.status(202).json({ runId: binding.runId, idempotencyKey });
   });
 
   return router;
