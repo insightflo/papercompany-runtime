@@ -110,7 +110,7 @@ import {
   queuePausedAgentWakeupRequest,
 } from "./quality/heartbeat-admission.js";
 import { isBoundedExecutionWakeKey } from "./quality/native-wake.js";
-import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
+import { agentWikiService, formatWikiLessons } from "./agent-wiki.js";
 import {
   formatKnowledgePatternCards,
   injectionGroupFor,
@@ -148,7 +148,7 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import {
   configureInstantWorkflowAdvanceDb,
-  requestInstantWorkflowAdvance,
+  fireInstantWorkflowAdvanceForTerminalRun,
 } from "./workflow/instant-advance.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
@@ -467,27 +467,7 @@ type SessionCompactionDecision = {
 
 export { prioritizeProjectWorkspaceCandidatesForRun };
 
-/**
- * [instant-advance v1.2] 종말 확정된 런이 워크플로우 런에 속하면(contextSnapshot.workflowRunId)
- *   즉시 진행을 요청한다 — fire-and-forget(fireWikiRecord 와 동일 non-blocking 패턴). 훅 실패가
- *   런 완료 경로에 영향을 주지 않도록 전체를 try/catch 로 감싼다. 게이트 off 면 모듈 내부에서
- *   no-op 다(PAPERCLIP_WORKFLOW_INSTANT_ADVANCE).
- * [수정시 영향] 호출부는 런 종결 확정 지점 3곳(정상 outcome / inner catch / outer catch).
- */
-function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnapshot: unknown }): void {
-  try {
-    const workflowRunId = readNonEmptyString(
-      parseObject(run.contextSnapshot)["workflowRunId"],
-    );
-    if (!workflowRunId) return;
-    requestInstantWorkflowAdvance(workflowRunId);
-  } catch (err) {
-    logger.warn(
-      { err, runId: run.id, tag: "instant-advance" },
-      "failed to request instant workflow advance for terminal run",
-    );
-  }
-}
+
 
 
 
@@ -633,36 +613,11 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
 }
 
 
-export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
-  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  return extractClaimedArtifactPathsFromText(text);
-}
 
 
 
-/**
- * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
- *   recordFailure를 await하지 않고 .catch로 에러를 삼켜, wiki 로깅이 절대 main flow를
- *   깨뜨리지 않도록 한다(activity-log.ts의 plugin event fanout .catch 선례와 동일 패턴).
- * [입력] wiki: agentWikiService(db) 인스턴스. input: RecordFailureInput. runIdForLog: 로깅용 run id.
- * [수정시 영향] 호출부는 모두 heartbeatService 클로저 내부. 에러는 logger.warn으로만 남는다.
- */
-function fireWikiRecord(
-  wiki: ReturnType<typeof agentWikiService>,
-  input: RecordFailureInput,
-  runIdForLog?: string,
-): void {
-  void wiki
-    .recordFailure(input)
-    .catch((err: unknown) =>
-      logger.warn(
-        { err, runId: runIdForLog, pattern: input.pattern },
-        "agent-wiki.recordFailure non-blocking failure",
-      ),
-    );
-}
+
+
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const c5OwnerRuntime = bindHeartbeatC5OwnerRuntime(db, options.qaCorrectionExecution?.ownerRuntime);
@@ -8767,7 +8722,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   };
 }
 import { isPgUniqueViolation } from "./pg-error.js";
-import { stringifyRunResultJson } from "./heartbeat-run-result-text.js";
 import { isHermesOperationsLiaisonAgent, isMissionOwnerControlIssue, canCreateMissionOwnerUnblockForRequestChanges, resolveMissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
 export { type MissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
 import { canApplyMissingWorkProductRegistrationGate, resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
@@ -8789,6 +8743,9 @@ import { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
 import { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
 import { containsToolLimitLifecycleFailure } from "./heartbeat-failure-classification.js";
 import { isTrackedLocalChildProcessAdapter } from "./heartbeat-process-liveness.js";
+import { fireWikiRecord } from "./heartbeat-failure-wiki.js";
+import { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
+export { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
 export { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
 export { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
 export { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
