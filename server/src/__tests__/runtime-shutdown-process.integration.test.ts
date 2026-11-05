@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -99,6 +100,13 @@ describe("runtime shutdown with real child process", () => {
     }, "queued QA intent");
     const activeRuns = await f.db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.status, "running"));
     expect(activeRuns.map((row) => row.id)).toEqual([s.runId]);
+    const productId = s.nativeProducer!.proof.productId!;
+    const originalBytes = await readFile(s.content);
+    const originalHash = createHash("sha256").update(originalBytes).digest("hex");
+    const producerHeartbeat = await s.nativeProducer!.heartbeatRun();
+    const [productBefore] = await f.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, productId));
+    expect(productBefore).toMatchObject({ companyId: s.companyId, issueId: s.producerIssueId,
+      createdByRunId: producerHeartbeat!.id });
     const pinsBefore = await f.db.select().from(workflowStepOutputBindings).where(eq(workflowStepOutputBindings.consumerStepRunId, original.id));
     const lock = await f.holdWorkflowStepRun(original.id);
     const server = await f.startServer();
@@ -128,6 +136,16 @@ describe("runtime shutdown with real child process", () => {
         executionGeneration: original.executionGeneration } },
     ]);
     expect((await f.events(s.eventsFile)).filter((row) => row.event === "started")).toHaveLength(1);
+    const completed = await s.qaStep();
+    expect(completed).toMatchObject({ id: original.id, status: "completed", lastDispatchRequestId: original.lastDispatchRequestId,
+      executionGeneration: original.executionGeneration, metadata: { toolArtifactReceipt: {
+        companyId: s.companyId, missionId: s.missionId, workflowRunId: s.runId, stepRunId: original.id,
+        requestId: original.lastDispatchRequestId, input: { workProductId: productId, path: s.content, sha256: originalHash },
+      } } });
+    const pinsAfter = await f.db.select().from(workflowStepOutputBindings).where(eq(workflowStepOutputBindings.consumerStepRunId, original.id));
+    expect(pinsAfter).toEqual([expect.objectContaining({ companyId: s.companyId, workflowRunId: s.runId,
+      consumerStepRunId: original.id, referencedStepId: "producer", workProductId: productId })]);
+    expect(await readFile(s.content)).toEqual(originalBytes);
     await expectRetryBudgetPreserved(s);
     restarted.signal("SIGTERM"); expect((await restarted.waitExit()).code).toBe(0);
     expect((await s.qaStep()).retryCount).toBe(0);
@@ -145,6 +163,15 @@ describe("runtime shutdown with real child process", () => {
     await f.waitFor(async () => (await f.db.select().from(workflowRuns).where(eq(workflowRuns.id, nextTick.runId)))[0]?.status === "completed" ? true : null,
       "post-replay workflow run completion");
     expect((await f.events(s.eventsFile)).filter((row) => row.event === "started")).toHaveLength(1);
+    expect((await s.nativeProducer!.records()).filter(row => row.event === "started")).toHaveLength(1);
+    expect(await f.db.select().from(workflowStepOutputBindings).where(eq(workflowStepOutputBindings.consumerStepRunId, original.id))).toEqual(pinsAfter);
+    expect(await readFile(s.content)).toEqual(originalBytes);
+    expect((await f.db.select().from(issueWorkProducts).where(eq(issueWorkProducts.id, productId)))[0]).toEqual(productBefore);
+    expect((await f.db.select().from(workflowRuns).where(eq(workflowRuns.id, s.runId)))[0]?.status).toBe("completed");
+    console.info("T16A_M10_EVIDENCE", JSON.stringify({ companyId: s.companyId, missionId: s.missionId,
+      workflowRunId: s.runId, producerIssueId: s.producerIssueId, productId, consumerStepRunId: original.id,
+      requestId: original.lastDispatchRequestId, executionGeneration: original.executionGeneration,
+      contentSha256: originalHash, producerCalls: 1, consumerCalls: 1, secondRestartObserved: true }));
     expect((await missionCompleted(nextTick))?.status).toBe("completed");
     secondRestart.signal("SIGTERM"); expect((await secondRestart.waitExit()).code).toBe(0);
   }, 180_000);
