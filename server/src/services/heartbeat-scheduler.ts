@@ -39,6 +39,7 @@ export type HeartbeatSchedulerOptions = {
 export type HeartbeatScheduler = {
   start(): void;
   stop(): void;
+  drain(): Promise<void>;
 };
 
 type Lane = "timer" | "routine" | "recovery";
@@ -61,6 +62,17 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
   let timerHandle: ReturnType<typeof setInterval> | null = null;
   let routineHandle: ReturnType<typeof setInterval> | null = null;
   let recoveryHandle: ReturnType<typeof setInterval> | null = null;
+  let timerGeneration = 0;
+  const activeTasks = new Set<Promise<unknown>>();
+
+  const trackTask = <T>(task: Promise<T>): Promise<T> => {
+    activeTasks.add(task);
+    void task.then(
+      () => activeTasks.delete(task),
+      () => activeTasks.delete(task),
+    );
+    return task;
+  };
   const laneFlights: Record<Lane, number> = {
     timer: 0,
     routine: 0,
@@ -83,7 +95,7 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
 
     // timer/routine lane 은 기존 동작 유지: 이전 tick 이 끝날 때까지 skip(타임아웃 없음).
     if (lane !== "recovery") {
-      void Promise.resolve()
+      trackTask(Promise.resolve()
         .then(task)
         .catch((err) => {
           const message = lane === "timer" ? "heartbeat timer tick failed" : "routine scheduler tick failed";
@@ -91,7 +103,7 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
         })
         .finally(() => {
           inFlight[lane] = false;
-        });
+        }));
       return;
     }
 
@@ -105,14 +117,14 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
     // 반드시 멱등이라고 보장되지는 않는다(release+promote 경로는 lock_timeout/statement_timeout/
     // SKIP LOCKED 로 bounded 를 강화했으나, 그 외 경로의 멱등성은 별도 검증 필요).
     const flight = ++laneFlights.recovery;
-    const laneTask = Promise.resolve().then(task);
+    const laneTask = trackTask(Promise.resolve().then(task));
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     const timeoutTask = new Promise<"timeout">((resolve) => {
       timeoutHandle = setTimeout(() => resolve("timeout"), laneTimeoutMs.recovery);
       timeoutHandle.unref?.();
     });
 
-    void Promise.race([
+    const laneLifecycle = Promise.race([
       laneTask.then(() => "completed" as const),
       timeoutTask,
     ])
@@ -128,6 +140,12 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (laneFlights.recovery === flight) inFlight.recovery = false;
       });
+    trackTask(laneLifecycle);
+  };
+
+  const runAutomaticLane = (generation: number, lane: Lane, task: () => Promise<void>) => {
+    if (!running || timerGeneration !== generation) return;
+    runLane(lane, task);
   };
 
   const tickTimers = async () => {
@@ -176,12 +194,13 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
     start() {
       if (running) return;
       running = true;
+      const generation = ++timerGeneration;
 
-      runLane("recovery", () => recover());
-      timerHandle = setInterval(() => runLane("timer", tickTimers), opts.timerIntervalMs);
-      routineHandle = setInterval(() => runLane("routine", tickRoutines), routineIntervalMs);
+      runAutomaticLane(generation, "recovery", () => recover());
+      timerHandle = setInterval(() => runAutomaticLane(generation, "timer", tickTimers), opts.timerIntervalMs);
+      routineHandle = setInterval(() => runAutomaticLane(generation, "routine", tickRoutines), routineIntervalMs);
       recoveryHandle = setInterval(
-        () => runLane("recovery", () => recover(recoveryStaleThresholdMs)),
+        () => runAutomaticLane(generation, "recovery", () => recover(recoveryStaleThresholdMs)),
         recoveryIntervalMs,
       );
     },
@@ -189,12 +208,19 @@ export function createHeartbeatScheduler(opts: HeartbeatSchedulerOptions): Heart
     stop() {
       if (!running) return;
       running = false;
+      timerGeneration += 1;
       if (timerHandle) clearInterval(timerHandle);
       if (routineHandle) clearInterval(routineHandle);
       if (recoveryHandle) clearInterval(recoveryHandle);
       timerHandle = null;
       routineHandle = null;
       recoveryHandle = null;
+    },
+
+    async drain() {
+      while (activeTasks.size > 0) {
+        await Promise.allSettled([...activeTasks]);
+      }
     },
   };
 }
