@@ -243,11 +243,24 @@ describe("observed plugin tool routing", () => {
       { ...identity, executionId: " run-1 " },
     ]) expect(() => f.dispatcher.executeToolObserved(TOOL, {}, context, bad)).toThrow();
     expect(() => f.dispatcher.executeToolObserved("bad", {}, context, identity)).toThrow('Invalid tool name "bad"');
-    expect(() => f.dispatcher.executeToolObserved("fixture.plugin:missing", {}, context, identity)).toThrow("is not registered");
+    expect(f.dispatcher.executeToolObserved("fixture.plugin:missing", {}, context, identity)).toEqual({
+      kind: "definitely_unsent", pluginId: "fixture.plugin", toolName: "missing", identity,
+    });
     await expect(f.dispatcher.executeTool("bad", {}, context)).rejects.toThrow('Invalid tool name "bad"');
     await expect(f.dispatcher.executeTool("fixture.plugin:missing", {}, context)).rejects.toThrow("is not registered");
     expect(f.observeTool).not.toHaveBeenCalled();
     expect(f.call).not.toHaveBeenCalled();
+  });
+
+  it("reports unregister and missing-manager failures as definitely unsent", () => {
+    const f = fixture();
+    f.dispatcher.unregisterPluginTools("fixture.plugin");
+    expect(f.dispatcher.executeToolObserved(TOOL, {}, context, identity)).toMatchObject({ kind: "definitely_unsent", identity });
+    expect(f.observeTool).not.toHaveBeenCalled();
+    const noManager = createPluginToolDispatcher();
+    noManager.registerPluginTools("fixture.plugin", { tools: [{ name: "publish", displayName: "Publish",
+      description: "Fixture", parametersSchema: { type: "object" } }] } as never, DB_ID);
+    expect(noManager.executeToolObserved(TOOL, {}, context, identity)).toMatchObject({ kind: "definitely_unsent", identity });
   });
 
   it("keeps two simultaneous call identities, contexts and observations isolated", async () => {
