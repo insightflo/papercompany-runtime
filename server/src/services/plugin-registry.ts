@@ -26,6 +26,7 @@ import type {
   PluginWebhookDeliveryStatus,
 } from "@paperclipai/shared";
 import { conflict, notFound } from "../errors.js";
+import { withPluginPurgeGuard } from "./plugin-purge-guard.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -252,18 +253,16 @@ export function pluginRegistryService(db: Db) {
      * a soft-delete that preserves the record.
      */
     uninstall: async (id: string, removeData = false) => {
-      const plugin = await getById(id);
-      if (!plugin) throw notFound("Plugin not found");
-
       if (removeData) {
-        // Hard delete – plugin_config cascades via FK onDelete
-        return db
-          .delete(plugins)
-          .where(eq(plugins.id, id))
-          .returning()
-          .then((rows) => rows[0] ?? null);
+        return withPluginPurgeGuard(db, {
+          pluginId: id,
+          mode: "plugin",
+          delete: async (tx) => (await tx.delete(plugins).where(eq(plugins.id, id)).returning())[0] ?? null,
+        });
       }
 
+      const plugin = await getById(id);
+      if (!plugin) throw notFound("Plugin not found");
       // Soft delete – mark as uninstalled
       return db
         .update(plugins)

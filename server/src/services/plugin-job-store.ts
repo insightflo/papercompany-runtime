@@ -39,6 +39,7 @@ import type {
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { pluginJobRunStore } from "./plugin-job-run-store.js";
+import { withPluginPurgeGuard } from "./plugin-purge-guard.js";
 export type { CompleteJobRunInput, CreateJobRunInput } from "./plugin-job-run-store.js";
 
 /**
@@ -294,17 +295,13 @@ export function pluginJobStore(db: Db) {
         .where(eq(pluginJobs.id, jobId));
     },
 
-    /**
-     * Delete all jobs (and cascaded runs) owned by a plugin.
-     *
-     * Called during plugin uninstall when `removeData = true`.
-     *
-     * @param pluginId - UUID of the owning plugin
-     */
+    /** Delete all jobs owned by a plugin after guarded run checks. */
     async deleteAllJobs(pluginId: string): Promise<void> {
-      await db
-        .delete(pluginJobs)
-        .where(eq(pluginJobs.pluginId, pluginId));
+      await withPluginPurgeGuard(db, {
+        pluginId,
+        mode: "jobs",
+        delete: async (tx) => { await tx.delete(pluginJobs).where(eq(pluginJobs.pluginId, pluginId)); },
+      });
     },
 
     ...runStore,
