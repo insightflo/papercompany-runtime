@@ -118,32 +118,23 @@ describe("plugin shutdown start boundary", () => {
     });
   });
 
-  it("passes the claimed workflow identity to the plugin start boundary", async () => {
-    const executeTool = vi.fn().mockResolvedValue(deferredResult());
+  it("passes the claimed workflow request to the retained plugin consumer", async () => {
+    const consume = vi.fn().mockResolvedValue({ accepted: true });
     const run = createAppWorkflowToolStepExecutor({
       db: {} as Db,
-      toolDispatcher: { getTool: vi.fn(() => ({})), executeTool } as never,
+      toolDispatcher: { getTool: vi.fn(() => ({})), executeToolObserved: vi.fn() } as never,
+      pluginToolConsumer: consume,
       completeToolStep: vi.fn(),
       resolveStepEnv: vi.fn(),
     });
-
-    await expect(run({
-      companyId: COMPANY_ID,
-      workflowRunId: workflowIdentity.executionId,
-      workflowId: "workflow-1",
-      stepId: "publish",
-      stepRunId: workflowIdentity.attemptId,
-      toolName: TOOL,
-      args: {},
-      requestId: workflowIdentity.requestId,
+    const request = {
+      companyId: COMPANY_ID, workflowRunId: workflowIdentity.executionId,
+      workflowId: "workflow-1", stepId: "publish", stepRunId: workflowIdentity.attemptId,
+      toolName: TOOL, args: {}, requestId: workflowIdentity.requestId,
       executionGeneration: workflowIdentity.executionGeneration,
-    })).resolves.toEqual({ deferredBeforeStart });
-    expect(executeTool).toHaveBeenCalledWith(
-      TOOL,
-      {},
-      expect.objectContaining({ runId: workflowIdentity.executionId, companyId: COMPANY_ID }),
-      workflowIdentity,
-    );
+    };
+    await expect(run(request)).resolves.toEqual({ accepted: true });
+    expect(consume).toHaveBeenCalledWith(request);
   });
 
   it("preserves a plugin result that started before shutdown", async () => {
