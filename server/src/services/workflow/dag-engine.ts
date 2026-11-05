@@ -72,6 +72,11 @@ import { recheckValidationStepIssues } from "./workflow-validation-recheck.js";
 import { finalizeWorkflowRunState } from "./workflow-run-finalization.js";
 import { acceptWorkflowToolResult } from "./workflow-tool-result-acceptance.js";
 import { deferredBeforeStartSchema, type DeferredBeforeStart } from "../runtime-execution-lifecycle.js";
+import type { OriginalWorkflowAuthority } from "../plugin-tool-execution-receipt.js";
+import { validRequest } from "../plugin-tool-receipt-envelope.js";
+import { bindRetainedWorkflowTool as bindRetainedWorkflowToolPrimitive, finalizeRetainedWorkflowTool as finalizeRetainedWorkflowToolPrimitive } from "./retained-tool-completion.js";
+import { releaseRetainedWorkflowToolUnsent as releaseRetainedWorkflowToolUnsentPrimitive, type RetainedWorkflowUnsentReleaseResult } from "./retained-tool-unsent-release.js";
+import { captureWorkflowToolStepOriginalAuthority } from "./tool-claim-orphan-reconciliation.js";
 import { reconcileOrphanedWorkflowToolStepClaims as reconcileOrphanedToolClaims, type OrphanedWorkflowToolClaim, type OrphanedWorkflowToolClaimWork } from "./tool-claim-orphan-reconciliation.js";
 export { wakeExistingWorkflowStepIssue };
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
@@ -295,6 +300,7 @@ export type WorkflowToolStepExecutionRequest = {
   requestId: string;
   /** Current claimed generation for exact deferred-start scope matching. */
   executionGeneration: number;
+  originalAuthority?: OriginalWorkflowAuthority;
   agentId?: string;
   agentName?: string;
 };
@@ -303,8 +309,31 @@ export type WorkflowToolStepExecutionResult = {
   accepted?: boolean;
   duplicate?: boolean;
   deferredBeforeStart?: DeferredBeforeStart;
+  retainedUnsentRelease?: RetainedWorkflowUnsentReleaseResult;
 };
 
+function validRetainedUnsentRelease(value: unknown, request: WorkflowToolStepExecutionRequest, authority: OriginalWorkflowAuthority): value is RetainedWorkflowUnsentReleaseResult {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("kind" in value) ||
+      !("receiptId" in value) || !("workflow" in value)) return false;
+  const kind = value.kind;
+  if (kind !== "released" && kind !== "held") return false;
+  const keys = Object.keys(value).sort().join(",");
+  if (keys !== (kind === "released" ? "kind,receiptId,workflow" : "kind,reason,receiptId,workflow") ||
+      (kind === "held" && (!("reason" in value) || typeof value.reason !== "string" || !value.reason.trim())) ||
+      !same(request.originalAuthority, authority) || authority.workflowRunId !== request.workflowRunId ||
+      authority.stepRunId !== request.stepRunId || authority.stepId !== request.stepId || authority.requestId !== request.requestId) return false;
+  const probe = { kind: "paperclip.retained-tool-request", version: 1, receiptId: value.receiptId, consumer: "workflow",
+    companyId: request.companyId, tool: request.toolName, parameters: request.args ?? {},
+    identity: { runId: request.workflowRunId, idempotencyKey: request.requestId }, workflow: value.workflow };
+  return validRequest(probe) && !!probe.workflow &&
+    same(retainedWorkflowAuthorityBase(probe.workflow), retainedWorkflowAuthorityBase(authority));
+}
+
+function retainedWorkflowAuthorityBase(value: OriginalWorkflowAuthority) {
+  const base = { ...value };
+  delete base.specialized;
+  return base;
+}
 export type WorkflowToolStepExecutor = (
   request: WorkflowToolStepExecutionRequest,
 ) => Promise<WorkflowToolStepExecutionResult | void>;
@@ -2319,7 +2348,10 @@ export async function processQueuedWorkflowToolStepRuns(
 
       const persistedStep = step as PersistedWorkflowStep;
       const agentName = typeof persistedStep.agentName === "string" ? persistedStep.agentName.trim() : undefined;
-      const dispatchResult = await workflowToolStepExecutor({
+      const originalAuthority = captureWorkflowToolStepOriginalAuthority({
+        run: row.run, stepRun: claimedStepRun, requestId,
+      });
+      const executionRequest: WorkflowToolStepExecutionRequest = {
         companyId: row.run.companyId,
         workflowRunId: row.run.id,
         workflowId: row.definition.id,
@@ -2329,11 +2361,25 @@ export async function processQueuedWorkflowToolStepRuns(
         args,
         requestId,
         executionGeneration: claimedStepRun.executionGeneration,
+        originalAuthority: structuredClone(originalAuthority),
         agentId: (typeof step.agentId === "string" && step.agentId.trim())
           ? step.agentId.trim()
           : (typeof step.assigneeAgentId === "string" ? step.assigneeAgentId.trim() : undefined),
         agentName,
-      });
+      };
+      const expectedRequest = structuredClone(executionRequest);
+      const dispatchResult = await workflowToolStepExecutor(executionRequest);
+      if (dispatchResult && Object.prototype.hasOwnProperty.call(dispatchResult, "retainedUnsentRelease")) {
+        const contradictory = dispatchResult.accepted !== true || dispatchResult.duplicate === true ||
+          Object.prototype.hasOwnProperty.call(dispatchResult, "deferredBeforeStart");
+        if (contradictory || !validRetainedUnsentRelease(dispatchResult.retainedUnsentRelease,
+          expectedRequest, originalAuthority)) {
+          logger.warn({ workflowRunId: row.run.id, stepRunId: claimedStepRun.id, requestId },
+            "Retained workflow tool release result was invalid; leaving the claim held");
+        }
+        result.skippedCount += 1;
+        continue;
+      }
       if (dispatchResult?.deferredBeforeStart) {
         try {
           await releaseDeferredWorkflowToolClaim({
@@ -2448,6 +2494,32 @@ export async function completeWorkflowToolStepFromResult(
     syncWorkflowRunState,
   });
 }
+export function bindRetainedWorkflowTool(
+  db: Db,
+  scope: Parameters<typeof bindRetainedWorkflowToolPrimitive>[1],
+): ReturnType<typeof bindRetainedWorkflowToolPrimitive> {
+  return bindRetainedWorkflowToolPrimitive(db, scope);
+}
+
+export function finalizeRetainedWorkflowTool(
+  db: Db,
+  owner: Parameters<typeof finalizeRetainedWorkflowToolPrimitive>[1],
+  actual: Parameters<typeof finalizeRetainedWorkflowToolPrimitive>[2],
+): ReturnType<typeof finalizeRetainedWorkflowToolPrimitive> {
+  return finalizeRetainedWorkflowToolPrimitive(db, owner, actual, {
+    normalizeRecord,
+    getMetadataRecord,
+    readMetadataString,
+    buildWorkflowStepRunMetadata,
+    syncWorkflowRunStateWithOutcome,
+  });
+}
+
+export function releaseRetainedWorkflowToolUnsent(db: Db, owner: Parameters<typeof releaseRetainedWorkflowToolUnsentPrimitive>[1],
+  proof: Parameters<typeof releaseRetainedWorkflowToolUnsentPrimitive>[2]): ReturnType<typeof releaseRetainedWorkflowToolUnsentPrimitive> {
+  return releaseRetainedWorkflowToolUnsentPrimitive(db, owner, proof);
+}
+
 export async function retryIssueLessToolWorkflowStep(
   db: Db,
   input: { companyId: string; runId: string; stepId: string; recoveryRequestReference?: string | null; expectedFailure?: ExpectedToolFailure; validateIntent?: (tx: Db) => Promise<boolean>; qaRebind?: QaRebindRecoveryIntent },
