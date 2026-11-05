@@ -32,13 +32,23 @@ export function createMissionOversightFailureLane(db: Db, options: FailureLaneOp
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
   let lifecycle = 0;
+  const activeRuns = new Set<Promise<void>>();
   // Retain DB microseconds, not JS Date's truncated milliseconds. The sealed
   // watermark is strictly excluded; full pages need a tie-breaking continuation
   // until the entire final timestamp bucket has been consumed.
   let watermark = new Date(Date.now() - LOOKBACK_MS).toISOString();
   let cursor: { at: string; id: string } | null = null;
 
-  async function run(): Promise<void> {
+  function trackRun(task: Promise<void>): Promise<void> {
+    activeRuns.add(task);
+    void task.then(
+      () => activeRuns.delete(task),
+      () => activeRuns.delete(task),
+    );
+    return task;
+  }
+
+  async function runTick(): Promise<void> {
     if (running) return;
     running = true;
     const epoch = lifecycle;
@@ -109,16 +119,31 @@ export function createMissionOversightFailureLane(db: Db, options: FailureLaneOp
     }
   }
 
+  function run(): Promise<void> {
+    return trackRun(runTick());
+  }
+
+  async function drain(): Promise<void> {
+    while (activeRuns.size > 0) {
+      await Promise.allSettled([...activeRuns]);
+    }
+  }
+
   return {
     start() {
       if (timer) return;
-      timer = setInterval(() => void run(), intervalMs);
+      const generation = lifecycle;
+      timer = setInterval(() => {
+        if (generation !== lifecycle) return;
+        void run();
+      }, intervalMs);
     },
     stop() {
       if (timer) clearInterval(timer);
       timer = null;
       lifecycle++; // An already-awaiting tick must not wake an owner after stop.
     },
+    drain,
     run,
   };
 }
