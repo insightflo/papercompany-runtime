@@ -44,7 +44,7 @@ import type {
   InitializeParams,
 } from "@paperclipai/plugin-sdk";
 import { logger } from "../middleware/logger.js";
-import { createJobRetention, createWorkerRpc, type ObservedJob, type PendingRequest } from "./plugin-job-rpc.js";
+import { createJobRetention, createWorkerRpc, type ObservedJob, type ObservedTool, type PendingRequest } from "./plugin-job-rpc.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -235,6 +235,7 @@ export interface PluginWorkerHandle {
   notify(method: string, params: unknown): void;
 
   observeJob(params: HostToWorkerMethods["runJob"][0], timeoutMs?: number): ObservedJob;
+  observeTool(params: HostToWorkerMethods["executeTool"][0], timeoutMs?: number): ObservedTool;
   drainJobs(): Promise<void>;
   retainedJobCount(): number;
 
@@ -317,6 +318,7 @@ export interface PluginWorkerManager {
   diagnostics(): WorkerDiagnostics[];
 
   observeJob(pluginId: string, params: HostToWorkerMethods["runJob"][0], timeoutMs?: number): ObservedJob;
+  observeTool(pluginId: string, params: HostToWorkerMethods["executeTool"][0], timeoutMs?: number): ObservedTool;
   /** Call after closing admission; waits through RPC settlement and DB acknowledgement. */
   drainJobs(): Promise<void>;
   retainedJobCount(): number;
@@ -1049,6 +1051,10 @@ export function createPluginWorkerHandle(
       if (stopRequested || status !== "running") return { kind: "definitely_unsent" };
       return rpc.observeJob(params, timeoutMs);
     },
+    observeTool(params, timeoutMs) {
+      if (stopRequested || status !== "running") return { kind: "definitely_unsent" };
+      return rpc.observeTool(params, timeoutMs);
+    },
     drainJobs: () => jobRetention.drain(),
     retainedJobCount: () => jobRetention.count(),
 
@@ -1057,6 +1063,9 @@ export function createPluginWorkerHandle(
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
     ): Promise<HostToWorkerMethods[M][1]> {
+      if (method === "executeTool" && stopRequested) {
+        return Promise.reject(new Error(`Cannot call "${method}" — worker for "${pluginId}" is stopping`));
+      }
       if (status !== "running" && status !== "starting") {
         return Promise.reject(
           new Error(
@@ -1273,6 +1282,9 @@ export function createPluginWorkerManager(
 
     observeJob(pluginId, params, timeoutMs) {
       return workers.get(pluginId)?.observeJob(params, timeoutMs) ?? { kind: "definitely_unsent" };
+    },
+    observeTool(pluginId, params, timeoutMs) {
+      return workers.get(pluginId)?.observeTool(params, timeoutMs) ?? { kind: "definitely_unsent" };
     },
     async drainJobs() {
       await Promise.all([...workers.values()].map((handle) => handle.drainJobs()));
