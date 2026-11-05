@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, or } from "drizzle-orm";
 import { pluginJobRuns, pluginJobs, type Db } from "@paperclipai/db";
 import type { PluginJobRunStatus, PluginJobRunTrigger } from "@paperclipai/shared";
-import { notFound } from "../errors.js";
+import { admitScheduledRun, finalizeClaimedRun, type ClaimedRunCompletion } from "./plugin-job-scheduled-store.js";
 
 export interface CreateJobRunInput {
   jobId: string;
@@ -15,6 +15,16 @@ export interface CompleteJobRunInput {
   error?: string | null;
   durationMs?: number | null;
 }
+
+const replayable = () => and(
+  eq(pluginJobRuns.status, "queued"),
+  isNull(pluginJobRuns.startedAt), isNull(pluginJobRuns.finishedAt),
+  isNull(pluginJobRuns.claimToken), isNull(pluginJobRuns.completionUncertainty),
+  or(eq(pluginJobRuns.trigger, "manual"), eq(pluginJobRuns.trigger, "retry"), and(
+    eq(pluginJobRuns.trigger, "schedule"),
+    isNotNull(pluginJobRuns.scheduledAt), isNotNull(pluginJobRuns.scheduledCron),
+  )),
+);
 
 export function pluginJobRunStore(db: Db) {
   return {
@@ -30,35 +40,8 @@ export function pluginJobRunStore(db: Db) {
 
     async createOrReuseQueuedScheduledRun(
       input: Omit<CreateJobRunInput, "trigger">,
-    ): Promise<{ run: typeof pluginJobRuns.$inferSelect; created: boolean }> {
-      return db.transaction(async (tx) => {
-        const [job] = await tx.select({ id: pluginJobs.id }).from(pluginJobs).where(and(
-          eq(pluginJobs.id, input.jobId),
-          eq(pluginJobs.pluginId, input.pluginId),
-        )).for("update").limit(1);
-        if (!job) throw notFound(`Plugin job not found: ${input.jobId}`);
-
-        const [queued] = await tx.select().from(pluginJobRuns).where(and(
-          eq(pluginJobRuns.jobId, input.jobId),
-          eq(pluginJobRuns.pluginId, input.pluginId),
-          or(
-            eq(pluginJobRuns.status, "running"),
-            and(
-              eq(pluginJobRuns.trigger, "schedule"),
-              eq(pluginJobRuns.status, "queued"),
-              isNull(pluginJobRuns.startedAt),
-            ),
-          ),
-        )).orderBy(asc(pluginJobRuns.createdAt), asc(pluginJobRuns.id)).limit(1);
-        if (queued) return { run: queued, created: false };
-
-        const [run] = await tx.insert(pluginJobRuns).values({
-          ...input,
-          trigger: "schedule",
-          status: "queued",
-        }).returning();
-        return { run: run!, created: true };
-      });
+    ) {
+      return admitScheduledRun(db, input);
     },
 
     async claimQueuedRun(
@@ -78,9 +61,7 @@ export function pluginJobRunStore(db: Db) {
         if (running) return null;
         const [claimed] = await tx.update(pluginJobRuns).set({ status: "running", startedAt, claimToken: randomUUID() }).where(and(
           eq(pluginJobRuns.id, runId),
-          eq(pluginJobRuns.status, "queued"),
-          isNull(pluginJobRuns.startedAt),
-          isNull(pluginJobRuns.finishedAt),
+          replayable(),
         )).returning();
         return claimed ?? null;
       });
@@ -92,22 +73,23 @@ export function pluginJobRunStore(db: Db) {
         eq(pluginJobRuns.status, "running"),
         eq(pluginJobRuns.claimToken, claimToken),
         isNull(pluginJobRuns.finishedAt),
+        isNull(pluginJobRuns.completionUncertainty),
       )).returning({ id: pluginJobRuns.id });
       return Boolean(released);
     },
 
-    async markRunning(runId: string): Promise<void> {
-      await db.update(pluginJobRuns).set({ status: "running", startedAt: new Date() })
-        .where(eq(pluginJobRuns.id, runId));
+    async markCompletionUncertain(runId: string, claimToken: string): Promise<boolean> {
+      const [run] = await db.update(pluginJobRuns).set({
+        completionUncertainty: "external_execution_sent_or_unknown",
+      }).where(and(
+        eq(pluginJobRuns.id, runId), eq(pluginJobRuns.claimToken, claimToken),
+        eq(pluginJobRuns.status, "running"), isNull(pluginJobRuns.finishedAt),
+      )).returning({ id: pluginJobRuns.id });
+      return Boolean(run);
     },
 
-    async completeRun(runId: string, input: CompleteJobRunInput): Promise<void> {
-      await db.update(pluginJobRuns).set({
-        status: input.status,
-        error: input.error ?? null,
-        durationMs: input.durationMs ?? null,
-        finishedAt: new Date(),
-      }).where(eq(pluginJobRuns.id, runId));
+    async finalizeClaimedRun(runId: string, claimToken: string, input: ClaimedRunCompletion) {
+      return finalizeClaimedRun(db, runId, claimToken, input);
     },
 
     async getRunById(runId: string): Promise<(typeof pluginJobRuns.$inferSelect) | null> {
@@ -137,9 +119,7 @@ export function pluginJobRunStore(db: Db) {
     ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
       return db.select().from(pluginJobRuns).where(and(
         eq(pluginJobRuns.pluginId, pluginId),
-        eq(pluginJobRuns.status, "queued"),
-        isNull(pluginJobRuns.startedAt),
-        isNull(pluginJobRuns.finishedAt),
+        replayable(),
       ))
         .orderBy(asc(pluginJobRuns.createdAt), asc(pluginJobRuns.id)).limit(limit);
     },
