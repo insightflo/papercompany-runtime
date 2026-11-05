@@ -20,9 +20,10 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  type Db,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
-import { createApp } from "./app.js";
+import { createApp, createRuntimeShutdownFlight, type AppRuntimeShutdown, type RuntimeShutdownSignal } from "./app.js";
 import { toPublicSocialAuthProviders, type PublicSocialAuthProvider } from "./auth/social-providers.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
@@ -33,6 +34,8 @@ import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { runningProcesses } from "./adapters/index.js";
+import { runtimeExecutionLifecycle } from "./services/runtime-execution-lifecycle.js";
+import { loadEmbeddedPostgres, type EmbeddedPostgresInstance } from "./runtime/embedded-postgres-loader.js";
 
 type BetterAuthSessionUser = {
   id: string;
@@ -45,24 +48,6 @@ type BetterAuthSessionResult = {
   user: BetterAuthSessionUser | null;
 };
 
-type EmbeddedPostgresInstance = {
-  initialise(): Promise<void>;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-};
-
-type EmbeddedPostgresCtor = new (opts: {
-  databaseDir: string;
-  user: string;
-  password: string;
-  port: number;
-  persistent: boolean;
-  initdbFlags?: string[];
-  onLog?: (message: unknown) => void;
-  onError?: (message: unknown) => void;
-}) => EmbeddedPostgresInstance;
-
-
 export interface StartedServer {
   server: ReturnType<typeof createServer>;
   host: string;
@@ -71,7 +56,197 @@ export interface StartedServer {
   databaseUrl: string;
 }
 
+type ServerShutdownContext = {
+  startupReady: Promise<void>;
+  resolveStartupReady(): void;
+  rejectStartupReady(error: unknown): void;
+  startupWork: Set<Promise<unknown>>;
+  appShutdown: AppRuntimeShutdown | null;
+  db: Db | null;
+  heartbeat: ReturnType<typeof heartbeatService> | null;
+  heartbeatScheduler: ReturnType<typeof createHeartbeatScheduler> | null;
+  embeddedPostgres: EmbeddedPostgresInstance | null;
+  embeddedPostgresStartedByThisProcess: boolean;
+  shutdownFlushTimeoutMs: number;
+  backupInterval: ReturnType<typeof setInterval> | null;
+  backupFlight: Promise<void> | null;
+  server: ReturnType<typeof createServer> | null;
+  liveEvents: ReturnType<typeof setupLiveEventsWebSocketServer> | null;
+  removeSignalHandlers(): void;
+};
+
+function createServerShutdownContext(): ServerShutdownContext {
+  let resolveStartupReady!: () => void;
+  let rejectStartupReady!: (error: unknown) => void;
+  const startupReady = new Promise<void>((resolve, reject) => {
+    resolveStartupReady = resolve;
+    rejectStartupReady = reject;
+  });
+  void startupReady.catch(() => {});
+  return {
+    startupReady,
+    resolveStartupReady,
+    rejectStartupReady,
+    startupWork: new Set(),
+    appShutdown: null,
+    db: null,
+    heartbeat: null,
+    heartbeatScheduler: null,
+    embeddedPostgres: null,
+    embeddedPostgresStartedByThisProcess: false,
+    shutdownFlushTimeoutMs: 0,
+    backupInterval: null,
+    backupFlight: null,
+    server: null,
+    liveEvents: null,
+    removeSignalHandlers: () => {},
+  };
+}
+
+function trackStartup<T>(context: ServerShutdownContext, promise: Promise<T>): Promise<T> {
+  context.startupWork.add(promise);
+  void promise.then(
+    () => context.startupWork.delete(promise),
+    () => context.startupWork.delete(promise),
+  );
+  return promise;
+}
+
+async function closeRemainingIngress(context: ServerShutdownContext): Promise<void> {
+  const serverClose = context.server?.listening
+    ? new Promise<void>((resolveClose, rejectClose) => {
+      context.server!.close((error) => error ? rejectClose(error) : resolveClose());
+    })
+    : Promise.resolve();
+
+  if (context.liveEvents) {
+    for (const socket of context.liveEvents.clients) socket.terminate();
+    await new Promise<void>((resolveClose, rejectClose) => {
+      context.liveEvents!.close((error) => error ? rejectClose(error) : resolveClose());
+    });
+  }
+  await serverClose;
+}
+
+async function terminateDrainedChildren(
+  context: ServerShutdownContext,
+  signal: RuntimeShutdownSignal,
+): Promise<void> {
+  const trackedEntries = Array.from(runningProcesses.entries());
+  if (trackedEntries.length === 0) return;
+
+  const heartbeat = context.heartbeat;
+  if (!heartbeat) throw new Error("Heartbeat service is unavailable for guarded shutdown flush");
+  const flushPromise = context.shutdownFlushTimeoutMs > 0
+    ? heartbeat.markRunsShutdownInterrupted(
+      trackedEntries.map(([runId]) => runId),
+      { signal, deadlineMs: context.shutdownFlushTimeoutMs },
+    )
+    : Promise.resolve(null);
+
+  const childGraceMs = 2000;
+  for (const [, tracked] of trackedEntries) {
+    try {
+      if (!tracked.child.killed) tracked.child.kill("SIGTERM");
+    } catch {
+      // A child may have exited after the fresh post-drain snapshot.
+    }
+  }
+  const [flushResult] = await Promise.allSettled([
+    flushPromise,
+    new Promise<void>((resolveDelay) => setTimeout(resolveDelay, childGraceMs)),
+  ]);
+  for (const [runId, tracked] of trackedEntries) {
+    try {
+      tracked.child.kill("SIGKILL");
+    } catch {
+      // The child may have exited during its grace period.
+    }
+    if (runningProcesses.get(runId) === tracked) runningProcesses.delete(runId);
+    logger.info({ runId, pid: tracked.child.pid ?? null }, "Terminated drained adapter child");
+  }
+  if (flushResult.status === "rejected") throw flushResult.reason;
+  if (flushResult.value) logger.info({ flushSummary: flushResult.value }, "Shutdown flush complete");
+}
+
+async function performServerShutdown(
+  context: ServerShutdownContext,
+  signal: RuntimeShutdownSignal,
+): Promise<void> {
+  logger.info({ signal }, "Server shutting down");
+  await context.startupReady;
+  if (!context.db || !context.appShutdown) throw new Error("Server startup did not provide shutdown owners");
+
+  while (context.startupWork.size > 0) {
+    const startupBatch = [...context.startupWork];
+    await Promise.allSettled(startupBatch);
+  }
+  if (context.backupFlight) await context.backupFlight;
+  await context.appShutdown.drain();
+
+  context.appShutdown.sealHttpIngress();
+  await closeRemainingIngress(context);
+  await context.appShutdown.drainHttpCallbacks();
+  await context.appShutdown.drain();
+  await terminateDrainedChildren(context, signal);
+  await context.appShutdown.dispose();
+
+  const client = (context.db as unknown as { $client?: { end(options: { timeout: number }): Promise<void> } }).$client;
+  if (!client) throw new Error("Database client does not expose the configured close API");
+  await client.end({ timeout: 5 });
+  if (context.embeddedPostgres && context.embeddedPostgresStartedByThisProcess) {
+    logger.info({ signal }, "Stopping embedded PostgreSQL");
+    await context.embeddedPostgres.stop();
+  }
+
+  context.removeSignalHandlers();
+  logger.info({ signal }, "Server shutdown completed");
+}
+
 export async function startServer(): Promise<StartedServer> {
+  const context = createServerShutdownContext();
+  const shutdown = createRuntimeShutdownFlight({
+    beginShutdown: (signal) => { runtimeExecutionLifecycle.beginShutdown(signal); },
+    stopIndexStarts() {
+      context.heartbeatScheduler?.stop();
+      if (context.backupInterval) {
+        clearInterval(context.backupInterval);
+        context.backupInterval = null;
+      }
+    },
+    stopAppStarts: () => context.appShutdown?.stopStarts(),
+    run: (signal) => performServerShutdown(context, signal),
+  });
+  const onSigint = () => {
+    void shutdown("SIGINT").catch((err) => {
+      process.exitCode = 1;
+      logger.error({ err }, "Shutdown held; database remains open");
+    });
+  };
+  const onSigterm = () => {
+    void shutdown("SIGTERM").catch((err) => {
+      process.exitCode = 1;
+      logger.error({ err }, "Shutdown held; database remains open");
+    });
+  };
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  context.removeSignalHandlers = () => {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  };
+
+  try {
+    const started = await startServerWithRuntime(context);
+    context.resolveStartupReady();
+    return started;
+  } catch (error) {
+    context.rejectStartupReady(error);
+    throw error;
+  }
+}
+
+async function startServerWithRuntime(context: ServerShutdownContext): Promise<StartedServer> {
   const config = loadConfig();
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -231,9 +406,10 @@ export async function startServer(): Promise<StartedServer> {
     }
   }
   
-  let db;
+  let db: Db;
   let embeddedPostgres: EmbeddedPostgresInstance | null = null;
   let embeddedPostgresStartedByThisProcess = false;
+  context.shutdownFlushTimeoutMs = config.shutdownFlushTimeoutMs;
   let migrationSummary: MigrationSummary = "skipped";
   let activeDatabaseConnectionString: string;
   let startupDbInfo:
@@ -247,16 +423,12 @@ export async function startServer(): Promise<StartedServer> {
     activeDatabaseConnectionString = config.databaseUrl;
     startupDbInfo = { mode: "external-postgres", connectionString: config.databaseUrl };
   } else {
-    const moduleName = "embedded-postgres";
-    let EmbeddedPostgres: EmbeddedPostgresCtor;
-    try {
-      const mod = await import(moduleName);
-      EmbeddedPostgres = mod.default as EmbeddedPostgresCtor;
-    } catch {
-      throw new Error(
-        "Embedded PostgreSQL mode requires dependency `embedded-postgres`. Reinstall dependencies (without omitting required packages), or set DATABASE_URL for external Postgres.",
-      );
-    }
+    const embeddedPostgresLoad = await loadEmbeddedPostgres();
+    const EmbeddedPostgres = embeddedPostgresLoad.ctor;
+    logger.info(
+      { ...embeddedPostgresLoad.evidence, alreadyOwned: embeddedPostgresLoad.alreadyOwned },
+      "Embedded PostgreSQL signal ownership transferred to server shutdown handlers",
+    );
   
     const dataDir = resolve(config.embeddedPostgresDataDir);
     const configuredPort = config.embeddedPostgresPort;
@@ -354,6 +526,7 @@ export async function startServer(): Promise<StartedServer> {
           onLog: appendEmbeddedPostgresLog,
           onError: appendEmbeddedPostgresLog,
         });
+        context.embeddedPostgres = embeddedPostgres;
 
         if (!clusterAlreadyInitialized) {
           try {
@@ -377,6 +550,7 @@ export async function startServer(): Promise<StartedServer> {
           throw err;
         }
         embeddedPostgresStartedByThisProcess = true;
+        context.embeddedPostgresStartedByThisProcess = true;
       }
     }
   
@@ -396,10 +570,13 @@ export async function startServer(): Promise<StartedServer> {
     });
   
     db = createDb(embeddedConnectionString);
+    context.db = db;
     logger.info("Embedded PostgreSQL ready");
     activeDatabaseConnectionString = embeddedConnectionString;
     startupDbInfo = { mode: "embedded-postgres", dataDir, port };
   }
+
+  if (config.databaseUrl) context.db = db;
   
   if (config.deploymentMode === "local_trusted" && !isLoopbackHost(config.host)) {
     throw new Error(
@@ -496,9 +673,16 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler,
     resolveSession,
     socialAuthProviders,
+    onRuntimeShutdown(controller) {
+      context.appShutdown = controller;
+      if (runtimeExecutionLifecycle.shutdownState()) controller.stopStarts();
+    },
+    drainAdditionalProducers: async () => {
+      await context.heartbeatScheduler?.drain();
+    },
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
-  let heartbeatScheduler: ReturnType<typeof createHeartbeatScheduler> | null = null;
+  context.server = server;
   
   if (listenPort !== config.port) {
     logger.warn(`Requested port is busy; using next free port (requestedPort=${config.port}, selectedPort=${listenPort})`);
@@ -513,69 +697,68 @@ export async function startServer(): Promise<StartedServer> {
   process.env.PAPERCLIP_LISTEN_PORT = String(listenPort);
   process.env.PAPERCLIP_API_URL = `http://${runtimeApiHost}:${listenPort}`;
   
-  setupLiveEventsWebSocketServer(server, db as any, {
-    deploymentMode: config.deploymentMode,
-    resolveSessionFromHeaders,
-  });
-
-  void reconcilePersistedRuntimeServicesOnStartup(db as any)
-    .then((result) => {
-      if (result.reconciled > 0) {
-        logger.warn(
-          { reconciled: result.reconciled },
-          "reconciled persisted runtime services from a previous server process",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of persisted runtime services failed");
+  if (!runtimeExecutionLifecycle.shutdownState()) {
+    context.liveEvents = setupLiveEventsWebSocketServer(server, db, {
+      deploymentMode: config.deploymentMode,
+      resolveSessionFromHeaders,
     });
-  void reconcilePersistedAgentStatusOnStartup(db as any)
-    .then((result) => {
-      if (result.reconciled > 0) {
-        logger.warn(
-          { reconciled: result.reconciled },
-          "reset phantom-running agents to idle on startup (no running heartbeat run)",
-        );
-      }
-    })
-    .catch((err) => {
-      logger.error({ err }, "startup reconciliation of persisted agent status failed");
-    });
+    trackStartup(context, reconcilePersistedRuntimeServicesOnStartup(db)
+      .then((result) => {
+        if (result.reconciled > 0) {
+          logger.warn(
+            { reconciled: result.reconciled },
+            "reconciled persisted runtime services from a previous server process",
+          );
+        }
+      })
+      .catch((err) => logger.error({ err }, "startup reconciliation of persisted runtime services failed")));
+    trackStartup(context, reconcilePersistedAgentStatusOnStartup(db)
+      .then((result) => {
+        if (result.reconciled > 0) {
+          logger.warn(
+            { reconciled: result.reconciled },
+            "reset phantom-running agents to idle on startup (no running heartbeat run)",
+          );
+        }
+      })
+      .catch((err) => logger.error({ err }, "startup reconciliation of persisted agent status failed")));
+  }
   
-  if (config.databaseBackupEnabled) {
+  if (config.databaseBackupEnabled && !runtimeExecutionLifecycle.shutdownState()) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;
-    let backupInFlight = false;
   
     const runScheduledBackup = async () => {
-      if (backupInFlight) {
+      if (context.backupFlight) {
         logger.warn("Skipping scheduled database backup because a previous backup is still running");
         return;
       }
-  
-      backupInFlight = true;
-      try {
-        const result = await runDatabaseBackup({
-          connectionString: activeDatabaseConnectionString,
-          backupDir: config.databaseBackupDir,
-          retentionDays: config.databaseBackupRetentionDays,
-          filenamePrefix: "paperclip",
-        });
-        logger.info(
-          {
-            backupFile: result.backupFile,
-            sizeBytes: result.sizeBytes,
-            prunedCount: result.prunedCount,
+      if (runtimeExecutionLifecycle.shutdownState()) return;
+      const flight = (async () => {
+        try {
+          const result = await runDatabaseBackup({
+            connectionString: activeDatabaseConnectionString,
             backupDir: config.databaseBackupDir,
             retentionDays: config.databaseBackupRetentionDays,
-          },
-          `Automatic database backup complete: ${formatDatabaseBackupResult(result)}`,
-        );
-      } catch (err) {
-        logger.error({ err, backupDir: config.databaseBackupDir }, "Automatic database backup failed");
-      } finally {
-        backupInFlight = false;
-      }
+            filenamePrefix: "paperclip",
+          });
+          logger.info(
+            {
+              backupFile: result.backupFile,
+              sizeBytes: result.sizeBytes,
+              prunedCount: result.prunedCount,
+              backupDir: config.databaseBackupDir,
+              retentionDays: config.databaseBackupRetentionDays,
+            },
+            `Automatic database backup complete: ${formatDatabaseBackupResult(result)}`,
+          );
+        } catch (err) {
+          logger.error({ err, backupDir: config.databaseBackupDir }, "Automatic database backup failed");
+        }
+      })();
+      context.backupFlight = flight;
+      const clearFlight = () => { if (context.backupFlight === flight) context.backupFlight = null; };
+      void flight.then(clearFlight, clearFlight);
+      return flight;
     };
   
     logger.info(
@@ -586,34 +769,35 @@ export async function startServer(): Promise<StartedServer> {
       },
       "Automatic database backups enabled",
     );
-    setInterval(() => {
+    context.backupInterval = setInterval(() => {
       void runScheduledBackup();
     }, backupIntervalMs);
   }
   
-  await new Promise<void>((resolveListen, rejectListen) => {
-    const onError = (err: Error) => {
-      server.off("error", onError);
-      rejectListen(err);
-    };
+  if (!runtimeExecutionLifecycle.shutdownState()) {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      const onError = (err: Error) => {
+        server.off("error", onError);
+        rejectListen(err);
+      };
 
-    server.once("error", onError);
-    server.listen(listenPort, config.host, () => {
-      server.off("error", onError);
-      logger.info(`Server listening on ${config.host}:${listenPort}`);
-      if (process.env.PAPERCLIP_OPEN_ON_LISTEN === "true") {
-        const openHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
-        const url = `http://${openHost}:${listenPort}`;
-        void import("open")
-          .then((mod) => mod.default(url))
-          .then(() => {
-            logger.info(`Opened browser at ${url}`);
-          })
-          .catch((err) => {
-            logger.warn({ err, url }, "Failed to open browser on startup");
-          });
-      }
-      printStartupBanner({
+      server.once("error", onError);
+      server.listen(listenPort, config.host, () => {
+        server.off("error", onError);
+        logger.info(`Server listening on ${config.host}:${listenPort}`);
+        if (process.env.PAPERCLIP_OPEN_ON_LISTEN === "true" && !runtimeExecutionLifecycle.shutdownState()) {
+          const openHost = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : config.host;
+          const url = `http://${openHost}:${listenPort}`;
+          trackStartup(context, import("open")
+            .then((mod) => mod.default(url))
+            .then(() => {
+              logger.info(`Opened browser at ${url}`);
+            })
+            .catch((err) => {
+              logger.warn({ err, url }, "Failed to open browser on startup");
+            }));
+        }
+        printStartupBanner({
         host: config.host,
         deploymentMode: config.deploymentMode,
         deploymentExposure: config.deploymentExposure,
@@ -647,104 +831,28 @@ export async function startServer(): Promise<StartedServer> {
         );
       }
 
-      resolveListen();
+        resolveListen();
+      });
     });
-  });
+  }
 
   // [checkpoint+graceful shutdown] heartbeatService 는 scheduler 활성 여부와 무관하게 항상 생성한다:
   // SIGTERM/SIGINT 종료 플러시(markRunsShutdownInterrupted)가 이 인스턴스를 필요로 하고,
   // scheduler 가 꺼진 경우에도(이론상 tracked child 없음) 플러시 호출부가 단순해진다.
-  const heartbeat = heartbeatService(db as any);
-  if (config.heartbeatSchedulerEnabled) {
+  const heartbeat = heartbeatService(db);
+  context.heartbeat = heartbeat;
+  if (config.heartbeatSchedulerEnabled && !runtimeExecutionLifecycle.shutdownState()) {
     const routines = routineService(db as any);
-    heartbeatScheduler = createHeartbeatScheduler({
+    context.heartbeatScheduler = createHeartbeatScheduler({
       heartbeat,
       routines,
       logger,
       timerIntervalMs: config.heartbeatSchedulerIntervalMs,
       routineIntervalMs: config.heartbeatSchedulerIntervalMs,
     });
-    heartbeatScheduler.start();
+    context.heartbeatScheduler.start();
   }
   
-  // Graceful shutdown — SIGINT/SIGTERM 시 (a) heartbeat scheduler 정지, (b) tracked adapter child를
-  // 모두 회수(orphan/hang 방지 — CMPA-5519: 재기동 후 child가 ~68분 orphan 생존하던 사고 대응),
-  // (c) 이 프로세스가 시작한 embedded postgres 정지. 핸들러를 embedded-postgres 가드 밖으로 뺐다 ->
-  // external-postgres 배포(A1 등)에서도 항상 tracked child를 회수한다.
-  const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
-    logger.info({ signal }, "Server shutting down");
-    const childGraceMs = 2000;
-    try {
-      heartbeatScheduler?.stop();
-      const trackedEntries = Array.from(runningProcesses.entries());
-      // [checkpoint+graceful shutdown] 스케줄러 정지 후, child SIGTERM 과 병렬로 종료 플러시 —
-      // 이 프로세스가 추적 중인 running 런에 내구 마킹(failed+shutdown_interrupted, #277 CAS 경로)
-      // + process_lost 동일 정합의 재시도 대기열 등록. 이중 타이머: flush 는 자체 데드라인
-      // (PAPERCLIP_SHUTDOWN_FLUSH_TIMEOUT_MS, 기본 3s) 후 나머지 스킵+로그 — 미마킹 런은 기존
-      // reaper 가 회수(안전 장전). 총 종료시간 ≈ max(child grace 2s, flush ≤3s) + PG stop.
-      const flushTimeoutMs = config.shutdownFlushTimeoutMs;
-      const flushPromise: Promise<import("./services/shutdown-flush.js").ShutdownFlushSummary | null> =
-        trackedEntries.length > 0 && flushTimeoutMs > 0
-          ? heartbeat
-              .markRunsShutdownInterrupted(
-                trackedEntries.map(([runId]) => runId),
-                { signal, deadlineMs: flushTimeoutMs },
-              )
-              .catch((err) => {
-                logger.error({ err }, "Shutdown flush failed; unmarked runs left for reaper recovery");
-                return null;
-              })
-          : Promise.resolve(null);
-      // tracked adapter child 회수: SIGTERM → grace → SIGKILL(exit 전 확실히 종료).
-      // (child.killed 는 kill() 호출 즉시 true 가 되어 신뢰할 수 없으므로 SIGKILL 은 무조건 시도.)
-      for (const tracked of trackedEntries.map((entry) => entry[1])) {
-        try {
-          if (!tracked.child.killed) tracked.child.kill("SIGTERM");
-        } catch {
-          // best-effort: child may already be gone
-        }
-      }
-      const [flushSummary] = await Promise.all([
-        flushPromise,
-        trackedEntries.length > 0
-          ? new Promise((resolve) => setTimeout(resolve, childGraceMs))
-          : Promise.resolve(),
-      ]);
-      if (flushSummary) {
-        logger.info({ flushSummary }, "Shutdown flush complete");
-      }
-      if (trackedEntries.length > 0) {
-        for (const [runId, tracked] of trackedEntries) {
-          try {
-            tracked.child.kill("SIGKILL");
-          } catch {
-            // already exited
-          }
-          logger.info(
-            { runId, pid: tracked.child.pid ?? null },
-            "Terminated tracked adapter child on shutdown",
-          );
-        }
-        runningProcesses.clear();
-      }
-      if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
-        logger.info({ signal }, "Stopping embedded PostgreSQL");
-        await embeddedPostgres.stop();
-      }
-    } catch (err) {
-      logger.error({ err }, "Failed to shut down cleanly");
-    } finally {
-      process.exit(0);
-    }
-  };
-  
-  process.once("SIGINT", () => {
-    void shutdown("SIGINT");
-  });
-  process.once("SIGTERM", () => {
-    void shutdown("SIGTERM");
-  });
-
   return {
     server,
     host: config.host,
@@ -767,6 +875,12 @@ function isMainModule(metaUrl: string): boolean {
 if (isMainModule(import.meta.url)) {
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
+    if (runtimeExecutionLifecycle.shutdownState()) {
+      process.exitCode = 1;
+      logger.error({ shutdown: runtimeExecutionLifecycle.shutdownState() },
+        "Startup failed during shutdown; preserving the database and unresolved runtime state");
+      return;
+    }
     process.exit(1);
   });
 }
