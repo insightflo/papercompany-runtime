@@ -85,12 +85,17 @@ describe("plugin queued run ownership", () => {
     const store = pluginJobStore(db);
     const run = await store.createRun({ jobId: JOB_ID, pluginId: PLUGIN_ID, trigger: "retry" });
     const at = new Date("2026-10-28T12:00:00.000Z");
-    expect(await store.claimQueuedRun(run.id, at)).not.toBeNull();
+    const first = await store.claimQueuedRun(run.id, at);
+    expect(first?.claimToken).toBeTruthy();
+    expect(await store.releaseUnstartedClaim(run.id, first!.claimToken!)).toBe(true);
+    expect(await store.getRunById(run.id)).toMatchObject({ status: "queued", startedAt: null, claimToken: null, finishedAt: null });
 
-    expect(await store.releaseUnstartedClaim(run.id, new Date(at.getTime() + 1))).toBe(false);
-    expect(await store.releaseUnstartedClaim(run.id, at)).toBe(true);
-    expect(await store.getRunById(run.id)).toMatchObject({ status: "queued", startedAt: null, finishedAt: null });
-    expect(await store.claimQueuedRun(run.id, new Date(at.getTime() + 2))).not.toBeNull();
+    const second = await store.claimQueuedRun(run.id, at);
+    expect(second?.claimToken).toBeTruthy();
+    expect(second!.claimToken).not.toBe(first!.claimToken);
+    expect(await store.releaseUnstartedClaim(run.id, first!.claimToken!)).toBe(false);
+    expect(await store.getRunById(run.id)).toMatchObject({ status: "running", startedAt: at, claimToken: second!.claimToken });
+    expect(await store.releaseUnstartedClaim(run.id, second!.claimToken!)).toBe(true);
   });
 
   it("lists replayable queued rows oldest first without running rows", async () => {
