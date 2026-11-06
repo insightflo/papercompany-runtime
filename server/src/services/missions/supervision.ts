@@ -1,9 +1,9 @@
 // server/src/services/missions/supervision.ts
 //
 // [수정시 주의] 1100+줄 supervision 본체. 회귀 시 mission test + workflow-dag-engine test 필수.
-import { agentWakeupRequests, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { agentWakeupRequests, issueComments, issues, missionPlanDecisionSubmissions, missions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -31,16 +31,16 @@ import {
   type OwnerDecisionNotAppliedReasonCode,
 } from "./mission-owner-dead-target-loop.js";
 import { buildOwnerActionExplanations } from "./mission-owner-recovery-explanations.js";
-import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied, SOURCE_RETRY_WORK_PRODUCT_MAX, type SourceRetryWorkProduct } from "./mission-owner-recovery-comments.js";
+import { buildRetrySourceIssueComment, buildRetrySourceIssueRequestChangesContextComment, buildRetrySourceIssueWakeupResultComment, buildStaleSourceIssueWakeupDispatchedComment, buildWorkProductReuseWakeDispatchedComment, extractLatestRequestChangesSummary, isTerminalIssueStatus, summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js";
 import { formatGovernanceThreadEvidenceLines, governanceThreadReasonSuffix } from "./mission-owner-recovery-governance-format.js";
-import { isTerminalFailureStatus, listMissionExecutionSourceSnapshots, type MissionExecutionSourceRef, type MissionExecutionStatus } from "./mission-execution-sources.js";
+import { type MissionExecutionSourceRef } from "./mission-execution-sources.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines, candidateRosterFingerprint, type MissionExecutionCandidate } from "./mission-execution-candidates.js";
 import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
-import { buildMaterializePlanDecisionAction, formatMissionPlanConsumerDiagnostics } from "./mission-plan-consumer-diagnostics.js";
+import { buildMaterializePlanDecisionAction } from "./mission-plan-consumer-diagnostics.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
-import { normalizeMissionOwnerDecisionWakeupDispatchResult, type ActiveMissionOwnerSupervisionResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
+import { normalizeMissionOwnerDecisionWakeupDispatchResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction, type MissionOwnerSupervisionRecommendation, type MissionOwnerSupervisionResult } from "./supervision-types.js";
 import { isTerminalMissionStatus } from "./shared-types.js";
-import { prepareSupervisionMissions, reconcileSupervisionMission } from "./supervision-lifecycle.js";
+import { reconcileSupervisionMission } from "./supervision-lifecycle.js";
 import { activePlanRecoveryGateReason, asRecord, asRecordArray, executionUnitKey, executionUnitKeyFromSourceRef, isApprovalRuleMode, isQaLikeStep, normalizedPlanStatus, resolveProducerStepIdFromDag, trimmedString, type DagStepLike, unitRequiresGovernedAction } from "./supervision-helpers.js";
 import { applyOwnerToolRecovery, type OwnerToolRecoveryOutcome } from "./owner-tool-recovery.js";
 import { loadCompanySystemLanguage } from "./system-language.js";
@@ -58,7 +58,7 @@ import { createMissionWorkSettlement } from "./mission-work-settlement.js";
 import { detectQaReworkCapExhaustion, ensureQaReworkCapOversightIssue, extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
 import { loadConsecutiveQaRejectTrend } from "./qa-rework-cap-oversight-detection.js";
 import { loadWorkflowApiFindings } from "../workflow/validation-verdict-ledger.js";
-import { loadRevisionBoardWait, revisionBoardWaitingMissionIds } from "./revision-board-wait.js";
+import { loadRevisionBoardWait } from "./revision-board-wait.js";
 import { ensureQaSourceDefectOwnerCard } from "../workflow/qa-source-defect-owner-card.js";
 import {
   TERMINAL_FAILURE_RUN_STATUSES,
@@ -71,278 +71,25 @@ import { summarizeProvider403LadderForMission } from "../heartbeat-provider403-l
 import { selectTerminalWorkflowAuthoritySource } from "./terminal-mission-authority-source.js";
 export { selectTerminalWorkflowAuthoritySource };
 
-// [issue-less tool recovery card liveness] 실패한 이슈 없는 도구 단계의 복구 권한은 링크된
-// owner_tool_recovery_target_v1 카드에 있다. 카드가 열려 있거나 아직 없으면(첫 감시 패스에서
-// 생성 예정) 억제를 유지한다. 모든 링크 카드가 종료(done/cancelled)면 복구 권한은 소진된
-// 것이므로 터미널 Human Operator 보고 경로로 넘어간다(2026-10-14 a6d16f90 사고).
-async function hasOpenOrMissingIssueLessToolRecoveryCard(db: Db, input: {
-  companyId: string; missionId: string; workflowStepRows: MissionSupervisionWorkflowStepRow[];
-}): Promise<boolean> {
-  const stepRunIds = input.workflowStepRows
-    .filter((row) => issueLessToolRecoveryOwnsFailure(row))
-    .map((row) => row.stepRun.id);
-  if (stepRunIds.length === 0) return false;
-  const linked = await db
-    .select({ workflowStepRunId: workflowTransitionEvents.workflowStepRunId, status: issues.status })
-    .from(workflowTransitionEvents)
-    .innerJoin(issues, eq(issues.id, workflowTransitionEvents.issueId))
-    .where(and(
-      eq(workflowTransitionEvents.companyId, input.companyId),
-      eq(workflowTransitionEvents.missionId, input.missionId),
-      eq(workflowTransitionEvents.eventType, "owner_tool_recovery_target_v1"),
-      inArray(workflowTransitionEvents.workflowStepRunId, stepRunIds),
-    ));
-  const statusesByStepRunId = new Map<string, string[]>();
-  for (const row of linked) {
-    if (!row.workflowStepRunId) continue;
-    const list = statusesByStepRunId.get(row.workflowStepRunId) ?? [];
-    list.push(row.status);
-    statusesByStepRunId.set(row.workflowStepRunId, list);
-  }
-  return stepRunIds.some((stepRunId) => {
-    const statuses = statusesByStepRunId.get(stepRunId) ?? [];
-    if (statuses.length === 0) return true;
-    return statuses.some((status) => !isTerminalIssueStatus(status));
-  });
-}
-
-/** [observability] wakeup callback 결과(report_only 등)에서 fail-closed 사유 문자열만 안전 추출. */
-function readWakeupResultDetailReason(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const reason = (value as { reason?: unknown }).reason;
-  return typeof reason === "string" && reason.length > 0 ? reason : null;
-}
-function formatAppliedAction(action: MissionOwnerSupervisionAppliedAction): string {
-  switch (action.type) {
-    case "dispatch_missing_step":
-      return `- ${action.type}: run=${action.workflowRunId} steps=${action.stepIds.join(",") || "n/a"} result=${action.resultStatus}`;
-    case "owner_decision_retry_source_issue":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
-    case "owner_decision_retry_unresolved":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} retry_target=${action.sourceIssueId} blocked=${action.blockedIssueId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
-    case "owner_decision_reassign_source_issue":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} source=${action.sourceIssueId} previous=${action.previousAgentId ?? "unassigned"} target=${action.targetAgentId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus ?? "n/a"}`;
-    case "owner_decision_replan_mission":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} planning_issue=${action.planningIssueId} result=${action.resultStatus}`;
-    case "native_tool_step_retry":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} result=${action.resultStatus}`;
-    case "native_tool_step_recovery_result":
-      return `- ${action.type}: owner_action=${action.ownerActionIssueId} run=${action.workflowRunId} step=${action.stepId} step_run=${action.stepRunId} artifact=${action.artifactPath} result=${action.resultStatus}`;
-    case "materialize_plan_decision":
-      return `- ${action.type}: planning_issue=${action.planningIssueId ?? "n/a"} workflow_run=${action.workflowRunId ?? "n/a"} result=${action.resultStatus}${formatMissionPlanConsumerDiagnostics(action)}`;
-    case "workproduct_reuse_wakeup":
-      return `- ${action.type}: source=${action.sourceIssueId} artifact=${action.artifactPath} stalled_run=${action.stalledRunId} result=${action.resultStatus}`;
-    case "plan_submission_missing":
-      return `- ${action.type}: planning_issue=${action.planIssueId} succeeded_run=${action.succeededRunId} result=${action.resultStatus}`;
-    case "plan_submission_rejected":
-      return `- ${action.type}: planning_issue=${action.planIssueId} decision_hash=${action.decisionHash} result=${action.resultStatus}`;
-    case "stale_source_issue_wakeup":
-      return `- ${action.type}: source=${action.sourceIssueId} failed_run=${action.failedRunId} result=${action.resultStatus} wakeup=${action.wakeupDispatchStatus}`;
-    case "mission_settled_from_workflow_runs":
-      return `- ${action.type}: mission=${action.missionId} result=${action.resultStatus}`;
-  }
-}
-
-function isPlanSubmissionRecoveryIssueStatus(status: string): boolean {
-  return status === "blocked" || isTerminalIssueStatus(status);
-}
-
-const REJECTED_PLAN_RECOVERY_PROMPT_REVISION = "v2";
-
-// [P3] originId 가 실제 workflow QA gate step 이면 그 id, 아니면 null. QA chain 오인 방지(codex 정정 1).
-function resolveQaGateIssueId(input: {
-  originId: string | null;
-  missionIssueById: Map<string, MissionSupervisionIssue>;
-  stepRowsByIssueId: Map<string, MissionSupervisionWorkflowStepRow[]>;
-}): string | null {
-  if (!input.originId) return null;
-  const originIssue = input.missionIssueById.get(input.originId);
-  if (!originIssue || originIssue.originKind !== "workflow_execution") return null;
-  const stepRows = input.stepRowsByIssueId.get(input.originId) ?? [];
-  const stepRow = stepRows[0];
-  if (!stepRow) return null;
-  const stepId = stepRow.stepRun.stepId ?? "";
-  const steps = stepRow.definition.stepsJson as DagStepLike[] | null;
-  const step = Array.isArray(steps) ? steps.find((s) => (s as { id?: string }).id === stepId) : null;
-  // supervision-helpers 의 isQaLikeStep 사용(QA 이름/title/한국어 검수/validate/audit/qaType 포괄, codex 보완 1).
-  if (step && isQaLikeStep(step as Parameters<typeof isQaLikeStep>[0])) return input.originId;
-  return null;
-}
-
-// [P3] source 의 active workProduct updatedAt(current-generation 기준, codex 정정 4).
-async function loadActiveWorkProductUpdatedAt(db: Db, companyId: string, issueId: string): Promise<Date | null> {
-  const row = await db.select({ updatedAt: issueWorkProducts.updatedAt })
-    .from(issueWorkProducts)
-    .where(and(
-      eq(issueWorkProducts.companyId, companyId),
-      eq(issueWorkProducts.issueId, issueId),
-      eq(issueWorkProducts.status, "active"),
-    ))
-    .orderBy(desc(issueWorkProducts.updatedAt))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  return row?.updatedAt ?? null;
-}
-async function hasRecoveryIdempotency(db: Db, companyId: string, idempotencyKey: string): Promise<boolean> {
-  const [event, wakeup] = await Promise.all([
-    db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
-      eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.idempotencyKey, idempotencyKey),
-    )).limit(1).then((rows) => rows[0] ?? null),
-    db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
-      eq(agentWakeupRequests.companyId, companyId),
-      eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
-    )).limit(1).then((rows) => rows[0] ?? null),
-  ]);
-  return Boolean(event || wakeup);
-}
-
-/**
- * [half-applied owner decision] wakeup 멱등은 "실제로 발사된" 증거만 만족한다.
- *   mission_owner_retry_wakeup 마커가 not_requested/failed/skipped_no_assignee 로 기록된 경우는
- *   아무것도 발사되지 않은 것이므로 '이미 적용됨'으로 간주하지 않는다(2026-08-15 GAZ ef12d027
- *   30시간 stall: not_requested 마커가 영구 멱급 게이트가 됐다). 실제 agent_wakeup_requests 행은
- *   항상 발사 증거로 인정한다.
- */
-const DISPATCHED_RECOVERY_WAKEUP_STATUSES = new Set(["dispatched", "workflow_already_dispatched"]);
-
-async function hasDispatchedRecoveryWakeup(db: Db, companyId: string, idempotencyKey: string): Promise<boolean> {
-  const [event, wakeup] = await Promise.all([
-    db.select({ toStatus: workflowTransitionEvents.toStatus }).from(workflowTransitionEvents).where(and(
-      eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.idempotencyKey, idempotencyKey),
-      inArray(workflowTransitionEvents.toStatus, [...DISPATCHED_RECOVERY_WAKEUP_STATUSES]),
-    )).limit(1).then((rows) => rows[0] ?? null),
-    db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
-      eq(agentWakeupRequests.companyId, companyId),
-      eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
-    )).limit(1).then((rows) => rows[0] ?? null),
-  ]);
-  return Boolean(event || wakeup);
-}
-
-async function recordRecoveryAction(input: {
-  readonly db: Db; readonly companyId: string; readonly missionId: string; readonly issueId: string;
-  readonly idempotencyKey: string; readonly eventType: string; readonly decision: string; readonly resultStatus: string;
-  readonly sourceIssueId?: string; readonly workflowRunId?: string; readonly workflowStepRunId?: string; readonly stepId?: string;
-}): Promise<void> {
-  await input.db.insert(workflowTransitionEvents).values({
-    companyId: input.companyId, missionId: input.missionId, issueId: input.issueId,
-    workflowRunId: input.workflowRunId ?? null, workflowStepRunId: input.workflowStepRunId ?? null,
-    eventType: input.eventType, layer: "mission_owner_recovery", decision: input.decision,
-    fromStatus: input.eventType === "mission_owner_tool_step_retry" ? "failed" : null,
-    toStatus: input.resultStatus, reason: "owner_recovery_api", reasonCode: "owner_recovery_api",
-    idempotencyKey: input.idempotencyKey,
-    payload: {
-      kind: input.eventType, ownerActionIssueId: input.issueId, resultStatus: input.resultStatus,
-      ...(input.sourceIssueId ? { sourceIssueId: input.sourceIssueId } : {}),
-      ...(input.workflowRunId ? { workflowRunId: input.workflowRunId } : {}),
-      ...(input.workflowStepRunId ? { workflowStepRunId: input.workflowStepRunId } : {}),
-      ...(input.stepId ? { stepId: input.stepId } : {}),
-    },
-  }).onConflictDoNothing();
-  // [half-applied owner decision] 같은 key 마커가 이미 있으면(예: not_requested) 결과 상태를 갱신한다.
-  //   doNothing 만으로는 발사 실패 마커가 영구 남아 재발사 수렴을 막는다(2026-08-15 GAZ ef12d027).
-  if (input.idempotencyKey) {
-    await input.db
-      .update(workflowTransitionEvents)
-      .set({ toStatus: input.resultStatus })
-      .where(and(
-        eq(workflowTransitionEvents.companyId, input.companyId),
-        eq(workflowTransitionEvents.idempotencyKey, input.idempotencyKey),
-      ));
-  }
-}
-
-/**
- * [supervision once-only claim] 감독 스윕이 "최초 1회"만 의미 있는 부수 효과(오너 재깨움 등)를 켤 때
- *   쓰는 멱등 클레임. 첫 insert 가 이기면 true, 이후 스윕은 false. append-only(삭제 없음).
- */
-async function claimSupervisionMarkerOnce(input: {
-  readonly db: Db;
-  readonly companyId: string;
-  readonly missionId: string;
-  readonly issueId: string | null;
-  readonly idempotencyKey: string;
-  readonly eventType: string;
-  readonly payload: Record<string, unknown>;
-}): Promise<boolean> {
-  const rows = await input.db.insert(workflowTransitionEvents).values({
-    companyId: input.companyId,
-    missionId: input.missionId,
-    issueId: input.issueId,
-    eventType: input.eventType,
-    layer: "mission_owner_recovery",
-    idempotencyKey: input.idempotencyKey,
-    payload: { kind: input.eventType, ...input.payload },
-  }).onConflictDoNothing().returning({ id: workflowTransitionEvents.id });
-  return rows.length > 0;
-}
-
-/** [terminal-run closeout] 실행 단위의 종단 상태(이 상태에서 mission 이 아직 active 면 종결 브리지 대상). */
-const TERMINAL_CLOSEOUT_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
-
-/** [owner on-duty monitoring] 오너 주기 리뷰 대상 실행 상태 — 진행 중이거나 미결(실패류)인 단위. */
-const ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW = new Set(["pending", "running", "failed", "cancelled", "timed_out"]);
-
-/**
- * [escalate-suppressed watchdog] 최근(24h) 오너의 사람 상정(escalate/request_input) 결정이 존재하는지.
- *   억제(live-wakeup 계열)가 지속되는 동안 사람 통지가 실제로 전달됐는지 의심해야 하는 근거.
- */
-async function hasRecentHumanEscalationDecision(db: Db, companyId: string, missionId: string): Promise<boolean> {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [row] = await db.select({ id: workflowTransitionEvents.id })
-    .from(workflowTransitionEvents)
-    .where(and(
-      eq(workflowTransitionEvents.companyId, companyId),
-      eq(workflowTransitionEvents.missionId, missionId),
-      eq(workflowTransitionEvents.layer, "mission_owner_recovery"),
-      inArray(workflowTransitionEvents.decision, ["escalate", "request_input"]),
-      gte(workflowTransitionEvents.createdAt, since),
-    ))
-    .limit(1);
-  return Boolean(row);
-}
-// [final QA / mission validation owner recovery] retry 가 깨울 source issue 의 active workProduct 를
-//   company+mission+source-issue scope 로 명시적으로 읽는다(issueWorkProducts.companyId + issueId 와
-//   issues.companyId + id + missionId 를 모두 검증). capped mission digest 에 의존하지 않고 원본 source
-//   issue title+description + active products(url/externalId/metadata path) + latest REQUEST_CHANGES feedback
-//   를 묶어 전달. 카운트는 bound.
-async function loadActiveSourceIssueWorkProducts(
-  db: Db,
-  companyId: string,
-  missionId: string,
-  issueId: string,
-): Promise<SourceRetryWorkProduct[]> {
-  const rows = await db.select({
-    title: issueWorkProducts.title,
-    type: issueWorkProducts.type,
-    provider: issueWorkProducts.provider,
-    url: issueWorkProducts.url,
-    externalId: issueWorkProducts.externalId,
-    metadata: issueWorkProducts.metadata,
-  })
-    .from(issueWorkProducts)
-    .innerJoin(issues, eq(issueWorkProducts.issueId, issues.id))
-    .where(and(
-      eq(issueWorkProducts.companyId, companyId),
-      eq(issueWorkProducts.issueId, issueId),
-      eq(issueWorkProducts.status, "active"),
-      eq(issues.companyId, companyId),
-      eq(issues.id, issueId),
-      eq(issues.missionId, missionId),
-    ))
-    .orderBy(desc(issueWorkProducts.updatedAt))
-    .limit(SOURCE_RETRY_WORK_PRODUCT_MAX);
-  return rows.map((row) => ({
-    title: row.title,
-    type: row.type,
-    provider: row.provider,
-    url: row.url ?? null,
-    externalId: row.externalId ?? null,
-    metadata: row.metadata ?? null,
-  }));
-}
+import { createRunActiveMissionOwnerSupervision } from "./supervision-active.js";
+import {
+  hasOpenOrMissingIssueLessToolRecoveryCard,
+  readWakeupResultDetailReason,
+  formatAppliedAction,
+  isPlanSubmissionRecoveryIssueStatus,
+  REJECTED_PLAN_RECOVERY_PROMPT_REVISION,
+  resolveQaGateIssueId,
+  loadActiveWorkProductUpdatedAt,
+  hasRecoveryIdempotency,
+  DISPATCHED_RECOVERY_WAKEUP_STATUSES,
+  hasDispatchedRecoveryWakeup,
+  recordRecoveryAction,
+  claimSupervisionMarkerOnce,
+  TERMINAL_CLOSEOUT_RUN_STATUSES,
+  ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW,
+  hasRecentHumanEscalationDecision,
+  loadActiveSourceIssueWorkProducts,
+} from "./supervision-support.js";
 
 export function createSupervision({ db, deps, ownerActions }: {
   db: Db;
@@ -3033,350 +2780,9 @@ export function createSupervision({ db, deps, ownerActions }: {
     return { missionId: mission.id, oversightIssueId: oversightIssue.id, findings: uniqueFindings, recommendations, appliedActions, recoveryOutcomes, ownerActionExplanations, commented: true };
   }
 
-  const ACTIVE_SUPERVISION_EXECUTION_STATUSES = new Set<MissionExecutionStatus>(["pending", "running", "failed", "cancelled", "timed_out"]);
-
-  function isActiveSupervisionExecutionStatus(status: MissionExecutionStatus): boolean {
-    return status === "pending" || status === "running" || isTerminalFailureStatus(status);
-  }
-
-  async function runActiveMissionOwnerSupervision(input: {
-    companyId?: string;
-    missionIds?: string[];
-    staleAfterMinutes?: number;
-    now?: Date;
-    applySafeActions?: boolean;
-    applyOwnerDecisionActions?: boolean;
-    dispatchOwnerDecisionWakeups?: boolean;
-    dispatchStaleSourceIssueWakeups?: boolean;
-  } = {}): Promise<ActiveMissionOwnerSupervisionResult> {
-    const { missionRows, terminalResults, promotedPlanningMissionIds } = await prepareSupervisionMissions(db, ownerActions, input);
-
-    const missionIds: string[] = [];
-    const missionRowsByCompanyId = new Map<string, typeof missionRows>();
-    for (const row of missionRows) {
-      const rows = missionRowsByCompanyId.get(row.companyId) ?? [];
-      rows.push(row);
-      missionRowsByCompanyId.set(row.companyId, rows);
-    }
-
-    const now = input.now ?? new Date();
-    const staleCutoff = new Date(now.getTime() - Math.max(1, input.staleAfterMinutes ?? 120) * 60 * 1000);
-
-    for (const [companyId, rows] of missionRowsByCompanyId) {
-      const rowMissionIds = rows.map((row) => row.id);
-      const snapshots = await listMissionExecutionSourceSnapshots(db, {
-        companyId,
-        missionIds: rowMissionIds,
-      });
-      const staleFailedHeartbeatMissionIds = new Set(
-        rowMissionIds.length > 0
-          ? (await db
-            .select({ missionId: issues.missionId })
-            .from(issues)
-            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, rowMissionIds),
-              isNull(issues.hiddenAt),
-              inArray(issues.status, ["todo", "backlog"]),
-              lte(issues.createdAt, staleCutoff),
-              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
-            )))
-            .map((row) => row.missionId)
-            .filter((missionId): missionId is string => Boolean(missionId))
-          : [],
-      );
-      const staleQueueIssueRows = rowMissionIds.length > 0
-        ? await db
-          .select({ missionId: issues.missionId, issueId: issues.id })
-          .from(issues)
-          .where(and(
-            eq(issues.companyId, companyId),
-            inArray(issues.missionId, rowMissionIds),
-            isNull(issues.hiddenAt),
-            inArray(issues.status, ["todo", "backlog"]),
-            lte(issues.createdAt, staleCutoff),
-            sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
-          ))
-        : [];
-      const staleOwnerActionIssueRows = rowMissionIds.length > 0
-        ? await db
-          .select({ missionId: issues.missionId, issueId: issues.id })
-          .from(issues)
-          .where(and(
-            eq(issues.companyId, companyId),
-            inArray(issues.missionId, rowMissionIds),
-            isNull(issues.hiddenAt),
-            inArray(issues.status, ["todo", "backlog"]),
-            lte(issues.createdAt, staleCutoff),
-            eq(issues.originKind, "mission_main_executor_unblock"),
-          ))
-        : [];
-      const activeHeartbeatMissionIds = rowMissionIds.length > 0
-        ? new Set((await db
-          .select({ missionId: issues.missionId })
-          .from(issues)
-          .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
-          .where(and(
-            eq(issues.companyId, companyId),
-            inArray(issues.missionId, rowMissionIds),
-            inArray(heartbeatRuns.status, ["queued", "running"]),
-          )))
-          .map((row) => row.missionId)
-          .filter((missionId): missionId is string => Boolean(missionId)))
-        : new Set<string>();
-      const activePlanArtifactRows = rowMissionIds.length > 0
-        ? await db
-          .select({
-            missionId: missionPlanArtifacts.missionId,
-            revision: missionPlanArtifacts.revision,
-            refs: missionPlanArtifacts.refs,
-          })
-          .from(missionPlanArtifacts)
-          .where(and(
-            eq(missionPlanArtifacts.companyId, companyId),
-            inArray(missionPlanArtifacts.missionId, rowMissionIds),
-            eq(missionPlanArtifacts.status, "active"),
-          ))
-          .orderBy(asc(missionPlanArtifacts.missionId), asc(missionPlanArtifacts.revision))
-        : [];
-      const activePlanByMissionId = new Map<string, typeof activePlanArtifactRows[number]>();
-      for (const planRow of activePlanArtifactRows) {
-        activePlanByMissionId.set(planRow.missionId, planRow);
-      }
-      const planQaIssueDecisionPairs = activePlanArtifactRows
-        .map((planRow) => {
-          const refs = asRecord(planRow.refs);
-          const planQaRef = asRecord(refs.planQa);
-          const issueId = trimmedString(planQaRef.issueId);
-          const decisionHash = trimmedString(planQaRef.decisionHash);
-          return issueId && decisionHash ? { issueId, decisionHash } : null;
-        })
-        .filter((pair): pair is { issueId: string; decisionHash: string } => Boolean(pair));
-      const planQaVerdictKeys = new Set(
-        planQaIssueDecisionPairs.length > 0
-          ? (await db
-            .select({
-              planQaIssueId: missionPlanQaVerdicts.planQaIssueId,
-              decisionHash: missionPlanQaVerdicts.decisionHash,
-            })
-            .from(missionPlanQaVerdicts)
-            .where(and(
-              eq(missionPlanQaVerdicts.companyId, companyId),
-              inArray(missionPlanQaVerdicts.planQaIssueId, planQaIssueDecisionPairs.map((pair) => pair.issueId)),
-            )))
-            .map((row) => `${row.planQaIssueId}:${row.decisionHash}`)
-          : [],
-      );
-      const boardWaiting = await revisionBoardWaitingMissionIds(db, companyId, rowMissionIds);
-      const planMaterializationGapMissionIds = new Set(
-        rows.map((row) => row.id)
-          .filter((missionId) => {
-            if (activeHeartbeatMissionIds.has(missionId) || boardWaiting.has(missionId)) return false;
-            const planRow = activePlanByMissionId.get(missionId);
-            if (!planRow) return false;
-            const refs = asRecord(planRow.refs);
-            const ownerPlanDecisionRef = asRecord(refs.ownerPlanDecision);
-            const paqoWorkflowRef = asRecord(refs.paqoWorkflow);
-            const planQaRef = asRecord(refs.planQa);
-            const decisionHash = trimmedString(ownerPlanDecisionRef.decisionHash);
-            const planQaIssueId = trimmedString(planQaRef.issueId);
-            const planQaDecisionHash = trimmedString(planQaRef.decisionHash) || decisionHash;
-            const hasPlanQaVerdict = Boolean(planQaIssueId && planQaDecisionHash && planQaVerdictKeys.has(`${planQaIssueId}:${planQaDecisionHash}`));
-            return Boolean(
-              decisionHash
-              && !trimmedString(paqoWorkflowRef.workflowRunId)
-              && (trimmedString(planQaRef.status) !== "pending" || hasPlanQaVerdict),
-            );
-          }),
-      );
-      const staleInProgressFailedHeartbeatMissionIds = new Set(rowMissionIds.length > 0
-          ? (await db
-            .select({ missionId: issues.missionId })
-            .from(issues)
-            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, rowMissionIds),
-              isNull(issues.hiddenAt),
-              eq(issues.status, "in_progress"),
-              lte(issues.createdAt, staleCutoff),
-              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
-              sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
-            )))
-            .map((row) => row.missionId)
-            .filter((missionId): missionId is string => Boolean(missionId))
-            .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
-          : [],
-      );
-      const staleInProgressMissionIds = new Set(
-        rowMissionIds.length > 0
-          ? (await db
-            .select({ missionId: issues.missionId })
-            .from(issues)
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, rowMissionIds),
-              isNull(issues.hiddenAt),
-              eq(issues.status, "in_progress"),
-              lte(issues.createdAt, staleCutoff),
-              sql`${issues.originKind} not in ('mission_main_executor_oversight', 'mission_main_executor_unblock')`,
-            )))
-            .map((row) => row.missionId)
-            .filter((missionId): missionId is string => Boolean(missionId))
-          : [],
-      );
-      const staleQueueNoActiveExecutionMissionIds = new Set(
-        staleQueueIssueRows
-          .map((row) => row.missionId)
-          .filter((missionId): missionId is string => Boolean(missionId))
-          .filter((missionId) => !activeHeartbeatMissionIds.has(missionId)),
-      );
-      const stalledOwnerActionMissionIds = new Set(
-        staleOwnerActionIssueRows
-          .map((row) => row.missionId)
-          .filter((missionId): missionId is string => Boolean(missionId))
-          .filter((missionId) => !activeHeartbeatMissionIds.has(missionId)),
-      );
-      // [terminal-mission Human Operator report 회복 · 교정] stale owner-action 회복이 todo/backlog 만
-      //   보아 blocked 된 mission_main_executor_unblock 을 놓치는 root-cause 보정. recovery run 이
-      //   failed/timed_out 된 blocked unblock 을 가진 mission 을 supervision 후보로 올린다. issue age 가
-      //   아닌 settled run state(terminal failed/timed_out run) 가 트리거이므로 createdAt delay 를 두지
-      //   않는다(교정: 새로 만들어진 owner-action 도 final recovery run 이 이미 실패했으면 다음 sweep 에
-      //   바로 eligible). 실제 terminal 판정은 per-mission supervision 의 classifyTerminalMissionContinuation
-      //   가 담당(active heartbeat / live wakeup / open recovery / runnable step 이 남으면 suppress).
-      const blockedOwnerActionFailedRunMissionIds = new Set(
-        rowMissionIds.length > 0
-          ? (await db
-            .select({ missionId: issues.missionId })
-            .from(issues)
-            .innerJoin(heartbeatRuns, eq(heartbeatRuns.issueId, issues.id))
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, rowMissionIds),
-              isNull(issues.hiddenAt),
-              eq(issues.status, "blocked"),
-              eq(issues.originKind, "mission_main_executor_unblock"),
-              inArray(heartbeatRuns.status, ["failed", "timed_out"]),
-            )))
-            .map((row) => row.missionId)
-            .filter((missionId): missionId is string => Boolean(missionId))
-            .filter((missionId) => !activeHeartbeatMissionIds.has(missionId))
-          : [],
-      );
-      // [settlement-pending mission] 실행 단위가 전부 terminal-good(활성 없음 + 최소 1개 completed)하고
-      //   열린 소유 work 가 없으면(oversight 제외) mission 을 정리(settle)해야 한다. monitor 선택은
-      //   svc.getById 를 거치지 않아 lazy reconcile 이 안 돌기 때문에 별도 후보로 올린다
-      //   (2026-08-15 GAZ ef12d027: run completed 후 mission 이 active 로 orphan — 수동 supervision/run 으로만 정리됨).
-      const openNonOversightWorkMissionIds = new Set(
-        rowMissionIds.length > 0
-          ? (await db
-            .select({ missionId: issues.missionId })
-            .from(issues)
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, rowMissionIds),
-              isNull(issues.hiddenAt),
-              sql`${issues.status} not in ('done', 'cancelled')`,
-              sql`${issues.originKind} <> 'mission_main_executor_oversight'`,
-            )))
-            .map((row) => row.missionId)
-            .filter((missionId): missionId is string => Boolean(missionId))
-          : [],
-      );
-
-      for (const row of rows) {
-        const snapshot = snapshots[row.id];
-        const hasSupervisionUnit = snapshot?.units.some((unit) => ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status) && isActiveSupervisionExecutionStatus(unit.status));
-        const units = snapshot?.units ?? [];
-        const settlementPending = !hasSupervisionUnit
-          && units.length > 0
-          && units.some((unit) => unit.status === "completed")
-          && units.every((unit) => !ACTIVE_SUPERVISION_EXECUTION_STATUSES.has(unit.status))
-          && !openNonOversightWorkMissionIds.has(row.id)
-          && !activeHeartbeatMissionIds.has(row.id);
-        if (hasSupervisionUnit || settlementPending || staleFailedHeartbeatMissionIds.has(row.id) || staleQueueNoActiveExecutionMissionIds.has(row.id) || stalledOwnerActionMissionIds.has(row.id) || blockedOwnerActionFailedRunMissionIds.has(row.id) || staleInProgressFailedHeartbeatMissionIds.has(row.id) || staleInProgressMissionIds.has(row.id) || planMaterializationGapMissionIds.has(row.id)) missionIds.push(row.id);
-      }
-
-      const planningRows = rows.filter((row) => row.id && !missionIds.includes(row.id));
-      if (planningRows.length > 0 && deps.onPlanSubmissionMissing) {
-        const planningMissionIds = planningRows.map((row) => row.id);
-        const planIssues = planningMissionIds.length > 0
-          ? await db
-            .select({ id: issues.id, missionId: issues.missionId, status: issues.status, originKind: issues.originKind })
-            .from(issues)
-            .where(and(
-              eq(issues.companyId, companyId),
-              inArray(issues.missionId, planningMissionIds),
-              eq(issues.originKind, "mission_main_executor_plan"),
-              isNull(issues.hiddenAt),
-            ))
-          : [];
-        for (const planIssue of planIssues) {
-          if (!isPlanSubmissionRecoveryIssueStatus(planIssue.status)) continue;
-          const missionId = planIssue.missionId;
-          if (!missionId) continue;
-          const [existingSubmission] = await db
-            .select({ id: missionPlanDecisionSubmissions.id, status: missionPlanDecisionSubmissions.status })
-            .from(missionPlanDecisionSubmissions)
-            .where(and(
-              eq(missionPlanDecisionSubmissions.companyId, companyId),
-              eq(missionPlanDecisionSubmissions.missionId, missionId),
-            ))
-            .orderBy(desc(missionPlanDecisionSubmissions.createdAt))
-            .limit(1);
-          const hasRejectedSubmission = existingSubmission
-            ? isRejectedMissionPlanDecisionSubmissionStatus(existingSubmission.status)
-            : false;
-          if (existingSubmission && !hasRejectedSubmission) continue;
-          if (!hasRejectedSubmission) {
-            const succeededRuns = await db
-              .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
-              .from(heartbeatRuns)
-              .where(and(eq(heartbeatRuns.issueId, planIssue.id), eq(heartbeatRuns.status, "succeeded")))
-              .orderBy(asc(heartbeatRuns.createdAt))
-              .limit(1);
-            if (succeededRuns.length === 0) continue;
-            const existingPlanQa = await db
-              .select({ id: issues.id })
-              .from(issues)
-              .where(and(
-                eq(issues.companyId, companyId),
-                eq(issues.missionId, missionId),
-                eq(issues.originKind, "mission_plan_qa"),
-                isNull(issues.hiddenAt),
-              ))
-              .limit(1);
-            if (existingPlanQa.length > 0) continue;
-            const existingWorkflowRuns = await db
-              .select({ id: workflowRuns.id })
-              .from(workflowRuns)
-              .where(and(eq(workflowRuns.companyId, companyId), eq(workflowRuns.missionId, missionId)))
-              .limit(1);
-            if (existingWorkflowRuns.length > 0) continue;
-          }
-          if (activeHeartbeatMissionIds.has(missionId)) continue;
-          if (!missionIds.includes(missionId)) missionIds.push(missionId);
-        }
-      }
-    }
-
-    const results: MissionOwnerSupervisionResult[] = [...terminalResults];
-    for (const missionId of missionIds) {
-      results.push(await runMainExecutorSupervision({
-        missionId,
-        staleAfterMinutes: input.staleAfterMinutes,
-        now: input.now,
-        applySafeActions: input.applySafeActions,
-        applyOwnerDecisionActions: input.applyOwnerDecisionActions,
-        dispatchOwnerDecisionWakeups: input.dispatchOwnerDecisionWakeups,
-        dispatchStalledOwnerActionWakeups: true,
-        dispatchStaleSourceIssueWakeups: input.dispatchStaleSourceIssueWakeups,
-      }, promotedPlanningMissionIds.has(missionId)));
-    }
-
-    return { companyId: input.companyId, missionIds: [...terminalResults.map((result) => result.missionId), ...missionIds], missions: results };
-  }
+  const runActiveMissionOwnerSupervision = createRunActiveMissionOwnerSupervision({
+    db, deps, ownerActions, runMainExecutorSupervision,
+  });
 
   return {
     runMainExecutorSupervision,
