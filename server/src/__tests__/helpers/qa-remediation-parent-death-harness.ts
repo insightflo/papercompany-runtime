@@ -9,7 +9,9 @@ import { createServer, type Server, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 
-export const SERVER_ROOT = process.cwd();
+// 자식 프로세스의 cwd 이자 `--import tsx` 해석 기준. vitest 는 저장소 루트에서 실행되므로
+// process.cwd() 를 쓰면 server/node_modules 의 tsx 를 찾지 못해 자식이 즉시 죽는다.
+export const SERVER_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const CHILD_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "qa-remediation-parent-death-child.ts");
 export const NATIVE_HELPER = fileURLToPath(new URL("../../services/workflow/control-flow/qa-remediation-file-owner.py", import.meta.url));
 export const PYTHON = process.env.PAPERCLIP_QA_FILE_OWNER_PYTHON
