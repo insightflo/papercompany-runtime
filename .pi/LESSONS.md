@@ -425,3 +425,12 @@
 - Candidate: Acquire mission key-share before the runtime upsert in the same transaction, including savepoint callers; preserve the existing status check and exports.
 - Prevention rule: For mission-runtime upserts, take the referenced mission key-share lock before the runtime unique key in the same transaction and exercise both arrival orders.
 - Evidence: `t16a-live-deadlock-repro-autocommit.log` and `t16a-mission-lock-scope-green.log` in `c5-candidate-backups`; the production event has the same observed SQL/lock shape but its prior locks were not retained.
+
+### 2026-11-06 — verify imports on both sides of a split
+- Task: T16d quality native delivery current-output test split, PR #594.
+- What failed: Five of eight candidate tests failed with `ReferenceError: watch is not defined`.
+- Root cause: The `watch` import was moved for the extracted helper, but the original file still used it in `waitForObservedLockWait`.
+- Fix: Restore the original import; the isolated baseline and corrected candidate each passed all eight tests.
+- Prevention rule: Before removing or relocating an import after a split, search value and type references in the original and destination separately; keep the import in each file that still uses it.
+- Reuse trigger: Moving functions, tests, or types between files while changing imports.
+- Evidence: PR #594 and `t16d-quality-comparison.json` in the `c5-candidate-backups` workspace directory.
