@@ -89,6 +89,7 @@ For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA path
 - When an approved restart creates an agent wake inside a transaction, keep the wake with the root commit owner and deliver it only after that commit; a savepoint alone must not start the agent.
 - When accepting a webhook idempotency key, lock the receipt and bind its run in the same transaction before starting work; a concurrent unbound replay must not create a second run, and rejected inputs must preserve the existing receipt and quota contract.
 - When a local process adapter starts a child, forward its spawn callback through every wrapper and verify that the heartbeat stores the real child PID before relying on cross-process cancellation or recovery.
+- When upserting a mission runtime, acquire the referenced mission row’s key-share lock before the runtime unique key in the same transaction, and test contention in both arrival orders.
 
 8. Keep implementation files under 300 lines.
 During development, do not let a single source, test, or support file grow past 300 lines. Split cohesive helpers, components, fixtures, or focused tests into separate files before crossing the limit. If a legacy file already exceeds 300 lines, do not make it larger unless the change is a targeted reduction or an explicitly approved exception. Compare its line count with the base before editing and again before opening the PR; record any explicit exception.

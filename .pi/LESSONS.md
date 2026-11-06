@@ -417,3 +417,11 @@
 - Fix: Preserve the original observer, enumerate the suite's query forms, and validate a revised observer against real live and exited children, parent PID, command identity, and zombie state before use. Earlier cleanup evidence remains unverified.
 - Prevention rule: Inventory and validate every process-status query before reusing an observer for a broader suite; unsupported calls must not count as process-death evidence.
 - Evidence: `t16a-proc-observer-v1.py` and `t16a-proc-observer-v2-check.log` in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — acquire the mission lock before runtime admission
+- Task: T16a mission-runtime deadlock investigation.
+- What failed: A resume transaction holding a mission lock and an ordinary runtime upsert of the same key waited on each other until PostgreSQL returned 40P01.
+- Root cause: The ordinary upsert could reserve the runtime unique key before its implicit mission foreign-key key-share lock, reversing the resume path’s mission-first order.
+- Candidate: Acquire mission key-share before the runtime upsert in the same transaction, including savepoint callers; preserve the existing status check and exports.
+- Prevention rule: For mission-runtime upserts, take the referenced mission key-share lock before the runtime unique key in the same transaction and exercise both arrival orders.
+- Evidence: `t16a-live-deadlock-repro-autocommit.log` and `t16a-mission-lock-scope-green.log` in `c5-candidate-backups`; the production event has the same observed SQL/lock shape but its prior locks were not retained.
