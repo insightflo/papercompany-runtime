@@ -1,9 +1,10 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { agents, companies, toolDefinitions, workflowRuns, workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
+import { signWorkflowWebhook } from "../services/workflow/webhook-signature.js";
 import { secretService } from "../services/secrets.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
@@ -64,7 +65,7 @@ it("serializes concurrent receipt insertion and later binding across two actual 
       return row ? Number(row.pid) : null;
     }, "two-stage webhook lock", 45_000);
     const body = JSON.stringify({ event: "same-delivery" }), timestamp = String(Math.floor(Date.now() / 1000));
-    const signature = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+    const signature = signWorkflowWebhook(secret, timestamp, "shared-key", body);
     const post = (url: string) => fetch(`${url}/api/webhooks/workflows/${definition.id}`, { method: "POST",
       headers: { "content-type": "application/json", "x-timestamp": timestamp, "x-idempotency-key": "shared-key", "x-signature": signature },
       body, signal: AbortSignal.timeout(120_000) });

@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -9,6 +9,7 @@ import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { agents, companies, createDb, toolDefinitions, workflowRuns, workflowRunSlots,
   workflowStepRuns, workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
+import { signWorkflowWebhook } from "../services/workflow/webhook-signature.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { workflowRoutes } from "../routes/workflows.js";
@@ -85,7 +86,7 @@ fs.appendFileSync(${JSON.stringify(marker)},mode+'\\n'); console.log(JSON.string
   };
   const postWebhook = (workflowId: string, key: string) => {
     const body = JSON.stringify({ event: "local-test" }), timestamp = String(Math.floor(Date.now() / 1000));
-    const signature = createHmac("sha256", webhookSecret).update(`${timestamp}.${body}`).digest("hex");
+    const signature = signWorkflowWebhook(webhookSecret, timestamp, key, body);
     return request(app).post(`/api/webhooks/workflows/${workflowId}`).set("Content-Type", "application/json")
       .set("X-Timestamp", timestamp).set("X-Idempotency-Key", key).set("X-Signature", signature).send(body);
   };
