@@ -3186,7 +3186,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const execution = executeRun(claimedRun.id).catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         });
-        trackHeartbeatExecution(db, execution);
+        // [C5 queue drain] run 이 끝난 직후 같은 agent 의 queued wake/run 을 한 번 더 승격한다.
+        //   실행 중에 만들어진 정착 wake(QA refire 등)는 그 run 이 유일한 슬롯을 점유한 탓에
+        //   after-commit drain 시점에 승격되지 못하고, 회수 lane(기본 5분)까지 기다려야 했다.
+        //   승격 자체는 기존 startNextQueuedRunForAgent 경로를 그대로 쓰므로 중복 실행은 없다.
+        const drained = execution.finally(() => resumeQueuedRuns(claimedRun.agentId).catch((err) => {
+          logger.warn({ err, agentId: claimedRun.agentId }, "post-run heartbeat queue drain failed");
+        }));
+        trackHeartbeatExecution(db, drained);
       }
       return claimedRuns;
     });
