@@ -7,8 +7,9 @@
 
 import { Router } from "express";
 import client from "prom-client";
+import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { createRuntimeMetricsMonitor } from "../services/runtime-metrics-monitor.js";
+import { createRuntimeMetricsMonitor, createDbMetricsMonitor, createTelegramMetricsSender, type MonitorAlertSender } from "../services/runtime-metrics-monitor.js";
 
 function normalizeMetricRoute(url: string): string {
   const path = url.split("?")[0] ?? url;
@@ -54,7 +55,7 @@ export const httpRequestTotal = new client.Counter({
  */
 export const activeMissionSessions = new client.Gauge({
   name: "paperclip_active_mission_sessions",
-  help: "Number of currently active mission sessions",
+  help: "Number of mission sessions with active database status, including expired sessions",
   registers: [register],
 });
 
@@ -107,6 +108,14 @@ export const srbDeliveriesByStatus = new client.Gauge({
   registers: [register],
 });
 
+// The last values remain available during an outage; check up and timestamp for freshness.
+export const dbMetricsCollectionUp = new client.Gauge({
+  name: "paperclip_db_metrics_collection_up", help: "Whether the latest DB metrics collection succeeded", registers: [register],
+});
+export const dbMetricsLastSuccess = new client.Gauge({
+  name: "paperclip_db_metrics_last_success_timestamp_seconds", help: "Unix time of the last successful DB metrics collection", registers: [register],
+});
+
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
@@ -141,13 +150,35 @@ export function metricsMiddleware() {
 // ---------------------------------------------------------------------------
 
 let metricsMonitorStarted = false;
+let monitoredDb: Db | undefined;
+let dbMonitor: ReturnType<typeof createDbMetricsMonitor> | undefined;
+let metricsAlertSender: MonitorAlertSender | undefined;
 
-export function metricsRoutes() {
+export function metricsRoutes(db?: Db, options?: { sendAlert?: MonitorAlertSender }) {
+  if (db && db !== monitoredDb) {
+    dbMonitor?.stop();
+    activeMissionSessions.set(0); activeHeartbeatRuns.set(0);
+    missionsByStatus.reset(); workflowRunsByStatus.reset();
+    worktreeRulesBySeverity.reset(); srbDeliveriesByStatus.reset();
+    dbMetricsCollectionUp.set(0); dbMetricsLastSuccess.set(0);
+    monitoredDb = db;
+    metricsAlertSender = options?.sendAlert ?? createTelegramMetricsSender();
+    dbMonitor = createDbMetricsMonitor(db, {
+      activeSessions: activeMissionSessions, activeHeartbeats: activeHeartbeatRuns,
+      missions: missionsByStatus, workflows: workflowRunsByStatus,
+      rules: worktreeRulesBySeverity, deliveries: srbDeliveriesByStatus,
+      up: dbMetricsCollectionUp, lastSuccess: dbMetricsLastSuccess,
+    }, logger, (message) => metricsAlertSender!(message));
+    if (metricsMonitorStarted) void dbMonitor.sample();
+  }
   if (!metricsMonitorStarted) {
     metricsMonitorStarted = true;
-    const monitor = createRuntimeMetricsMonitor(() => httpRequestTotal.get(), logger);
-    void monitor.sample();
-    const timer = setInterval(() => void monitor.sample(), 60_000);
+    const monitor = createRuntimeMetricsMonitor(() => httpRequestTotal.get(), logger, 5, async (message) => {
+      if (metricsAlertSender) await metricsAlertSender(message);
+    });
+    const sample = () => { void monitor.sample(); if (dbMonitor) void dbMonitor.sample(); };
+    sample();
+    const timer = setInterval(sample, 60_000);
     timer.unref();
   }
   const router = Router();
