@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { prioritizeProjectWorkspaceCandidatesForRun } from "./heartbeat-workspace-priority.js";
-import { hasWorkflowQaReworkContract, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
+import { describeSessionResetReason, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 export { shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 import { detectCodexAuthFailureForAutoBlock, type CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classification.js";
 export { detectCodexAuthFailureForAutoBlock } from "./heartbeat-codex-auth-classification.js";
@@ -557,16 +557,7 @@ function hasResumableSessionForRun(
   );
 }
 
-interface WakeupOptions {
-  source?: "timer" | "assignment" | "on_demand" | "automation" | "scheduler";
-  triggerDetail?: string | null;
-  reason?: string | null;
-  payload?: Record<string, unknown> | null;
-  idempotencyKey?: string | null;
-  requestedByActorType?: "user" | "agent" | "system";
-  requestedByActorId?: string | null;
-  contextSnapshot?: Record<string, unknown>;
-}
+
 
 
 type SessionCompactionDecision = {
@@ -779,98 +770,13 @@ export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo &
   ].join("\n");
 }
 
-function describeSessionResetReason(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-) {
-  if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
-  if (hasWorkflowQaReworkContract(contextSnapshot)) return "workflow QA rework requires a fresh session";
 
-  const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
-  if (wakeReason === "mission_unblock_action_created") return "wake reason is mission_unblock_action_created";
-  if (wakeReason === "mission_unblock_action_stalled") return "wake reason is mission_unblock_action_stalled";
-  return null;
-}
 
-function deriveCommentId(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-  payload: Record<string, unknown> | null | undefined,
-) {
-  return (
-    readNonEmptyString(contextSnapshot?.wakeCommentId) ??
-    readNonEmptyString(contextSnapshot?.commentId) ??
-    readNonEmptyString(payload?.commentId) ??
-    null
-  );
-}
 
-function enrichWakeContextSnapshot(input: {
-  contextSnapshot: Record<string, unknown>;
-  reason: string | null;
-  source: WakeupOptions["source"];
-  triggerDetail: WakeupOptions["triggerDetail"] | null;
-  payload: Record<string, unknown> | null;
-}) {
-  const { contextSnapshot, reason, source, triggerDetail, payload } = input;
-  const issueIdFromPayload = readNonEmptyString(payload?.["issueId"]);
-  const commentIdFromPayload = readNonEmptyString(payload?.["commentId"]);
-  const missionIdFromPayload = readNonEmptyString(payload?.["missionId"]);
-  const taskKey = deriveTaskKey(contextSnapshot, payload);
-  const wakeCommentId = deriveCommentId(contextSnapshot, payload);
 
-  if (!readNonEmptyString(contextSnapshot["wakeReason"]) && reason) {
-    contextSnapshot.wakeReason = reason;
-  }
-  if (!readNonEmptyString(contextSnapshot["issueId"]) && issueIdFromPayload) {
-    contextSnapshot.issueId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["missionId"]) && missionIdFromPayload) {
-    contextSnapshot.missionId = missionIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskId"]) && issueIdFromPayload) {
-    contextSnapshot.taskId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskKey"]) && taskKey) {
-    contextSnapshot.taskKey = taskKey;
-  }
-  if (!readNonEmptyString(contextSnapshot["commentId"]) && commentIdFromPayload) {
-    contextSnapshot.commentId = commentIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeCommentId"]) && wakeCommentId) {
-    contextSnapshot.wakeCommentId = wakeCommentId;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeSource"]) && source) {
-    contextSnapshot.wakeSource = source;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeTriggerDetail"]) && triggerDetail) {
-    contextSnapshot.wakeTriggerDetail = triggerDetail;
-  }
 
-  return {
-    contextSnapshot,
-    issueIdFromPayload,
-    commentIdFromPayload,
-    taskKey,
-    wakeCommentId,
-  };
-}
 
-function mergeCoalescedContextSnapshot(
-  existingRaw: unknown,
-  incoming: Record<string, unknown>,
-) {
-  const existing = parseObject(existingRaw);
-  const merged: Record<string, unknown> = {
-    ...existing,
-    ...incoming,
-  };
-  const commentId = deriveCommentId(incoming, null);
-  if (commentId) {
-    merged.commentId = commentId;
-    merged.wakeCommentId = commentId;
-  }
-  return merged;
-}
+
 
 
 function isTrackedLocalChildProcessAdapter(adapterType: string) {
@@ -9159,5 +9065,6 @@ import { isHermesOperationsLiaisonAgent, isMissionOwnerControlIssue, canCreateMi
 export { type MissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
 import { canApplyMissingWorkProductRegistrationGate, resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
 import { truncateDisplayId, getAdapterSessionCodec, buildMissionSessionSecretName, isRecoverableMissionSessionSecretReadError, normalizeSessionParams, resolveMissionSessionAuthorityDecision, resolveNextSessionState, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
+import { enrichWakeContextSnapshot, mergeCoalescedContextSnapshot, type WakeupOptions } from "./heartbeat-wake-context.js";
 export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
 export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";

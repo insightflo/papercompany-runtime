@@ -23,3 +23,16 @@ export function shouldResetTaskSessionForWake(
   ) return true;
   return false;
 }
+
+export function describeSessionResetReason(
+  contextSnapshot: Record<string, unknown> | null | undefined,
+) {
+  if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
+  if (hasWorkflowQaReworkContract(contextSnapshot)) return "workflow QA rework requires a fresh session";
+
+  const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
+  if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
+  if (wakeReason === "mission_unblock_action_created") return "wake reason is mission_unblock_action_created";
+  if (wakeReason === "mission_unblock_action_stalled") return "wake reason is mission_unblock_action_stalled";
+  return null;
+}
