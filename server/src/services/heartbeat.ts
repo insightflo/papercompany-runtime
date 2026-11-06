@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { prioritizeProjectWorkspaceCandidatesForRun } from "./heartbeat-workspace-priority.js";
-import { hasWorkflowQaReworkContract, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
+import { describeSessionResetReason, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 export { shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 import { detectCodexAuthFailureForAutoBlock, type CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classification.js";
 export { detectCodexAuthFailureForAutoBlock } from "./heartbeat-codex-auth-classification.js";
@@ -557,16 +557,7 @@ function hasResumableSessionForRun(
   );
 }
 
-interface WakeupOptions {
-  source?: "timer" | "assignment" | "on_demand" | "automation" | "scheduler";
-  triggerDetail?: string | null;
-  reason?: string | null;
-  payload?: Record<string, unknown> | null;
-  idempotencyKey?: string | null;
-  requestedByActorType?: "user" | "agent" | "system";
-  requestedByActorId?: string | null;
-  contextSnapshot?: Record<string, unknown>;
-}
+
 
 
 type SessionCompactionDecision = {
@@ -626,90 +617,6 @@ function applyPaperclipApiContext(context: Record<string, unknown>): void {
   context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
 }
 
-function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
-  return isMissionExecutionLiaisonAgent(agent);
-}
-
-function isMissionOwnerControlIssue(issue: Pick<typeof issues.$inferSelect, "originKind" | "description">) {
-  return isMissionOwnerTaskIssue(issue);
-}
-
-function truncateContextText(value: string | null | undefined, max = 220) {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed.length > max ? `${trimmed.slice(0, max - 3)}...` : trimmed;
-}
-
-function isMissionOwnerTaskIssue(issue: {
-  originKind: string | null;
-  description: string | null;
-}) {
-  return (
-    issue.originKind === "mission_main_executor_oversight" ||
-    issue.originKind === "mission_main_executor_unblock" ||
-    parseMissionOwnerActionMarker(issue.description) !== null
-  );
-}
-
-function canApplyRequestChangesValidationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  const title = issue.title?.trim() ?? "";
-  return (
-    /^\s*\[QA\]/iu.test(title) ||
-    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(title) ||
-    title.includes("검증")
-  );
-}
-
-function canApplyMissingWorkProductRegistrationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-  description?: string | null;
-}, stepRunRequiresWorkProduct?: boolean) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  // workflow step의 명시 graphWorkProductRequired 플래그(workflow_step_runs.metadata에 stamp)가
-  // 권위 source. present면 title/contract 휴리스틱을 무시한다.
-  if (stepRunRequiresWorkProduct === true) return true;
-  if (stepRunRequiresWorkProduct === false) return false;
-
-  // Legacy fallback: 플래그 미스탬프 step-run(pre-deploy / 미동기화)용 종래 휴리스틱.
-  const title = issue.title?.trim() ?? "";
-  if (/\b(lead|approval|approve|audit|auditor|validator|validation|validate|verify|QA|review|check)\b/iu.test(title)) return false;
-  if (hasDeliverableOutputContract(issue.description)) return true;
-  return (
-    /\b(synthesi[sz]e|synthesis|generate|produce|create|draft|artifact|document|note|infographic|export|deliver|html|pdf|report)\b/iu.test(title) ||
-    /(작성|생성|제작|산출물|문서|자료|보고서|리포트|HTML|PDF)/u.test(title)
-  );
-}
-
-function hasDeliverableOutputContract(description: string | null | undefined) {
-  const text = description?.trim() ?? "";
-  return text.includes("Deliverable output (use exactly this directory)") && /`?\[?ARTIFACT\]?`?\s*:/iu.test(text);
-}
-
-/**
- * workflow_step_runs.metadata 에서 graphWorkProductRequired 플래그를 3상으로 판정.
- * - true  → 명시 산출물 step (gate 발동)
- * - false → 명시 비산출물 step (gate 스킵, 휴리스틱도 무시)
- * - undefined → 필드 미스탬프(legacy row / metadata={} / non-boolean) → 종래 휴리스틱 fallback
- * buildWorkflowStepRunMetadata 가 항상 boolean 으로 stamp 하므로 non-boolean은 undefined 취급(legacy 호환).
- */
-export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | undefined {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
-  const value = (metadata as Record<string, unknown>).graphWorkProductRequired;
-  if (value === true) return true;
-  if (value === false) return false;
-  return undefined;
-}
 
 
 
@@ -724,131 +631,27 @@ export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | 
 
 
 
-function canCreateMissionOwnerUnblockForRequestChanges(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  return canApplyRequestChangesValidationGate(issue);
-}
 
-export type MissionOwnerTaskContext = {
-  available: true;
-  gating: "originKind" | "mission-owner-action-marker";
-  mission: {
-    id: string;
-    title: string;
-    status: string;
-  };
-  ownerTaskIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    originKind: string | null;
-    status: string;
-  };
-  sourceIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    status: string;
-    assigneeAgentId: string | null;
-  } | null;
-  latestOwnerActionDecision: ExtractedMissionOwnerDecision | null;
-  governanceEvidence: string;
-  allowedDecisionOptions: string[];
-  requiredDecisionFormat: string[];
-};
 
-async function resolveMissionOwnerTaskContext(input: {
-  db: Db;
-  companyId: string;
-  issue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    description: string | null;
-    status: string;
-    missionId: string | null;
-    originKind: string | null;
-    originId: string | null;
-  } | null;
-}): Promise<MissionOwnerTaskContext | null> {
-  const { db, companyId, issue } = input;
-  if (!issue || !isMissionOwnerTaskIssue(issue)) return null;
 
-  const marker = parseMissionOwnerActionMarker(issue.description);
-  const missionId = issue.missionId ?? marker?.missionId ?? null;
-  if (!missionId) return null;
 
-  const mission = await db
-    .select({ id: missions.id, title: missions.title, status: missions.status })
-    .from(missions)
-    .where(and(eq(missions.id, missionId), eq(missions.companyId, companyId)))
-    .then((rows) => rows[0] ?? null);
-  if (!mission) return null;
 
-  const sourceIssueId = issue.originKind === "mission_main_executor_unblock"
-    ? issue.originId
-    : marker?.sourceIssueId ?? null;
-  const sourceIssue = sourceIssueId
-    ? await db
-        .select({
-          id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          assigneeAgentId: issues.assigneeAgentId,
-        })
-        .from(issues)
-        .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, companyId)))
-        .then((rows) => rows[0] ?? null)
-    : null;
 
-  // Structured recovery ledger only — comment/description decision prose is display-only.
-  const structuredDecision = await loadLatestMissionOwnerDecision({
-    db,
-    companyId,
-    ownerActionIssueId: issue.id,
-  });
-  const latestOwnerActionDecision = structuredDecision?.decision ?? null;
 
-  return {
-    available: true,
-    gating: issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock"
-      ? "originKind"
-      : "mission-owner-action-marker",
-    mission: {
-      id: mission.id,
-      title: truncateContextText(mission.title, 160) ?? "Untitled mission",
-      status: mission.status,
-    },
-    ownerTaskIssue: {
-      id: issue.id,
-      identifier: issue.identifier,
-      title: truncateContextText(issue.title, 160) ?? "Untitled issue",
-      originKind: issue.originKind,
-      status: issue.status,
-    },
-    sourceIssue: sourceIssue
-      ? {
-          id: sourceIssue.id,
-          identifier: sourceIssue.identifier,
-          title: truncateContextText(sourceIssue.title, 160) ?? "Untitled source issue",
-          status: sourceIssue.status,
-          assigneeAgentId: sourceIssue.assigneeAgentId,
-        }
-      : null,
-    latestOwnerActionDecision,
-    governanceEvidence: "Governance evidence: unavailable in this context builder",
-    allowedDecisionOptions: [...MISSION_OWNER_DECISION_OPTIONS],
-    requiredDecisionFormat: [
-      "Submit structured Mission owner decision via the dedicated recovery API / ledger (owner_recovery_api).",
-      "Comments and Markdown decision blocks are display-only and are not control-plane authority.",
-      "Decision options:",
-      ...MISSION_OWNER_DECISION_OPTIONS.map((option) => `- ${option}`),
-    ],
-  };
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function normalizeLedgerBillingType(value: unknown): BillingType {
   const raw = readNonEmptyString(value);
@@ -967,98 +770,13 @@ export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo &
   ].join("\n");
 }
 
-function describeSessionResetReason(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-) {
-  if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
-  if (hasWorkflowQaReworkContract(contextSnapshot)) return "workflow QA rework requires a fresh session";
 
-  const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
-  if (wakeReason === "mission_unblock_action_created") return "wake reason is mission_unblock_action_created";
-  if (wakeReason === "mission_unblock_action_stalled") return "wake reason is mission_unblock_action_stalled";
-  return null;
-}
 
-function deriveCommentId(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-  payload: Record<string, unknown> | null | undefined,
-) {
-  return (
-    readNonEmptyString(contextSnapshot?.wakeCommentId) ??
-    readNonEmptyString(contextSnapshot?.commentId) ??
-    readNonEmptyString(payload?.commentId) ??
-    null
-  );
-}
 
-function enrichWakeContextSnapshot(input: {
-  contextSnapshot: Record<string, unknown>;
-  reason: string | null;
-  source: WakeupOptions["source"];
-  triggerDetail: WakeupOptions["triggerDetail"] | null;
-  payload: Record<string, unknown> | null;
-}) {
-  const { contextSnapshot, reason, source, triggerDetail, payload } = input;
-  const issueIdFromPayload = readNonEmptyString(payload?.["issueId"]);
-  const commentIdFromPayload = readNonEmptyString(payload?.["commentId"]);
-  const missionIdFromPayload = readNonEmptyString(payload?.["missionId"]);
-  const taskKey = deriveTaskKey(contextSnapshot, payload);
-  const wakeCommentId = deriveCommentId(contextSnapshot, payload);
 
-  if (!readNonEmptyString(contextSnapshot["wakeReason"]) && reason) {
-    contextSnapshot.wakeReason = reason;
-  }
-  if (!readNonEmptyString(contextSnapshot["issueId"]) && issueIdFromPayload) {
-    contextSnapshot.issueId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["missionId"]) && missionIdFromPayload) {
-    contextSnapshot.missionId = missionIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskId"]) && issueIdFromPayload) {
-    contextSnapshot.taskId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskKey"]) && taskKey) {
-    contextSnapshot.taskKey = taskKey;
-  }
-  if (!readNonEmptyString(contextSnapshot["commentId"]) && commentIdFromPayload) {
-    contextSnapshot.commentId = commentIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeCommentId"]) && wakeCommentId) {
-    contextSnapshot.wakeCommentId = wakeCommentId;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeSource"]) && source) {
-    contextSnapshot.wakeSource = source;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeTriggerDetail"]) && triggerDetail) {
-    contextSnapshot.wakeTriggerDetail = triggerDetail;
-  }
 
-  return {
-    contextSnapshot,
-    issueIdFromPayload,
-    commentIdFromPayload,
-    taskKey,
-    wakeCommentId,
-  };
-}
 
-function mergeCoalescedContextSnapshot(
-  existingRaw: unknown,
-  incoming: Record<string, unknown>,
-) {
-  const existing = parseObject(existingRaw);
-  const merged: Record<string, unknown> = {
-    ...existing,
-    ...incoming,
-  };
-  const commentId = deriveCommentId(incoming, null);
-  if (commentId) {
-    merged.commentId = commentId;
-    merged.wakeCommentId = commentId;
-  }
-  return merged;
-}
+
 
 
 function isTrackedLocalChildProcessAdapter(adapterType: string) {
@@ -1118,181 +836,23 @@ function shouldQueueRunFailureAdapterFallback(input: {
 }
 
 
-function truncateDisplayId(value: string | null | undefined, max = 128) {
-  if (!value) return null;
-  return value.length > max ? value.slice(0, max) : value;
-}
 
-const defaultSessionCodec: AdapterSessionCodec = {
-  deserialize(raw: unknown) {
-    const asObj = parseObject(raw);
-    if (Object.keys(asObj).length > 0) return asObj;
-    const sessionId = readNonEmptyString((raw as Record<string, unknown> | null)?.sessionId);
-    if (sessionId) return { sessionId };
-    return null;
-  },
-  serialize(params: Record<string, unknown> | null) {
-    if (!params || Object.keys(params).length === 0) return null;
-    return params;
-  },
-  getDisplayId(params: Record<string, unknown> | null) {
-    return readNonEmptyString(params?.sessionId);
-  },
-};
 
-function getAdapterSessionCodec(adapterType: string) {
-  const adapter = getServerAdapter(adapterType);
-  return adapter.sessionCodec ?? defaultSessionCodec;
-}
 
-function buildMissionSessionSecretName(input: {
-  missionId: string;
-  agentId: string;
-  adapterType: string;
-}) {
-  return `mission-session:${input.missionId}:${input.agentId}:${input.adapterType}`;
-}
 
-function isRecoverableMissionSessionSecretReadError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof HttpError) {
-    return error.status === 400 && message.includes("Invalid local_encrypted secret material");
-  }
-  return (
-    message.includes("Unsupported state or unable to authenticate data") ||
-    message.includes("Invalid initialization vector") ||
-    message.includes("Invalid authentication tag length")
-  );
-}
 
-function normalizeSessionParams(params: Record<string, unknown> | null | undefined) {
-  if (!params) return null;
-  return Object.keys(params).length > 0 ? params : null;
-}
 
-export type MissionSessionAuthorityDecision = {
-  missionKnown: boolean;
-  defaultAuthority: "mission_session" | "task_session" | "runtime_state" | "none";
-  compatibilitySeedSessionId: string | null;
-  preferredSessionId: string | null;
-};
 
-export function resolveMissionSessionAuthorityDecision(input: {
-  missionId?: string | null;
-  missionSessionId?: string | null;
-  taskSessionDisplayId?: string | null;
-  taskSessionLegacySessionId?: string | null;
-  runtimeSessionId?: string | null;
-  resetTaskSession?: boolean;
-}): MissionSessionAuthorityDecision {
-  const missionId = readNonEmptyString(input.missionId);
-  const resetTaskSession = input.resetTaskSession === true;
-  const taskSessionDisplayId = truncateDisplayId(readNonEmptyString(input.taskSessionDisplayId));
-  const taskSessionLegacySessionId = readNonEmptyString(input.taskSessionLegacySessionId);
-  const runtimeSessionId = readNonEmptyString(input.runtimeSessionId);
 
-  if (missionId) {
-    return {
-      missionKnown: true,
-      defaultAuthority: "mission_session",
-      compatibilitySeedSessionId:
-        resetTaskSession ? null : (taskSessionDisplayId ?? taskSessionLegacySessionId ?? null),
-      preferredSessionId: readNonEmptyString(input.missionSessionId),
-    };
-  }
 
-  if (resetTaskSession) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "none",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: null,
-    };
-  }
 
-  const taskSessionId = taskSessionDisplayId ?? taskSessionLegacySessionId ?? null;
-  if (taskSessionId) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "task_session",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: taskSessionId,
-    };
-  }
 
-  if (runtimeSessionId) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "runtime_state",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: runtimeSessionId,
-    };
-  }
 
-  return {
-    missionKnown: false,
-    defaultAuthority: "none",
-    compatibilitySeedSessionId: null,
-    preferredSessionId: null,
-  };
-}
 
-function resolveNextSessionState(input: {
-  codec: AdapterSessionCodec;
-  adapterResult: AdapterExecutionResult;
-  previousParams: Record<string, unknown> | null;
-  previousDisplayId: string | null;
-  previousLegacySessionId: string | null;
-}) {
-  const { codec, adapterResult, previousParams, previousDisplayId, previousLegacySessionId } = input;
 
-  if (adapterResult.clearSession) {
-    return {
-      params: null as Record<string, unknown> | null,
-      displayId: null as string | null,
-      legacySessionId: null as string | null,
-    };
-  }
 
-  const explicitParams = adapterResult.sessionParams;
-  const hasExplicitParams = adapterResult.sessionParams !== undefined;
-  const hasExplicitSessionId = adapterResult.sessionId !== undefined;
-  const explicitSessionId = readNonEmptyString(adapterResult.sessionId);
-  const hasExplicitDisplay = adapterResult.sessionDisplayId !== undefined;
-  const explicitDisplayId = readNonEmptyString(adapterResult.sessionDisplayId);
-  const shouldUsePrevious = !hasExplicitParams && !hasExplicitSessionId && !hasExplicitDisplay;
 
-  const candidateParams =
-    hasExplicitParams
-      ? explicitParams
-      : hasExplicitSessionId
-        ? (explicitSessionId ? { sessionId: explicitSessionId } : null)
-        : previousParams;
 
-  const serialized = normalizeSessionParams(codec.serialize(normalizeSessionParams(candidateParams) ?? null));
-  const deserialized = normalizeSessionParams(codec.deserialize(serialized));
-
-  const displayId = truncateDisplayId(
-    explicitDisplayId ??
-      (codec.getDisplayId ? codec.getDisplayId(deserialized) : null) ??
-      readNonEmptyString(deserialized?.sessionId) ??
-      (shouldUsePrevious ? previousDisplayId : null) ??
-      explicitSessionId ??
-      (shouldUsePrevious ? previousLegacySessionId : null),
-  );
-
-  const legacySessionId =
-    explicitSessionId ??
-    readNonEmptyString(deserialized?.sessionId) ??
-    displayId ??
-    (shouldUsePrevious ? previousLegacySessionId : null);
-
-  return {
-    params: serialized,
-    displayId,
-    legacySessionId,
-  };
-}
 
 export function isSucceededHeartbeatRunStatus(status: string | null | undefined): status is "succeeded" {
   return status === "succeeded";
@@ -9501,3 +9061,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 }
 import { isPgUniqueViolation } from "./pg-error.js";
 import { stringifyRunResultJson } from "./heartbeat-run-result-text.js";
+import { isHermesOperationsLiaisonAgent, isMissionOwnerControlIssue, canCreateMissionOwnerUnblockForRequestChanges, resolveMissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+export { type MissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+import { canApplyMissingWorkProductRegistrationGate, resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
+import { truncateDisplayId, getAdapterSessionCodec, buildMissionSessionSecretName, isRecoverableMissionSessionSecretReadError, normalizeSessionParams, resolveMissionSessionAuthorityDecision, resolveNextSessionState, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
+import { enrichWakeContextSnapshot, mergeCoalescedContextSnapshot, type WakeupOptions } from "./heartbeat-wake-context.js";
+export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
+export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";

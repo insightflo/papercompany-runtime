@@ -22,39 +22,8 @@ import { evaluateSemanticStructuralReadiness, renderStructuralGateCoverageLines 
 import { buildCompanyWorkflowExecutionSteps } from './company-execution-steps.js';
 import type { WorkflowStep } from "./dag-engine.js";
 
-export function collectGateValidatedProducerStepIds(
-  directDependencyStepIds: string[],
-  workflowStepsById: Map<string, WorkflowStep>,
-): Map<string, string[]> {
-  const producerStepIdsByGateStepId = new Map<string, string[]>();
-
-  const collectProducerSteps = (stepId: string, visited: Set<string>): string[] => {
-    if (visited.has(stepId)) return [];
-    const step = workflowStepsById.get(stepId);
-    if (!step) return [];
-    if (step.graphWorkProductRequired === true) return [stepId];
-    const nextVisited = new Set(visited);
-    nextVisited.add(stepId);
-    return Array.from(new Set(step.dependencies.flatMap((dependencyStepId) => (
-      collectProducerSteps(dependencyStepId, nextVisited)
-    ))));
-  };
-
-  for (const dependencyStepId of directDependencyStepIds) {
-    const dependencyStep = workflowStepsById.get(dependencyStepId);
-    if (!dependencyStep || dependencyStep.graphWorkProductRequired === true || dependencyStep.dependencies.length === 0) {
-      continue;
-    }
-    const producerStepIds = Array.from(new Set(dependencyStep.dependencies.flatMap((upstreamStepId) => (
-      collectProducerSteps(upstreamStepId, new Set([dependencyStepId]))
-    ))));
-    if (producerStepIds.length > 0) {
-      producerStepIdsByGateStepId.set(dependencyStepId, producerStepIds);
-    }
-  }
-
-  return producerStepIdsByGateStepId;
-}
+import { collectGateValidatedProducerStepIds, createBoundWorkflowStepIssue } from "./workflow-step-issue-atomic.js";
+export { collectGateValidatedProducerStepIds } from "./workflow-step-issue-atomic.js";
 
 export async function createWorkflowStepIssue(input: {
   db: Db;
@@ -67,6 +36,9 @@ export async function createWorkflowStepIssue(input: {
   deferredSideEffectsDb?: Db;
   captureDeferredSideEffects?: (apply: () => Promise<void>) => void;
 }): Promise<string | null> {
+  if (input.captureDeferredSideEffects && !input.deferredSideEffectsDb) {
+    return createBoundWorkflowStepIssue(input, createWorkflowStepIssue);
+  }
   const issueSvc = issueService(input.db);
 
   const executionSteps = input.steps ?? await buildCompanyWorkflowExecutionSteps(input.db, input.definition);

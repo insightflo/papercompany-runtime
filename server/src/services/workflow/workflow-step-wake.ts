@@ -17,12 +17,13 @@ import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runti
 import { evaluateSemanticStructuralReadiness } from "./control-flow/structural-semantic-readiness.js";
 import { loadExecutionDefinition } from "./execution-definition.js";
 import { projectExecutionDefinition } from "./execution-definition-view.js";
+import { withWorkflowDispatchGate } from "./workflow-step-issue-atomic.js";
 
 function normalizeRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-export async function wakeExistingWorkflowStepIssue(input: {
+type WakeExistingInput = {
   db: Db;
   run: typeof workflowRuns.$inferSelect;
   definition: typeof workflowDefinitions.$inferSelect;
@@ -45,7 +46,19 @@ export async function wakeExistingWorkflowStepIssue(input: {
   /** [owner admission] owner-linked 실행의 typed 승인 정보 — 생략해도 저장 영수증 맥락에서
    *  동일 검사가 적용된다(인자 생략으로 우회 불가). */
   ownerExecution?: OwnerExecutionAdmission;
-}): Promise<boolean> {
+};
+
+export async function wakeExistingWorkflowStepIssue(input: WakeExistingInput): Promise<boolean> {
+  const hasOwnWake = input.forceFreshSession === true || (input.priorFindings?.length ?? 0) > 0
+    || (typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0)
+    || input.ownerExecution !== undefined || input.requireOwnWake === true
+    || readWorkflowReworkContract(normalizeRecord(input.stepRunMetadata).workflowReworkContract) !== null;
+  if (hasOwnWake) return wakeExistingWorkflowStepIssueUnlocked(input);
+  return withWorkflowDispatchGate(input.db, input.run.id, input.step.id,
+    () => wakeExistingWorkflowStepIssueUnlocked(input));
+}
+
+async function wakeExistingWorkflowStepIssueUnlocked(input: WakeExistingInput): Promise<boolean> {
   // [Task5a2a] external recovery paths 는 live steps/definition 을 넘길 수 있다. 진입 시 1회 로드해 snapshot 이면
   //   caller 입력을 캡처 정의/저장 step 으로 대체하고(구조게이트·QA-cap 배열 소비자 모두 캡처 배열), 저장 step 이
   //   없으면 mutation/wake 없이 false. legacy_current 는 caller step/definition 동작 + legacy builder 배열 유지.
