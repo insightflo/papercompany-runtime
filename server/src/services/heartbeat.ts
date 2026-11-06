@@ -626,90 +626,6 @@ function applyPaperclipApiContext(context: Record<string, unknown>): void {
   context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
 }
 
-function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
-  return isMissionExecutionLiaisonAgent(agent);
-}
-
-function isMissionOwnerControlIssue(issue: Pick<typeof issues.$inferSelect, "originKind" | "description">) {
-  return isMissionOwnerTaskIssue(issue);
-}
-
-function truncateContextText(value: string | null | undefined, max = 220) {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed.length > max ? `${trimmed.slice(0, max - 3)}...` : trimmed;
-}
-
-function isMissionOwnerTaskIssue(issue: {
-  originKind: string | null;
-  description: string | null;
-}) {
-  return (
-    issue.originKind === "mission_main_executor_oversight" ||
-    issue.originKind === "mission_main_executor_unblock" ||
-    parseMissionOwnerActionMarker(issue.description) !== null
-  );
-}
-
-function canApplyRequestChangesValidationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  const title = issue.title?.trim() ?? "";
-  return (
-    /^\s*\[QA\]/iu.test(title) ||
-    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(title) ||
-    title.includes("검증")
-  );
-}
-
-function canApplyMissingWorkProductRegistrationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-  description?: string | null;
-}, stepRunRequiresWorkProduct?: boolean) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  // workflow step의 명시 graphWorkProductRequired 플래그(workflow_step_runs.metadata에 stamp)가
-  // 권위 source. present면 title/contract 휴리스틱을 무시한다.
-  if (stepRunRequiresWorkProduct === true) return true;
-  if (stepRunRequiresWorkProduct === false) return false;
-
-  // Legacy fallback: 플래그 미스탬프 step-run(pre-deploy / 미동기화)용 종래 휴리스틱.
-  const title = issue.title?.trim() ?? "";
-  if (/\b(lead|approval|approve|audit|auditor|validator|validation|validate|verify|QA|review|check)\b/iu.test(title)) return false;
-  if (hasDeliverableOutputContract(issue.description)) return true;
-  return (
-    /\b(synthesi[sz]e|synthesis|generate|produce|create|draft|artifact|document|note|infographic|export|deliver|html|pdf|report)\b/iu.test(title) ||
-    /(작성|생성|제작|산출물|문서|자료|보고서|리포트|HTML|PDF)/u.test(title)
-  );
-}
-
-function hasDeliverableOutputContract(description: string | null | undefined) {
-  const text = description?.trim() ?? "";
-  return text.includes("Deliverable output (use exactly this directory)") && /`?\[?ARTIFACT\]?`?\s*:/iu.test(text);
-}
-
-/**
- * workflow_step_runs.metadata 에서 graphWorkProductRequired 플래그를 3상으로 판정.
- * - true  → 명시 산출물 step (gate 발동)
- * - false → 명시 비산출물 step (gate 스킵, 휴리스틱도 무시)
- * - undefined → 필드 미스탬프(legacy row / metadata={} / non-boolean) → 종래 휴리스틱 fallback
- * buildWorkflowStepRunMetadata 가 항상 boolean 으로 stamp 하므로 non-boolean은 undefined 취급(legacy 호환).
- */
-export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | undefined {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
-  const value = (metadata as Record<string, unknown>).graphWorkProductRequired;
-  if (value === true) return true;
-  if (value === false) return false;
-  return undefined;
-}
 
 
 
@@ -724,131 +640,27 @@ export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | 
 
 
 
-function canCreateMissionOwnerUnblockForRequestChanges(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  return canApplyRequestChangesValidationGate(issue);
-}
 
-export type MissionOwnerTaskContext = {
-  available: true;
-  gating: "originKind" | "mission-owner-action-marker";
-  mission: {
-    id: string;
-    title: string;
-    status: string;
-  };
-  ownerTaskIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    originKind: string | null;
-    status: string;
-  };
-  sourceIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    status: string;
-    assigneeAgentId: string | null;
-  } | null;
-  latestOwnerActionDecision: ExtractedMissionOwnerDecision | null;
-  governanceEvidence: string;
-  allowedDecisionOptions: string[];
-  requiredDecisionFormat: string[];
-};
 
-async function resolveMissionOwnerTaskContext(input: {
-  db: Db;
-  companyId: string;
-  issue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    description: string | null;
-    status: string;
-    missionId: string | null;
-    originKind: string | null;
-    originId: string | null;
-  } | null;
-}): Promise<MissionOwnerTaskContext | null> {
-  const { db, companyId, issue } = input;
-  if (!issue || !isMissionOwnerTaskIssue(issue)) return null;
 
-  const marker = parseMissionOwnerActionMarker(issue.description);
-  const missionId = issue.missionId ?? marker?.missionId ?? null;
-  if (!missionId) return null;
 
-  const mission = await db
-    .select({ id: missions.id, title: missions.title, status: missions.status })
-    .from(missions)
-    .where(and(eq(missions.id, missionId), eq(missions.companyId, companyId)))
-    .then((rows) => rows[0] ?? null);
-  if (!mission) return null;
 
-  const sourceIssueId = issue.originKind === "mission_main_executor_unblock"
-    ? issue.originId
-    : marker?.sourceIssueId ?? null;
-  const sourceIssue = sourceIssueId
-    ? await db
-        .select({
-          id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          assigneeAgentId: issues.assigneeAgentId,
-        })
-        .from(issues)
-        .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, companyId)))
-        .then((rows) => rows[0] ?? null)
-    : null;
 
-  // Structured recovery ledger only — comment/description decision prose is display-only.
-  const structuredDecision = await loadLatestMissionOwnerDecision({
-    db,
-    companyId,
-    ownerActionIssueId: issue.id,
-  });
-  const latestOwnerActionDecision = structuredDecision?.decision ?? null;
 
-  return {
-    available: true,
-    gating: issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock"
-      ? "originKind"
-      : "mission-owner-action-marker",
-    mission: {
-      id: mission.id,
-      title: truncateContextText(mission.title, 160) ?? "Untitled mission",
-      status: mission.status,
-    },
-    ownerTaskIssue: {
-      id: issue.id,
-      identifier: issue.identifier,
-      title: truncateContextText(issue.title, 160) ?? "Untitled issue",
-      originKind: issue.originKind,
-      status: issue.status,
-    },
-    sourceIssue: sourceIssue
-      ? {
-          id: sourceIssue.id,
-          identifier: sourceIssue.identifier,
-          title: truncateContextText(sourceIssue.title, 160) ?? "Untitled source issue",
-          status: sourceIssue.status,
-          assigneeAgentId: sourceIssue.assigneeAgentId,
-        }
-      : null,
-    latestOwnerActionDecision,
-    governanceEvidence: "Governance evidence: unavailable in this context builder",
-    allowedDecisionOptions: [...MISSION_OWNER_DECISION_OPTIONS],
-    requiredDecisionFormat: [
-      "Submit structured Mission owner decision via the dedicated recovery API / ledger (owner_recovery_api).",
-      "Comments and Markdown decision blocks are display-only and are not control-plane authority.",
-      "Decision options:",
-      ...MISSION_OWNER_DECISION_OPTIONS.map((option) => `- ${option}`),
-    ],
-  };
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function normalizeLedgerBillingType(value: unknown): BillingType {
   const raw = readNonEmptyString(value);
@@ -9501,3 +9313,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 }
 import { isPgUniqueViolation } from "./pg-error.js";
 import { stringifyRunResultJson } from "./heartbeat-run-result-text.js";
+import { isHermesOperationsLiaisonAgent, isMissionOwnerControlIssue, canCreateMissionOwnerUnblockForRequestChanges, resolveMissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+export { type MissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+import { canApplyMissingWorkProductRegistrationGate, resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
+export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
