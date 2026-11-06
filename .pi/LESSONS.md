@@ -434,3 +434,27 @@
 - Prevention rule: Before removing or relocating an import after a split, search value and type references in the original and destination separately; keep the import in each file that still uses it.
 - Reuse trigger: Moving functions, tests, or types between files while changing imports.
 - Evidence: PR #594 and `t16d-quality-comparison.json` in the `c5-candidate-backups` workspace directory.
+
+### 2026-11-06 — reconcile generated SQL after manual migrations
+- Task: T16a webhook signed-message receipt migration.
+- What failed: `pnpm db:generate` emitted already journaled 0124–0127 operations again and placed the new composite foreign key before its prerequisite unique index.
+- Root cause: The latest prior generated snapshot was 0123, while later schema changes had been recorded as manual migrations without newer snapshots.
+- Fix: Preserve the newly generated full snapshot; limit the new SQL to the intended schema changes in dependency order, then test a fresh fully migrated database and an upgrade with a synthetic pre-existing receipt table.
+- Prevention rule: If generated SQL repeats journaled manual DDL, compare it with the recorded migrations, keep intended operations in dependency order, and verify fresh/upgrade databases and a no-diff regeneration before use.
+- Evidence: `t16a-v2-generator-raw-0128.sql`, `t16a-v2-migration-green.log`, and `t16a-v2-db-verify-snapshot.log` in `c5-candidate-backups`.
+
+### 2026-11-06 — wait for matching blocked SQL evidence
+- Task: T16a mission-runtime lock-order regression test.
+- What failed: The CI test accepted the first activity sample with the expected blocker, then failed because its SQL was `savepoint "s0"` instead of the expected mission key-share statement.
+- Root cause: The test accepted any non-null blocker observation before checking the SQL; the reason the unrelated SQL appeared in that sample remains unconfirmed.
+- Fix: Continue polling within the existing bound until both the blocker and the expected SQL match, retaining the real PostgreSQL lock and rollback assertions.
+- Prevention rule: If a contention test needs both a blocker and specific blocked SQL, observe both together; an unmatched sample must not count as proof or trigger a premature assertion.
+- Evidence: `t16a-pr601-ci-shard3.log`, `t16a-lock-probe-red.log`, and `t16a-lock-probe-green.log` in `c5-candidate-backups`.
+
+### 2026-11-06 — distinguish Node socket errors from application failures
+- Task: T16a webhook v2 integration on macOS arm64.
+- What failed: A four-suite run had 25 passing assertions but exited 1 after an uncaught `setTypeOfService EINVAL` in Node's bundled undici HTTP client.
+- Evidence: Node 24.22.1 with undici 7.30.1 reproduced the same error and call stack in an isolated loopback reset experiment that loaded no repository code; undici issue #6075 reports the same version and failure mechanism.
+- Unconfirmed: The original test's socket state and precise trigger were not captured; the original failed result remains a failure.
+- Prevention rule: For this uncaught macOS Node HTTP error, retain the failure, record Node/undici versions, and compare an isolated loopback reproduction before attributing its cause.
+- Evidence files: `t16a-v2-after604-tests.log`, `t16a-undici-reset-repro.cjs`, and `t16a-undici-reset-repro.log` in `c5-candidate-backups`; upstream issue: https://github.com/nodejs/undici/issues/6075.
