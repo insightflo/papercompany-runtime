@@ -16,3 +16,17 @@ export function resolveHostForPaperclipApiUrl(value: string | null | undefined):
   if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
   return host;
 }
+
+export function resolveCurrentPaperclipApiUrl(): string {
+  const explicit = normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL);
+  if (explicit) return explicit;
+  const host = resolveHostForPaperclipApiUrl(process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST);
+  const port = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
+  return `http://${host}:${port}`;
+}
+
+export function applyPaperclipApiContext(context: Record<string, unknown>): void {
+  const apiUrl = resolveCurrentPaperclipApiUrl();
+  context.paperclipApiUrl = apiUrl;
+  context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
+}
