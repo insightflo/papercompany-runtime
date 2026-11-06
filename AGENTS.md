@@ -96,6 +96,8 @@ During development, do not let a single source, test, or support file grow past 
 9. Never use agent-authored natural language as execution authority.
 Comments, prose, Markdown, stdout, and stderr must never decide retry, branch, completion, reopen, wakeup, escalation, approval, QA verdict, artifact registration, or next workflow step. Parsing is allowed only for machine-produced, versioned, schema-validated contracts. Human-readable comments may be generated from structured records for display, but the runtime must never read them back as authority. Execution consumers (supervision, materialization, QA gates, recovery, verdict ledgers) must read only durable structured submissions/tables submitted through dedicated write APIs; legacy comment-derived ledger rows (non-null `sourceCommentId`) are display/audit only and must be ignored. When no structured authority exists, fail closed and use the existing bounded retry/re-dispatch path; do not add parser tolerance or keyword fallbacks.
 
+10. After splitting files, search the original and destination separately for remaining value and type references before removing or relocating an import; retain it in every file that still uses it.
+
 ## 6. Database Change Workflow
 
 When changing data model:
