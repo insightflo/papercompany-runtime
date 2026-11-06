@@ -1235,15 +1235,15 @@ function readAgentEnvInputs(
   });
 }
 
-function readAgentSkillRefs(frontmatter: Record<string, unknown>) {
+function readAgentSkillRefs(frontmatter: Record<string, unknown>, warnings: string[], agentSlug: string) {
   const skills = frontmatter.skills;
+  if (skills === undefined) return [];
+  if (!Array.isArray(skills) || skills.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    warnings.push(`Agent ${agentSlug} has invalid skills; expected a list of non-empty strings.`);
+  }
   if (!Array.isArray(skills)) return [];
-  return Array.from(new Set(
-    skills
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => normalizeSkillKey(entry) ?? entry.trim())
-      .filter(Boolean),
-  ));
+  return [...new Set(skills.filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => normalizeSkillKey(entry) ?? entry.trim()).filter(Boolean))];
 }
 
 function buildManifestFromPackageFiles(
@@ -1372,7 +1372,7 @@ function buildManifestFromPackageFiles(
       slug,
       name: asString(frontmatter.name) ?? title ?? slug,
       path: agentPath,
-      skills: readAgentSkillRefs(frontmatter),
+      skills: readAgentSkillRefs(frontmatter, warnings, slug),
       role: asString(extension.role) ?? "agent",
       title,
       icon: asString(extension.icon),
