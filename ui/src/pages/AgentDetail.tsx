@@ -91,9 +91,7 @@ import {
   type HeartbeatRunSummary,
   type AgentRuntimeState,
   type LiveEvent,
-  type WorkspaceOperation,
 } from "@paperclipai/shared";
-import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
 import {
   applyAgentSkillSnapshot,
@@ -102,9 +100,9 @@ import {
 } from "../lib/agent-skills-state";
 import { AgentRunsTab } from "../components/agent-detail/AgentRunsTab";
 import { parseAgentDetailView, runMetrics, setsEqual, type AgentDetailView } from "./agent-detail-view-helpers";
-import { parseStoredLogContent } from "./agent-detail-log-content";
-import { workspaceOperationPhaseLabel, workspaceOperationStatusTone } from "./agent-detail-workspace-display";
 import { findScrollContainer, readScrollMetrics, scrollToContainerBottom, type ScrollContainer } from "./agent-detail-scroll";
+import { asRecord, asNonEmptyString, formatEnvForDisplay, isMarkdown, redactPathText, redactPathValue } from "./agent-detail-redaction";
+import { WorkspaceOperationsSection } from "./agent-detail-workspace-operations";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
   succeeded: { icon: CheckCircle2, color: "text-green-600 dark:text-green-400" },
@@ -117,61 +115,6 @@ const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string 
 
 const EMPTY_HEARTBEAT_RUN_SUMMARIES: HeartbeatRunSummary[] = [];
 
-const REDACTED_ENV_VALUE = "***REDACTED***";
-const SECRET_ENV_KEY_RE =
-  /(api[-_]?key|access[-_]?token|auth(?:_?token)?|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)/i;
-const JWT_VALUE_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$/;
-
-function redactPathText(value: string, censorUsernameInLogs: boolean) {
-  return redactHomePathUserSegments(value, { enabled: censorUsernameInLogs });
-}
-
-function redactPathValue<T>(value: T, censorUsernameInLogs: boolean): T {
-  return redactHomePathUserSegmentsInValue(value, { enabled: censorUsernameInLogs });
-}
-
-function shouldRedactSecretValue(key: string, value: unknown): boolean {
-  if (SECRET_ENV_KEY_RE.test(key)) return true;
-  if (typeof value !== "string") return false;
-  return JWT_VALUE_RE.test(value);
-}
-
-function redactEnvValue(key: string, value: unknown, censorUsernameInLogs: boolean): string {
-  if (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { type?: unknown }).type === "secret_ref"
-  ) {
-    return "***SECRET_REF***";
-  }
-  if (shouldRedactSecretValue(key, value)) return REDACTED_ENV_VALUE;
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return redactPathText(value, censorUsernameInLogs);
-  try {
-    return JSON.stringify(redactPathValue(value, censorUsernameInLogs));
-  } catch {
-    return redactPathText(String(value), censorUsernameInLogs);
-  }
-}
-
-function isMarkdown(pathValue: string) {
-  return pathValue.toLowerCase().endsWith(".md");
-}
-
-function formatEnvForDisplay(envValue: unknown, censorUsernameInLogs: boolean): string {
-  const env = asRecord(envValue);
-  if (!env) return "<unable-to-parse>";
-
-  const keys = Object.keys(env);
-  if (keys.length === 0) return "<empty>";
-
-  return keys
-    .sort()
-    .map((key) => `${key}=${redactEnvValue(key, env[key], censorUsernameInLogs)}`)
-    .join("\n");
-}
-
 const sourceLabels: Record<string, string> = {
   timer: "Timer",
   assignment: "Assignment",
@@ -180,199 +123,6 @@ const sourceLabels: Record<string, string> = {
 };
 
 const LIVE_SCROLL_BOTTOM_TOLERANCE_PX = 32;
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function asNonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-
-
-function WorkspaceOperationStatusBadge({ status }: { status: WorkspaceOperation["status"] }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize",
-        workspaceOperationStatusTone(status),
-      )}
-    >
-      {status.replace("_", " ")}
-    </span>
-  );
-}
-
-function WorkspaceOperationLogViewer({
-  operation,
-  censorUsernameInLogs,
-}: {
-  operation: WorkspaceOperation;
-  censorUsernameInLogs: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const { data: logData, isLoading, error } = useQuery({
-    queryKey: ["workspace-operation-log", operation.id],
-    queryFn: () => heartbeatsApi.workspaceOperationLog(operation.id),
-    enabled: open && Boolean(operation.logRef),
-    refetchInterval: open && operation.status === "running" ? 2000 : false,
-  });
-
-  const chunks = useMemo(
-    () => (logData?.content ? parseStoredLogContent(logData.content) : []),
-    [logData?.content],
-  );
-
-  return (
-    <div className="space-y-2">
-      <button
-        type="button"
-        className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
-        onClick={() => setOpen((value) => !value)}
-      >
-        {open ? "Hide full log" : "Show full log"}
-      </button>
-      {open && (
-        <div className="rounded-md border border-border bg-background/70 p-2">
-          {isLoading && <div className="text-xs text-muted-foreground">Loading log...</div>}
-          {error && (
-            <div className="text-xs text-destructive">
-              {error instanceof Error ? error.message : "Failed to load execution-context operation log"}
-            </div>
-          )}
-          {!isLoading && !error && chunks.length === 0 && (
-            <div className="text-xs text-muted-foreground">No persisted log lines.</div>
-          )}
-          {chunks.length > 0 && (
-            <div className="max-h-64 overflow-y-auto rounded bg-neutral-100 p-2 font-mono text-xs dark:bg-neutral-950">
-              {chunks.map((chunk, index) => (
-                <div key={`${chunk.ts}-${index}`} className="flex gap-2">
-                  <span className="shrink-0 text-neutral-500">
-                    {new Date(chunk.ts).toLocaleTimeString("en-US", { hour12: false })}
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 w-14",
-                      chunk.stream === "stderr"
-                        ? "text-red-600 dark:text-red-300"
-                        : chunk.stream === "system"
-                          ? "text-blue-600 dark:text-blue-300"
-                          : "text-muted-foreground",
-                    )}
-                  >
-                    [{chunk.stream}]
-                  </span>
-                  <span className="whitespace-pre-wrap break-all">{redactPathText(chunk.chunk, censorUsernameInLogs)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function WorkspaceOperationsSection({
-  operations,
-  censorUsernameInLogs,
-}: {
-  operations: WorkspaceOperation[];
-  censorUsernameInLogs: boolean;
-}) {
-  if (operations.length === 0) return null;
-
-  return (
-    <div className="rounded-lg border border-border bg-background/60 p-3 space-y-3">
-      <div className="text-xs font-medium text-muted-foreground">
-        Execution Context ({operations.length})
-      </div>
-      <div className="space-y-3">
-        {operations.map((operation) => {
-          const metadata = asRecord(operation.metadata);
-          return (
-            <div key={operation.id} className="rounded-md border border-border/70 bg-background/70 p-3 space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="text-sm font-medium">{workspaceOperationPhaseLabel(operation.phase)}</div>
-                <WorkspaceOperationStatusBadge status={operation.status} />
-                <div className="text-[11px] text-muted-foreground">
-                  {relativeTime(operation.startedAt)}
-                  {operation.finishedAt && ` to ${relativeTime(operation.finishedAt)}`}
-                </div>
-              </div>
-              {operation.command && (
-                <div className="text-xs break-all">
-                  <span className="text-muted-foreground">Command: </span>
-                  <span className="font-mono">{operation.command}</span>
-                </div>
-              )}
-              {operation.cwd && (
-                <div className="text-xs break-all">
-                  <span className="text-muted-foreground">Working dir: </span>
-                  <span className="font-mono">{operation.cwd}</span>
-                </div>
-              )}
-              {(asNonEmptyString(metadata?.branchName)
-                || asNonEmptyString(metadata?.baseRef)
-                || asNonEmptyString(metadata?.worktreePath)
-                || asNonEmptyString(metadata?.repoRoot)
-                || asNonEmptyString(metadata?.cleanupAction)) && (
-                <div className="grid gap-1 text-xs sm:grid-cols-2">
-                  {asNonEmptyString(metadata?.branchName) && (
-                    <div><span className="text-muted-foreground">Branch: </span><span className="font-mono">{metadata?.branchName as string}</span></div>
-                  )}
-                  {asNonEmptyString(metadata?.baseRef) && (
-                    <div><span className="text-muted-foreground">Base ref: </span><span className="font-mono">{metadata?.baseRef as string}</span></div>
-                  )}
-                  {asNonEmptyString(metadata?.worktreePath) && (
-                      <div className="break-all"><span className="text-muted-foreground">Context path: </span><span className="font-mono">{metadata?.worktreePath as string}</span></div>
-                  )}
-                  {asNonEmptyString(metadata?.repoRoot) && (
-                    <div className="break-all"><span className="text-muted-foreground">Repo root: </span><span className="font-mono">{metadata?.repoRoot as string}</span></div>
-                  )}
-                  {asNonEmptyString(metadata?.cleanupAction) && (
-                    <div><span className="text-muted-foreground">Cleanup: </span><span className="font-mono">{metadata?.cleanupAction as string}</span></div>
-                  )}
-                </div>
-              )}
-              {typeof metadata?.created === "boolean" && (
-                <div className="text-xs text-muted-foreground">
-                  {metadata.created ? "Created by this run" : "Reused existing execution context"}
-                </div>
-              )}
-              {operation.stderrExcerpt && operation.stderrExcerpt.trim() && (
-                <div>
-                  <div className="mb-1 text-xs text-red-700 dark:text-red-300">stderr excerpt</div>
-                  <pre className="rounded-md bg-red-50 p-2 text-xs whitespace-pre-wrap break-all text-red-800 dark:bg-neutral-950 dark:text-red-100">
-                    {redactPathText(operation.stderrExcerpt, censorUsernameInLogs)}
-                  </pre>
-                </div>
-              )}
-              {operation.stdoutExcerpt && operation.stdoutExcerpt.trim() && (
-                <div>
-                  <div className="mb-1 text-xs text-muted-foreground">stdout excerpt</div>
-                  <pre className="rounded-md bg-neutral-100 p-2 text-xs whitespace-pre-wrap break-all dark:bg-neutral-950">
-                    {redactPathText(operation.stdoutExcerpt, censorUsernameInLogs)}
-                  </pre>
-                </div>
-              )}
-              {operation.logRef && (
-                <WorkspaceOperationLogViewer
-                  operation={operation}
-                  censorUsernameInLogs={censorUsernameInLogs}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
 
 export function AgentDetail() {
   const { companyPrefix, agentId, tab: urlTab, runId: urlRunId } = useParams<{
