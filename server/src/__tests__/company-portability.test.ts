@@ -395,6 +395,38 @@ describe("company portability", () => {
     expect(asTextFile(exported.files["skills/paperclipai/paperclip/paperclip/references/api.md"])).toContain("# API");
   });
 
+  it("keeps exporting a stored skill whose SKILL.md has malformed YAML and warns", async () => {
+    const portability = companyPortabilityService({} as any);
+    const malformed = "---\nname: paperclip\nskills: [plan\n---\n\n# Paperclip\n";
+    const previousReadFile = companySkillSvc.readFile.getMockImplementation();
+    companySkillSvc.readFile.mockImplementation(async (companyId: string, skillId: string, relativePath: string) => {
+      const detail = await previousReadFile?.(companyId, skillId, relativePath);
+      if (detail && skillId === "skill-1" && relativePath === "SKILL.md") {
+        return { ...detail, content: malformed };
+      }
+      return detail;
+    });
+
+    try {
+      const exported = await portability.exportBundle("company-1", {
+        include: {
+          company: true,
+          agents: true,
+          projects: false,
+          issues: false,
+        },
+        expandReferencedSkills: true,
+      });
+
+      expect(asTextFile(exported.files[`skills/${paperclipKey}/SKILL.md`])).toBe(malformed);
+      expect(exported.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining(`Skill ${paperclipKey} SKILL.md has invalid YAML frontmatter`),
+      ]));
+    } finally {
+      companySkillSvc.readFile.mockImplementation(previousReadFile);
+    }
+  });
+
   it("exports only selected skills when skills filter is provided", async () => {
     const portability = companyPortabilityService({} as any);
 
