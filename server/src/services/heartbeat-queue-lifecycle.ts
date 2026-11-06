@@ -184,3 +184,11 @@ export async function setHeartbeatRunStatus(
 
   return updated;
 }
+
+export function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+    publishLiveEvent({
+      companyId: run.companyId, type: "heartbeat.run.queued",
+      payload: { runId: run.id, agentId: run.agentId, invocationSource: run.invocationSource,
+        triggerDetail: run.triggerDetail, wakeupRequestId: run.wakeupRequestId },
+    });
+  }
