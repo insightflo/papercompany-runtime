@@ -10,3 +10,7 @@ const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancell
 export function isTerminalHeartbeatRunStatus(status: string | null | undefined) {
   return TERMINAL_HEARTBEAT_RUN_STATUSES.has(status ?? "");
 }
+
+export function isSucceededHeartbeatRunStatus(status: string | null | undefined): status is "succeeded" {
+  return status === "succeeded";
+}

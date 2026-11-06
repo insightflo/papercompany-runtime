@@ -362,9 +362,7 @@ import { createHeartbeatQueuedStaleRecovery } from "./heartbeat-queued-stale-rec
 import {
   countSessionFileMessages,
   hasSessionCompactionThresholds,
-  resolveSessionCompactionPolicy,
   RUN_TOOL_CONTRACT_CONTEXT_KEY,
-  type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 
 export {
@@ -401,15 +399,7 @@ export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 
-const SESSIONED_LOCAL_ADAPTERS = new Set([
-  "claude_local",
-  "codex_local",
-  "cursor",
-  "gemini_local",
-  "opencode_local",
-  "pi_local",
-  "commandcode_local",
-]);
+
 
 
 
@@ -553,34 +543,6 @@ function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnap
 
 
 
-export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function isTrackedLocalChildProcessAdapter(adapterType: string) {
-  return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
-}
 
 
 
@@ -608,13 +570,32 @@ function isTrackedLocalChildProcessAdapter(adapterType: string) {
 
 
 
-export function isSucceededHeartbeatRunStatus(status: string | null | undefined): status is "succeeded" {
-  return status === "succeeded";
-}
-function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelect) {
-  const text = [run.stdoutExcerpt, run.stderrExcerpt, run.error].filter(Boolean).join("\n");
-  return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -8804,6 +8785,12 @@ import { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.j
 import { isMissionOwnerActionParentPlacementRejected } from "./heartbeat-mission-owner-context.js";
 import { isCorrectionRun } from "./heartbeat-correction-run.js";
 import { parseIssueAssigneeAdapterOverrides } from "./heartbeat-assignee-adapter-overrides.js";
+import { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
+import { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
+import { containsToolLimitLifecycleFailure } from "./heartbeat-failure-classification.js";
+import { isTrackedLocalChildProcessAdapter } from "./heartbeat-process-liveness.js";
+export { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
+export { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
 export { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
 export { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
 export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
