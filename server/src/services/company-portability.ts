@@ -1246,6 +1246,28 @@ function readAgentSkillRefs(frontmatter: Record<string, unknown>, warnings: stri
     .map((entry) => normalizeSkillKey(entry) ?? entry.trim()).filter(Boolean))];
 }
 
+// Parses packaged markdown frontmatter with the standard YAML parser. Malformed
+// frontmatter rejects the request (422) instead of silently dropping metadata,
+// and parser warnings (e.g. unresolved tags, non-mapping documents) are surfaced
+// through the preview/import warnings list.
+function parsePackagedFrontmatter(
+  markdown: string,
+  filePath: string,
+  warnings: string[],
+): { frontmatter: Record<string, unknown>; body: string } {
+  let parsed;
+  try {
+    parsed = parseFrontmatterMarkdown(markdown);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw unprocessable(`Company package file ${filePath} has invalid YAML frontmatter: ${reason}`);
+  }
+  for (const warning of parsed.yamlWarnings) {
+    warnings.push(`Company package file ${filePath} ${warning}`);
+  }
+  return { frontmatter: parsed.frontmatter, body: parsed.body };
+}
+
 function buildManifestFromPackageFiles(
   files: Record<string, CompanyPortabilityFileEntry>,
   opts?: { sourceLabel?: { companyId: string; companyName: string } | null },
@@ -1262,15 +1284,27 @@ function buildManifestFromPackageFiles(
   }
 
   const companyMarkdown = readPortableTextFile(normalizedFiles, resolvedCompanyPath);
+  const warnings: string[] = [];
   if (typeof companyMarkdown !== "string") {
     throw unprocessable(`Company package file is not readable as text: ${resolvedCompanyPath}`);
   }
-  const companyDoc = parseFrontmatterMarkdown(companyMarkdown);
+  const companyDoc = parsePackagedFrontmatter(companyMarkdown, resolvedCompanyPath, warnings);
   const companyFrontmatter = companyDoc.frontmatter;
   const paperclipExtensionPath = findPaperclipExtensionPath(normalizedFiles);
-  const paperclipExtension = paperclipExtensionPath
-    ? parseYamlFile(readPortableTextFile(normalizedFiles, paperclipExtensionPath) ?? "")
-    : {};
+  let paperclipExtension: Record<string, unknown> = {};
+  if (paperclipExtensionPath) {
+    const extensionRaw = readPortableTextFile(normalizedFiles, paperclipExtensionPath) ?? "";
+    try {
+      const parsedExtension = parseYamlFile(extensionRaw);
+      for (const warning of parsedExtension.warnings) {
+        warnings.push(`Company package file ${paperclipExtensionPath} ${warning}`);
+      }
+      paperclipExtension = parsedExtension.value;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw unprocessable(`Company package file ${paperclipExtensionPath} is not valid YAML: ${reason}`);
+    }
+  }
   const paperclipCompany = isPlainRecord(paperclipExtension.company) ? paperclipExtension.company : {};
   const paperclipAgents = isPlainRecord(paperclipExtension.agents) ? paperclipExtension.agents : {};
   const paperclipProjects = isPlainRecord(paperclipExtension.projects) ? paperclipExtension.projects : {};
@@ -1343,7 +1377,6 @@ function buildManifestFromPackageFiles(
     envInputs: [],
   };
 
-  const warnings: string[] = [];
   if (manifest.company?.logoPath && !normalizedFiles[manifest.company.logoPath]) {
     warnings.push(`Referenced company logo file is missing from package: ${manifest.company.logoPath}`);
   }
@@ -1353,7 +1386,7 @@ function buildManifestFromPackageFiles(
       warnings.push(`Referenced agent file is missing from package: ${agentPath}`);
       continue;
     }
-    const agentDoc = parseFrontmatterMarkdown(markdownRaw);
+    const agentDoc = parsePackagedFrontmatter(markdownRaw, agentPath, warnings);
     const frontmatter = agentDoc.frontmatter;
     const fallbackSlug = normalizeAgentUrlKey(path.posix.basename(path.posix.dirname(agentPath))) ?? "agent";
     const slug = asString(frontmatter.slug) ?? fallbackSlug;
@@ -1402,7 +1435,7 @@ function buildManifestFromPackageFiles(
       warnings.push(`Referenced skill file is missing from package: ${skillPath}`);
       continue;
     }
-    const skillDoc = parseFrontmatterMarkdown(markdownRaw);
+    const skillDoc = parsePackagedFrontmatter(markdownRaw, skillPath, warnings);
     const frontmatter = skillDoc.frontmatter;
     const skillDir = path.posix.dirname(skillPath);
     const fallbackSlug = normalizeAgentUrlKey(path.posix.basename(skillDir)) ?? "skill";
@@ -1487,7 +1520,7 @@ function buildManifestFromPackageFiles(
       warnings.push(`Referenced project file is missing from package: ${projectPath}`);
       continue;
     }
-    const projectDoc = parseFrontmatterMarkdown(markdownRaw);
+    const projectDoc = parsePackagedFrontmatter(markdownRaw, projectPath, warnings);
     const frontmatter = projectDoc.frontmatter;
     const fallbackSlug = deriveProjectUrlKey(
       asString(frontmatter.name) ?? path.posix.basename(path.posix.dirname(projectPath)) ?? "project",
@@ -1521,7 +1554,7 @@ function buildManifestFromPackageFiles(
       warnings.push(`Referenced task file is missing from package: ${taskPath}`);
       continue;
     }
-    const taskDoc = parseFrontmatterMarkdown(markdownRaw);
+    const taskDoc = parsePackagedFrontmatter(markdownRaw, taskPath, warnings);
     const frontmatter = taskDoc.frontmatter;
     const fallbackSlug = normalizeAgentUrlKey(path.posix.basename(path.posix.dirname(taskPath))) ?? "task";
     const slug = asString(frontmatter.slug) ?? fallbackSlug;
@@ -2289,7 +2322,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         errors.push(`Missing markdown file for agent ${agent.slug}: ${filePath}`);
         continue;
       }
-      const parsed = parseFrontmatterMarkdown(markdown);
+      const parsed = parsePackagedFrontmatter(markdown, filePath, warnings);
       if (parsed.frontmatter.kind && parsed.frontmatter.kind !== "agent") {
         warnings.push(`Agent markdown ${filePath} does not declare kind: agent in frontmatter.`);
       }
@@ -2308,7 +2341,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           errors.push(`Missing markdown file for project ${project.slug}: ${project.path}`);
           continue;
         }
-        const parsed = parseFrontmatterMarkdown(markdown);
+        const parsed = parsePackagedFrontmatter(markdown, project.path, warnings);
         if (parsed.frontmatter.kind && parsed.frontmatter.kind !== "project") {
           warnings.push(`Project markdown ${project.path} does not declare kind: project in frontmatter.`);
         }
@@ -2322,7 +2355,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           errors.push(`Missing markdown file for task ${issue.slug}: ${issue.path}`);
           continue;
         }
-        const parsed = parseFrontmatterMarkdown(markdown);
+        const parsed = parsePackagedFrontmatter(markdown, issue.path, warnings);
         if (parsed.frontmatter.kind && parsed.frontmatter.kind !== "task") {
           warnings.push(`Task markdown ${issue.path} does not declare kind: task in frontmatter.`);
         }
@@ -2908,7 +2941,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
     if (include.issues) {
       for (const manifestIssue of sourceManifest.issues) {
         const markdownRaw = readPortableTextFile(plan.source.files, manifestIssue.path);
-        const parsed = markdownRaw ? parseFrontmatterMarkdown(markdownRaw) : null;
+        const parsed = markdownRaw ? parsePackagedFrontmatter(markdownRaw, manifestIssue.path, warnings) : null;
         const description = parsed?.body || manifestIssue.description || null;
         const assigneeAgentId = manifestIssue.assigneeAgentSlug
           ? importedSlugToAgentId.get(manifestIssue.assigneeAgentSlug)
