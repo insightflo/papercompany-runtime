@@ -13,11 +13,12 @@ const deferred = () => {
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 };
-async function waitFor<T>(read: () => Promise<T | null>, label: string, timeoutMs = 8_000): Promise<T> {
+async function waitFor<T>(read: () => Promise<T | null>, label: string, timeoutMs = 8_000,
+  accept: (value: T) => boolean = () => true): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const result = await read();
-    if (result !== null) return result;
+    if (result !== null && accept(result)) return result;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Timed out waiting for ${label}`);
@@ -44,6 +45,15 @@ afterAll(async () => {
   await Promise.all([observer?.$client.end({ timeout: 5 }), resumeDb?.$client.end({ timeout: 5 }), ordinaryDb?.$client.end({ timeout: 5 })]);
   await pg?.cleanup();
 }, 120_000);
+
+it("waits for the expected blocked SQL when an earlier observation is stale", async () => {
+  const observations = ['savepoint "s0"', 'select * from "missions" for key share'];
+  const expected = /select\b[\s\S]*from\s+"missions"[\s\S]*for\s+key\s+share/i;
+  let index = 0;
+  const query = await waitFor(async () => observations[index++] ?? null, "expected lock SQL", 500, (value) => expected.test(value));
+  expect(query).toMatch(expected);
+  expect(index).toBe(2);
+});
 
 it("locks the mission before a competing runtime upsert and allows both callers to finish", async () => {
   const input = await fixture();
@@ -114,12 +124,13 @@ it("locks the referenced mission even when a caller supplies another company", a
       throw new Error("foreign probe rollback");
     });
     void b.catch(() => {});
+    const expectedSql = /select\b[\s\S]*from\s+"missions"[\s\S]*for\s+key\s+share/i;
     const waiting = await waitFor(async () => {
       const rows = await observer.$client`select pg_blocking_pids(pid) as blockers, query from pg_stat_activity where application_name='mission-lock-ordinary'`;
       const row = rows.find((item) => (item.blockers as number[]).includes(aPid));
       return row ? String(row.query) : null;
-    }, "foreign-company probe waiting on the referenced mission");
-    expect(waiting).toMatch(/select\b[\s\S]*from\s+"missions"[\s\S]*for\s+key\s+share/i);
+    }, "foreign-company probe waiting on the referenced mission", 8_000, (query) => expectedSql.test(query));
+    expect(waiting).toMatch(expectedSql);
     allowAInsert.resolve();
     await a;
     await expect(b).rejects.toThrow("foreign probe rollback");
