@@ -9,8 +9,8 @@
  *
  * Headers:
  * - X-Timestamp:        unix seconds, ±300s skew
- * - X-Idempotency-Key:  1-200 chars, replay protection (covered by signature)
- * - X-Signature:        HMAC-SHA256("${timestamp}.${rawBody}") hex
+ * - X-Idempotency-Key:  1-200 chars, replay protection (signed in v2)
+ * - X-Signature:        v2=<HMAC-SHA256 hex>; legacy v1 hex is accepted temporarily
  *
  * Body: UTF-8 JSON object only. triggerSource "webhook" is additive.
  */
@@ -25,6 +25,7 @@ import { logger } from "../middleware/logger.js";
 import { ensureMissionWorkingNote } from "../services/missions/mission-working-note.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
+import { legacyWebhookMessageHash } from "../services/workflow/webhook-signature.js";
 import {
   WebhookQuotaExceededError,
   admitWebhookDelivery,
@@ -139,6 +140,7 @@ export function workflowWebhookRoutes(db: Db) {
         timestamp,
         rawBody,
         signature,
+        idempotencyKey,
         secrets: webhookSecrets.previous
           ? [
             { value: webhookSecrets.current },
@@ -149,6 +151,10 @@ export function workflowWebhookRoutes(db: Db) {
       : false;
     if (!verified) {
       throw unauthorized("Invalid webhook signature");
+    }
+    const legacySignature = !signature.startsWith("v2=");
+    if (legacySignature) {
+      logger.warn({ companyId: config.companyId, workflowId }, "Legacy webhook v1 signature accepted; migrate to v2");
     }
 
     let parsed: unknown;
@@ -170,6 +176,7 @@ export function workflowWebhookRoutes(db: Db) {
         companyId: config.companyId,
         workflowId,
         idempotencyKey,
+        legacyMessageHash: legacySignature ? legacyWebhookMessageHash(timestamp, rawBody) : undefined,
         quota: { max: 60, windowMs: 3_600_000 },
       });
       binding = await db.transaction(async (tx) => {
