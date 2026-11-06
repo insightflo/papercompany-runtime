@@ -1,9 +1,10 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { agents, companies, toolDefinitions, workflowRuns, workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
+import { signWorkflowWebhook } from "../services/workflow/webhook-signature.js";
 import { secretService } from "../services/secrets.js";
 import { workflowService } from "../services/workflow/engine.js";
 import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
@@ -52,7 +53,7 @@ it("serializes the same signed webhook across two actual servers and runs its lo
   await f.db.$client.unsafe(`create trigger ${trigger} before insert on workflow_runs for each row execute function ${trigger}()`);
   let held = true, second: Promise<Response> | undefined;
   const body = JSON.stringify({ event: "same-delivery" }), timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+  const signature = signWorkflowWebhook(secret, timestamp, "shared-key", body);
   const post = (url: string) => fetch(`${url}/api/webhooks/workflows/${definition.id}`, { method: "POST",
     headers: { "content-type": "application/json", "x-timestamp": timestamp, "x-idempotency-key": "shared-key", "x-signature": signature }, body });
   const first = post(firstServer.url); void first.catch(() => {});

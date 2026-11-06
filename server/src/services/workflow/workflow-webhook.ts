@@ -8,9 +8,9 @@
  * - Admission: durable delivery receipts (unique per company+workflow+key) with
  *   a per-workflow quota window enforced inside the admission transaction.
  *
- * Note (SRB gap fix): the idempotency key is covered by the signature (whole
- * raw body is), and the previous secret version is only honored inside a 24h
- * rotation window; expired previous versions are rejected.
+ * The current v1 signature covers timestamp and body, but not the separate
+ * idempotency-key header. Previous secret versions are honored only within a
+ * 24h rotation window; expired previous versions are rejected.
  */
 
 import crypto from "node:crypto";
@@ -24,10 +24,8 @@ import {
 import { secretService } from "../secrets.js";
 import type { WorkflowRunInputDeclaration } from "./run-input-derivations.js";
 
-/**
- * Maximum allowed clock skew in seconds (SRB anchor parity).
- */
-export const WEBHOOK_MAX_CLOCK_SKEW_SECONDS = 300;
+export { WEBHOOK_MAX_CLOCK_SKEW_SECONDS, verifyWebhookSignature } from "./webhook-signature.js";
+export type { WebhookSecretCandidate } from "./webhook-signature.js";
 
 /**
  * Dual-secret rotation window: the previous secret version is honored only
@@ -37,10 +35,6 @@ export const WEBHOOK_PREVIOUS_SECRET_WINDOW_MS = 24 * 3_600_000;
 
 export const WORKFLOW_WEBHOOK_SECRET_REF_PREFIX = "workflow-webhook:";
 
-export type WebhookSecretCandidate = {
-  value: string;
-  expiresAt?: Date | string | null;
-};
 
 export type WebhookDeliveryQuota = { max: number; windowMs: number };
 
@@ -70,50 +64,6 @@ export function generateWebhookSecret(): string {
 
 export function webhookSecretLast4(secret: string): string {
   return secret.slice(-4);
-}
-
-function isExpired(candidate: WebhookSecretCandidate, now: number): boolean {
-  if (candidate.expiresAt == null) return false;
-  const expiry = candidate.expiresAt instanceof Date
-    ? candidate.expiresAt.getTime()
-    : Date.parse(candidate.expiresAt);
-  return Number.isFinite(expiry) && expiry <= now;
-}
-
-/**
- * Verify an HMAC-SHA256 signature against the live secrets.
- * Signature format: HMAC-SHA256("${timestamp}.${body}", secret) hex digest,
- * compared with crypto.timingSafeEqual. Expired candidates are skipped.
- */
-export function verifyWebhookSignature(input: {
-  timestamp: string;
-  rawBody: Buffer | string;
-  signature: string;
-  secrets: readonly WebhookSecretCandidate[];
-}): boolean {
-  const { timestamp, rawBody, signature, secrets } = input;
-  const ts = Number.parseInt(timestamp, 10);
-  if (!Number.isFinite(ts)) return false;
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSeconds - ts) > WEBHOOK_MAX_CLOCK_SKEW_SECONDS) return false;
-
-  const now = Date.now();
-  const message = `${timestamp}.${rawBody.toString("utf8")}`;
-  for (const candidate of secrets) {
-    if (isExpired(candidate, now)) continue;
-    const expected = crypto
-      .createHmac("sha256", candidate.value)
-      .update(message)
-      .digest("hex");
-    try {
-      if (crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"))) {
-        return true;
-      }
-    } catch {
-      // Length-mismatched or non-hex signature — keep trying remaining secrets.
-    }
-  }
-  return false;
 }
 
 /**
