@@ -10,6 +10,7 @@ import {
   workflowWebhookConfigs,
   workflowWebhookDeliveries,
 } from "@paperclipai/db";
+import { signWorkflowWebhook } from "../services/workflow/webhook-signature.js";
 import { errorHandler } from "../middleware/index.js";
 import { secretService } from "../services/secrets.js";
 import { workflowWebhookRoutes, webhookRawBodyErrorHandler } from "../routes/workflow-webhooks.js";
@@ -39,13 +40,6 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 const QUOTA = { max: 60, windowMs: 3_600_000 };
-
-function sign(secret: string, timestamp: string, rawBody: string): string {
-  return crypto
-    .createHmac("sha256", secret)
-    .update(`${timestamp}.${rawBody}`)
-    .digest("hex");
-}
 
 describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:workflowId)", () => {
   let db!: ReturnType<typeof createDb>;
@@ -81,10 +75,11 @@ describeEmbeddedPostgres("workflow webhook route (POST /api/webhooks/workflows/:
     opts: { ts?: string; key?: string; sig?: string; omit?: string[] } = {},
   ) => {
     const ts = opts.ts ?? String(Math.floor(Date.now() / 1000));
+    const key = opts.key ?? `idem-${crypto.randomUUID()}`;
     const headers: Record<string, string> = {
       "X-Timestamp": ts,
-      "X-Idempotency-Key": opts.key ?? `idem-${crypto.randomUUID()}`,
-      "X-Signature": opts.sig ?? sign(secretValue, ts, body),
+      "X-Idempotency-Key": key,
+      "X-Signature": opts.sig ?? signWorkflowWebhook(secretValue, ts, key, body),
     };
     for (const header of opts.omit ?? []) delete headers[header];
     return post(body, headers);
