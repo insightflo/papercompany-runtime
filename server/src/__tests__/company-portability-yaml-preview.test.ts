@@ -46,6 +46,16 @@ describe("company import YAML preview", () => {
     expect(result.manifest.company?.name).toBe("Example");
   });
 
+  it("does not warn when frontmatter contains only comments", async () => {
+    const result = await preview("---\n# draft notes\n---\n\nCompany\n");
+    expect(result.warnings.filter((warning) => warning.includes("not a mapping"))).toEqual([]);
+  });
+
+  it("warns when the company frontmatter is not a mapping", async () => {
+    const result = await preview("---\n- one\n- two\n---\n\nCompany\n");
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining("not a mapping")]));
+  });
+
   it("preserves a multi-line company description", async () => {
     const result = await preview(
       "---\nname: Example\ndescription: |\n  First line\n  Second line\n---\n\nCompany\n",

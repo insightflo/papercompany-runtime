@@ -964,7 +964,13 @@ function filterCompanyMarkdownIncludes(
   markdown: string,
   selectedFiles: Set<string>,
 ) {
-  const parsed = parseFrontmatterMarkdown(markdown);
+  let parsed: ReturnType<typeof parseFrontmatterMarkdown>;
+  try {
+    parsed = parseFrontmatterMarkdown(markdown);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw unprocessable(`Company package file ${companyPath} has invalid YAML frontmatter: ${reason}`);
+  }
   const includeEntries = readIncludeEntries(parsed.frontmatter);
   const filteredIncludes = includeEntries.filter((entry) =>
     selectedFiles.has(resolvePortablePath(companyPath, entry.path)),
@@ -1100,9 +1106,18 @@ async function buildReferencedSkillMarkdown(skill: CompanySkill) {
   return buildMarkdown(frontmatter, "");
 }
 
-async function withSkillSourceMetadata(skill: CompanySkill, markdown: string) {
+async function withSkillSourceMetadata(skill: CompanySkill, markdown: string, warnings: string[]) {
   const sourceEntry = await buildSkillSourceEntry(skill);
-  const parsed = parseFrontmatterMarkdown(markdown);
+  let parsed: ReturnType<typeof parseFrontmatterMarkdown>;
+  try {
+    parsed = parseFrontmatterMarkdown(markdown);
+  } catch (error) {
+    // Stored skill files were never validated by the strict parser; keep the
+    // stored bytes as-is so export keeps succeeding, but surface the problem.
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(`Skill ${skill.key} SKILL.md has invalid YAML frontmatter; exported as stored without source metadata: ${reason}`);
+    return markdown;
+  }
   const metadata = isPlainRecord(parsed.frontmatter.metadata)
     ? { ...parsed.frontmatter.metadata }
     : {};
@@ -1238,10 +1253,13 @@ function readAgentEnvInputs(
 function readAgentSkillRefs(frontmatter: Record<string, unknown>, warnings: string[], agentSlug: string) {
   const skills = frontmatter.skills;
   if (skills === undefined) return [];
-  if (!Array.isArray(skills) || skills.some((entry) => typeof entry !== "string" || !entry.trim())) {
-    warnings.push(`Agent ${agentSlug} has invalid skills; expected a list of non-empty strings.`);
+  if (!Array.isArray(skills)) {
+    warnings.push(`Agent ${agentSlug} has invalid skills; expected a list of non-empty strings. The value was ignored.`);
+    return [];
   }
-  if (!Array.isArray(skills)) return [];
+  if (skills.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    warnings.push(`Agent ${agentSlug} has invalid skills; non-string or empty entries were ignored, valid entries were kept.`);
+  }
   return [...new Set(skills.filter((entry): entry is string => typeof entry === "string")
     .map((entry) => normalizeSkillKey(entry) ?? entry.trim()).filter(Boolean))];
 }
@@ -1255,7 +1273,7 @@ function parsePackagedFrontmatter(
   filePath: string,
   warnings: string[],
 ): { frontmatter: Record<string, unknown>; body: string } {
-  let parsed;
+  let parsed: ReturnType<typeof parseFrontmatterMarkdown>;
   try {
     parsed = parseFrontmatterMarkdown(markdown);
   } catch (error) {
@@ -1268,9 +1286,29 @@ function parsePackagedFrontmatter(
   return { frontmatter: parsed.frontmatter, body: parsed.body };
 }
 
+// Same guard as parsePackagedFrontmatter for plain YAML files such as
+// .paperclip.yaml: parse errors reject the request (422) and parser warnings
+// surface through the preview/import warnings list.
+function parsePackagedYamlFile(
+  raw: string,
+  filePath: string,
+  warnings: string[],
+): Record<string, unknown> {
+  try {
+    const parsed = parseYamlFile(raw);
+    for (const warning of parsed.warnings) {
+      warnings.push(`Company package file ${filePath} ${warning}`);
+    }
+    return parsed.value;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw unprocessable(`Company package file ${filePath} is not valid YAML: ${reason}`);
+  }
+}
+
 function buildManifestFromPackageFiles(
   files: Record<string, CompanyPortabilityFileEntry>,
-  opts?: { sourceLabel?: { companyId: string; companyName: string } | null },
+  opts?: { sourceLabel?: { companyId: string; companyName: string } | null; lenientYaml?: boolean },
 ): ResolvedSource {
   const normalizedFiles = normalizeFileMap(files);
   const companyPath = typeof normalizedFiles["COMPANY.md"] === "string"
@@ -1291,20 +1329,9 @@ function buildManifestFromPackageFiles(
   const companyDoc = parsePackagedFrontmatter(companyMarkdown, resolvedCompanyPath, warnings);
   const companyFrontmatter = companyDoc.frontmatter;
   const paperclipExtensionPath = findPaperclipExtensionPath(normalizedFiles);
-  let paperclipExtension: Record<string, unknown> = {};
-  if (paperclipExtensionPath) {
-    const extensionRaw = readPortableTextFile(normalizedFiles, paperclipExtensionPath) ?? "";
-    try {
-      const parsedExtension = parseYamlFile(extensionRaw);
-      for (const warning of parsedExtension.warnings) {
-        warnings.push(`Company package file ${paperclipExtensionPath} ${warning}`);
-      }
-      paperclipExtension = parsedExtension.value;
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw unprocessable(`Company package file ${paperclipExtensionPath} is not valid YAML: ${reason}`);
-    }
-  }
+  const paperclipExtension = paperclipExtensionPath
+    ? parsePackagedYamlFile(readPortableTextFile(normalizedFiles, paperclipExtensionPath) ?? "", paperclipExtensionPath, warnings)
+    : {};
   const paperclipCompany = isPlainRecord(paperclipExtension.company) ? paperclipExtension.company : {};
   const paperclipAgents = isPlainRecord(paperclipExtension.agents) ? paperclipExtension.agents : {};
   const paperclipProjects = isPlainRecord(paperclipExtension.projects) ? paperclipExtension.projects : {};
@@ -1435,7 +1462,17 @@ function buildManifestFromPackageFiles(
       warnings.push(`Referenced skill file is missing from package: ${skillPath}`);
       continue;
     }
-    const skillDoc = parsePackagedFrontmatter(markdownRaw, skillPath, warnings);
+    let skillDoc: { frontmatter: Record<string, unknown>; body: string };
+    try {
+      skillDoc = parsePackagedFrontmatter(markdownRaw, skillPath, warnings);
+    } catch (error) {
+      // Export re-reads its own bundle with stored SKILL.md content that the
+      // strict parser may reject; lenient mode keeps legacy exports working
+      // while surfacing the problem as a warning instead of failing the export.
+      if (!opts?.lenientYaml) throw error;
+      warnings.push(error instanceof Error ? error.message : String(error));
+      skillDoc = { frontmatter: {}, body: "" };
+    }
     const frontmatter = skillDoc.frontmatter;
     const skillDir = path.posix.dirname(skillPath);
     const fallbackSlug = normalizeAgentUrlKey(path.posix.basename(skillDir)) ?? "skill";
@@ -1734,7 +1771,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         resolveRawGitHubUrl(parsed.owner, parsed.repo, ref, repoPath),
       );
     }
-    const companyDoc = parseFrontmatterMarkdown(companyMarkdown);
+    const companyDoc = parsePackagedFrontmatter(companyMarkdown, companyPath, warnings);
     const includeEntries = readIncludeEntries(companyDoc.frontmatter);
     for (const includeEntry of includeEntries) {
       const repoPath = [parsed.basePath, includeEntry.path].filter(Boolean).join("/");
@@ -2004,7 +2041,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         if (!fileDetail) continue;
         const filePath = `${packageDir}/${inventoryEntry.path}`;
         files[filePath] = inventoryEntry.path === "SKILL.md"
-          ? await withSkillSourceMetadata(skill, fileDetail.content)
+          ? await withSkillSourceMetadata(skill, fileDetail.content, warnings)
           : fileDetail.content;
       }
     }
@@ -2171,6 +2208,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         companyId: company.id,
         companyName: company.name,
       },
+      lenientYaml: true,
     });
     resolved.manifest.includes = {
       company: resolved.manifest.company !== null,
@@ -2205,6 +2243,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         companyId: company.id,
         companyName: company.name,
       },
+      lenientYaml: true,
     });
     resolved.manifest.includes = {
       company: resolved.manifest.company !== null,

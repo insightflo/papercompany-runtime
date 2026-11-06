@@ -20,12 +20,21 @@ type ParsedYaml = {
 function readYamlDocument(raw: string): ParsedYaml {
   const document = parseDocument(raw, { logLevel: "silent" });
   if (document.errors.length > 0) {
-    throw new Error(document.errors.map((issue) => issue.message).join("; "));
+    throw new Error(
+      document.errors
+        .map((issue) => {
+          const at = issue.linePos?.[0]
+            ? `line ${issue.linePos[0].line}:${issue.linePos[0].col}: `
+            : "";
+          return `${at}${issue.message}`;
+        })
+        .join("; "),
+    );
   }
   const warnings = document.warnings.map((issue) => `YAML warning: ${issue.message}`);
   const value = document.toJS();
   if (!isPlainRecord(value)) {
-    if (raw.trim().length > 0) {
+    if (document.contents !== null) {
       warnings.push("YAML document is not a mapping; its entries were not read.");
     }
     return { value: {}, warnings };
