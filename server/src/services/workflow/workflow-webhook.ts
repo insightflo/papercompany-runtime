@@ -3,14 +3,13 @@
  *
  * n8n-style inbound webhook support for workflow definitions.
  *
- * - Signing: HMAC-SHA256 over `${timestamp}.${rawBody}` (SRB pattern), ±300s
- *   clock skew, dual-secret rotation window against versioned company secrets.
+ * - Signing: v2 covers timestamp, idempotency key and exact body bytes; v1
+ *   remains available during migration with its signed-message receipt bound.
  * - Admission: durable delivery receipts (unique per company+workflow+key) with
  *   a per-workflow quota window enforced inside the admission transaction.
  *
- * The current v1 signature covers timestamp and body, but not the separate
- * idempotency-key header. Previous secret versions are honored only within a
- * 24h rotation window; expired previous versions are rejected.
+ * Previous secret versions are honored only within a 24h rotation window;
+ * expired previous versions are rejected.
  */
 
 import crypto from "node:crypto";
@@ -20,7 +19,9 @@ import {
   companySecretVersions,
   companySecrets,
   workflowWebhookDeliveries,
+  workflowWebhookSignedMessages,
 } from "@paperclipai/db";
+import { conflict } from "../../errors.js";
 import { secretService } from "../secrets.js";
 import type { WorkflowRunInputDeclaration } from "./run-input-derivations.js";
 
@@ -125,8 +126,8 @@ export async function resolveWorkflowWebhookSecret(
  *   (replay=true, never a second row);
  * - quota: deliveries for the workflow within the window are counted inside
  *   the same transaction; over the max, a 429-typed error is thrown;
- * - race: concurrent inserts rely on the unique index (onConflictDoNothing)
- *   and re-read the winning row.
+ * - legacy: the signed-message hash is bound to a receipt under an advisory
+ *   lock, so a changed unsigned header cannot create another receipt.
  */
 export async function admitWebhookDelivery(
   db: Db,
@@ -134,12 +135,18 @@ export async function admitWebhookDelivery(
     companyId: string;
     workflowId: string;
     idempotencyKey: string;
+    legacyMessageHash?: string;
     quota: WebhookDeliveryQuota;
   },
 ): Promise<{ delivery: typeof workflowWebhookDeliveries.$inferSelect; replay: boolean }> {
-  const { companyId, workflowId, idempotencyKey, quota } = input;
+  const { companyId, workflowId, idempotencyKey, legacyMessageHash, quota } = input;
 
   return db.transaction(async (tx) => {
+    if (legacyMessageHash) {
+      // All v1 requests for the same signed message serialize across servers.
+      const lockKey = `workflow-webhook-v1:${companyId}:${workflowId}:${legacyMessageHash}`;
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+    }
     const [existing] = await tx
       .select()
       .from(workflowWebhookDeliveries)
@@ -151,7 +158,30 @@ export async function admitWebhookDelivery(
         ),
       )
       .limit(1);
-    if (existing) return { delivery: existing, replay: true };
+    const [bound] = legacyMessageHash ? await tx
+      .select({ delivery: workflowWebhookDeliveries })
+      .from(workflowWebhookSignedMessages)
+      .innerJoin(workflowWebhookDeliveries, eq(workflowWebhookSignedMessages.deliveryId, workflowWebhookDeliveries.id))
+      .where(and(
+        eq(workflowWebhookSignedMessages.companyId, companyId),
+        eq(workflowWebhookSignedMessages.workflowId, workflowId),
+        eq(workflowWebhookSignedMessages.messageHash, legacyMessageHash),
+      ))
+      .limit(1) : [];
+    if (bound && existing && bound.delivery.id !== existing.id) {
+      throw conflict("Signed webhook message conflicts with an existing idempotency key");
+    }
+    if (bound) return { delivery: bound.delivery, replay: true };
+
+    const bindMessage = async (deliveryId: string) => {
+      if (legacyMessageHash) {
+        await tx.insert(workflowWebhookSignedMessages).values({ companyId, workflowId, deliveryId, messageHash: legacyMessageHash });
+      }
+    };
+    if (existing) {
+      await bindMessage(existing.id);
+      return { delivery: existing, replay: true };
+    }
 
     const windowStart = new Date(Date.now() - quota.windowMs);
     const [countRow] = await tx
@@ -172,7 +202,10 @@ export async function admitWebhookDelivery(
       .values({ companyId, workflowId, idempotencyKey })
       .onConflictDoNothing()
       .returning();
-    if (inserted) return { delivery: inserted, replay: false };
+    if (inserted) {
+      await bindMessage(inserted.id);
+      return { delivery: inserted, replay: false };
+    }
 
     const [winner] = await tx
       .select()
@@ -186,6 +219,7 @@ export async function admitWebhookDelivery(
       )
       .limit(1);
     if (!winner) throw new Error("webhook delivery receipt vanished during admission");
+    await bindMessage(winner.id);
     return { delivery: winner, replay: true };
   });
 }
