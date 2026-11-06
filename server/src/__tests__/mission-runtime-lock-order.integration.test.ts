@@ -132,6 +132,43 @@ it("locks the referenced mission even when a caller supplies another company", a
   }
 }, 60_000);
 
+it("lets resume wait behind an ordinary transaction that already owns the mission key lock", async () => {
+  const input = await fixture();
+  const bInserted = deferred(), allowBCommit = deferred();
+  let bPid = 0;
+  const b = ordinaryDb.transaction(async (tx) => {
+    const scoped = tx as unknown as Db;
+    const rows = await scoped.execute(sql`select pg_backend_pid() as pid`);
+    bPid = Number((rows as unknown as Array<{ pid: number }>)[0]!.pid);
+    const result = await ensureMissionAgentRuntime(scoped, input);
+    bInserted.resolve();
+    await allowBCommit.promise;
+    return result;
+  });
+  void b.catch(() => {});
+  await Promise.race([bInserted.promise, b.then(() => { throw new Error("ordinary transaction exited before its gate"); })]);
+  let a: ReturnType<typeof ensureMissionAgentRuntime> | undefined;
+  try {
+    a = withResumeSerialization(resumeDb, { companyId: input.companyId, missionId: input.missionId, runId: input.workflowRunId },
+      async ({ tx }) => ensureMissionAgentRuntime(tx as unknown as Db, input));
+    void a.catch(() => {});
+    const waiting = await waitFor(async () => {
+      const rows = await observer.$client`select pg_blocking_pids(pid) as blockers, query from pg_stat_activity where application_name='mission-lock-resume'`;
+      const row = rows.find((item) => (item.blockers as number[]).includes(bPid));
+      return row ? String(row.query) : null;
+    }, "resume waiting for the ordinary mission lock");
+    expect(waiting).toMatch(/select\b[\s\S]*from\s+"missions"[\s\S]*for\s+update/i);
+    allowBCommit.resolve();
+    const [fromOrdinary, fromResume] = await Promise.all([b, a]);
+    expect(fromResume.runtime.id).toBe(fromOrdinary.runtime.id);
+    const rows = await observer.select().from(missionAgentRuntimes).where(eq(missionAgentRuntimes.missionId, input.missionId));
+    expect(rows).toHaveLength(1);
+  } finally {
+    allowBCommit.resolve();
+    await Promise.allSettled([b, ...(a ? [a] : [])]);
+  }
+}, 60_000);
+
 it("preserves the caller transaction's rollback boundary", async () => {
   const input = await fixture();
   await expect(observer.transaction(async (tx) => {
