@@ -105,6 +105,7 @@ export { workflowDefinitions } from "./workflow_definitions.js";
 export {
   workflowWebhookConfigs,
   workflowWebhookDeliveries,
+  workflowWebhookSignedMessages,
 } from "./workflow_webhooks.js";
 export { workflowRunSlots } from "./workflow_run_slots.js";
 export { workflowRuns } from "./workflow_runs.js";

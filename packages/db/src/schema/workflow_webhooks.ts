@@ -6,6 +6,7 @@ import {
   boolean,
   index,
   uniqueIndex,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { workflowDefinitions } from "./workflow_definitions.js";
@@ -54,9 +55,36 @@ export const workflowWebhookDeliveries = pgTable(
       table.workflowId,
       table.idempotencyKey,
     ),
+    scopeIdUq: uniqueIndex("workflow_webhook_deliveries_scope_id_uq").on(
+      table.companyId, table.workflowId, table.id,
+    ),
     windowIdx: index("idx_workflow_webhook_deliveries_workflow_received_at").on(
       table.workflowId,
       table.receivedAt,
     ),
+  }),
+);
+
+/** Bind every verified v1 signed message to its existing scoped receipt. */
+export const workflowWebhookSignedMessages = pgTable(
+  "workflow_webhook_signed_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull(),
+    workflowId: uuid("workflow_id").notNull(),
+    deliveryId: uuid("delivery_id").notNull(),
+    messageHash: text("message_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    messageUq: uniqueIndex("workflow_webhook_signed_messages_hash_uq").on(
+      table.companyId, table.workflowId, table.messageHash,
+    ),
+    deliveryIdx: index("idx_workflow_webhook_signed_messages_delivery_id").on(table.deliveryId),
+    deliveryScopeFk: foreignKey({
+      name: "workflow_webhook_signed_messages_delivery_scope_fk",
+      columns: [table.companyId, table.workflowId, table.deliveryId],
+      foreignColumns: [workflowWebhookDeliveries.companyId, workflowWebhookDeliveries.workflowId, workflowWebhookDeliveries.id],
+    }).onDelete("cascade"),
   }),
 );
