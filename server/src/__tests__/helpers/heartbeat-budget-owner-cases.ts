@@ -29,6 +29,8 @@ export type HeartbeatBudgetCaseContext = {
   waitForIssueStatus: (db: ReturnType<typeof createDb>, issueId: string, predicate: (issue: typeof issues.$inferSelect) => boolean) => Promise<typeof issues.$inferSelect>;
   waitForWakeupRequestStatus: (db: ReturnType<typeof createDb>, runId: string, predicate: (request: typeof agentWakeupRequests.$inferSelect) => boolean) => Promise<typeof agentWakeupRequests.$inferSelect>;
   mockRequestChangesOnce: (db: ReturnType<typeof createDb>, issueId: string, lines: string[]) => void;
+  decisionComment: (decision: Record<string, unknown>) => string;
+  validOwnerPlanDecision: (missionId: string, workflowDefinitionId: string) => Record<string, unknown>;
   failedAdapterResult: (overrides?: HeartbeatAdapterFailureOverrides) => object;
   waitForWakeupStatus: (db: ReturnType<typeof createDb>, wakeupRequestId: string, expected: string, deadlineMs?: number) => Promise<{ status: string } | null>;
   expectBroadScanInterception: (db: ReturnType<typeof createDb>, runId: string) => Promise<void>;
