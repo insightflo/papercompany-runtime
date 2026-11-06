@@ -8,7 +8,6 @@ export type { CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classificati
 import { resolveRuntimeSessionParamsForWorkspace, type ResolvedWorkspaceForRun } from "./heartbeat-workspace-session.js";
 export { resolveRuntimeSessionParamsForWorkspace } from "./heartbeat-workspace-session.js";
 export type { ResolvedWorkspaceForRun } from "./heartbeat-workspace-session.js";
-import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, is, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
@@ -55,7 +54,6 @@ import { runtimeExecutionLifecycle, type RuntimeExecutionScope } from "./runtime
 import { parseObject } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
-import { normalizePaperclipApiUrl, resolveHostForPaperclipApiUrl } from "./heartbeat-api-address.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { hasSatisfiedWorkProductRegistration } from "./heartbeat-artifact-registration.js";
 export { hasSatisfiedWorkProductRegistration, workProductReferencesClaimedArtifact } from "./heartbeat-artifact-registration.js";
@@ -476,22 +474,7 @@ const heartbeatRunListColumns = {
 const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
 
 
-function hasResumableSessionForRun(
-  runtime: {
-    sessionId: string | null;
-    sessionParams: Record<string, unknown> | null;
-  },
-  cwd: string,
-) {
-  return (
-    typeof runtime.sessionId === "string" &&
-    runtime.sessionId.length > 0 &&
-    (() => {
-      const runtimeSessionCwd = readNonEmptyString(parseObject(runtime.sessionParams).cwd) ?? "";
-      return runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(cwd);
-    })()
-  );
-}
+
 
 
 
@@ -539,19 +522,9 @@ function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnap
 
 
 
-function resolveCurrentPaperclipApiUrl(): string {
-  const explicit = normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL);
-  if (explicit) return explicit;
-  const host = resolveHostForPaperclipApiUrl(process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST);
-  const port = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
-  return `http://${host}:${port}`;
-}
 
-function applyPaperclipApiContext(context: Record<string, unknown>): void {
-  const apiUrl = resolveCurrentPaperclipApiUrl();
-  context.paperclipApiUrl = apiUrl;
-  context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
-}
+
+
 
 
 
@@ -625,30 +598,11 @@ function parseIssueAssigneeAdapterOverrides(
 
 
 
-export function formatRuntimeWorkspaceWarningLog(warning: string) {
-  return {
-    stream: "stdout" as const,
-    chunk: `[paperclip] ${warning}\n`,
-  };
-}
 
 
 
-export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo & { runId: string }): string {
-  const detected = input.authErrorCode
-    ? `codex_local 실행 중 401 Unauthorized (auth error code: \`${input.authErrorCode}\`)`
-    : "codex_local 실행 중 401 Unauthorized";
-  return [
-    "## 자동 차단: codex_local 인증 오류",
-    `- 원인코드: \`${input.reasonCode}\``,
-    `- 감지: ${detected}`,
-    `- 실행 runId: \`${input.runId}\``,
-    "- 조치 1: `codex login`으로 Codex CLI를 재인증",
-    "- 조치 2: Hermes `openai-codex`도 같은 계정 세션을 쓰면 `hermes auth`로 별도 재인증 상태 확인",
-    "- 조치 3: OPENAI API 키 사용 모드면 `OPENAI_API_KEY` 유효성 재확인",
-    "- 재개: 인증 복구 후 에이전트 일시정지를 해제하고 heartbeat 재실행",
-  ].join("\n");
-}
+
+
 
 
 
@@ -8890,5 +8844,11 @@ import { isTerminalAdapterFallbackConfigurationFailure, shouldQueueRunFailureAda
 import { ensureManagedProjectWorkspace } from "./heartbeat-managed-workspace.js";
 import { parseHeartbeatPolicy } from "./heartbeat-concurrency-limit.js";
 import { publishQueuedRun } from "./heartbeat-queue-lifecycle.js";
+import { hasResumableSessionForRun } from "./heartbeat-workspace-session.js";
+import { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
+import { applyPaperclipApiContext } from "./heartbeat-api-address.js";
+import { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
+export { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
+export { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
 export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
 export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";

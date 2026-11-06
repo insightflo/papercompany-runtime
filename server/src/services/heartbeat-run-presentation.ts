@@ -1,3 +1,4 @@
+import type { CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classification.js";
 import type { heartbeatRuns } from "@paperclipai/db";
 import { parseObject } from "../adapters/utils.js";
 import { readNonEmptyString, resolveAdapterFallbackAttempt } from "./heartbeat-run-context.js";
@@ -236,5 +237,21 @@ export function buildMissionOversightRunSucceededReleaseComment(run: typeof hear
     `- succeeded runId: \`${run.id}\``,
     `- mission status: \`${missionStatus}\``,
     "- policy: mission oversight stays alive until the mission is completed or cancelled, so this successful cycle releases the issue back to todo instead of closing it.",
+  ].join("\n");
+}
+
+export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo & { runId: string }): string {
+  const detected = input.authErrorCode
+    ? `codex_local 실행 중 401 Unauthorized (auth error code: \`${input.authErrorCode}\`)`
+    : "codex_local 실행 중 401 Unauthorized";
+  return [
+    "## 자동 차단: codex_local 인증 오류",
+    `- 원인코드: \`${input.reasonCode}\``,
+    `- 감지: ${detected}`,
+    `- 실행 runId: \`${input.runId}\``,
+    "- 조치 1: `codex login`으로 Codex CLI를 재인증",
+    "- 조치 2: Hermes `openai-codex`도 같은 계정 세션을 쓰면 `hermes auth`로 별도 재인증 상태 확인",
+    "- 조치 3: OPENAI API 키 사용 모드면 `OPENAI_API_KEY` 유효성 재확인",
+    "- 재개: 인증 복구 후 에이전트 일시정지를 해제하고 heartbeat 재실행",
   ].join("\n");
 }
