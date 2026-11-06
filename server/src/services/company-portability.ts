@@ -47,6 +47,8 @@ import { companySkillService } from "./company-skills.js";
 import { companyService } from "./companies.js";
 import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
+import { isPlainRecord, stripEmptyValues, buildMarkdown, buildYamlFile } from "./company-portability-yaml.js";
+import { parseYamlFile, parseFrontmatterMarkdown } from "./company-portability-yaml-parse.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
 function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]): OrgNode[] {
@@ -380,11 +382,6 @@ type ResolvedSource = {
   warnings: string[];
 };
 
-type MarkdownDoc = {
-  frontmatter: Record<string, unknown>;
-  body: string;
-};
-
 type CompanyPackageIncludeEntry = {
   path: string;
 };
@@ -508,10 +505,6 @@ const ADAPTER_DEFAULT_RULES_BY_TYPE: Record<string, Array<{ path: string[]; valu
     { path: ["scopes"], value: ["operator.admin"] },
   ],
 };
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function asString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -957,179 +950,6 @@ function pruneDefaultLikeValue(
   return value;
 }
 
-function renderYamlScalar(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  if (typeof value === "string") return JSON.stringify(value);
-  return JSON.stringify(value);
-}
-
-function isEmptyObject(value: unknown): boolean {
-  return isPlainRecord(value) && Object.keys(value).length === 0;
-}
-
-function isEmptyArray(value: unknown): boolean {
-  return Array.isArray(value) && value.length === 0;
-}
-
-function stripEmptyValues(value: unknown, opts?: { preserveEmptyStrings?: boolean }): unknown {
-  if (Array.isArray(value)) {
-    const next = value
-      .map((entry) => stripEmptyValues(entry, opts))
-      .filter((entry) => entry !== undefined);
-    return next.length > 0 ? next : undefined;
-  }
-  if (isPlainRecord(value)) {
-    const next: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      const cleaned = stripEmptyValues(entry, opts);
-      if (cleaned === undefined) continue;
-      next[key] = cleaned;
-    }
-    return Object.keys(next).length > 0 ? next : undefined;
-  }
-  if (
-    value === undefined ||
-    value === null ||
-    (!opts?.preserveEmptyStrings && value === "") ||
-    isEmptyArray(value) ||
-    isEmptyObject(value)
-  ) {
-    return undefined;
-  }
-  return value;
-}
-
-const YAML_KEY_PRIORITY = [
-  "name",
-  "description",
-  "title",
-  "schema",
-  "kind",
-  "slug",
-  "reportsTo",
-  "skills",
-  "owner",
-  "assignee",
-  "project",
-  "schedule",
-  "version",
-  "license",
-  "authors",
-  "homepage",
-  "tags",
-  "includes",
-  "requirements",
-  "role",
-  "icon",
-  "capabilities",
-  "brandColor",
-  "logoPath",
-  "adapter",
-  "runtime",
-  "permissions",
-  "budgetMonthlyCents",
-  "metadata",
-] as const;
-
-const YAML_KEY_PRIORITY_INDEX = new Map<string, number>(
-  YAML_KEY_PRIORITY.map((key, index) => [key, index]),
-);
-
-function compareYamlKeys(left: string, right: string) {
-  const leftPriority = YAML_KEY_PRIORITY_INDEX.get(left);
-  const rightPriority = YAML_KEY_PRIORITY_INDEX.get(right);
-  if (leftPriority !== undefined || rightPriority !== undefined) {
-    if (leftPriority === undefined) return 1;
-    if (rightPriority === undefined) return -1;
-    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-  }
-  return left.localeCompare(right);
-}
-
-function orderedYamlEntries(value: Record<string, unknown>) {
-  return Object.entries(value).sort(([leftKey], [rightKey]) => compareYamlKeys(leftKey, rightKey));
-}
-
-function renderYamlBlock(value: unknown, indentLevel: number): string[] {
-  const indent = "  ".repeat(indentLevel);
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [`${indent}[]`];
-    const lines: string[] = [];
-    for (const entry of value) {
-      const scalar =
-        entry === null ||
-        typeof entry === "string" ||
-        typeof entry === "boolean" ||
-        typeof entry === "number" ||
-        Array.isArray(entry) && entry.length === 0 ||
-        isEmptyObject(entry);
-      if (scalar) {
-        lines.push(`${indent}- ${renderYamlScalar(entry)}`);
-        continue;
-      }
-      lines.push(`${indent}-`);
-      lines.push(...renderYamlBlock(entry, indentLevel + 1));
-    }
-    return lines;
-  }
-
-  if (isPlainRecord(value)) {
-    const entries = orderedYamlEntries(value);
-    if (entries.length === 0) return [`${indent}{}`];
-    const lines: string[] = [];
-    for (const [key, entry] of entries) {
-      const scalar =
-        entry === null ||
-        typeof entry === "string" ||
-        typeof entry === "boolean" ||
-        typeof entry === "number" ||
-        Array.isArray(entry) && entry.length === 0 ||
-        isEmptyObject(entry);
-      if (scalar) {
-        lines.push(`${indent}${key}: ${renderYamlScalar(entry)}`);
-        continue;
-      }
-      lines.push(`${indent}${key}:`);
-      lines.push(...renderYamlBlock(entry, indentLevel + 1));
-    }
-    return lines;
-  }
-
-  return [`${indent}${renderYamlScalar(value)}`];
-}
-
-function renderFrontmatter(frontmatter: Record<string, unknown>) {
-  const lines: string[] = ["---"];
-  for (const [key, value] of orderedYamlEntries(frontmatter)) {
-    // Skip null/undefined values — don't export empty fields
-    if (value === null || value === undefined) continue;
-    const scalar =
-      typeof value === "string" ||
-      typeof value === "boolean" ||
-      typeof value === "number" ||
-      Array.isArray(value) && value.length === 0 ||
-      isEmptyObject(value);
-    if (scalar) {
-      lines.push(`${key}: ${renderYamlScalar(value)}`);
-      continue;
-    }
-    lines.push(`${key}:`);
-    lines.push(...renderYamlBlock(value, 1));
-  }
-  lines.push("---");
-  return `${lines.join("\n")}\n`;
-}
-
-function buildMarkdown(frontmatter: Record<string, unknown>, body: string) {
-  const cleanBody = body.replace(/\r\n/g, "\n").trim();
-  if (!cleanBody) {
-    return `${renderFrontmatter(frontmatter)}\n`;
-  }
-  return `${renderFrontmatter(frontmatter)}\n${cleanBody}\n`;
-}
-
 function normalizeSelectedFiles(selectedFiles?: string[]) {
   if (!selectedFiles) return null;
   return new Set(
@@ -1308,156 +1128,6 @@ async function withSkillSourceMetadata(skill: CompanySkill, markdown: string) {
   return buildMarkdown(frontmatter, parsed.body);
 }
 
-
-function parseYamlScalar(rawValue: string): unknown {
-  const trimmed = rawValue.trim();
-  if (trimmed === "") return "";
-  if (trimmed === "null" || trimmed === "~") return null;
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (trimmed === "[]") return [];
-  if (trimmed === "{}") return {};
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (
-    trimmed.startsWith("\"") ||
-    trimmed.startsWith("[") ||
-    trimmed.startsWith("{")
-  ) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return trimmed;
-    }
-  }
-  return trimmed;
-}
-
-function prepareYamlLines(raw: string) {
-  return raw
-    .split("\n")
-    .map((line) => ({
-      indent: line.match(/^ */)?.[0].length ?? 0,
-      content: line.trim(),
-    }))
-    .filter((line) => line.content.length > 0 && !line.content.startsWith("#"));
-}
-
-function parseYamlBlock(
-  lines: Array<{ indent: number; content: string }>,
-  startIndex: number,
-  indentLevel: number,
-): { value: unknown; nextIndex: number } {
-  let index = startIndex;
-  while (index < lines.length && lines[index]!.content.length === 0) {
-    index += 1;
-  }
-  if (index >= lines.length || lines[index]!.indent < indentLevel) {
-    return { value: {}, nextIndex: index };
-  }
-
-  const isArray = lines[index]!.indent === indentLevel && lines[index]!.content.startsWith("-");
-  if (isArray) {
-    const values: unknown[] = [];
-    while (index < lines.length) {
-      const line = lines[index]!;
-      if (line.indent < indentLevel) break;
-      if (line.indent !== indentLevel || !line.content.startsWith("-")) break;
-      const remainder = line.content.slice(1).trim();
-      index += 1;
-      if (!remainder) {
-        const nested = parseYamlBlock(lines, index, indentLevel + 2);
-        values.push(nested.value);
-        index = nested.nextIndex;
-        continue;
-      }
-      const inlineObjectSeparator = remainder.indexOf(":");
-      if (
-        inlineObjectSeparator > 0 &&
-        !remainder.startsWith("\"") &&
-        !remainder.startsWith("{") &&
-        !remainder.startsWith("[")
-      ) {
-        const key = remainder.slice(0, inlineObjectSeparator).trim();
-        const rawValue = remainder.slice(inlineObjectSeparator + 1).trim();
-        const nextObject: Record<string, unknown> = {
-          [key]: parseYamlScalar(rawValue),
-        };
-        if (index < lines.length && lines[index]!.indent > indentLevel) {
-          const nested = parseYamlBlock(lines, index, indentLevel + 2);
-          if (isPlainRecord(nested.value)) {
-            Object.assign(nextObject, nested.value);
-          }
-          index = nested.nextIndex;
-        }
-        values.push(nextObject);
-        continue;
-      }
-      values.push(parseYamlScalar(remainder));
-    }
-    return { value: values, nextIndex: index };
-  }
-
-  const record: Record<string, unknown> = {};
-  while (index < lines.length) {
-    const line = lines[index]!;
-    if (line.indent < indentLevel) break;
-    if (line.indent !== indentLevel) {
-      index += 1;
-      continue;
-    }
-    const separatorIndex = line.content.indexOf(":");
-    if (separatorIndex <= 0) {
-      index += 1;
-      continue;
-    }
-    const key = line.content.slice(0, separatorIndex).trim();
-    const remainder = line.content.slice(separatorIndex + 1).trim();
-    index += 1;
-    if (!remainder) {
-      const nested = parseYamlBlock(lines, index, indentLevel + 2);
-      record[key] = nested.value;
-      index = nested.nextIndex;
-      continue;
-    }
-    record[key] = parseYamlScalar(remainder);
-  }
-
-  return { value: record, nextIndex: index };
-}
-
-function parseYamlFrontmatter(raw: string): Record<string, unknown> {
-  const prepared = prepareYamlLines(raw);
-  if (prepared.length === 0) return {};
-  const parsed = parseYamlBlock(prepared, 0, prepared[0]!.indent);
-  return isPlainRecord(parsed.value) ? parsed.value : {};
-}
-
-function parseYamlFile(raw: string): Record<string, unknown> {
-  return parseYamlFrontmatter(raw);
-}
-
-function buildYamlFile(value: Record<string, unknown>, opts?: { preserveEmptyStrings?: boolean }) {
-  const cleaned = stripEmptyValues(value, opts);
-  if (!isPlainRecord(cleaned)) return "{}\n";
-  return renderYamlBlock(cleaned, 0).join("\n") + "\n";
-}
-
-function parseFrontmatterMarkdown(raw: string): MarkdownDoc {
-  const normalized = raw.replace(/\r\n/g, "\n");
-  if (!normalized.startsWith("---\n")) {
-    return { frontmatter: {}, body: normalized.trim() };
-  }
-  const closing = normalized.indexOf("\n---\n", 4);
-  if (closing < 0) {
-    return { frontmatter: {}, body: normalized.trim() };
-  }
-  const frontmatterRaw = normalized.slice(4, closing).trim();
-  const body = normalized.slice(closing + 5).trim();
-  return {
-    frontmatter: parseYamlFrontmatter(frontmatterRaw),
-    body,
-  };
-}
 
 async function fetchText(url: string) {
   const response = await fetch(url);
