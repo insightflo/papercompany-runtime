@@ -1,4 +1,5 @@
-import type { RecordFailureInput } from "./agent-wiki.js";
+import type { agentWikiService, RecordFailureInput } from "./agent-wiki.js";
+import { logger } from "../middleware/logger.js";
 import { isActionableClaimedArtifactPath } from "./work-products/artifact-claim-paths.js";
 import { isPathInsideOrEqual } from "./work-products/output-paths.js";
 
@@ -80,4 +81,26 @@ export function classifyWorkProductFailure(input: {
       errorCode: "workproduct_registration_missing",
     },
   };
+}
+
+/**
+ * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
+ *   recordFailure를 await하지 않고 .catch로 에러를 삼켜, wiki 로깅이 절대 main flow를
+ *   깨뜨리지 않도록 한다(activity-log.ts의 plugin event fanout .catch 선례와 동일 패턴).
+ * [입력] wiki: agentWikiService(db) 인스턴스. input: RecordFailureInput. runIdForLog: 로깅용 run id.
+ * [수정시 영향] 호출부는 모두 heartbeatService 클로저 내부. 에러는 logger.warn으로만 남는다.
+ */
+export function fireWikiRecord(
+  wiki: ReturnType<typeof agentWikiService>,
+  input: RecordFailureInput,
+  runIdForLog?: string,
+): void {
+  void wiki
+    .recordFailure(input)
+    .catch((err: unknown) =>
+      logger.warn(
+        { err, runId: runIdForLog, pattern: input.pattern },
+        "agent-wiki.recordFailure non-blocking failure",
+      ),
+    );
 }

@@ -1,4 +1,6 @@
-import { isActionableClaimedArtifactPath, stripArtifactTokenPunctuation } from "./work-products/artifact-claim-paths.js";
+import type { heartbeatRuns } from "@paperclipai/db";
+import { stringifyRunResultJson } from "./heartbeat-run-result-text.js";
+import { extractClaimedArtifactPathsFromText, isActionableClaimedArtifactPath, stripArtifactTokenPunctuation } from "./work-products/artifact-claim-paths.js";
 import path from "node:path";
 import { isPathInsideOrEqual } from "./work-products/output-paths.js";
 
@@ -175,4 +177,11 @@ export function hasSatisfiedWorkProductRegistration(input: {
     hasIssueDeclaredWorkProduct ||
     Boolean(input.autoRegisteredWorkProduct)
   );
+}
+
+export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
+  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  return extractClaimedArtifactPathsFromText(text);
 }
