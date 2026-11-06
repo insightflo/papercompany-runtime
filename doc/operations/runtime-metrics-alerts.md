@@ -17,7 +17,8 @@ Check `paperclip_db_metrics_collection_up` and
 On a collection failure, `up` becomes 0 and the last successful values and time
 remain visible. A changed DB binding clears the previous values. The SQL statement
 has a five-second limit; an outer ten-second limit reports a stalled acquisition
-without starting overlapping DB queries.
+without starting overlapping DB queries. A timed-out result is discarded; once
+the old query finishes, only a new successful sample marks collection recovered.
 
 The monitor sends an alert when HTTP 5xx errors reach five since the previous
 successful sample, when HTTP or DB sampling fails, and when those conditions

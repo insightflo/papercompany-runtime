@@ -135,6 +135,49 @@ describe("DB metrics and operational alerts", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("does not publish a timed-out DB snapshot when it resolves in a later sample", async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: unknown) => void;
+      const delayed = new Promise((resolve) => { release = resolve; });
+      const snapshot = {
+        activeSessions: 7, activeHeartbeats: 0,
+        missions: { planning: 0, active: 0, paused: 0, completed: 0, cancelled: 0, other: 0 },
+        workflows: { pending: 0, running: 0, completed: 0, failed: 0, cancelled: 0, other: 0 },
+        rules: { MUST: 0, SHOULD: 0, MAY: 0, other: 0 },
+        deliveries: { pending: 0, retrying: 0, delivered: 0, failed: 0, abandoned: 0, other: 0 },
+      };
+      const transaction = vi.fn().mockReturnValueOnce(delayed).mockResolvedValue(snapshot);
+      const scalar = { set: vi.fn() };
+      const labeled = { reset: vi.fn(), set: vi.fn() };
+      const up = { set: vi.fn() };
+      const send = vi.fn().mockResolvedValue(undefined);
+      const monitor = createDbMetricsMonitor({ transaction } as unknown as typeof db, {
+        activeSessions: scalar, activeHeartbeats: scalar, missions: labeled, workflows: labeled,
+        rules: labeled, deliveries: labeled, up, lastSuccess: scalar,
+      }, { warn: vi.fn(), info: vi.fn() }, send);
+
+      const first = monitor.sample();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await first;
+      await vi.advanceTimersByTimeAsync(50_000);
+      const second = monitor.sample();
+      release(snapshot);
+      await second;
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(up.set).not.toHaveBeenCalledWith(1);
+      expect(scalar.set).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await monitor.sample();
+      expect(transaction).toHaveBeenCalledTimes(2);
+      expect(up.set).toHaveBeenCalledWith(1);
+      expect(send.mock.calls[1]![0]).toMatch(/recovered/i);
+      monitor.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("reports a DB sampling failure and recovery without presenting stale values as current", async () => {
     vi.resetModules();
     const fresh = await import("../routes/metrics.js");

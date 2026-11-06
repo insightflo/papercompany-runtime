@@ -185,15 +185,16 @@ export function createDbMetricsMonitor(db: Db, gauges: DbMetricGauges, logger: M
   let failed = false;
   let reading = false;
   let stopped = false;
-  let inFlight: Promise<Snapshot> | undefined;
+  let inFlight: { promise: Promise<Snapshot>; expired: boolean } | undefined;
   const log = (level: "warn" | "info", message: string) => { try { logger[level]({}, message); } catch { /* Monitoring is non-critical. */ } };
   function read() {
     if (!inFlight) {
       const pending = readDatabaseMetrics(db);
-      inFlight = pending;
+      const current = { promise: pending, expired: false };
+      inFlight = current;
       void pending.then(
-        () => { if (inFlight === pending) inFlight = undefined; },
-        () => { if (inFlight === pending) inFlight = undefined; },
+        () => { if (inFlight === current) inFlight = undefined; },
+        () => { if (inFlight === current) inFlight = undefined; },
       );
     }
     return inFlight;
@@ -204,12 +205,15 @@ export function createDbMetricsMonitor(db: Db, gauges: DbMetricGauges, logger: M
       if (stopped || reading) return;
       reading = true;
       let timer: NodeJS.Timeout | undefined;
+      let current: typeof inFlight;
       try {
+        current = read();
+        if (current.expired) throw new Error("DB metrics snapshot expired");
         const timeout = new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("DB metrics timeout")), 10_000);
           timer.unref();
         });
-        const snapshot = await Promise.race([read(), timeout]);
+        const snapshot = await Promise.race([current.promise, timeout]);
         if (stopped) return;
         publishSnapshot(gauges, snapshot);
         if (failed) {
@@ -218,6 +222,7 @@ export function createDbMetricsMonitor(db: Db, gauges: DbMetricGauges, logger: M
         }
         failed = false;
       } catch {
+        if (current) current.expired = true;
         if (stopped) return;
         gauges.up.set(0);
         if (!failed) {
