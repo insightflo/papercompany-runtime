@@ -10,6 +10,7 @@ import { activityLog, companies, heartbeatRuns, issueWorkProducts, issues, workf
 import { and, desc, eq, gt, lt, ne } from "drizzle-orm";
 import { issueService } from "../issues.js";
 import { validateDag, executeWorkflowRun, syncWorkflowRunState, getWorkflowExecutionResultSnapshot, syncWorkflowRunForIssue, cancelWorkflowRunWithCleanup } from "./dag-engine.js";
+import { QaRemediationWorkflowHoldError } from "./control-flow/qa-correction-followup-reconcile.js";
 import { lockUnreplacedRun } from "./run-replacement-guard.js";
 import { assertWorkflowToolReadinessForSteps } from "./admission-tool-readiness.js";
 import { validateRunInputDeclarations } from "./run-input-derivations.js";
@@ -449,7 +450,19 @@ async resumeRun(
     });
     return run.id;
     });
-    return syncWorkflowRunState(db, resumedId, "workflow_execution", { requireRunning: true });
+    // [C5 hold] 공개 resume 의 sync 가 qa-remediation 정착 보류(예: publication io 오류)를
+    //   QaRemediationWorkflowHoldError 로 알리는 것은 실패가 아니라 "이번 시도 양보"다. 보류는 이미
+    //   내구 preparation 으로 남아 후속 정산 주체가 소유하고, sync 는 그 지점에서 중단되므로 이후
+    //   단계(producer rework 포함)는 실행되지 않는다. 따라서 라우트 500 대신 현재 영속 스냅샷을
+    //   그대로 돌려주고, 그 밖의 오류는 기존처럼 전파한다.
+    try {
+      return await syncWorkflowRunState(db, resumedId, "workflow_execution", { requireRunning: true });
+    } catch (error) {
+      if (!(error instanceof QaRemediationWorkflowHoldError)) throw error;
+      const heldSnapshot = await getWorkflowExecutionResultSnapshot(db, resumedId);
+      if (!heldSnapshot) throw error;
+      return heldSnapshot;
+    }
   },
 
   /**
