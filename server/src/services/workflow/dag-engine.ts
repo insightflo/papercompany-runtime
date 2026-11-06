@@ -165,12 +165,14 @@ import {
   logWorkflowRunCancellationRefused,
   type CancelledRunRef,
 } from "./workflow-cancel-bridge.js";
+import { workflowChildStepIds, ensureStepRunRecords, buildWorkflowStepRunMetadata, resetUnlaunchedTerminalStepRuns } from "./workflow-step-run-maintenance.js";
+import { syncStepRunsFromIssueState } from "./workflow-issue-state-sync.js";
+import { type WorkflowToolCorrection, isQaCorrectionToolStep, readWorkflowToolCorrection, hasWorkflowToolCorrectionInvocation, withWorkflowToolCorrection } from "./workflow-tool-correction.js";
+import { applyConditionalSkipPropagation } from "./workflow-conditional-skip.js";
 export { markRetryDispatching };
 
-/** workflow-type 스텝 id 집합 — 리셋/재오픈 금지(D2) 필터에 쓴다. */
-function workflowChildStepIds(steps: WorkflowStep[]): Set<string> {
-  return new Set(steps.filter(isWorkflowChildStep).map((step) => step.id));
-}
+
+
 
 /**
  * Workflow step definition.
@@ -407,268 +409,17 @@ function getDynamicLaunchStepIds(context: WorkflowExecutionContext): Set<string>
  */
 
 
-async function ensureStepRunRecords(
-  db: Db,
-  runId: string,
-  steps: WorkflowStep[],
-  childStartFence?: ChildStartFence,
-  requireRunning?: boolean,
-): Promise<MaterializationOutcome> {
-  // [fix4 §2.3 / cycle A §7] materialization 은 전용 모듈로 이관했다 — run 행 직렬화, (run,step)
-  //   유일 인덱스 충돌 안전 insert, 자식 시작 fence 원자 소비. 소유 결과(ready/not-owner/busy)를
-  //   타입으로 그대로 보존한다(null 로 버리지 않는다).
-  return await ensureWorkflowStepRunRecords(db, {
-    runId,
-    steps,
-    ...(childStartFence ? { childStartFence } : {}),
-    ...(requireRunning ? { requireRunning } : {}),
-    buildMetadata: (step) => buildWorkflowStepRunMetadata(step as unknown as WorkflowStep),
-    syncControls: (syncDb, rows, syncSteps) => syncStepRunExecutionControlMetadata(syncDb, rows, syncSteps as unknown as WorkflowStep[]),
-  });
-}
 
-function buildWorkflowStepRunMetadata(
-  step: WorkflowStep,
-  existingMetadata: unknown = {},
-): Record<string, unknown> {
-  const metadata = { ...normalizeRecord(existingMetadata) };
-  if (step.executionControls && Object.keys(step.executionControls).length > 0) {
-    metadata.executionControls = step.executionControls;
-  } else {
-    delete metadata.executionControls;
-  }
-  // heartbeat missing-workProduct gate가 이 step의 산출물 여부를
-  // title/contract 휴리스틱 없이 권위적으로 판정하도록 stamp. syncStepRunExecutionControlMetadata 가
-  // 로드 시마다 재동기화하므로 기존 step-run에도 채워진다.
-  metadata.graphWorkProductRequired = step.graphWorkProductRequired === true;
-  return metadata;
-}
 
-function metadataJson(value: unknown): string {
-  return JSON.stringify(value ?? {});
-}
 
-async function syncStepRunExecutionControlMetadata(
-  db: Db,
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-  steps: WorkflowStep[],
-): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  if (stepRuns.length === 0) return stepRuns;
 
-  const stepById = new Map(steps.map((step) => [step.id, step]));
-  let changed = false;
-  for (const stepRun of stepRuns) {
-    const step = stepById.get(stepRun.stepId);
-    if (!step) continue;
-    const nextMetadata = buildWorkflowStepRunMetadata(step, stepRun.metadata);
-    if (metadataJson(stepRun.metadata) === metadataJson(nextMetadata)) continue;
-    changed = true;
-    await db
-      .update(workflowStepRuns)
-      .set({ metadata: nextMetadata })
-      .where(eq(workflowStepRuns.id, stepRun.id));
-  }
 
-  if (!changed) return stepRuns;
-  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
-}
 
-async function syncStepRunsFromIssueState(
-  db: Db,
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-  steps: WorkflowStep[] = [],
-  context?: WorkflowExecutionContext,
-): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  const correctionToolIds = new Set<string>();
-  if (context) {
-    for (const stepRun of stepRuns) {
-      const step = steps.find(s => s.id === stepRun.stepId);
-      if (step && await readWorkflowToolCorrection(db, context.run, stepRun, step)) correctionToolIds.add(stepRun.id);
-    }
-  }
-  // Issued tool targets settle through the tool queue, never through an old issue status or agent wake.
-  const issueIds = stepRuns
-    .map((stepRun) => stepRun.issueId)
-    .filter((issueId): issueId is string => Boolean(issueId));
-  if (issueIds.length === 0) return stepRuns;
-  // Preserve status/verdict sync; reserve only the issued agent targets from ordinary recheck.
-  const correctionIssueIds = context ? await queueCurrentIssuedQaCorrectionTargets(db, context.run,
-    stepRuns.filter(s => !correctionToolIds.has(s.id))) : new Set<string>();
-  const issueRows = await db.select({
-    id: issues.id, companyId: issues.companyId, status: issues.status, startedAt: issues.startedAt,
-    completedAt: issues.completedAt, cancelledAt: issues.cancelledAt, title: issues.title, originKind: issues.originKind,
-  }).from(issues).where(inArray(issues.id, issueIds));
-  const correctionToolIssueIds = new Set(stepRuns.filter(s => correctionToolIds.has(s.id)).map(s => s.issueId));
-  const issueById = new Map(issueRows
-    .filter(issue => issue.status === "cancelled" || !correctionToolIssueIds.has(issue.id))
-    .map((issue) => [issue.id, issue]));
-  const stepById = new Map(steps.map((step) => [step.id, step]));
-  const workProductDependencyGate = await loadWorkProductDependencyGate(db, stepRuns, steps);
-  const validationCandidateIssueIds = collectUniqueStepRunIssueIds(stepRuns.filter((stepRun) => {
-      if (!stepRun.issueId) return false;
-      const issue = issueById.get(stepRun.issueId);
-      if (!issue || (issue.status !== "done" && issue.status !== "blocked")) return false;
-      return isValidationGateCandidate({
-        issueTitle: issue.title,
-        issueOriginKind: issue.originKind,
-        step: stepById.get(stepRun.stepId) ?? null,
-      });
-    }));
-  const validationCandidateIssueIdSet = new Set(validationCandidateIssueIds);
-  const validationBindings = new Map<string, WorkflowValidationIssueBinding>();
-  for (const stepRun of stepRuns) {
-    if (!stepRun.issueId || !validationCandidateIssueIdSet.has(stepRun.issueId)) continue;
-    const issue = issueById.get(stepRun.issueId);
-    if (!issue) continue;
-    validationBindings.set(stepRun.issueId, {
-      companyId: issue.companyId,
-      workflowRunId: stepRun.workflowRunId,
-      workflowStepRunId: stepRun.id,
-    });
-  }
-  const latestValidationVerdictByIssueId = await loadLatestValidationVerdicts(db, validationBindings);
-  await recheckValidationStepIssues({
-    db,
-    stepRuns,
-    stepById,
-    issueById,
-    validationCandidateIssueIds: validationCandidateIssueIds.filter(id => !correctionIssueIds.has(id)),
-    // The callee iterates stepRuns; its private verdict view is the actual wake fence.
-    latestValidationVerdictByIssueId: new Map([...latestValidationVerdictByIssueId].filter(([id]) => !correctionIssueIds.has(id))),
-    context,
-  }, { isValidationGateCandidate, collectGateValidatedProducerStepIds });
 
-  // A rework reset ignores the prior issue completion but accepts a later
-  // completion from the current iteration.
-  for (const stepRun of stepRuns) {
-    if (!stepRun.issueId) continue;
-    const issue = issueById.get(stepRun.issueId);
-    if (!issue) continue;
-    if (stepRun.issueId && await shouldPreservePendingRetryFromIssueState({
-      db,
-      companyId: issue.companyId,
-      issueId: issue.id,
-      stepRunStatus: stepRun.status,
-      metadata: stepRun.metadata,
-    })) {
-      continue;
-    }
-    if (isPendingReworkAwaitingCurrentIssueCompletion(stepRun, issue.completedAt)) continue;
-    // [qa-cap acceptance] cap 수용으로 completed 된 QA 는 request_changes+done 재유도(flap)에서 보호 —
-    //   단, sentinel 의 producerStepId/producerIteration 이 현 sync 의 completed producer row 와 정확히
-    //   일치(현 generation)할 때만. 새 producer generation(rework) 시 보호 해제 → 재유도 허용.
-    if (stepRun.status === "completed" && matchesCurrentCapAcceptedProducer(stepRun, stepRuns)) continue;
-    const isValidationCheck = validationCandidateIssueIdSet.has(issue.id);
-    const latestValidationVerdict = latestValidationVerdictByIssueId.get(issue.id);
-    const ungatedStatus = isValidationCheck
-      ? desiredValidationCheckStepStatus({ issueStatus: issue.status, latestVerdict: latestValidationVerdict })
-      : desiredStepRunStatusFromIssueStatus(issue.status);
-    const desiredStatus = applyWorkProductDependencyGate({
-      issueId: issue.id,
-      status: ungatedStatus,
-      gate: workProductDependencyGate,
-    });
-    const patch: Partial<typeof workflowStepRuns.$inferInsert> = {};
-    const now = new Date();
-    // [rework startedAt 타이밍] rework 리셋 후 stepRun.startedAt 이 null 이면 startedAt 이 완료
-    //   시각(now)으로 잡혀, 같은 시도가 막 생산한 work product(updatedAt 이 몇 초 먼저)이 "이전 시도
-    //   산물(stale)"로 오분류돼 하류 IF 노드의 신선도 검사(condition-source-resolver)가 실패한다.
-    //   rework 계약의 createdAt(= 현 시도 시작의 신뢰 가능 하한)으로 폴백해 현 시도 산물이 stale 처리
-    //   되지 않게 한다. 비-rework(최초 시도)는 reworkStartedAt 이 null 이라 기존 동작과 동일.
-    const reworkContract = readWorkflowReworkContract(
-      normalizeRecord(stepRun.metadata).workflowReworkContract,
-    );
-    const reworkStartedAt = reworkContract?.createdAt ? new Date(reworkContract.createdAt) : null;
-    const attemptStartedAt = stepRun.startedAt ?? issue.startedAt ?? reworkStartedAt ?? now;
 
-    if (desiredStatus !== stepRun.status) {
-      patch.status = desiredStatus;
-    }
 
-    if (desiredStatus === "running") {
-      patch.startedAt = attemptStartedAt;
-      patch.completedAt = null;
-    } else if (desiredStatus === "completed") {
-      patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
-      // When finalization v1 is active, issue-backed steps also need
-      // dispatch_ready_at set so downstream edge-condition evaluation admits
-      // successors. Heartbeat-linked steps get this via settlement.ts, but
-      // steps that complete via issue status sync (e.g. workflow_agent_api)
-      // bypass settlement entirely.
-      if (!stepRun.dispatchReadyAt) {
-        patch.dispatchReadyAt = now;
-      }
-      const cleanedRetryMetadata = stripRetryTrackingOnSuccess(stepRun.metadata);
-      if (cleanedRetryMetadata) {
-        patch.metadata = cleanedRetryMetadata;
-      }
-    } else if (desiredStatus === "failed") {
-      patch.startedAt = attemptStartedAt;
-      patch.completedAt = issue.cancelledAt ?? issue.completedAt ?? currentQaCorrectionSyncTime(db) ?? now;
-    } else {
-      patch.startedAt = null;
-      patch.completedAt = null;
-    }
 
-    if (Object.keys(patch).length === 0) continue;
-    const metadataCleanupCondition = patch.metadata
-      ? eq(workflowStepRuns.metadata, stepRun.metadata)
-      : undefined;
-    // 늦은 이슈 완료가 종결/재설정된 세대의 스텝 행을 덮어쓰지 않게 하는 소비 지점 울타리.
-    // 세대가 바뀌었다면 이 패치는 0행으로 흐르고, 이후 reload 가 실제 상태를 반영한다.
-    // [step-status fencing v1] 세대 울타리에 스냅샷 status CAS 를 추가 — load 이후 같은 세대
-    //   안에서 상태가 이미 옮겨간 행을 늦은 소비자가 덮어쓰는 좀비쓰기를 막는다(0행 폐기+로그).
-    await setWorkflowStepRunStatus(db, {
-      stepRunId: stepRun.id,
-      status: desiredStatus,
-      patch,
-      expectedStatuses: [stepRun.status],
-      extraConditions: [
-        eq(workflowStepRuns.executionGeneration, stepRun.executionGeneration),
-        ...(metadataCleanupCondition ? [metadataCleanupCondition] : []),
-      ],
-    });
-  }
 
-  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
-}
-
-async function resetUnlaunchedTerminalStepRuns(
-  db: Db,
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[],
-  excludeWorkflowStepIds?: ReadonlySet<string>,
-): Promise<(typeof workflowStepRuns.$inferSelect)[]> {
-  // [descope D2] workflow-type S 는 리셋 대상에서 "명시적으로" 제외된다 — 자식 실패로 정산된
-  //  (또는 pre-admission 거부된) 부모 스텝은 resume/retry 경로에서 재오픈되지 않는다.
-  // controlFlowSkipped/failureCascadeSkipped sentinel: IF false-branch 로 skip 된 step 과 60min reconciler 가 kill 한 step(failureCascadeSkipped, 가즈아 저녁3 4f8cfacb 플랩)
-  // 은 리셋에서 제외한다. 그렇지 않으면 매 sync 마다 skipped→pending→(skip pass)→skipped 로
-  // flap 하며 finalize 가 allStepsTerminal 에 수렴하지 못해 런 상태 진동을 유발한다.
-  const unlaunchedTerminal = stepRuns.filter((stepRun) =>
-    (stepRun.status === "skipped" || stepRun.status === "failed")
-    && stepRun.issueId == null
-    && stepRun.startedAt == null
-    && stepRun.lastDispatchAttemptAt == null
-    && !(excludeWorkflowStepIds?.has(stepRun.stepId) ?? false)
-    && normalizeRecord(stepRun.metadata).controlFlowSkipped !== true
-    && normalizeRecord(stepRun.metadata).failureCascadeSkipped !== true
-  );
-  if (unlaunchedTerminal.length === 0) return stepRuns;
-
-  // [step-status fencing v1] skipped/failed → pending 리셋을 행별 status CAS 로 — 리셋 도중
-  //   다른 실행자가 이미 상태를 옮긴 행을 pending 으로 되돌리는 좀비쓰기를 막는다.
-  //   폐기된 행은 이후 reload 가 실제 상태로 수렴시킨다.
-  for (const stepRun of unlaunchedTerminal) {
-    await setWorkflowStepRunStatus(db, {
-      stepRunId: stepRun.id,
-      status: "pending",
-      patch: { startedAt: null, completedAt: null },
-      expectedStatuses: ["skipped", "failed"],
-    });
-  }
-
-  return reloadWorkflowStepRunsForSameRun(db, stepRuns);
-}
 
 async function failMalformedCompletedControlNodes(
   db: Db,
@@ -722,44 +473,7 @@ async function failMalformedCompletedControlNodes(
 }
 
 
-function hasRecoverableQaRequestChangesDependency(
-  step: WorkflowStep,
-  steps: WorkflowStep[],
-  stepRunMap: Map<string, typeof workflowStepRuns.$inferSelect>,
-  validationVerdictsByIssueId: Map<string, ValidationVerdictObservation>,
-): boolean {
-  const predsByStepId = buildPredFactsMap(steps, stepRunMap, validationVerdictsByIssueId);
-  const incomingEdges = resolveEdges(step).filter((edge) => edge.isBackEdge !== true);
-  for (const edge of incomingEdges) {
-    const pred = predsByStepId.get(edge.stepId);
-    if (
-      pred?.status !== "failed"
-      || pred.isQaGate !== true
-      || pred.verdict !== "request_changes"
-      || (edge.when ?? "success") !== "success"
-    ) {
-      continue;
-    }
 
-    const hasRemainingBackEdgeRework = steps.some((candidate) => {
-      const candidateRun = stepRunMap.get(candidate.id);
-      if (!candidateRun) return false;
-      return resolveEdges(candidate).some((candidateEdge) => {
-        if (
-          candidateEdge.isBackEdge !== true
-          || candidateEdge.stepId !== edge.stepId
-          || candidateEdge.when !== "qa_request_changes"
-          || typeof candidateEdge.maxIterations !== "number"
-        ) {
-          return false;
-        }
-        return (candidateRun.iterationIndex ?? 0) < candidateEdge.maxIterations;
-      });
-    });
-    if (hasRemainingBackEdgeRework) return true;
-  }
-  return false;
-}
 
 async function blockToolStepRunForConcurrency(input: {
   db: Db;
@@ -833,7 +547,7 @@ async function failToolStepRunWithDispatchError(input: Parameters<typeof persist
   await persistFailedToolDispatch(input, buildWorkflowStepRunMetadata(input.step, input.stepRun.metadata));
 }
 
-type WorkflowToolCorrection = NonNullable<Awaited<ReturnType<typeof findWorkflowVerdictCorrection>>>;
+
 
 /** Narrow discovery only; a matching event still needs issuance, currentness and byte proof. */
 function workflowToolQueueCandidate() {
@@ -847,81 +561,15 @@ function workflowToolQueueCandidate() {
   )`);
 }
 
-function isQaCorrectionToolStep(step: WorkflowStep) {
-  const toolNames = Array.isArray(step.toolNames)
-    ? step.toolNames.filter(name => typeof name === "string" && name.trim()) : [];
-  return !isStructuralGateStep(step) && !isWorkflowControlNode(step) && !isWorkflowChildStep(step)
-    && normalizeRecord((step as PersistedWorkflowStep).toolArtifactContract).role === "qa"
-    && toolNames.length === 1;
-}
 
-async function readWorkflowToolCorrection(db: Pick<Db, "select">, run: typeof workflowRuns.$inferSelect,
-  stepRun: typeof workflowStepRuns.$inferSelect, step: WorkflowStep) {
-  if (!stepRun.issueId || !isQaCorrectionToolStep(step)) return null;
-  const correction = await findWorkflowVerdictCorrection(db, { companyId: run.companyId,
-    issueId: stepRun.issueId, workflowRunId: run.id, workflowStepRunId: stepRun.id });
-  if (!correction || correction.issued.preparation.missionId !== run.missionId
-    || !same(correction.followup.target, { stepRunId: stepRun.id, stepId: stepRun.stepId,
-      issueId: stepRun.issueId, executionGeneration: stepRun.executionGeneration,
-      retryCount: stepRun.retryCount, iterationIndex: stepRun.iterationIndex })) return null;
-  return correction;
-}
 
-/** The ref is a lookup binding, never permission. Keep it across existing dispatch-failure metadata. */
-function hasWorkflowToolCorrectionInvocation(stepRun: typeof workflowStepRuns.$inferSelect,
-  correction: WorkflowToolCorrection) {
-  const invocation = getMetadataRecord(stepRun.metadata, "toolInvocation");
-  const request = getMetadataRecord(stepRun.metadata, "toolArtifactRequest");
-  const ref = normalizeRecord(stepRun.metadata).qaCorrectionToolFollowup ?? request.qaCorrectionFollowup;
-  return same(ref, correction.ref) && typeof invocation.requestId === "string"
-    && invocation.requestId === stepRun.lastDispatchRequestId;
-}
 
-/** Real root only: observe files first, then reuse the accepted ordered dependency locks and reservation. */
-async function withWorkflowToolCorrection<T>(input: {
-  db: Db; run: typeof workflowRuns.$inferSelect; stepRun: typeof workflowStepRuns.$inferSelect;
-  step: WorkflowStep; correction: WorkflowToolCorrection;
-}, write: (tx: Db) => Promise<T>): Promise<T | null> {
-  const { db, run, stepRun, step, correction } = input;
-  if (is(db, PgTransaction)) return null;
-  try {
-    const execution = await loadExecutionDefinition(db, run.id, { requireHistorical: false });
-    if (!same(execution.steps.find(s => s.id === step.id), step)
-      || await readQaCorrectionFollowupConsumption(db, correction.ref,
-        createQaCorrectionHistorySession(db, correction.ref))) return null;
-    const observation = await observeQaCorrectionFollowup(db, correction.ref,
-      createQaCorrectionHistorySession(db, correction.ref));
-    const dependencies = await prepareWorkflowVerdictLocks(db, correction, []);
-    return await db.transaction(async tx => {
-      const p = correction.issued.preparation;
-      if (p.authority.kind === "quality_current_output") {
-        await lockQualityAttemptBudget(tx, { companyId: run.companyId, actionId: p.authority.actionId, now: new Date() });
-      }
-      const currentRun = await lockUnreplacedRun(tx as unknown as Db, run.id, run.companyId);
-      if (!currentRun || currentRun.status !== "running" || currentRun.missionId !== run.missionId) return null;
-      await assertResumeAccepted(tx, run.id, currentRun.dispatchAuthorityVersion);
-      await lockWorkflowVerdictDependencies(tx, dependencies);
-      const current = await readCurrentQaCorrectionFollowup(tx, correction.ref, observation,
-        createQaCorrectionHistorySession(tx, correction.ref));
-      const latest = await readWorkflowToolCorrection(tx, currentRun, current.database.target.step, step);
-      const captured = await loadExecutionDefinition(tx, run.id, { requireHistorical: false });
-      if (!latest || !same(latest.ref, correction.ref) || !same(current.database.target.step, stepRun)
-        || captured.definitionHash !== execution.definitionHash
-        || !same(captured.steps.find(s => s.id === step.id), step)
-        || await readQaCorrectionFollowupConsumption(tx, correction.ref,
-          createQaCorrectionHistorySession(tx, correction.ref))) return null;
-      const rows = await tx.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
-      if (!classifyStepActivation(step, buildPredFactsMap(captured.steps, buildStepRunMap(rows))).runnable
-        || !await ownerPlanExecutionIntentCurrent(tx as unknown as Db, run.companyId,
-          { runMetadata: currentRun.metadata, stepMetadata: current.database.target.step.metadata })) return null;
-      return write(tx as unknown as Db);
-    });
-  } catch (error) {
-    // A refused/stale observation leaves the request unclaimed; unexpected DB errors still propagate.
-    if (!(error instanceof QaCorrectionReadError) && !(error instanceof QaCorrectionFollowupReadError)) throw error;
-    return null;
-  }
-}
+
+
+
+
+
+
 
 async function startIssueLessToolStepRun(input: {
   db: Db;
@@ -1940,82 +1588,7 @@ async function commentOnMainExecutorOversightForFailures(
   }
 }
 
-async function applyConditionalSkipPropagation(input: {
-  db: Db;
-  context: WorkflowExecutionContext;
-  stepRuns: (typeof workflowStepRuns.$inferSelect)[];
-  dynamicLaunchStepIds?: Set<string>;
-  validationVerdictsByIssueId: Map<string, ValidationVerdictObservation>;
-  // [B2 사실망 통일] launch(findRunnableSteps)와 동일한 v1 enforcement 정책 스냅샷. 같은 sync 평가에서
-  //   세 경로가 같은 사실망(dispatch_ready_at 포함)을 소비하게 한다 — 평가 중 재계산/혼합 금지.
-  v1EnforcementEnabled: boolean;
-  // [B2 좁은 회복 채널] 실패 선행의 연결 이슈 상태 스냅샷 — v1 대기 규칙을 failed 선행에 좁게
-  //   적용하기 위한 최소 사실 전달. 미공급 시 fail-closed 로 open 취급(기존 대기 유지).
-  issueStatusByIssueId?: Map<string, string>;
-}): Promise<{ stepRuns: (typeof workflowStepRuns.$inferSelect)[]; cancelled: boolean }> {
-  if (input.context.run.status === "cancelled" || !workflowHasConditionalEdges(input.context.steps)) {
-    return { stepRuns: input.stepRuns, cancelled: false };
-  }
-  let stepRuns = input.stepRuns;
-  for (;;) {
-    const skipRunMap = buildStepRunMap(stepRuns);
-    const skipPredsByStepId = buildPredFactsMap(
-      input.context.steps,
-      skipRunMap,
-      input.validationVerdictsByIssueId,
-      input.v1EnforcementEnabled,
-      input.issueStatusByIssueId,
-    );
-    const skippableSteps = findSkippableSteps(input.context.steps, skipPredsByStepId, {
-      launchedStepIds: input.dynamicLaunchStepIds,
-      isStepEligible: (step) => {
-        const run = skipRunMap.get(step.id);
-        if (!run || run.status !== "pending" || run.issueId != null) return false;
-        if (step.dependencies.some((depId) => {
-          const depStep = input.context.steps.find((candidate) => candidate.id === depId);
-          return isStructuralGateStep(depStep);
-        })) return false;
-        return !hasRecoverableQaRequestChangesDependency(
-          step,
-          input.context.steps,
-          skipRunMap,
-          input.validationVerdictsByIssueId,
-        );
-      },
-    });
-    if (skippableSteps.length === 0) return { stepRuns, cancelled: false };
 
-    let settledAny = false;
-    for (const step of skippableSteps) {
-      const stepRun = skipRunMap.get(step.id);
-      if (!stepRun) continue;
-      const nextMetadata = {
-        ...buildWorkflowStepRunMetadata(step, stepRun.metadata),
-        controlFlowSkipped: true,
-      };
-      const result = await settleConditionalSkip(input.db, {
-        observedRun: input.context.run,
-        target: stepRun,
-        nextMetadata,
-        observedPredecessors: stepRuns
-          .filter((predecessor) => predecessor.id !== stepRun.id)
-          .map(toConditionalStepObservation),
-      });
-      if (result.kind === "cancelled") return { stepRuns, cancelled: true };
-      if (result.kind !== "settled") {
-        stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
-        return { stepRuns, cancelled: false };
-      }
-      settledAny = true;
-      stepRun.status = "skipped";
-      stepRun.metadata = nextMetadata;
-      stepRun.completedAt = result.completedAt;
-      stepRun.dispatchReadyAt = result.dispatchReadyAt;
-    }
-    if (!settledAny) return { stepRuns, cancelled: false };
-    stepRuns = await reloadWorkflowStepRunsForSameRun(input.db, stepRuns);
-  }
-}
 
 /** [cycle A §7] sync 소유 결과 — 실행 스냅숏과 별도로 전달되는 타입핑 결과. */
 export type WorkflowSyncOutcome = { kind: "synced" | "not-owner" | "busy"; result: WorkflowExecutionResult };
