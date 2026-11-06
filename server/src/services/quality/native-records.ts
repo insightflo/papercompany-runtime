@@ -35,14 +35,13 @@ import {
   type QualityKey,
   type SourceAttempt,
 } from "@paperclipai/shared";
-import { conflict, HttpError, notFound } from "../../errors.js";
+import { conflict, notFound } from "../../errors.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { createIssueRecord } from "../issue-create-records.js";
 import { insertActivityRecord } from "../activity-log-records.js";
 import { missionPlanArtifactService } from "../mission-plan-artifacts.js";
 import { addMissionAgentRecord, createMissionRecord } from "../missions/mission-create-records.js";
 import { bindWorkflowStepIssueRecord, createWorkflowStepRunRecord, verifyCanonicalBindingJoin } from "../workflow/workflow-step-issue-records.js";
-import type { WorkflowStep } from "../workflow/dag-engine.js";
 import { loadLatestQaRemediations } from "../workflow/validation-verdict-ledger.js";
 import { hashContract, parseEvidence } from "./contract.js";
 import { assertPolicyTargets, type QualityTx } from "./targets.js";
@@ -266,35 +265,4 @@ async function finalizeBinding(tx: Tx, input: {
 }
 
 export type { QualityTx };
-
-/**
- * [T3 Quality DAG 계약] 이슈 생성+step 연결을 한 트랜잭션으로 commit 하고 그 후 깨우기 부작용을 적용한다.
- * 동시 sync 가 이미 연결했다면(CAS conflict) 그 경로가 깨웠으므로 스킵한다. createStepIssue 는
- * dag-engine 의 생성 함수를 주입받아 생성 로직의 단일점을 유지한다.
- */
-export async function syncQualityStepIssueCommitBeforeWake(
-  db: Db,
-  context: { run: typeof workflowRuns.$inferSelect; definition: typeof workflowDefinitions.$inferSelect; step: WorkflowStep; stepRunId: string },
-  createStepIssue: (input: {
-    db: Db; run: typeof workflowRuns.$inferSelect; definition: typeof workflowDefinitions.$inferSelect; step: WorkflowStep;
-    deferredSideEffectsDb: Db; captureDeferredSideEffects: (apply: () => Promise<void>) => void;
-  }) => Promise<string | null>,
-): Promise<void> {
-  let deferredWake: (() => Promise<void>) | null = null;
-  let boundIssueId: string | null = null;
-  try {
-    boundIssueId = await db.transaction(async (tx) => {
-      const issueId = await createStepIssue({
-        db: tx as unknown as Db, run: context.run, definition: context.definition, step: context.step,
-        deferredSideEffectsDb: db, captureDeferredSideEffects: (apply) => { deferredWake = apply; },
-      });
-      if (!issueId) return null;
-      await bindWorkflowStepIssueRecord(tx as unknown as Db, { companyId: context.run.companyId, stepRunId: context.stepRunId, issueId });
-      return issueId;
-    });
-  } catch (error) {
-    if (error instanceof HttpError && error.message === "quality_step_issue_binding_conflict") return;
-    throw error;
-  }
-  if (boundIssueId) await deferredWake!();
-}
+export { syncQualityStepIssueCommitBeforeWake } from "../workflow/workflow-step-issue-atomic.js";
