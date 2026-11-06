@@ -13,6 +13,7 @@ export type HeartbeatBudgetCaseContext = {
   waitForRunTerminal: (heartbeat: ReturnType<typeof heartbeatService>, runId: string) => Promise<NonNullable<Awaited<ReturnType<ReturnType<typeof heartbeatService>["getRun"]>>>>;
   mockedAdapterOptions: { supportsLocalAgentJwt: boolean };
   waitForIssueStatus: (db: ReturnType<typeof createDb>, issueId: string, predicate: (issue: typeof issues.$inferSelect) => boolean) => Promise<typeof issues.$inferSelect>;
+  waitForWakeupRequestStatus: (db: ReturnType<typeof createDb>, runId: string, predicate: (request: typeof agentWakeupRequests.$inferSelect) => boolean) => Promise<typeof agentWakeupRequests.$inferSelect>;
   mockRequestChangesOnce: (db: ReturnType<typeof createDb>, issueId: string, lines: string[]) => void;
 };
 
