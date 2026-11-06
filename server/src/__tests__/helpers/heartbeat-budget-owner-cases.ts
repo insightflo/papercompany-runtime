@@ -4,6 +4,7 @@ import { expect, it, type Mock } from "vitest";
 import { activityLog, agentWakeupRequests, agents, companies, heartbeatRuns, issueComments, issueWorkProducts, issues, missions, type createDb } from "@paperclipai/db";
 import type { heartbeatService } from "../../services/heartbeat.js";
 import { seedMissionOwnerTaskContextFixture } from "./heartbeat-owner-context-fixture.js";
+import type { createInstructionRotationFixture } from "./heartbeat-instruction-rotation-fixture.js";
 
 export type HeartbeatBudgetCaseContext = {
   getDb: () => ReturnType<typeof createDb>;
@@ -15,6 +16,9 @@ export type HeartbeatBudgetCaseContext = {
   waitForIssueStatus: (db: ReturnType<typeof createDb>, issueId: string, predicate: (issue: typeof issues.$inferSelect) => boolean) => Promise<typeof issues.$inferSelect>;
   waitForWakeupRequestStatus: (db: ReturnType<typeof createDb>, runId: string, predicate: (request: typeof agentWakeupRequests.$inferSelect) => boolean) => Promise<typeof agentWakeupRequests.$inferSelect>;
   mockRequestChangesOnce: (db: ReturnType<typeof createDb>, issueId: string, lines: string[]) => void;
+  waitForWakeupStatus: (db: ReturnType<typeof createDb>, wakeupRequestId: string, expected: string, deadlineMs?: number) => Promise<{ status: string } | null>;
+  expectBroadScanInterception: (db: ReturnType<typeof createDb>, runId: string) => Promise<void>;
+  seedInstructionRotationFixture: ReturnType<typeof createInstructionRotationFixture>;
 };
 
 export function registerHeartbeatOwnerContextCases({ getDb, heartbeatService, executeSpy, successfulAdapterResult, waitForRunTerminal }: HeartbeatBudgetCaseContext) {
