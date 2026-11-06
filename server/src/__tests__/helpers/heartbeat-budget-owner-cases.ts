@@ -6,6 +6,19 @@ import type { heartbeatService } from "../../services/heartbeat.js";
 import { seedMissionOwnerTaskContextFixture } from "./heartbeat-owner-context-fixture.js";
 import type { createInstructionRotationFixture } from "./heartbeat-instruction-rotation-fixture.js";
 
+export type HeartbeatAdapterFailureOverrides = Partial<{
+  exitCode: number;
+  signal: null;
+  timedOut: boolean;
+  errorMessage: null;
+  usage: null;
+  provider: string;
+  model: string;
+  resultJson: null;
+  runtimeServices: never[];
+  errorCode: string;
+}>;
+
 export type HeartbeatBudgetCaseContext = {
   getDb: () => ReturnType<typeof createDb>;
   heartbeatService: typeof heartbeatService;
@@ -16,6 +29,7 @@ export type HeartbeatBudgetCaseContext = {
   waitForIssueStatus: (db: ReturnType<typeof createDb>, issueId: string, predicate: (issue: typeof issues.$inferSelect) => boolean) => Promise<typeof issues.$inferSelect>;
   waitForWakeupRequestStatus: (db: ReturnType<typeof createDb>, runId: string, predicate: (request: typeof agentWakeupRequests.$inferSelect) => boolean) => Promise<typeof agentWakeupRequests.$inferSelect>;
   mockRequestChangesOnce: (db: ReturnType<typeof createDb>, issueId: string, lines: string[]) => void;
+  failedAdapterResult: (overrides?: HeartbeatAdapterFailureOverrides) => object;
   waitForWakeupStatus: (db: ReturnType<typeof createDb>, wakeupRequestId: string, expected: string, deadlineMs?: number) => Promise<{ status: string } | null>;
   expectBroadScanInterception: (db: ReturnType<typeof createDb>, runId: string) => Promise<void>;
   seedInstructionRotationFixture: ReturnType<typeof createInstructionRotationFixture>;
