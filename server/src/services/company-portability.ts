@@ -1,8 +1,4 @@
-import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
-import { execFile } from "node:child_process";
 import path from "node:path";
-import { promisify } from "node:util";
 import type { Db } from "@paperclipai/db";
 import type {
   CompanyPortabilityAgentManifestEntry,
@@ -19,10 +15,7 @@ import type {
   CompanyPortabilityPreview,
   CompanyPortabilityPreviewAgentPlan,
   CompanyPortabilityPreviewResult,
-  CompanyPortabilityProjectManifestEntry,
-  CompanyPortabilityIssueManifestEntry,
   CompanyPortabilitySkillManifestEntry,
-  CompanySkill,
 } from "@paperclipai/shared";
 import {
   ISSUE_PRIORITIES,
@@ -38,7 +31,7 @@ import {
 import { notFound, unprocessable } from "../errors.js";
 import type { StorageService } from "../storage/types.js";
 import { accessService } from "./access.js";
-import { agentService, AGENT_LEVEL_CONFIG_KEYS, mergeAgentConfig } from "./agents.js";
+import { agentService, mergeAgentConfig } from "./agents.js";
 import { agentInstructionsService } from "./agent-instructions.js";
 import { assetService } from "./assets.js";
 import { generateReadme } from "./company-export-readme.js";
@@ -49,6 +42,9 @@ import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { isPlainRecord, stripEmptyValues, buildMarkdown, buildYamlFile } from "./company-portability-yaml.js";
 import { parseYamlFile, parseFrontmatterMarkdown } from "./company-portability-yaml-parse.js";
+import { COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS, COMPANY_LOGO_FILE_NAME, RUNTIME_DEFAULT_RULES, ADAPTER_DEFAULT_RULES_BY_TYPE, asString, PORTABLE_CONFIG_STRIP_KEYS, pruneDefaultLikeValue } from "./company-portability-normalize.js";
+import { normalizeSkillSlug, normalizeSkillKey, deriveManifestSkillKey, buildSkillExportDirMap } from "./company-portability-skill-export.js";
+import { shouldReferenceSkillOnExport, buildReferencedSkillMarkdown, withSkillSourceMetadata, fetchText, fetchOptionalText, fetchBinary, fetchJson } from "./company-portability-skill-source.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
 function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]): OrgNode[] {
@@ -104,8 +100,6 @@ const DEFAULT_INCLUDE: CompanyPortabilityInclude = {
 };
 
 const DEFAULT_COLLISION_STRATEGY: CompanyPortabilityCollisionStrategy = "rename";
-const execFileAsync = promisify(execFile);
-let bundledSkillsCommitPromise: Promise<string | null> | null = null;
 
 function resolveImportMode(options?: ImportBehaviorOptions): ImportMode {
   return options?.mode ?? "board_full";
@@ -126,225 +120,6 @@ function classifyPortableFileKind(pathValue: string): CompanyPortabilityExportPr
   if (normalized.startsWith("projects/")) return "project";
   if (normalized.startsWith("tasks/")) return "issue";
   return "other";
-}
-
-function normalizeSkillSlug(value: string | null | undefined) {
-  return value ? normalizeAgentUrlKey(value) ?? null : null;
-}
-
-function normalizeSkillKey(value: string | null | undefined) {
-  if (!value) return null;
-  const segments = value
-    .split("/")
-    .map((segment) => normalizeSkillSlug(segment))
-    .filter((segment): segment is string => Boolean(segment));
-  return segments.length > 0 ? segments.join("/") : null;
-}
-
-function readSkillKey(frontmatter: Record<string, unknown>) {
-  const metadata = isPlainRecord(frontmatter.metadata) ? frontmatter.metadata : null;
-  const paperclip = isPlainRecord(metadata?.paperclip) ? metadata?.paperclip as Record<string, unknown> : null;
-  return normalizeSkillKey(
-    asString(frontmatter.key)
-    ?? asString(frontmatter.skillKey)
-    ?? asString(metadata?.skillKey)
-    ?? asString(metadata?.canonicalKey)
-    ?? asString(metadata?.paperclipSkillKey)
-    ?? asString(paperclip?.skillKey)
-    ?? asString(paperclip?.key),
-  );
-}
-
-function deriveManifestSkillKey(
-  frontmatter: Record<string, unknown>,
-  fallbackSlug: string,
-  metadata: Record<string, unknown> | null,
-  sourceType: string,
-  sourceLocator: string | null,
-) {
-  const explicit = readSkillKey(frontmatter);
-  if (explicit) return explicit;
-  const slug = normalizeSkillSlug(asString(frontmatter.slug) ?? fallbackSlug) ?? "skill";
-  const sourceKind = asString(metadata?.sourceKind);
-  const owner = normalizeSkillSlug(asString(metadata?.owner));
-  const repo = normalizeSkillSlug(asString(metadata?.repo));
-  if ((sourceType === "github" || sourceType === "skills_sh" || sourceKind === "github" || sourceKind === "skills_sh") && owner && repo) {
-    return `${owner}/${repo}/${slug}`;
-  }
-  if (sourceKind === "paperclip_bundled") {
-    return `paperclipai/paperclip/${slug}`;
-  }
-  if (sourceType === "url" || sourceKind === "url") {
-    try {
-      const host = normalizeSkillSlug(sourceLocator ? new URL(sourceLocator).host : null) ?? "url";
-      return `url/${host}/${slug}`;
-    } catch {
-      return `url/unknown/${slug}`;
-    }
-  }
-  return slug;
-}
-
-function hashSkillValue(value: string) {
-  return createHash("sha256").update(value).digest("hex").slice(0, 8);
-}
-
-function normalizeExportPathSegment(value: string | null | undefined, preserveCase = false) {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const normalized = trimmed
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!normalized) return null;
-  return preserveCase ? normalized : normalized.toLowerCase();
-}
-
-function readSkillSourceKind(skill: CompanySkill) {
-  const metadata = isPlainRecord(skill.metadata) ? skill.metadata : null;
-  return asString(metadata?.sourceKind);
-}
-
-function deriveLocalExportNamespace(skill: CompanySkill, slug: string) {
-  const metadata = isPlainRecord(skill.metadata) ? skill.metadata : null;
-  const candidates = [
-    asString(metadata?.projectName),
-    asString(metadata?.workspaceName),
-  ];
-
-  if (skill.sourceLocator) {
-    const basename = path.basename(skill.sourceLocator);
-    candidates.push(basename.toLowerCase() === "skill.md" ? path.basename(path.dirname(skill.sourceLocator)) : basename);
-  }
-
-  for (const value of candidates) {
-    const normalized = normalizeSkillSlug(value);
-    if (normalized && normalized !== slug) return normalized;
-  }
-
-  return null;
-}
-
-function derivePrimarySkillExportDir(
-  skill: CompanySkill,
-  slug: string,
-  companyIssuePrefix: string | null | undefined,
-) {
-  const normalizedKey = normalizeSkillKey(skill.key);
-  const keySegments = normalizedKey?.split("/") ?? [];
-  const primaryNamespace = keySegments[0] ?? null;
-
-  if (primaryNamespace === "company") {
-    const companySegment = normalizeExportPathSegment(companyIssuePrefix, true)
-      ?? normalizeExportPathSegment(keySegments[1], true)
-      ?? "company";
-    return `skills/company/${companySegment}/${slug}`;
-  }
-
-  if (primaryNamespace === "local") {
-    const localNamespace = deriveLocalExportNamespace(skill, slug);
-    return localNamespace
-      ? `skills/local/${localNamespace}/${slug}`
-      : `skills/local/${slug}`;
-  }
-
-  if (primaryNamespace === "url") {
-    let derivedHost: string | null = keySegments[1] ?? null;
-    if (!derivedHost) {
-      try {
-        derivedHost = normalizeSkillSlug(skill.sourceLocator ? new URL(skill.sourceLocator).host : null);
-      } catch {
-        derivedHost = null;
-      }
-    }
-    const host = derivedHost ?? "url";
-    return `skills/url/${host}/${slug}`;
-  }
-
-  if (keySegments.length > 1) {
-    return `skills/${keySegments.join("/")}`;
-  }
-
-  return `skills/${slug}`;
-}
-
-function appendSkillExportDirSuffix(packageDir: string, suffix: string) {
-  const lastSeparator = packageDir.lastIndexOf("/");
-  if (lastSeparator < 0) return `${packageDir}--${suffix}`;
-  return `${packageDir.slice(0, lastSeparator + 1)}${packageDir.slice(lastSeparator + 1)}--${suffix}`;
-}
-
-function deriveSkillExportDirCandidates(
-  skill: CompanySkill,
-  slug: string,
-  companyIssuePrefix: string | null | undefined,
-) {
-  const primaryDir = derivePrimarySkillExportDir(skill, slug, companyIssuePrefix);
-  const metadata = isPlainRecord(skill.metadata) ? skill.metadata : null;
-  const sourceKind = readSkillSourceKind(skill);
-  const suffixes = new Set<string>();
-  const pushSuffix = (value: string | null | undefined, preserveCase = false) => {
-    const normalized = normalizeExportPathSegment(value, preserveCase);
-    if (normalized && normalized !== slug) {
-      suffixes.add(normalized);
-    }
-  };
-
-  if (sourceKind === "paperclip_bundled") {
-    pushSuffix("paperclip");
-  }
-
-  if (skill.sourceType === "github" || skill.sourceType === "skills_sh") {
-    pushSuffix(asString(metadata?.repo));
-    pushSuffix(asString(metadata?.owner));
-    pushSuffix(skill.sourceType === "skills_sh" ? "skills_sh" : "github");
-  } else if (skill.sourceType === "url") {
-    try {
-      pushSuffix(skill.sourceLocator ? new URL(skill.sourceLocator).host : null);
-    } catch {
-      // Ignore URL parse failures and fall through to generic suffixes.
-    }
-    pushSuffix("url");
-  } else if (skill.sourceType === "local_path") {
-    pushSuffix(asString(metadata?.projectName));
-    pushSuffix(asString(metadata?.workspaceName));
-    pushSuffix(deriveLocalExportNamespace(skill, slug));
-    if (sourceKind === "managed_local") pushSuffix("company");
-    if (sourceKind === "project_scan") pushSuffix("project");
-    pushSuffix("local");
-  } else {
-    pushSuffix(sourceKind);
-    pushSuffix("skill");
-  }
-
-  return [primaryDir, ...Array.from(suffixes, (suffix) => appendSkillExportDirSuffix(primaryDir, suffix))];
-}
-
-function buildSkillExportDirMap(skills: CompanySkill[], companyIssuePrefix: string | null | undefined) {
-  const usedDirs = new Set<string>();
-  const keyToDir = new Map<string, string>();
-  const orderedSkills = [...skills].sort((left, right) => left.key.localeCompare(right.key));
-  for (const skill of orderedSkills) {
-    const slug = normalizeSkillSlug(skill.slug) ?? "skill";
-    const candidates = deriveSkillExportDirCandidates(skill, slug, companyIssuePrefix);
-
-    let packageDir = candidates.find((candidate) => !usedDirs.has(candidate)) ?? null;
-    if (!packageDir) {
-      packageDir = appendSkillExportDirSuffix(candidates[0] ?? `skills/${slug}`, hashSkillValue(skill.key));
-      while (usedDirs.has(packageDir)) {
-        packageDir = appendSkillExportDirSuffix(
-          candidates[0] ?? `skills/${slug}`,
-          hashSkillValue(`${skill.key}:${packageDir}`),
-        );
-      }
-    }
-
-    usedDirs.add(packageDir);
-    keyToDir.set(skill.key, packageDir);
-  }
-
-  return keyToDir;
 }
 
 function isSensitiveEnvKey(key: string) {
@@ -449,68 +224,6 @@ type EnvInputRecord = {
   description?: string | null;
   portability?: "portable" | "system_dependent";
 };
-
-const COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
-  "image/gif": ".gif",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/svg+xml": ".svg",
-  "image/webp": ".webp",
-};
-
-const COMPANY_LOGO_FILE_NAME = "company-logo";
-
-const RUNTIME_DEFAULT_RULES: Array<{ path: string[]; value: unknown }> = [
-  { path: ["heartbeat", "cooldownSec"], value: 10 },
-  { path: ["heartbeat", "intervalSec"], value: 3600 },
-  { path: ["heartbeat", "wakeOnOnDemand"], value: true },
-  { path: ["heartbeat", "wakeOnAssignment"], value: true },
-  { path: ["heartbeat", "wakeOnAutomation"], value: true },
-  { path: ["heartbeat", "wakeOnDemand"], value: true },
-  { path: ["heartbeat", "maxConcurrentRuns"], value: 3 },
-];
-
-const ADAPTER_DEFAULT_RULES_BY_TYPE: Record<string, Array<{ path: string[]; value: unknown }>> = {
-  codex_local: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 15 },
-  ],
-  gemini_local: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 15 },
-  ],
-  antigravity_local: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 20 },
-  ],
-  opencode_local: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 15 },
-  ],
-  cursor: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 15 },
-  ],
-  claude_local: [
-    { path: ["timeoutSec"], value: 0 },
-    { path: ["graceSec"], value: 15 },
-    { path: ["maxTurnsPerRun"], value: 300 },
-  ],
-  openclaw_gateway: [
-    { path: ["timeoutSec"], value: 120 },
-    { path: ["waitTimeoutMs"], value: 120000 },
-    { path: ["sessionKeyStrategy"], value: "fixed" },
-    { path: ["sessionKey"], value: "paperclip" },
-    { path: ["role"], value: "operator" },
-    { path: ["scopes"], value: ["operator.admin"] },
-  ],
-};
-
-function asString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
 
 function toSafeSlug(input: string, fallback: string) {
   return normalizeAgentUrlKey(input) ?? fallback;
@@ -815,13 +528,6 @@ function ensureMarkdownPath(pathValue: string) {
   return normalized;
 }
 
-const PORTABLE_CONFIG_STRIP_KEYS = new Set<string>([
-  ...AGENT_LEVEL_CONFIG_KEYS,
-  // env is stripped for company-scoped secret reasons (secret_ref bindings),
-  // orthogonal to agent ownership.
-  "env",
-]);
-
 function normalizePortableConfig(
   value: unknown,
 ): Record<string, unknown> {
@@ -910,46 +616,6 @@ function extractPortableEnvInputs(
   return inputs;
 }
 
-function jsonEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function isPathDefault(pathSegments: string[], value: unknown, rules: Array<{ path: string[]; value: unknown }>) {
-  return rules.some((rule) => jsonEqual(rule.path, pathSegments) && jsonEqual(rule.value, value));
-}
-
-function pruneDefaultLikeValue(
-  value: unknown,
-  opts: {
-    dropFalseBooleans: boolean;
-    path?: string[];
-    defaultRules?: Array<{ path: string[]; value: unknown }>;
-  },
-): unknown {
-  const pathSegments = opts.path ?? [];
-  if (opts.defaultRules && isPathDefault(pathSegments, value, opts.defaultRules)) {
-    return undefined;
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => pruneDefaultLikeValue(entry, { ...opts, path: pathSegments }));
-  }
-  if (isPlainRecord(value)) {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      const next = pruneDefaultLikeValue(entry, {
-        ...opts,
-        path: [...pathSegments, key],
-      });
-      if (next === undefined) continue;
-      out[key] = next;
-    }
-    return out;
-  }
-  if (value === undefined) return undefined;
-  if (opts.dropFalseBooleans && value === false) return undefined;
-  return value;
-}
-
 function normalizeSelectedFiles(selectedFiles?: string[]) {
   if (!selectedFiles) return null;
   return new Set(
@@ -1030,155 +696,6 @@ function applySelectedFilesToSource(source: ResolvedSource, selectedFiles?: stri
   };
 
   return filtered;
-}
-
-async function resolveBundledSkillsCommit() {
-  if (!bundledSkillsCommitPromise) {
-    bundledSkillsCommitPromise = execFileAsync("git", ["rev-parse", "HEAD"], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    })
-      .then(({ stdout }) => stdout.trim() || null)
-      .catch(() => null);
-  }
-  return bundledSkillsCommitPromise;
-}
-
-async function buildSkillSourceEntry(skill: CompanySkill) {
-  const metadata = isPlainRecord(skill.metadata) ? skill.metadata : null;
-  if (asString(metadata?.sourceKind) === "paperclip_bundled") {
-    const commit = await resolveBundledSkillsCommit();
-    return {
-      kind: "github-dir",
-      repo: "paperclipai/paperclip",
-      path: `skills/${skill.slug}`,
-      commit,
-      trackingRef: "master",
-      url: `https://github.com/paperclipai/paperclip/tree/master/skills/${skill.slug}`,
-    };
-  }
-
-  if (skill.sourceType === "github" || skill.sourceType === "skills_sh") {
-    const owner = asString(metadata?.owner);
-    const repo = asString(metadata?.repo);
-    const repoSkillDir = asString(metadata?.repoSkillDir);
-    if (!owner || !repo || !repoSkillDir) return null;
-    return {
-      kind: "github-dir",
-      repo: `${owner}/${repo}`,
-      path: repoSkillDir,
-      commit: skill.sourceRef ?? null,
-      trackingRef: asString(metadata?.trackingRef),
-      url: skill.sourceLocator,
-    };
-  }
-
-  if (skill.sourceType === "url" && skill.sourceLocator) {
-    return {
-      kind: "url",
-      url: skill.sourceLocator,
-    };
-  }
-
-  return null;
-}
-
-function shouldReferenceSkillOnExport(skill: CompanySkill, expandReferencedSkills: boolean) {
-  if (expandReferencedSkills) return false;
-  const metadata = isPlainRecord(skill.metadata) ? skill.metadata : null;
-  if (asString(metadata?.sourceKind) === "paperclip_bundled") return true;
-  return skill.sourceType === "github" || skill.sourceType === "skills_sh" || skill.sourceType === "url";
-}
-
-async function buildReferencedSkillMarkdown(skill: CompanySkill) {
-  const sourceEntry = await buildSkillSourceEntry(skill);
-  const frontmatter: Record<string, unknown> = {
-    key: skill.key,
-    slug: skill.slug,
-    name: skill.name,
-    description: skill.description ?? null,
-  };
-  if (sourceEntry) {
-    frontmatter.metadata = {
-      sources: [sourceEntry],
-    };
-  }
-  return buildMarkdown(frontmatter, "");
-}
-
-async function withSkillSourceMetadata(skill: CompanySkill, markdown: string, warnings: string[]) {
-  const sourceEntry = await buildSkillSourceEntry(skill);
-  let parsed: ReturnType<typeof parseFrontmatterMarkdown>;
-  try {
-    parsed = parseFrontmatterMarkdown(markdown);
-  } catch (error) {
-    // Stored skill files were never validated by the strict parser; keep the
-    // stored bytes as-is so export keeps succeeding, but surface the problem.
-    const reason = error instanceof Error ? error.message : String(error);
-    warnings.push(`Skill ${skill.key} SKILL.md has invalid YAML frontmatter; exported as stored without source metadata: ${reason}`);
-    return markdown;
-  }
-  const metadata = isPlainRecord(parsed.frontmatter.metadata)
-    ? { ...parsed.frontmatter.metadata }
-    : {};
-  const existingSources = Array.isArray(metadata.sources)
-    ? metadata.sources.filter((entry) => isPlainRecord(entry))
-    : [];
-  if (sourceEntry) {
-    metadata.sources = [...existingSources, sourceEntry];
-  }
-  metadata.skillKey = skill.key;
-  metadata.paperclipSkillKey = skill.key;
-  metadata.paperclip = {
-    ...(isPlainRecord(metadata.paperclip) ? metadata.paperclip : {}),
-    skillKey: skill.key,
-    slug: skill.slug,
-  };
-  const frontmatter = {
-    ...parsed.frontmatter,
-    key: skill.key,
-    slug: skill.slug,
-    metadata,
-  };
-  return buildMarkdown(frontmatter, parsed.body);
-}
-
-
-async function fetchText(url: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
-  }
-  return response.text();
-}
-
-async function fetchOptionalText(url: string) {
-  const response = await fetch(url);
-  if (response.status === 404) return null;
-  if (!response.ok) {
-    throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
-  }
-  return response.text();
-}
-
-async function fetchBinary(url: string) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
-  }
-  return Buffer.from(await response.arrayBuffer());
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/vnd.github+json",
-    },
-  });
-  if (!response.ok) {
-    throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
-  }
-  return response.json() as Promise<T>;
 }
 
 function dedupeEnvInputs(values: CompanyPortabilityManifest["envInputs"]) {
@@ -1637,7 +1154,6 @@ function buildManifestFromPackageFiles(
     warnings,
   };
 }
-
 
 function normalizeGitHubSourcePath(value: string | null | undefined) {
   if (!value) return "";
