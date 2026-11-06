@@ -42,9 +42,34 @@ import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { isPlainRecord, stripEmptyValues, buildMarkdown, buildYamlFile } from "./company-portability-yaml.js";
 import { parseYamlFile, parseFrontmatterMarkdown } from "./company-portability-yaml-parse.js";
-import { COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS, COMPANY_LOGO_FILE_NAME, RUNTIME_DEFAULT_RULES, ADAPTER_DEFAULT_RULES_BY_TYPE, asString, PORTABLE_CONFIG_STRIP_KEYS, pruneDefaultLikeValue } from "./company-portability-normalize.js";
-import { normalizeSkillSlug, normalizeSkillKey, deriveManifestSkillKey, buildSkillExportDirMap } from "./company-portability-skill-export.js";
-import { shouldReferenceSkillOnExport, buildReferencedSkillMarkdown, withSkillSourceMetadata, fetchText, fetchOptionalText, fetchBinary, fetchJson } from "./company-portability-skill-source.js";
+import { normalizePortablePath, resolvePortablePath, isPortableBinaryFile, readPortableTextFile, inferContentTypeFromPath, resolveCompanyLogoExtension, portableFileToBuffer, bufferToPortableBinaryFile, streamToBuffer, normalizeFileMap, pickTextFiles, findPaperclipExtensionPath, ensureMarkdownPath, normalizeSelectedFiles } from "./company-portability-files.js";
+import { filterExportFiles } from "./company-portability-extension-filter.js";
+import { parseGitHubSourceUrl, resolveRawGitHubUrl } from "./company-portability-github-source.js";
+import {
+  COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS,
+  COMPANY_LOGO_FILE_NAME,
+  RUNTIME_DEFAULT_RULES,
+  ADAPTER_DEFAULT_RULES_BY_TYPE,
+  asString,
+  PORTABLE_CONFIG_STRIP_KEYS,
+  pruneDefaultLikeValue,
+} from "./company-portability-normalize.js";
+import {
+  normalizeSkillSlug,
+  normalizeSkillKey,
+  deriveManifestSkillKey,
+  buildSkillExportDirMap,
+} from "./company-portability-skill-export.js";
+import {
+  shouldReferenceSkillOnExport,
+  buildReferencedSkillMarkdown,
+  withSkillSourceMetadata,
+  fetchText,
+  fetchOptionalText,
+  fetchBinary,
+  fetchJson,
+} from "./company-portability-skill-source.js";
+export { parseGitHubSourceUrl } from "./company-portability-github-source.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
 function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]): OrgNode[] {
@@ -279,255 +304,6 @@ function normalizeInclude(input?: Partial<CompanyPortabilityInclude>): CompanyPo
   };
 }
 
-function normalizePortablePath(input: string) {
-  const normalized = input.replace(/\\/g, "/").replace(/^\.\/+/, "");
-  const parts: string[] = [];
-  for (const segment of normalized.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") {
-      if (parts.length > 0) parts.pop();
-      continue;
-    }
-    parts.push(segment);
-  }
-  return parts.join("/");
-}
-
-function resolvePortablePath(fromPath: string, targetPath: string) {
-  const baseDir = path.posix.dirname(fromPath.replace(/\\/g, "/"));
-  return normalizePortablePath(path.posix.join(baseDir, targetPath.replace(/\\/g, "/")));
-}
-
-function isPortableBinaryFile(
-  value: CompanyPortabilityFileEntry,
-): value is Extract<CompanyPortabilityFileEntry, { encoding: "base64" }> {
-  return typeof value === "object" && value !== null && value.encoding === "base64" && typeof value.data === "string";
-}
-
-function readPortableTextFile(
-  files: Record<string, CompanyPortabilityFileEntry>,
-  filePath: string,
-) {
-  const value = files[filePath];
-  return typeof value === "string" ? value : null;
-}
-
-function inferContentTypeFromPath(filePath: string) {
-  const extension = path.posix.extname(filePath).toLowerCase();
-  switch (extension) {
-    case ".gif":
-      return "image/gif";
-    case ".jpeg":
-    case ".jpg":
-      return "image/jpeg";
-    case ".png":
-      return "image/png";
-    case ".svg":
-      return "image/svg+xml";
-    case ".webp":
-      return "image/webp";
-    default:
-      return null;
-  }
-}
-
-function resolveCompanyLogoExtension(contentType: string | null | undefined, originalFilename: string | null | undefined) {
-  const fromContentType = contentType ? COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS[contentType.toLowerCase()] : null;
-  if (fromContentType) return fromContentType;
-
-  const extension = originalFilename ? path.extname(originalFilename).toLowerCase() : "";
-  return extension || ".png";
-}
-
-function portableBinaryFileToBuffer(entry: Extract<CompanyPortabilityFileEntry, { encoding: "base64" }>) {
-  return Buffer.from(entry.data, "base64");
-}
-
-function portableFileToBuffer(entry: CompanyPortabilityFileEntry, filePath: string) {
-  if (typeof entry === "string") {
-    return Buffer.from(entry, "utf8");
-  }
-  if (isPortableBinaryFile(entry)) {
-    return portableBinaryFileToBuffer(entry);
-  }
-  throw unprocessable(`Unsupported file entry encoding for ${filePath}`);
-}
-
-function bufferToPortableBinaryFile(buffer: Buffer, contentType: string | null): CompanyPortabilityFileEntry {
-  return {
-    encoding: "base64",
-    data: buffer.toString("base64"),
-    contentType,
-  };
-}
-
-async function streamToBuffer(stream: NodeJS.ReadableStream) {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
-function normalizeFileMap(
-  files: Record<string, CompanyPortabilityFileEntry>,
-  rootPath?: string | null,
-): Record<string, CompanyPortabilityFileEntry> {
-  const normalizedRoot = rootPath ? normalizePortablePath(rootPath) : null;
-  const out: Record<string, CompanyPortabilityFileEntry> = {};
-  for (const [rawPath, content] of Object.entries(files)) {
-    let nextPath = normalizePortablePath(rawPath);
-    if (normalizedRoot && nextPath === normalizedRoot) {
-      continue;
-    }
-    if (normalizedRoot && nextPath.startsWith(`${normalizedRoot}/`)) {
-      nextPath = nextPath.slice(normalizedRoot.length + 1);
-    }
-    if (!nextPath) continue;
-    out[nextPath] = content;
-  }
-  return out;
-}
-
-function pickTextFiles(files: Record<string, CompanyPortabilityFileEntry>) {
-  const out: Record<string, string> = {};
-  for (const [filePath, content] of Object.entries(files)) {
-    if (typeof content === "string") {
-      out[filePath] = content;
-    }
-  }
-  return out;
-}
-
-function collectSelectedExportSlugs(selectedFiles: Set<string>) {
-  const agents = new Set<string>();
-  const projects = new Set<string>();
-  const tasks = new Set<string>();
-  for (const filePath of selectedFiles) {
-    const agentMatch = filePath.match(/^agents\/([^/]+)\//);
-    if (agentMatch) agents.add(agentMatch[1]!);
-    const projectMatch = filePath.match(/^projects\/([^/]+)\//);
-    if (projectMatch) projects.add(projectMatch[1]!);
-    const taskMatch = filePath.match(/^tasks\/([^/]+)\//);
-    if (taskMatch) tasks.add(taskMatch[1]!);
-  }
-  return { agents, projects, tasks };
-}
-
-function filterPortableExtensionYaml(yaml: string, selectedFiles: Set<string>) {
-  const selected = collectSelectedExportSlugs(selectedFiles);
-  const lines = yaml.split("\n");
-  const out: string[] = [];
-  const filterableSections = new Set(["agents", "projects", "tasks"]);
-
-  let currentSection: string | null = null;
-  let currentEntry: string | null = null;
-  let includeEntry = true;
-  let sectionHeaderLine: string | null = null;
-  let sectionBuffer: string[] = [];
-
-  const flushSection = () => {
-    if (sectionHeaderLine !== null && sectionBuffer.length > 0) {
-      out.push(sectionHeaderLine);
-      out.push(...sectionBuffer);
-    }
-    sectionHeaderLine = null;
-    sectionBuffer = [];
-  };
-
-  for (const line of lines) {
-    const topMatch = line.match(/^([a-zA-Z_][\w-]*):\s*(.*)$/);
-    if (topMatch && !line.startsWith(" ")) {
-      flushSection();
-      currentEntry = null;
-      includeEntry = true;
-
-      const key = topMatch[1]!;
-      if (filterableSections.has(key)) {
-        currentSection = key;
-        sectionHeaderLine = line;
-        continue;
-      }
-
-      currentSection = null;
-      out.push(line);
-      continue;
-    }
-
-    if (currentSection && filterableSections.has(currentSection)) {
-      const entryMatch = line.match(/^  ([\w][\w-]*):\s*(.*)$/);
-      if (entryMatch && !line.startsWith("    ")) {
-        const slug = entryMatch[1]!;
-        currentEntry = slug;
-        const sectionSlugs = selected[currentSection as keyof typeof selected];
-        includeEntry = sectionSlugs.has(slug);
-        if (includeEntry) sectionBuffer.push(line);
-        continue;
-      }
-
-      if (currentEntry !== null) {
-        if (includeEntry) sectionBuffer.push(line);
-        continue;
-      }
-
-      sectionBuffer.push(line);
-      continue;
-    }
-
-    out.push(line);
-  }
-
-  flushSection();
-  let filtered = out.join("\n");
-  const logoPathMatch = filtered.match(/^\s{2}logoPath:\s*["']?([^"'\n]+)["']?\s*$/m);
-  if (logoPathMatch && !selectedFiles.has(logoPathMatch[1]!)) {
-    filtered = filtered.replace(/^\s{2}logoPath:\s*["']?([^"'\n]+)["']?\s*\n?/m, "");
-  }
-  return filtered;
-}
-
-function filterExportFiles(
-  files: Record<string, CompanyPortabilityFileEntry>,
-  selectedFilesInput: string[] | undefined,
-  paperclipExtensionPath: string,
-) {
-  if (!selectedFilesInput || selectedFilesInput.length === 0) {
-    return files;
-  }
-
-  const selectedFiles = new Set(
-    selectedFilesInput
-      .map((entry) => normalizePortablePath(entry))
-      .filter((entry) => entry.length > 0),
-  );
-  const filtered: Record<string, CompanyPortabilityFileEntry> = {};
-  for (const [filePath, content] of Object.entries(files)) {
-    if (!selectedFiles.has(filePath)) continue;
-    filtered[filePath] = content;
-  }
-
-  const extensionEntry = filtered[paperclipExtensionPath];
-  if (selectedFiles.has(paperclipExtensionPath) && typeof extensionEntry === "string") {
-    filtered[paperclipExtensionPath] = filterPortableExtensionYaml(extensionEntry, selectedFiles);
-  }
-
-  return filtered;
-}
-
-function findPaperclipExtensionPath(files: Record<string, CompanyPortabilityFileEntry>) {
-  if (typeof files[".paperclip.yaml"] === "string") return ".paperclip.yaml";
-  if (typeof files[".paperclip.yml"] === "string") return ".paperclip.yml";
-  return Object.keys(files).find((entry) => entry.endsWith("/.paperclip.yaml") || entry.endsWith("/.paperclip.yml")) ?? null;
-}
-
-function ensureMarkdownPath(pathValue: string) {
-  const normalized = pathValue.replace(/\\/g, "/");
-  if (!normalized.endsWith(".md")) {
-    throw unprocessable(`Manifest file path must end in .md: ${pathValue}`);
-  }
-  return normalized;
-}
-
 function normalizePortableConfig(
   value: unknown,
 ): Record<string, unknown> {
@@ -614,15 +390,6 @@ function extractPortableEnvInputs(
   }
 
   return inputs;
-}
-
-function normalizeSelectedFiles(selectedFiles?: string[]) {
-  if (!selectedFiles) return null;
-  return new Set(
-    selectedFiles
-      .map((entry) => normalizePortablePath(entry))
-      .filter((entry) => entry.length > 0),
-  );
 }
 
 function filterCompanyMarkdownIncludes(
@@ -1153,64 +920,6 @@ function buildManifestFromPackageFiles(
     files: normalizedFiles,
     warnings,
   };
-}
-
-function normalizeGitHubSourcePath(value: string | null | undefined) {
-  if (!value) return "";
-  return value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-}
-
-export function parseGitHubSourceUrl(rawUrl: string) {
-  const url = new URL(rawUrl);
-  if (url.hostname !== "github.com") {
-    throw unprocessable("GitHub source must use github.com URL");
-  }
-  const parts = url.pathname.split("/").filter(Boolean);
-  if (parts.length < 2) {
-    throw unprocessable("Invalid GitHub URL");
-  }
-  const owner = parts[0]!;
-  const repo = parts[1]!.replace(/\.git$/i, "");
-  const queryRef = url.searchParams.get("ref")?.trim();
-  const queryPath = normalizeGitHubSourcePath(url.searchParams.get("path"));
-  const queryCompanyPath = normalizeGitHubSourcePath(url.searchParams.get("companyPath"));
-  if (queryRef || queryPath || queryCompanyPath) {
-    const companyPath = queryCompanyPath || [queryPath, "COMPANY.md"].filter(Boolean).join("/") || "COMPANY.md";
-    let basePath = queryPath;
-    if (!basePath && companyPath !== "COMPANY.md") {
-      basePath = path.posix.dirname(companyPath);
-      if (basePath === ".") basePath = "";
-    }
-    return {
-      owner,
-      repo,
-      ref: queryRef || "main",
-      basePath,
-      companyPath,
-    };
-  }
-  let ref = "main";
-  let basePath = "";
-  let companyPath = "COMPANY.md";
-  if (parts[2] === "tree") {
-    ref = parts[3] ?? "main";
-    basePath = parts.slice(4).join("/");
-  } else if (parts[2] === "blob") {
-    ref = parts[3] ?? "main";
-    const blobPath = parts.slice(4).join("/");
-    if (!blobPath) {
-      throw unprocessable("Invalid GitHub blob URL");
-    }
-    companyPath = blobPath;
-    basePath = path.posix.dirname(blobPath);
-    if (basePath === ".") basePath = "";
-  }
-  return { owner, repo, ref, basePath, companyPath };
-}
-
-function resolveRawGitHubUrl(owner: string, repo: string, ref: string, filePath: string) {
-  const normalizedFilePath = filePath.replace(/^\/+/, "");
-  return `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${normalizedFilePath}`;
 }
 
 export function companyPortabilityService(db: Db, storage?: StorageService) {
