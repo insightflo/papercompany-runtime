@@ -87,3 +87,23 @@ export function buildDependencyStepContractLines(input: {
   }
   return lines;
 }
+
+export function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
+  if (!description) return null;
+  return description.match(/(?:^|\n)-?\s*stepId:\s*([a-z0-9_-]+)/i)?.[1] ?? null;
+}
+
+export function firstDependencyIssueFromDescription(description: string | null | undefined): {
+  targetStepId: string;
+  targetIssueIdentifier: string;
+  targetIssueTitle: string;
+} | null {
+  if (!description) return null;
+  const match = description.match(/\n-\s*([a-z0-9_-]+):\s*([A-Z][A-Z0-9]{1,9}-\d+)\s*\([^)]*\)\s*—\s*([^\n]+)/i);
+  if (!match) return null;
+  return {
+    targetStepId: match[1],
+    targetIssueIdentifier: match[2],
+    targetIssueTitle: match[3].trim(),
+  };
+}

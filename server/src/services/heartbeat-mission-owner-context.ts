@@ -1,3 +1,4 @@
+import { HttpError } from "../errors.js";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, issues, missions } from "@paperclipai/db";
@@ -171,3 +172,13 @@ export async function resolveMissionOwnerTaskContext(input: {
     ],
   };
 }
+
+export function isMissionOwnerActionParentPlacementRejected(error: unknown) {
+    return error instanceof HttpError &&
+      error.status === 422 &&
+      (
+        error.message.includes("Mission downstream issue creation is not allowed") ||
+        error.message.includes("Mission nested child issue creation is not allowed") ||
+        error.message.includes("Mission child issue burst limit exceeded")
+      );
+  }
