@@ -1,9 +1,6 @@
 import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type {
-  CompanyPortabilityAgentManifestEntry,
-  CompanyPortabilityCollisionStrategy,
-  CompanyPortabilityEnvInput,
   CompanyPortabilityExport,
   CompanyPortabilityFileEntry,
   CompanyPortabilityExportPreviewResult,
@@ -42,7 +39,30 @@ import { issueService } from "./issues.js";
 import { projectService } from "./projects.js";
 import { isPlainRecord, stripEmptyValues, buildMarkdown, buildYamlFile } from "./company-portability-yaml.js";
 import { parseYamlFile, parseFrontmatterMarkdown } from "./company-portability-yaml-parse.js";
-import { normalizePortablePath, resolvePortablePath, isPortableBinaryFile, readPortableTextFile, inferContentTypeFromPath, resolveCompanyLogoExtension, portableFileToBuffer, bufferToPortableBinaryFile, streamToBuffer, normalizeFileMap, pickTextFiles, findPaperclipExtensionPath, ensureMarkdownPath, normalizeSelectedFiles } from "./company-portability-files.js";
+import type {
+  CompanyPackageIncludeEntry,
+  ImportBehaviorOptions,
+  ImportPlanInternal,
+  ResolvedSource,
+} from "./company-portability-types.js";
+import { DEFAULT_COLLISION_STRATEGY, resolveImportMode, resolveSkillConflictStrategy, classifyPortableFileKind, toSafeSlug, uniqueSlug, uniqueNameBySlug, uniqueProjectName, normalizeInclude } from "./company-portability-naming.js";
+import { isAbsoluteCommand, extractPortableEnvInputs, dedupeEnvInputs, buildEnvInputMap, readAgentEnvInputs } from "./company-portability-env-inputs.js";
+import {
+  normalizePortablePath,
+  resolvePortablePath,
+  isPortableBinaryFile,
+  readPortableTextFile,
+  inferContentTypeFromPath,
+  resolveCompanyLogoExtension,
+  portableFileToBuffer,
+  bufferToPortableBinaryFile,
+  streamToBuffer,
+  normalizeFileMap,
+  pickTextFiles,
+  findPaperclipExtensionPath,
+  ensureMarkdownPath,
+  normalizeSelectedFiles,
+} from "./company-portability-files.js";
 import { filterExportFiles } from "./company-portability-extension-filter.js";
 import { parseGitHubSourceUrl, resolveRawGitHubUrl } from "./company-portability-github-source.js";
 import {
@@ -116,194 +136,6 @@ function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]):
   return tree;
 }
 
-const DEFAULT_INCLUDE: CompanyPortabilityInclude = {
-  company: true,
-  agents: true,
-  projects: false,
-  issues: false,
-  skills: false,
-};
-
-const DEFAULT_COLLISION_STRATEGY: CompanyPortabilityCollisionStrategy = "rename";
-
-function resolveImportMode(options?: ImportBehaviorOptions): ImportMode {
-  return options?.mode ?? "board_full";
-}
-
-function resolveSkillConflictStrategy(mode: ImportMode, collisionStrategy: CompanyPortabilityCollisionStrategy) {
-  if (mode === "board_full") return "replace" as const;
-  return collisionStrategy === "skip" ? "skip" as const : "rename" as const;
-}
-
-function classifyPortableFileKind(pathValue: string): CompanyPortabilityExportPreviewResult["fileInventory"][number]["kind"] {
-  const normalized = normalizePortablePath(pathValue);
-  if (normalized === "COMPANY.md") return "company";
-  if (normalized === ".paperclip.yaml" || normalized === ".paperclip.yml") return "extension";
-  if (normalized === "README.md") return "readme";
-  if (normalized.startsWith("agents/")) return "agent";
-  if (normalized.startsWith("skills/")) return "skill";
-  if (normalized.startsWith("projects/")) return "project";
-  if (normalized.startsWith("tasks/")) return "issue";
-  return "other";
-}
-
-function isSensitiveEnvKey(key: string) {
-  const normalized = key.trim().toLowerCase();
-  return (
-    normalized === "token" ||
-    normalized.endsWith("_token") ||
-    normalized.endsWith("-token") ||
-    normalized.includes("apikey") ||
-    normalized.includes("api_key") ||
-    normalized.includes("api-key") ||
-    normalized.includes("access_token") ||
-    normalized.includes("access-token") ||
-    normalized.includes("auth") ||
-    normalized.includes("auth_token") ||
-    normalized.includes("auth-token") ||
-    normalized.includes("authorization") ||
-    normalized.includes("bearer") ||
-    normalized.includes("secret") ||
-    normalized.includes("passwd") ||
-    normalized.includes("password") ||
-    normalized.includes("credential") ||
-    normalized.includes("jwt") ||
-    normalized.includes("privatekey") ||
-    normalized.includes("private_key") ||
-    normalized.includes("private-key") ||
-    normalized.includes("cookie") ||
-    normalized.includes("connectionstring")
-  );
-}
-
-type ResolvedSource = {
-  manifest: CompanyPortabilityManifest;
-  files: Record<string, CompanyPortabilityFileEntry>;
-  warnings: string[];
-};
-
-type CompanyPackageIncludeEntry = {
-  path: string;
-};
-
-type PaperclipExtensionDoc = {
-  schema?: string;
-  company?: Record<string, unknown> | null;
-  agents?: Record<string, Record<string, unknown>> | null;
-  projects?: Record<string, Record<string, unknown>> | null;
-  tasks?: Record<string, Record<string, unknown>> | null;
-};
-
-type ProjectLike = {
-  id: string;
-  name: string;
-  description: string | null;
-  leadAgentId: string | null;
-  targetDate: string | null;
-  color: string | null;
-  status: string;
-  executionWorkspacePolicy: Record<string, unknown> | null;
-  metadata?: Record<string, unknown> | null;
-};
-
-type IssueLike = {
-  id: string;
-  identifier: string | null;
-  title: string;
-  description: string | null;
-  projectId: string | null;
-  assigneeAgentId: string | null;
-  status: string;
-  priority: string;
-  labelIds?: string[];
-  billingCode: string | null;
-  executionWorkspaceSettings: Record<string, unknown> | null;
-  assigneeAdapterOverrides: Record<string, unknown> | null;
-};
-
-type ImportPlanInternal = {
-  preview: CompanyPortabilityPreviewResult;
-  source: ResolvedSource;
-  include: CompanyPortabilityInclude;
-  collisionStrategy: CompanyPortabilityCollisionStrategy;
-  selectedAgents: CompanyPortabilityAgentManifestEntry[];
-};
-
-type ImportMode = "board_full" | "agent_safe";
-
-type ImportBehaviorOptions = {
-  mode?: ImportMode;
-  sourceCompanyId?: string | null;
-};
-
-type AgentLike = {
-  id: string;
-  name: string;
-  adapterConfig: Record<string, unknown>;
-};
-
-type EnvInputRecord = {
-  kind: "secret" | "plain";
-  requirement: "required" | "optional";
-  default?: string | null;
-  description?: string | null;
-  portability?: "portable" | "system_dependent";
-};
-
-function toSafeSlug(input: string, fallback: string) {
-  return normalizeAgentUrlKey(input) ?? fallback;
-}
-
-function uniqueSlug(base: string, used: Set<string>) {
-  if (!used.has(base)) {
-    used.add(base);
-    return base;
-  }
-  let idx = 2;
-  while (true) {
-    const candidate = `${base}-${idx}`;
-    if (!used.has(candidate)) {
-      used.add(candidate);
-      return candidate;
-    }
-    idx += 1;
-  }
-}
-
-function uniqueNameBySlug(baseName: string, existingSlugs: Set<string>) {
-  const baseSlug = normalizeAgentUrlKey(baseName) ?? "agent";
-  if (!existingSlugs.has(baseSlug)) return baseName;
-  let idx = 2;
-  while (true) {
-    const candidateName = `${baseName} ${idx}`;
-    const candidateSlug = normalizeAgentUrlKey(candidateName) ?? `agent-${idx}`;
-    if (!existingSlugs.has(candidateSlug)) return candidateName;
-    idx += 1;
-  }
-}
-
-function uniqueProjectName(baseName: string, existingProjectSlugs: Set<string>) {
-  const baseSlug = deriveProjectUrlKey(baseName, baseName);
-  if (!existingProjectSlugs.has(baseSlug)) return baseName;
-  let idx = 2;
-  while (true) {
-    const candidateName = `${baseName} ${idx}`;
-    const candidateSlug = deriveProjectUrlKey(candidateName, candidateName);
-    if (!existingProjectSlugs.has(candidateSlug)) return candidateName;
-    idx += 1;
-  }
-}
-
-function normalizeInclude(input?: Partial<CompanyPortabilityInclude>): CompanyPortabilityInclude {
-  return {
-    company: input?.company ?? DEFAULT_INCLUDE.company,
-    agents: input?.agents ?? DEFAULT_INCLUDE.agents,
-    projects: input?.projects ?? DEFAULT_INCLUDE.projects,
-    issues: input?.issues ?? DEFAULT_INCLUDE.issues,
-    skills: input?.skills ?? DEFAULT_INCLUDE.skills,
-  };
-}
-
 function normalizePortableConfig(
   value: unknown,
 ): Record<string, unknown> {
@@ -317,79 +149,6 @@ function normalizePortableConfig(
   }
 
   return next;
-}
-
-function isAbsoluteCommand(value: string) {
-  return path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value);
-}
-
-function extractPortableEnvInputs(
-  agentSlug: string,
-  envValue: unknown,
-  warnings: string[],
-): CompanyPortabilityEnvInput[] {
-  if (!isPlainRecord(envValue)) return [];
-  const env = envValue as Record<string, unknown>;
-  const inputs: CompanyPortabilityEnvInput[] = [];
-
-  for (const [key, binding] of Object.entries(env)) {
-    if (key.toUpperCase() === "PATH") {
-      warnings.push(`Agent ${agentSlug} PATH override was omitted from export because it is system-dependent.`);
-      continue;
-    }
-
-    if (isPlainRecord(binding) && binding.type === "secret_ref") {
-      inputs.push({
-        key,
-        description: `Provide ${key} for agent ${agentSlug}`,
-        agentSlug,
-        kind: "secret",
-        requirement: "optional",
-        defaultValue: "",
-        portability: "portable",
-      });
-      continue;
-    }
-
-    if (isPlainRecord(binding) && binding.type === "plain") {
-      const defaultValue = asString(binding.value);
-      const isSensitive = isSensitiveEnvKey(key);
-      const portability = defaultValue && isAbsoluteCommand(defaultValue)
-        ? "system_dependent"
-        : "portable";
-      if (portability === "system_dependent") {
-        warnings.push(`Agent ${agentSlug} env ${key} default was exported as system-dependent.`);
-      }
-      inputs.push({
-        key,
-        description: `Optional default for ${key} on agent ${agentSlug}`,
-        agentSlug,
-        kind: isSensitive ? "secret" : "plain",
-        requirement: "optional",
-        defaultValue: isSensitive ? "" : defaultValue ?? "",
-        portability,
-      });
-      continue;
-    }
-
-    if (typeof binding === "string") {
-      const portability = isAbsoluteCommand(binding) ? "system_dependent" : "portable";
-      if (portability === "system_dependent") {
-        warnings.push(`Agent ${agentSlug} env ${key} default was exported as system-dependent.`);
-      }
-      inputs.push({
-        key,
-        description: `Optional default for ${key} on agent ${agentSlug}`,
-        agentSlug,
-        kind: isSensitiveEnvKey(key) ? "secret" : "plain",
-        requirement: "optional",
-        defaultValue: binding,
-        portability,
-      });
-    }
-  }
-
-  return inputs;
 }
 
 function filterCompanyMarkdownIncludes(
@@ -465,33 +224,6 @@ function applySelectedFilesToSource(source: ResolvedSource, selectedFiles?: stri
   return filtered;
 }
 
-function dedupeEnvInputs(values: CompanyPortabilityManifest["envInputs"]) {
-  const seen = new Set<string>();
-  const out: CompanyPortabilityManifest["envInputs"] = [];
-  for (const value of values) {
-    const key = `${value.agentSlug ?? ""}:${value.key.toUpperCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(value);
-  }
-  return out;
-}
-
-function buildEnvInputMap(inputs: CompanyPortabilityEnvInput[]) {
-  const env: Record<string, Record<string, unknown>> = {};
-  for (const input of inputs) {
-    const entry: Record<string, unknown> = {
-      kind: input.kind,
-      requirement: input.requirement,
-    };
-    if (input.defaultValue !== null) entry.default = input.defaultValue;
-    if (input.description) entry.description = input.description;
-    if (input.portability === "system_dependent") entry.portability = "system_dependent";
-    env[input.key] = entry;
-  }
-  return env;
-}
-
 function readCompanyApprovalDefault(_frontmatter: Record<string, unknown>) {
   return true;
 }
@@ -508,29 +240,6 @@ function readIncludeEntries(frontmatter: Record<string, unknown>): CompanyPackag
       return pathValue ? [{ path: pathValue }] : [];
     }
     return [];
-  });
-}
-
-function readAgentEnvInputs(
-  extension: Record<string, unknown>,
-  agentSlug: string,
-): CompanyPortabilityManifest["envInputs"] {
-  const inputs = isPlainRecord(extension.inputs) ? extension.inputs : null;
-  const env = inputs && isPlainRecord(inputs.env) ? inputs.env : null;
-  if (!env) return [];
-
-  return Object.entries(env).flatMap(([key, value]) => {
-    if (!isPlainRecord(value)) return [];
-    const record = value as EnvInputRecord;
-    return [{
-      key,
-      description: asString(record.description) ?? null,
-      agentSlug,
-      kind: record.kind === "plain" ? "plain" : "secret",
-      requirement: record.requirement === "required" ? "required" : "optional",
-      defaultValue: typeof record.default === "string" ? record.default : null,
-      portability: record.portability === "system_dependent" ? "system_dependent" : "portable",
-    }];
   });
 }
 
