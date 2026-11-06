@@ -598,7 +598,7 @@ export async function createApp(
       companyDeletionEnabled: opts.companyDeletionEnabled,
     }),
   );
-  api.use("/metrics", metricsRoutes());
+  api.use("/metrics", metricsRoutes(db));
   api.use(issueRoutes(db, opts.storageService));
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(hermesChatRoutes(db));

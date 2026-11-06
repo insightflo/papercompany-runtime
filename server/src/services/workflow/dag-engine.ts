@@ -37,14 +37,15 @@ import { QaRemediationAdmissionHold, unresolvedQaRemediationAdmissionPending,
 import { agents, heartbeatRuns, issueComments, issueWorkProducts, issues, missionPlanArtifacts, missions, toolDefinitions, workflowDefinitions, workflowRuns, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
 import { artifactAttemptMetadata, freezeCompanyArtifactAttempt } from './artifact-attempt-start.js';
 import { workflowControlNodeResultSchema, type WorkflowConditionGroup, type WorkflowStepContract } from "@paperclipai/shared";
-import { stableJson, isCacheEnabled, getCacheTtlSeconds } from "./dag-tool-cache-helpers.js";
+import { findCachedToolStepRun, getRunningConcurrencyCount } from "./dag-tool-step-lookups.js";
 import { sortWorkflowStepsByPriority } from "./dag-step-priority.js";
 import { getSingleToolStepName } from "./dag-tool-step-name.js";
 import { buildStepRunMap, toConditionalStepObservation } from "./dag-step-observation.js";
 import { normalizeRecord, getMetadataRecord, readMetadataString } from "./dag-metadata-helpers.js";
 import { renderWorkflowRunTextTemplate } from "./dag-run-text-template.js";
 import { buildWorkflowApiCloseoutLines, buildStepContractDescriptionLines, buildDependencyStepContractLines } from "./dag-contract-description.js";
-import { isValidationGateCandidate, buildPredFactsMap, findRunnableSteps, type ValidationVerdict, type ValidationVerdictObservation } from "./dag-readiness-facts.js";
+import { isValidationGateCandidate, buildPredFactsMap, findRunnableSteps, type ValidationVerdictObservation } from "./dag-readiness-facts.js";
+import { desiredValidationCheckStepStatus, loadLatestValidationVerdicts, type WorkflowValidationIssueBinding } from "./dag-validation-verdicts.js";
 import { mapWorkflowExecutionResult } from "./workflow-execution-result.js";
 import type { WorkflowExecutionResult } from "./types.js";
 import {
@@ -110,8 +111,7 @@ import {
 } from "./conditional-skip-settlement.js";
 import { loadDownstreamQaCapAcceptanceContext } from "./control-flow/qa-cap-acceptance-context.js";
 import { buildQaCapAcceptanceRuntimeContract } from "./control-flow/qa-cap-runtime-contract.js";
-import { readAcceptanceRecord } from "./control-flow/qa-cap-acceptance-records.js";
-import { readAttempts } from "./control-flow/verdict-store.js";
+import { stepRunNeedsWorkflowResume, isPendingReworkAwaitingCurrentIssueCompletion, matchesCurrentCapAcceptedProducer } from "./dag-rework-observation.js";
 import { resolveMissionWorkProductPaths } from "../work-products/output-paths.js";
 import { resolveWorkProductLocalFilePath } from "../work-products.js";
 import {
@@ -482,168 +482,6 @@ async function syncStepRunExecutionControlMetadata(
 
   if (!changed) return stepRuns;
   return reloadWorkflowStepRunsForSameRun(db, stepRuns);
-}
-
-
-
-function desiredValidationCheckStepStatus(input: {
-  issueStatus: string;
-  latestVerdict: ValidationVerdictObservation | undefined;
-}): "pending" | "running" | "completed" | "failed" {
-  if (input.issueStatus !== "done") {
-    return desiredStepRunStatusFromIssueStatus(input.issueStatus);
-  }
-  if (input.latestVerdict?.verdict === "pass") return "completed";
-  if (input.latestVerdict?.verdict === "request_changes") return "failed";
-  return "running";
-}
-
-function isNewerValidationVerdict(
-  next: ValidationVerdictObservation,
-  current: ValidationVerdictObservation | undefined,
-): boolean {
-  if (!current) return true;
-  const nextTime = next.observedAt?.getTime() ?? 0;
-  const currentTime = current.observedAt?.getTime() ?? 0;
-  return nextTime >= currentTime;
-}
-
-function setLatestValidationVerdict(
-  verdictsByIssueId: Map<string, ValidationVerdictObservation>,
-  issueId: string | null,
-  verdict: ValidationVerdict | null,
-  observedAt: Date | null,
-): void {
-  if (!issueId) return;
-  const next = { verdict, observedAt };
-  if (isNewerValidationVerdict(next, verdictsByIssueId.get(issueId))) {
-    verdictsByIssueId.set(issueId, next);
-  }
-}
-
-
-function stepRunNeedsWorkflowResume(stepRun: typeof workflowStepRuns.$inferSelect): boolean {
-  return stepRun.status === "pending" && (stepRun.iterationIndex ?? 0) > 0;
-}
-function isPendingReworkAwaitingCurrentIssueCompletion(
-  stepRun: typeof workflowStepRuns.$inferSelect,
-  issueCompletedAt: Date | null,
-): boolean {
-  if (stepRun.status !== "pending" || (stepRun.iterationIndex ?? 0) === 0) return false;
-  const priorCompletedAt = readAttempts(stepRun.metadata).at(-1)?.completedAt;
-  if (!priorCompletedAt || !issueCompletedAt) return true;
-  const priorCompletedMs = new Date(priorCompletedAt).getTime();
-  return !Number.isFinite(priorCompletedMs) || issueCompletedAt.getTime() <= priorCompletedMs;
-}
-
-/**
- * [목적] 주어진 issue 들에 대해 최신 validation verdict(pass|request_changes|null) 를 durable
- *   workflow_validation_verdict event 에서만 읽어 issueId→observation 맵으로 반환.
- *   syncStepRunsFromIssueState 와 syncWorkflowRunState(loop-driver predFacts 빌드) 가 동일 원천을 공유.
- * [scope fail-closed] 각 issue 의 CURRENT workflow run + step run + company exact binding 만 인정.
- *   재사용된 issue의 과거 run/step verdict 가 현재 DAG 판정을 좌우하지 않는다(startedAt 단독 대체 ❌).
- */
-type WorkflowValidationIssueBinding = {
-  readonly companyId: string;
-  readonly workflowRunId: string;
-  readonly workflowStepRunId: string;
-};
-
-async function loadLatestValidationVerdicts(
-  db: Db,
-  bindings: ReadonlyMap<string, WorkflowValidationIssueBinding>,
-): Promise<Map<string, ValidationVerdictObservation>> {
-  const verdicts = new Map<string, ValidationVerdictObservation>();
-  if (bindings.size === 0) return verdicts;
-
-  const issueIds = [...bindings.keys()];
-  const issueRows = await db
-    .select({
-      id: issues.id,
-      startedAt: issues.startedAt,
-    })
-    .from(issues)
-    .where(inArray(issues.id, issueIds));
-  const minObservedAtByIssueId = new Map(issueRows.map((issue) => [issue.id, issue.startedAt ?? null]));
-  const isWithinCurrentExecutionWindow = (issueId: string | null, observedAt: Date | null): boolean => {
-    if (!issueId || !observedAt) return true;
-    const minObservedAt = minObservedAtByIssueId.get(issueId);
-    return !minObservedAt || observedAt.getTime() >= minObservedAt.getTime();
-  };
-
-  const eventRows = await db
-    .select({
-      issueId: workflowTransitionEvents.issueId,
-      verdict: workflowTransitionEvents.verdict,
-      createdAt: workflowTransitionEvents.createdAt,
-      companyId: workflowTransitionEvents.companyId,
-      workflowRunId: workflowTransitionEvents.workflowRunId,
-      workflowStepRunId: workflowTransitionEvents.workflowStepRunId,
-      heartbeatRunId: workflowTransitionEvents.heartbeatRunId,
-    })
-    .from(workflowTransitionEvents)
-    .where(and(
-      inArray(workflowTransitionEvents.issueId, issueIds),
-      eq(workflowTransitionEvents.eventType, "workflow_validation_verdict"),
-      // structured authority only: ignore legacy comment/heartbeat_result derived events.
-      eq(workflowTransitionEvents.reason, "workflow_api"),
-    ))
-    .orderBy(desc(workflowTransitionEvents.createdAt), desc(workflowTransitionEvents.id));
-  // [verdict authority] batch-resolve backing heartbeat runs and keep only those scoped (company +
-  //   issue) to their QA issue — the verdict API always runs on a checked-out run of the QA issue.
-  const heartbeatRunIds = Array.from(new Set(
-    eventRows.map((event) => event.heartbeatRunId).filter((id): id is string => typeof id === "string"),
-  ));
-  const heartbeatRunScopeById = new Map<string, { companyId: string | null; issueId: string | null }>();
-  if (heartbeatRunIds.length > 0) {
-    const runScopeRows = await db
-      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, issueId: heartbeatRuns.issueId })
-      .from(heartbeatRuns)
-      .where(inArray(heartbeatRuns.id, heartbeatRunIds));
-    for (const row of runScopeRows) {
-      heartbeatRunScopeById.set(row.id, { companyId: row.companyId, issueId: row.issueId });
-    }
-  }
-  for (const event of eventRows) {
-    const observedAt = event.createdAt ?? null;
-    if (!isWithinCurrentExecutionWindow(event.issueId, observedAt)) continue;
-    if (event.verdict !== "pass" && event.verdict !== "request_changes") continue;
-    // [scope fail-closed] exact binding to the issue's current workflow run + step run + company.
-    //   a reused issue's prior-run verdict must never drive the current DAG verdict.
-    const binding = event.issueId ? bindings.get(event.issueId) : null;
-    if (
-      !binding ||
-      event.companyId !== binding.companyId ||
-      event.workflowRunId !== binding.workflowRunId ||
-      event.workflowStepRunId !== binding.workflowStepRunId
-    ) {
-      continue;
-    }
-    // [verdict authority] the backing heartbeat run must be a checked-out run scoped to this QA issue.
-    const runScope = event.heartbeatRunId ? heartbeatRunScopeById.get(event.heartbeatRunId) : null;
-    if (!runScope || runScope.companyId !== binding.companyId || runScope.issueId !== event.issueId) {
-      continue;
-    }
-    setLatestValidationVerdict(verdicts, event.issueId, event.verdict, observedAt);
-  }
-  return verdicts;
-}
-
-/**
- * [qa-cap acceptance anti-flap, generation-aware] a completed QA is protected from
- *   request_changes+done re-derivation ONLY while its qaCapAccepted sentinel's
- *   producerStepId/producerIteration match a CURRENTLY completed producer row in this run.
- *   A new producer generation (rework) breaks the match => protection lifts, re-derivation resumes.
- */
-function matchesCurrentCapAcceptedProducer(
-  qaStepRun: (typeof workflowStepRuns.$inferSelect),
-  stepRuns: ReadonlyArray<(typeof workflowStepRuns.$inferSelect)>,
-): boolean {
-  const sentinel = readAcceptanceRecord(normalizeRecord(qaStepRun.metadata).qaCapAccepted);
-  if (!sentinel) return false; // forged/malformed metadata never suppresses QA re-derivation
-  return stepRuns.some(
-    (r) => r.stepId === sentinel.producerStepId && r.status === "completed" && (r.iterationIndex ?? 0) === sentinel.producerIteration,
-  );
 }
 
 async function syncStepRunsFromIssueState(
@@ -1404,73 +1242,6 @@ function hasRecoverableQaRequestChangesDependency(
     if (hasRemainingBackEdgeRework) return true;
   }
   return false;
-}
-
-
-
-
-
-async function findCachedToolStepRun(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  definition: typeof workflowDefinitions.$inferSelect;
-  step: WorkflowStep;
-  toolName: string;
-  args: unknown;
-  now: Date;
-}): Promise<typeof workflowStepRuns.$inferSelect | null> {
-  if (!isCacheEnabled(input.step)) return null;
-
-  const ttlSeconds = getCacheTtlSeconds(input.step);
-  const cutoff = ttlSeconds ? new Date(input.now.getTime() - ttlSeconds * 1000) : null;
-  const conditions = [
-    eq(workflowRuns.companyId, input.run.companyId),
-    eq(workflowRuns.workflowId, input.definition.id),
-    ne(workflowRuns.id, input.run.id),
-    eq(workflowStepRuns.stepId, input.step.id),
-    eq(workflowStepRuns.status, "completed"),
-    ...(cutoff ? [gte(workflowStepRuns.completedAt, cutoff)] : []),
-  ];
-  const rows = await input.db
-    .select({ stepRun: workflowStepRuns })
-    .from(workflowStepRuns)
-    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .where(and(...conditions))
-    .orderBy(desc(workflowStepRuns.completedAt))
-    .limit(25);
-  const argsKey = stableJson(input.args);
-
-  for (const row of rows) {
-    const invocation = getMetadataRecord(row.stepRun.metadata, "toolInvocation");
-    const result = getMetadataRecord(row.stepRun.metadata, "toolResult");
-    if (result.success !== true) continue;
-    if (invocation.toolName !== input.toolName) continue;
-    if (stableJson(invocation.args ?? {}) !== argsKey) continue;
-    return row.stepRun;
-  }
-
-  return null;
-}
-
-async function getRunningConcurrencyCount(input: {
-  db: Db;
-  run: typeof workflowRuns.$inferSelect;
-  stepRun: typeof workflowStepRuns.$inferSelect;
-  concurrencyKey: string;
-}): Promise<number> {
-  const rows = await input.db
-    .select({ stepRun: workflowStepRuns })
-    .from(workflowStepRuns)
-    .innerJoin(workflowRuns, eq(workflowStepRuns.workflowRunId, workflowRuns.id))
-    .where(and(
-      eq(workflowRuns.companyId, input.run.companyId),
-      eq(workflowStepRuns.status, "running"),
-      ne(workflowStepRuns.id, input.stepRun.id),
-    ));
-  return rows.filter((row) => {
-    const controls = getMetadataRecord(row.stepRun.metadata, "executionControls");
-    return controls.concurrencyKey === input.concurrencyKey;
-  }).length;
 }
 
 async function blockToolStepRunForConcurrency(input: {
