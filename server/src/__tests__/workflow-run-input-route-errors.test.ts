@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   createDb,
   workflowDefinitions,
+  workflowRuns,
   workflowWebhookConfigs,
   workflowWebhookDeliveries,
 } from "@paperclipai/db";
@@ -28,6 +29,8 @@ const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const mockWorkflowService = vi.hoisted(() => ({
   getDefinition: vi.fn(),
   trigger: vi.fn(),
+  prepareTrigger: vi.fn(),
+  startPreparedRun: vi.fn(),
 }));
 vi.mock("../services/workflow/engine.js", () => ({ workflowService: mockWorkflowService }));
 
@@ -226,29 +229,37 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
         { key: "topic", type: "text", required: true },
       ],
     });
-    mockWorkflowService.trigger.mockImplementation(async () => ({
-      runId: mockedRunId(),
-      workflowId,
-      missionId: null,
-      status: "running",
-      completedAt: null,
-      stepRuns: [],
-    }));
+    mockWorkflowService.prepareTrigger.mockImplementation(async (tx: ReturnType<typeof createDb>) => {
+      const [run] = await tx.insert(workflowRuns).values({
+        id: mockedRunId(), companyId, workflowId, missionId: null, status: "pending",
+        triggeredBy: "webhook", triggerSource: "webhook",
+      }).returning();
+      return { run, replay: false };
+    });
+    mockWorkflowService.startPreparedRun.mockImplementation(async (_db: ReturnType<typeof createDb>, runId: string) => {
+      const [committed] = await db.select().from(workflowWebhookDeliveries).where(eq(workflowWebhookDeliveries.runId, runId));
+      if (!committed || committed.companyId !== companyId || committed.workflowId !== workflowId) {
+        throw new Error("webhook receipt was not committed before start");
+      }
+      return {};
+    });
   });
 
   it("translates a typed engine run-input error into 400 with structured details and no receipt runId", async () => {
-    mockWorkflowService.trigger.mockRejectedValue(typedSectionError());
+    mockWorkflowService.prepareTrigger.mockRejectedValue(typedSectionError());
 
     const res = await signedPost(JSON.stringify({ section: "news", topic: "release" }), "typed-error-key-1");
 
     expect(res.status).toBe(400);
     expect(res.body.details).toEqual(expectedDetails);
-    expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(1);
+    expect(mockWorkflowService.prepareTrigger).toHaveBeenCalledTimes(1);
+    expect(mockWorkflowService.startPreparedRun).not.toHaveBeenCalled();
     const [delivery] = await db
       .select()
       .from(workflowWebhookDeliveries)
       .where(eq(workflowWebhookDeliveries.idempotencyKey, "typed-error-key-1"));
-    expect(delivery?.runId ?? null).toBeNull();
+    expect(delivery).toBeDefined();
+    expect(delivery!.runId).toBeNull();
     // activity 로깅은 이 파일에서 모의다. 실제 DB 행 수가 아니라 모의 호출로 검증한다.
     expect(logActivity).not.toHaveBeenCalled();
   });
@@ -257,11 +268,11 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
     const res = await signedPost(JSON.stringify({ section: "manuals", topic: "release" }), "policy-key-1");
 
     expect(res.status).toBe(202);
-    // [care] 전체 호출 비교 금지(첫 인자 DB 포함). 3-인자 계약을 경계 projection으로 단언한다.
-    expect(mockWorkflowService.trigger).toHaveBeenCalledTimes(1);
-    const triggerCall = mockWorkflowService.trigger.mock.calls[0]!;
-    expect(triggerCall.length).toBe(3);
-    expect(triggerCall[0] === db).toBe(true);
+    // 준비는 트랜잭션에서 원본 입력/정책을 받고 실행은 바인딩 커밋 후 시작한다.
+    expect(mockWorkflowService.prepareTrigger).toHaveBeenCalledTimes(1);
+    const triggerCall = mockWorkflowService.prepareTrigger.mock.calls[0]!;
+    expect(triggerCall.length).toBe(4);
+    expect(triggerCall[0]).not.toBe(db);
     expect(triggerCall[1]).toMatchObject({
       workflowId,
       companyId,
@@ -270,6 +281,8 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
     });
     expect(triggerCall[1].metadata).toEqual({ section: "manuals", topic: "release" });
     expect(triggerCall[2]).toEqual({ legacyTextRequired: true });
+    expect(triggerCall[3]).toEqual({ deferWorkingNote: true });
+    expect(mockWorkflowService.startPreparedRun).toHaveBeenCalledWith(db, lastRunId);
     const [delivery] = await db
       .select()
       .from(workflowWebhookDeliveries)
