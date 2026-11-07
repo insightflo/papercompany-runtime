@@ -9,6 +9,7 @@ import { buildMissionExecutionDigest } from "./mission-execution-digest.js";
 import { buildMissionOwnerUnblockDescription, isTerminalIssueStatus } from "./mission-owner-recovery-comments.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { findRelatedKnowledgePatterns } from "./mission-owner-related-patterns.js";
+import { admitHumanCardForSource } from "./human-card-admission.js";
 import { ownerHumanCurrentKey, ownerHumanCurrentSchema, ownerHumanLifetimeSchema,
   sameOwnerHumanValue, type OwnerHumanScope } from "./owner-human-request-contract.js";
 import { readOwnerHumanCurrent } from "./owner-human-request-state.js";
@@ -124,12 +125,16 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
       // supervision tick while the original request merely waits for a human
       // answer (2026-11-07 runaway: 38 anchors / 40 cards in one mission).
       // Reuse the current lifetime's anchor until that card resolves or cancels.
+      // [R2 2026-11-08] The one-open-card invariant is mission-scoped, not lifetime-scoped:
+      // any pending mission-owner human card for this mission (any anchor/lifetime)
+      // blocks renewal so the mission never holds two open human cards at once.
       if (current?.pointer.recoveryNeeded) {
-        const [pendingCard] = await tx.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
+        const [pendingMissionCard] = await tx.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
           eq(operatorDecisions.companyId, mission.companyId),
-          eq(operatorDecisions.requestKey, `moi2:${current.lifetime.lifetimeId}`),
-          eq(operatorDecisions.status, "pending"))).limit(1);
-        if (pendingCard) {
+          eq(operatorDecisions.status, "pending"),
+          eq(operatorDecisions.sourceType, "mission_owner_human_input"),
+          sql`${operatorDecisions.sourceContext}->>'missionId' = ${mission.id}`)).limit(1);
+        if (pendingMissionCard) {
           return { mission, source, issue: locked.get(current.pointer.anchorIssueId)!, created: false };
         }
       }
@@ -183,7 +188,18 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
       // this anchor through the existing CAS writer; historical approval grants nothing.
       // The renewal key is derived from the predecessor lifetime only (never the new
       // anchor id), so retries and replays dedupe onto one stable key per round.
+      // [R1 2026-11-08] Auto-recoverable causes (429/quota adapter failures, stale queueing,
+      // issue_status_blocked settlement gaps, any terminal-but-unsettled run) must never mint
+      // a human decision card — retry/settlement recovery owns them. The anchor itself stays
+      // as the owner's bounded work surface (MAX_SOURCE_ANCHORS caps repeats).
       if (current?.pointer.recoveryNeeded) {
+        const admission = await admitHumanCardForSource(tx, mission.companyId, source.id);
+        if (!admission.admit) {
+          logger.warn({ missionId: mission.id, sourceIssueId: source.id, cause: admission.cause,
+            runId: admission.runId, errorCode: admission.errorCode },
+            "owner human request renewal suppressed: auto-recoverable cause (no human card)");
+          return { mission, source, issue, created: true };
+        }
         await renewOwnerHumanRequestWithCard(tx, { companyId: mission.companyId,
           previousLifetimeId: current.lifetime.lifetimeId, anchorIssueId: issue.id,
           requestKey: `owner-anchor-renewal:v2:${current.lifetime.lifetimeId}` });

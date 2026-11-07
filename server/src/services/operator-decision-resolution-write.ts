@@ -129,7 +129,7 @@ export function operatorDecisionResolutionWriteService(
       }
       const collectionAdmission = await lockQaRecoveryCollectionAdmission({ tx, before, result, rawInput, conflictFor });
       if (collectionAdmission?.kind === "replayed") return false;
-      if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before);
+      if (before.status === "pending") await assertOwnerHumanDecisionCurrent(tx, before, { allowTerminalAnchor: true });
       if (before.status === "pending" && directRestartSelected) {
         const [current] = await tx.select().from(operatorDecisions).where(eq(operatorDecisions.id, id)).for("update");
         if (current?.status === "resolved" && sameOperatorDecisionResult(current.result, result)) return false;
@@ -149,7 +149,7 @@ export function operatorDecisionResolutionWriteService(
         }
         const targetSnapshot = readTargetSnapshot(current.sourceContext);
         if (targetSnapshot) await assertTargetSnapshotCurrent(tx, id, current.companyId, targetSnapshot,
-          current.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
+          current.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "mission_alive" : "exact");
         const facts = await loadRecoveryAdviceIdentityFacts(tx as unknown as Db, current);
         const advice = facts
           ? evaluateRecoveryAdviceIdentity({ card: current, ...facts })
@@ -178,10 +178,11 @@ export function operatorDecisionResolutionWriteService(
       //   (applied=false)는 스냅샷과 무관하게 그대로 둔다. throw 시 트랜잭션이 롤백되어 카드는 pending 유지.
       const targetSnapshot = readTargetSnapshot(updated.sourceContext);
       if (targetSnapshot) {
-        // [moi currentness 완화 2026-10-17] 사람 응답 대기 중 이슈 상태 churn 은 정상 — moi 카드의
-        //   currentness는 이슈 종결 여부 기준(종결 이슈 resolve 는 기존대로 409 target_changed).
+        // [moi currentness 2026-11-08] moi 카드는 mission_alive 정책 — 식별자 소멸만 409.
+        //   앵커 종결은 정상 churn 이므로 사람 resolve 를 막지 않는다(2026-11-07 남발: 앵커 종결 →
+        //   resolve 409 + sweep 취소 → 사람이 답할 새 없이 5분마다 재발행).
         await assertTargetSnapshotCurrent(tx, id, updated.companyId, targetSnapshot,
-          updated.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "terminal_only" : "exact");
+          updated.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE ? "mission_alive" : "exact");
       }
       let continuationId: string | null = null;
       if (updated.continuationMode === "issue_current_assignee" && !directCommandSelected) {

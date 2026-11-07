@@ -57,7 +57,14 @@ describeDb("C08 source anchor producer", () => {
   const produce = (w: World, connection = db, deps: MissionServiceDeps = {}) =>
     createOwnerActions({ db: connection, deps }).ensureMainExecutorUnblockIssue(w.mission, w.source);
   // The 2026-11-07 runaway fix makes a still-pending human card block renewal, so
-  // tests that exercise the renewal path answer the current card first.
+  // tests that exercise the renewal path answer the current card while its anchor
+  // is still open, then terminalize the anchor exactly like a finished owner run.
+  const answeredWorld = async () => {
+    const w = await world(true, false, false);
+    await resolveCard(w);
+    await issueService(db).update(w.oldId, { status: "cancelled" });
+    return w;
+  };
   const resolveCard = async (w: World) => {
     const [pending] = (await cards(w)).filter((row) => row.status === "pending");
     if (pending) await operatorDecisionWriteService(db).resolve(pending.id,
@@ -86,7 +93,7 @@ describeDb("C08 source anchor producer", () => {
       row.id === pointer.payload!.lifetimeId)!.payload);
   };
   it("creates one new anchor/lifetime/key/pending card and preserves original author, bytes and history", async () => {
-    const w = await world(); await resolveCard(w);
+    const w = await answeredWorld();
     const old = await currentLifetime(w), before = await snapshot(w);
     const next = await produce(w), now = await currentLifetime(w);
     expect(next.id).not.toBe(w.oldId);
@@ -113,7 +120,7 @@ describeDb("C08 source anchor producer", () => {
     expect(after[0].filter((row) => row.eventType === "mission_owner_decision")).toHaveLength(1);
   });
   it("serializes independent connections, replays after response loss and notifies only after commit", async () => {
-    const w = await world(); await resolveCard(w);
+    const w = await answeredWorld();
     const notify = vi.fn<NonNullable<MissionServiceDeps["onOwnerActionCreated"]>>(async ({ issue }) => {
       const [stored] = await other.select().from(issues).where(eq(issues.id, issue.id));
       const linked = await other.select().from(operatorDecisions).where(eq(operatorDecisions.issueId, issue.id));
@@ -130,7 +137,7 @@ describeDb("C08 source anchor producer", () => {
     expect((await anchors(w))).toHaveLength(2); expect(await cards(w)).toHaveLength(2);
   });
   it("rolls the anchor, issue counter, lifetime, ending, pointer, card and audit back on real link write failure", async () => {
-    const w = await world(); await resolveCard(w);
+    const w = await answeredWorld();
     const before = await snapshot(w), notify = vi.fn();
     // Owned isolated DB only; the real writer reaches this CHECK after creating its card.
     await db.execute(sql.raw(`alter table workflow_transition_events add constraint c08_anchor_injected
@@ -163,7 +170,8 @@ describeDb("C08 source anchor producer", () => {
     expect(after[1].find((row) => row.issueId === next.id)).toMatchObject({ status: "pending", result: null });
   });
   it("current GET and exact POST replay use the renewed anchor while retaining the original decision", async () => {
-    const w = await world(), old = await currentLifetime(w); await resolveCard(w);
+    const w = await world(true, false, false), old = await currentLifetime(w); await resolveCard(w);
+    await issueService(db).update(w.oldId, { status: "cancelled" });
     const next = await produce(w), runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId,
       issueId: next.id, status: "running" }); // Current caller identity only.
@@ -180,7 +188,7 @@ describeDb("C08 source anchor producer", () => {
   });
 
   it("reuses the one open current anchor even when an older terminal anchor sorts first", async () => {
-    const w = await world(); await resolveCard(w);
+    const w = await answeredWorld();
     const next = await produce(w), before = await snapshot(w);
     expect((await produce(w)).id).toBe(next.id); expect(await snapshot(w)).toEqual(before);
     await issueService(db).update(next.id, { status: "cancelled" });
@@ -203,10 +211,11 @@ describeDb("C08 source anchor producer", () => {
   });
 
   it("caps anchor creation per source when cards keep ending without recovery", async () => {
-    const w = await world();
+    const w = await answeredWorld();
     let latest = w.oldId;
     for (let round = 0; round < 6; round += 1) {
       await resolveCard(w); // every card is answered, so renewal stays legitimate
+      await issueService(db).update(latest, { status: "cancelled" }); // its owner run ends the anchor
       const anchor = await produce(w);
       if (round < 4) {
         expect(anchor.id).not.toBe(latest); latest = anchor.id; // rounds 0-3 mint anchors 2-5
@@ -223,7 +232,12 @@ describeDb("C08 source anchor producer", () => {
     const fresh = await produce(nonhuman);
     expect(fresh.id).not.toBe(nonhuman.oldId); expect(await cards(nonhuman)).toHaveLength(0);
     expect((await events(nonhuman)).filter((row) => row.eventType === "owner_human_lifetime_v1")).toHaveLength(0);
-    const legacy = await world(true, true), old = await currentLifetime(legacy), next = await produce(legacy);
+    const legacy = await world(true, true), old = await currentLifetime(legacy);
+    // [R2 2026-11-08] 미션에 pending 사람 카드(moi1 포함)가 있으면 갱신이 보류된다 — 먼저 응답한다.
+    const [legacyCard] = (await cards(legacy)).filter((row) => row.requestKey.startsWith("moi1:"));
+    await operatorDecisionWriteService(db).resolve(legacyCard!.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "레거시 카드 응답" }, "board");
+    const next = await produce(legacy);
     expect((await currentLifetime(legacy))).toMatchObject({ identityMode: "keyed", anchorIssueId: next.id,
       decisionEventId: old.decisionEventId, heartbeatRunId: old.heartbeatRunId });
     expect((await cards(legacy)).find((row) => row.issueId === legacy.oldId)?.requestKey).toMatch(/^moi1:/);

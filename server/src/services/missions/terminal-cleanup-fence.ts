@@ -66,10 +66,11 @@ async function executeMissionTerminalCleanup(
       eq(missionSessions.status, "active"),
     ));
 
-  // [취소 회수] 취소된 미션에 매달린 pending 승인요청(operator decision)은 이후 결정될 수 없다.
-  // resolve(승인/기각 — 재실행 트리거)가 아니라 cancel로 회수한다(웨이크업·연속 실행 없음).
-  // completed에는 적용하지 않는다(종결 후 처리 요청은 여전히 유효할 수 있다).
-  if (status === "cancelled") {
+  // [종료 회수 2026-11-08 R3] 취소·완료된 미션에 매달린 pending 승인요청(operator decision)은
+  // 이후 결정될 수 없다. resolve(승인/기각 — 재실행 트리거)가 아니라 cancel로 회수한다(웨이크업·연속 실행 없음).
+  // completed 도 포함한다(R3): 종료 미션의 사람 결정 카드는 답을 가져올 수 없다 — 2026-11-02
+  // concept-onboarding(completed)에 pending 카드가 5일 방치된 라이브 사례. 전이 시점 이후 생성 카드는 영향 없음.
+  if (status === "cancelled" || status === "completed") {
     const missionIssueIds = executor
       .select({ id: issues.id })
       .from(issues)
@@ -99,7 +100,7 @@ async function executeMissionTerminalCleanup(
           operatorDecisionId: row.id,
           requestKey: row.requestKey,
           missionId,
-          reason: "mission_cancelled",
+          reason: status === "cancelled" ? "mission_cancelled" : "mission_completed",
         },
       })));
     }
