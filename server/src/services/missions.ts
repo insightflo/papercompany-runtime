@@ -802,7 +802,14 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     const issuesSvc = issueService(db);
     await ownerActions.ensureWorkflowIssuesLinkedToMission(mission);
 
-    const allCompanyIssues = await issuesSvc.list(mission.companyId);
+    // [목적] 이 트리는 issue 행을 그대로 API 응답으로 내보내므로 본문(description)까지 필요하다.
+    // [이유] 목록 기본값이 summary(description null)가 되면서 view 를 넘기지 않으면
+    //        GET /api/missions/:id/issues 가 본문 없는 행을 돌려주고, 화면(HermesChatPanel 의
+    //        attention 점수·serializeWorkItemContext, MissionIssueTree/ExecutionOverview)이 빈 본문을 받는다.
+    //        여기서 view="full" 을 넘겨 변경 전(main) 동작을 그대로 유지한다.
+    // [주의] 이 함수는 회사 전체 이슈를 읽어 하위 트리를 계산한다(변경 전부터의 비용).
+    //        missionId/ids 로 후보를 좁히는 최적화는 이 커밋 범위 밖 후속 과제다.
+    const allCompanyIssues = await issuesSvc.list(mission.companyId, { view: "full" });
     const includedIssueIds = new Set(
       allCompanyIssues.filter((issue) => issue.missionId === missionId).map((issue) => issue.id),
     );

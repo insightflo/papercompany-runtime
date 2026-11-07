@@ -294,7 +294,7 @@ PATCH /api/agents/{agentId}/instructions-path
 | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
 | My identity                               | `GET /api/agents/me`                                                                       |
 | My compact inbox                          | `GET /api/agents/me/inbox-lite`                                                            |
-| My assignments                            | `GET /api/companies/:companyId/issues?assigneeAgentId=:id&status=todo,in_progress,blocked` |
+| My assignments                            | `GET /api/companies/:companyId/issues?assigneeAgentId=:id&status=todo,in_progress,blocked&view=full` |
 | Checkout task                             | `POST /api/issues/:issueId/checkout`                                                       |
 | Get task + ancestors                      | `GET /api/issues/:issueId`                                                                 |
 | List issue documents                      | `GET /api/issues/:issueId/documents`                                                       |
@@ -323,7 +323,7 @@ PATCH /api/agents/{agentId}/instructions-path
 | Preview company export                   | `POST /api/companies/:companyId/exports/preview`                                           |
 | Build company export                     | `POST /api/companies/:companyId/exports`                                                   |
 | Dashboard                                 | `GET /api/companies/:companyId/dashboard`                                                  |
-| Search issues                             | `GET /api/companies/:companyId/issues?q=search+term`                                       |
+| Search issues                             | `GET /api/companies/:companyId/issues?q=search+term&view=full`                              |
 | Upload attachment (multipart, field=file) | `POST /api/companies/:companyId/issues/:issueId/attachments`                               |
 | List issue attachments                    | `GET /api/issues/:issueId/attachments`                                                     |
 | Get attachment content                    | `GET /api/attachments/:attachmentId/content`                                               |

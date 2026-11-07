@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -94,6 +94,16 @@ export interface IssueFilters {
   missionId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
+  /**
+   * [목적] 목록 응답 필드 범위. "summary"(기본)는 본문(description)을 DB에서 읽지 않는다.
+   * [계약] "full"이면 기존과 동일하게 전체 필드를 반환한다. 그 외 값은 summary로 취급한다.
+   * [이력] #673 이 호출자 옵트인(view="full")을 먼저 넣고, 이 커밋에서 summary 기본값과
+   *        페이지 윈도우를 구현하며 두 선언을 한 곳으로 합쳤다(중복 선언 제거).
+   */
+  view?: "summary" | "full";
+  /** 페이지 윈도우 — 호출자가 지정했을 때만 적용한다(기본 limit 없음). */
+  limit?: number;
+  offset?: number;
 }
 
 type IssueRow = typeof issues.$inferSelect;
@@ -1028,11 +1038,36 @@ export function issueService(db: Db) {
           ELSE 6
         END
       `;
-      const rows = await db
-        .select()
+      // [목적] 목록 조회는 기본(summary)에서 이슈 본문(description)을 Postgres에서 읽지 않는다.
+      // [이유] A1 운영(3ed5a29a) 실측: GET /api/companies/:companyId/issues 응답이 64,658,717 bytes였고
+      //        description이 46.54MB(필드 합계 53.38MB의 87%)로 단일 최대 항목이었다. 대부분이
+      //        DB→Node 전송 비용이므로, 조회 후 잘라내는 방식(전송 46MB 유지)이 아니라 SELECT
+      //        컬럼 자체를 뺀다. 본문은 상세 화면이 단건 조회(getById)로 가져온다.
+      // [계약] summary 행도 description 키는 유지하고 값만 null이다(키 부재를 보는 JSON 소비자 방지).
+      //        SELECT에서는 컬럼 대신 SQL NULL 리터럴을 넣어 두 뷰가 같은 행 shape을 유지하고,
+      //        아래 map이 키 존재를 한 번 더 보장한다. view="full"이면 기존 페이로드를 그대로 복원한다.
+      const view = filters?.view === "full" ? "full" : "summary";
+      const issueColumns = getTableColumns(issues);
+      const { description: _omittedDescriptionColumn, ...summaryIssueColumns } = issueColumns;
+      const listColumns = view === "full"
+        ? issueColumns
+        : { ...summaryIssueColumns, description: sql<string | null>`null` };
+      const listQuery = db
+        .select(listColumns)
         .from(issues)
         .where(and(...conditions))
-        .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt));
+        .orderBy(hasSearch ? asc(searchOrder) : asc(priorityOrder), asc(priorityOrder), desc(issues.updatedAt))
+        .$dynamic();
+      // [이유] 기본 limit을 두지 않는다 — 10.5k 이슈 보드를 조용히 잘라내면 정확성 회귀다.
+      //        UI 페이지네이션이 먼저 붙고, 그 뒤에 호출자가 limit/offset을 넘기는 순서를 전제한다.
+      //        offset 단독 지정도 허용한다(SQL OFFSET without LIMIT은 유효).
+      let windowedQuery = listQuery;
+      if (filters?.limit !== undefined) windowedQuery = windowedQuery.limit(filters.limit);
+      if (filters?.offset !== undefined) windowedQuery = windowedQuery.offset(filters.offset);
+      const selectedRows = await windowedQuery;
+      const rows: IssueRow[] = view === "full"
+        ? selectedRows
+        : selectedRows.map((row) => ({ ...row, description: null }));
       const withLabels = await withIssueLabels(db, rows);
       const runMap = await activeRunMapForIssues(db, withLabels);
       const withRunsBase = withActiveRuns(withLabels, runMap);
