@@ -41,7 +41,6 @@ import {
 } from "@paperclipai/db";
 import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
-import { loadConfig } from "../config.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { createHeartbeatRunLog } from "./heartbeat-run-log.js";
@@ -255,61 +254,21 @@ import {
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
 
-type ActiveHeartbeatExecutionFrame = {
-  readonly run: typeof heartbeatRuns.$inferSelect;
-  readonly finalizationVersion: number | null;
-  adapterInvocationAttempted: boolean;
-  actualCaptured: boolean;
-  identityObserved: boolean;
-  actualDrainIdentity: HeartbeatActualDrainIdentity | null;
-  noActualInvocationConfirmed: boolean;
-  c5ExecutionOptedIn: boolean;
-  c5NotInvoked: { proof: C5NotInvokedProof; identity: QaCorrectionExecutionIdentity } | null;
-  c5TerminalWriterSnapshot: typeof heartbeatRuns.$inferSelect | null;
-  ownerReleaseBlocked: boolean;
-  conflicted: boolean;
-};
+
 
 type HeartbeatServiceOptions = {
   qaCorrectionExecution?: { ownerRuntime: QaFileOwnerRuntime };
 };
 
-// A root Db keeps its explicitly supplied owner runtime across bare service recreation.
-// The WeakMap keys by the exact Db object and does not share execution contexts or roots.
 import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "./heartbeat-attempt-identity.js";
 
-const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
 
-function bindHeartbeatC5OwnerRuntime(db: Db, explicit: QaFileOwnerRuntime | undefined) {
-  const bound = heartbeatC5OwnerRuntimeByDb.get(db);
-  if (explicit) {
-    if (bound && bound !== explicit) throw new Error("heartbeat_c5_owner_runtime_binding_conflict");
-    if (!bound) heartbeatC5OwnerRuntimeByDb.set(db, explicit);
-    return explicit;
-  }
-  if (bound) return bound;
-  const ownerRuntime = createQaFileOwnerRuntime(loadConfig());
-  heartbeatC5OwnerRuntimeByDb.set(db, ownerRuntime);
-  return ownerRuntime;
-}
 
-function createHeartbeatC5SharedAdmission(ownerRuntime: QaFileOwnerRuntime): QaRemediationSharedAdmissionRuntime {
-  const outerNotifications = createReplacementRootNotifications();
-  const resolutionMap = new Map<string, unknown>();
-  const rootResolutionMaps = new WeakMap<ReplacementRootNotifications, Map<string, unknown>>();
-  return {
-    ownerRuntime,
-    outerNotifications,
-    resolutionMap,
-    bindResolutionMap: (notifications, map) => rootResolutionMaps.set(notifications, map),
-    driftBudget: { corrections: 0 },
-  };
-}
 
-function mergeHeartbeatRootNotifications(target: ReplacementRootNotifications, source: ReplacementRootNotifications) {
-  for (const agentId of source.agentIds) target.agentIds.add(agentId);
-  for (const wakeupRequestId of source.correctionWakeupRequestIds) target.correctionWakeupRequestIds.add(wakeupRequestId);
-}
+
+
+
+
 
 class C5NotInvokedExecutionError extends Error {
   readonly code = "c5_held_not_invoked";
@@ -318,18 +277,9 @@ class C5NotInvokedExecutionError extends Error {
   }
 }
 
-// heartbeatService(db) is created by several control-plane callers. Share only live frames
-// for that exact Db object so cancellation can consult the active actual without persistence.
-const activeHeartbeatExecutionFramesByDb = new WeakMap<Db, Map<string, ActiveHeartbeatExecutionFrame>>();
 
-function activeHeartbeatExecutionFrames(db: Db) {
-  let frames = activeHeartbeatExecutionFramesByDb.get(db);
-  if (!frames) {
-    frames = new Map();
-    activeHeartbeatExecutionFramesByDb.set(db, frames);
-  }
-  return frames;
-}
+
+
 
 
 
@@ -355,7 +305,7 @@ import {
 import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type C5NotInvokedProof, type QaCorrectionExecutionIdentity,
   type QaRemediationSharedAdmissionRuntime }
   from "./workflow/control-flow/qa-remediation-admission-root.js";
-import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
+import type { QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import { createHeartbeatQueuedStaleRecovery } from "./heartbeat-queued-stale-recovery.js";
@@ -8704,6 +8654,8 @@ import { heartbeatRunListColumns } from "./heartbeat-bounded-reads.js";
 import { REPO_ONLY_CWD_SENTINEL } from "./heartbeat-managed-workspace.js";
 import { ISSUE_RUN_START_STATUSES, PROMOTED_REJECT_ISSUE_STATUSES } from "./heartbeat-queue-lifecycle.js";
 import { DETACHED_PROCESS_ERROR_CODE, DETACHED_REAP_AFTER_MS, DETACHED_GRACE_SEC, HEARTBEAT_AGENT_DETACHED_DEMOTE_MS } from "./heartbeat-process-liveness.js";
+import { bindHeartbeatC5OwnerRuntime, createHeartbeatC5SharedAdmission, mergeHeartbeatRootNotifications } from "./heartbeat-c5-runtime-context.js";
+import { activeHeartbeatExecutionFrames, activeHeartbeatExecutionFramesByDb, type ActiveHeartbeatExecutionFrame } from "./heartbeat-execution-frames.js";
 export { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
 export { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
 export { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
