@@ -120,6 +120,7 @@ pnpm -r typecheck
 Notes:
 - `packages/db/drizzle.config.ts` reads compiled schema from `dist/schema/*.js`
 - `pnpm db:generate` compiles `packages/db` first
+- If Drizzle regenerates DDL from already journaled manual migrations, compare the output with those migrations, keep only intended changes in dependency order, and verify fresh and upgrade databases plus a no-diff regeneration before using it.
 
 ## 7. Verification Before Hand-off
 
@@ -135,6 +136,8 @@ If anything cannot be run, explicitly report what was not run and why.
 
 - When an isolated HOME is used with Corepack and networking is disabled, point COREPACK_HOME at an existing local cache, disable Corepack downloads, and verify `pnpm --version` before starting tests.
 - When replacing process-status commands in isolated tests, inventory every invocation and validate the required state, parent and command-identity queries; an unsupported query must not be treated as proof that a process exited.
+- When a PostgreSQL lock-contention test requires both a blocker and specific blocked SQL as evidence, poll the same backend until both match; fail within the existing timeout if they never do.
+- When Node's HTTP client throws an uncaught `setTypeOfService EINVAL` on macOS, retain the failed result and compare Node/undici versions and an isolated loopback reproduction before attributing the cause.
 - When dividing test ownership among workers, inspect selected test bodies and imported fixtures for excluded inputs, shutdown behavior, and process signals; exclude another worker's scenarios from both baseline and candidate runs.
 - When an independent reviewer is given an allowed test selection, compare the executed command and collected cases with that selection; report extra cases or missing isolation evidence instead of claiming the selection was followed.
 - When recording a review time, read the system clock and time zone directly; do not use a future or inconsistent timestamp as execution-order evidence until corrected.
