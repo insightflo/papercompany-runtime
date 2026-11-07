@@ -215,6 +215,13 @@ export function createRunMainExecutorSupervision({
     const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
       missionIssues.map((issue) => issue.id),
     );
+    // [R4 2026-11-08 이중 경로 금지] 미션에 pending 사람 결정 카드가 있으면 그 카드가 기다림의
+    // 단일 표면이다 — 카드 대기 중에는 오너/실행자 stale-source 자동 wakeup 회수를 보류해서
+    // '회구 run → 새 오류 → 새 카드' 루프(2026-11-07 남발)를 끊는다. 카드 resolve 웨이크가
+    // 회구를 이어받는다(continuationMode: issue_current_assignee).
+    const missionPendingHumanDecisionIds = Array.from(approvalWaitByIssueId.values())
+      .flatMap((marker) => marker.operatorDecisionIds);
+    const missionHasPendingHumanCard = missionPendingHumanDecisionIds.length > 0;
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -292,7 +299,10 @@ export function createRunMainExecutorSupervision({
           // [P3 주의] stale-source 경로의 issue.originId 는 보통 workflow run id(QA issue id 아님)라
           //   resolveQaGateIssueId 가 no-op. 정확한 QA gate derive 가 필요하므로 이 삽입점은 제거
           //   (잘못된 차단 방지). QA recovery ownership 차단은 retry case(unblock issue, originId=source)에서 처리.
-          if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
+          if (missionHasPendingHumanCard) {
+            findings.push(`stale_source_wakeup_deferred_human_card_pending: ${label} stale but mission holds ${missionPendingHumanDecisionIds.length} pending human decision card(s) — owner auto-recovery deferred until the card resolves (single-path rule)`);
+            wakeupDispatchStatus = "not_requested";
+          } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
             findings.push(`stale_source_wakeup_requires_diagnosis: ${label} terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; diagnose root cause before choosing same-issue wakeup or recovery issue`);
             wakeupDispatchStatus = "not_requested";
           } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched) {

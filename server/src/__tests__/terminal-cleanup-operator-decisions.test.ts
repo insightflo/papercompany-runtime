@@ -5,10 +5,11 @@ import type { Db } from "@paperclipai/db";
 import { runMissionTerminalCleanup } from "../services/missions/terminal-cleanup-fence.js";
 import { schema, seedTerminal, terminalDatabase } from "./helpers/terminal-cleanup-fixture.js";
 
-// [계약] 미션 cancel 터미널 정리는 해당 미션에 매달린 pending 승인요청을 cancel로 회수한다.
+// [계약] 미션 cancel·completed 터미널 정리는 해당 미션에 매달린 pending 승인요청을 cancel로 회수한다.
 //   - 회수 대상: sourceContext.missionId 일치 또는 미션 이슈에 issueId 로 연결된 pending.
 //   - 회수 제외: 다른 미션·회사 소속, 미션 무관 company-scope, 이미 resolved/cancelled.
-//   - completed 종결에는 적용하지 않는다(종결 후 처리 요청은 유효할 수 있다).
+//   - completed 도 회수한다(R3 2026-11-08): 종료 미션의 카드는 답을 가져올 수 없다
+//     (2026-11-02 concept-onboarding completed 에 pending 카드 5일 방치 라이브 사례).
 function decisionSeed(companyId: string, overrides: Record<string, unknown>) {
   return {
     companyId,
@@ -100,7 +101,7 @@ describe("terminal cleanup withdraws mission-scoped pending operator decisions o
     }
   }, 60_000);
 
-  it("leaves pending decisions untouched when the mission completes", async () => {
+  it("withdraws pending decisions when the mission completes (R3)", async () => {
     const f = await seedTerminal(db);
     const [pending] = await db.insert(schema.operatorDecisions).values(
       decisionSeed(f.company.id, { sourceContext: { missionId: f.mission.id, workflowId: null, workflowRunId: null, artifactRefs: [] } }),
@@ -108,8 +109,13 @@ describe("terminal cleanup withdraws mission-scoped pending operator decisions o
     const result = await runMissionTerminalCleanup(db, f.input);
     expect(result.aborted).toBe(false);
     const [row] = await db.select().from(schema.operatorDecisions).where(eq(schema.operatorDecisions.id, pending.id));
-    expect(row.status).toBe("pending");
-    expect(row.cancelledAt).toBeNull();
+    expect(row.status).toBe("cancelled");
+    expect(row.cancelledAt).toEqual(f.input.now);
+    expect(row.updatedAt).toEqual(f.input.now);
+    const activity = await db.select().from(schema.activityLog).where(eq(schema.activityLog.entityId, pending.id));
+    expect(activity).toHaveLength(1);
+    expect(activity[0]).toMatchObject({ action: "operator_decision.cancelled", actorType: "system",
+      details: { missionId: f.mission.id, reason: "mission_completed" } });
   }, 60_000);
 
   it("second cancel through the real service path is idempotent — no double activity, no errors", async () => {

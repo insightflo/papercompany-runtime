@@ -361,17 +361,30 @@ describeDb("operator decision write service", () => {
         expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
       });
 
-      it("M2: terminal anchor issue (done) still rejects with 409 target_changed and stays pending", async () => {
+      it("M2: terminal anchor issue (done) still lets a human resolve — 409 only on identifier loss", async () => {
         const service = operatorDecisionWriteService(db);
         const created = await service.create(companyId, moiCard("moi-terminal", {
           issueId, issueStatus: "in_progress",
         }), { type: "agent", id: agentId });
         await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
-        await expect(service.resolve(created.decision.id, resolveBody, "board"))
-          .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["issueStatus"] } });
-        expect(await decisionRow(created.decision.id)).toMatchObject({ status: "pending", result: null });
-        expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(0);
-        expect(await db.select().from(issueComments)).toHaveLength(0);
+        // [R3 2026-11-08] moi resolve gate 은 mission_alive — 앵커 종결은 카드를 무효화하지 않으므로
+        //   사람이 답하면 정상 적용된다(앵커 종결 → 409 → 재발행 루프가 11-07 카드 남발의 엔진이었다).
+        const resolved = await service.resolve(created.decision.id, resolveBody, "board");
+        expect(resolved).toMatchObject({ applied: true, decision: { status: "resolved" } });
+        expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
+
+        // 식별자 소멸(스냅샷 대상 run 삭제)은 여전히 409 target_changed — 카드는 pending 유지, 추가 적용 없음.
+        //   (이슈 하드 삭제 케이스는 FK set-null 로 카드 issueId 도 함께 null 이 되어 별개 경로다.)
+        const { workflowRunId } = await seedWorkflowFixture();
+        const extinct = await service.create(companyId, moiCard("moi-extinct", {
+          workflowRunId, workflowRunStatus: "running",
+        }), { type: "agent", id: agentId });
+        await db.delete(workflowRuns).where(eq(workflowRuns.id, workflowRunId));
+        await expect(service.resolve(extinct.decision.id, resolveBody, "board"))
+          .rejects.toMatchObject({ status: 409, details: { code: "target_changed", mismatch: ["workflowRunId"] } });
+        expect(await decisionRow(extinct.decision.id)).toMatchObject({ status: "pending", result: null });
+        expect(await db.select().from(operatorDecisionContinuations)).toHaveLength(1);
+        expect(await db.select().from(issueComments)).toHaveLength(1);
       });
 
       it("M3: non-moi cards keep the exact-snapshot rejection on the same open-state churn", async () => {

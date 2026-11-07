@@ -300,7 +300,7 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     expect(publishesOfType("mission.human_input_requested")).toHaveLength(1);
   });
 
-  it("S4: open-state issue churn keeps the moi card resolvable; a terminal anchor still 409s and restores", async () => {
+  it("S4: open-state issue churn keeps the moi card resolvable; a terminal anchor no longer blocks resolution", async () => {
     const submitted = await submitDecision();
     const eventId: string = submitted.body.eventId;
     const card = await moiCard(eventId);
@@ -331,19 +331,18 @@ describeDb("mission owner human-input decision card contract E2E", () => {
     expect(secondRow).toMatchObject({ status: "pending" });
     const secondCardId: string = secondRow!.id;
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
-    const conflict = await resolveCard(secondCardId);
-    expect(conflict.status).toBe(409);
-    expect(conflict.body).toMatchObject({
-      details: { code: "target_changed", mismatch: expect.arrayContaining(["issueStatus"]), operatorDecisionId: secondCardId },
-    });
-    const [stillPending] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, secondCardId));
-    expect(stillPending).toMatchObject({ status: "pending", result: null });
-
-    // 종결 후 원복(재오픈)이면 같은 카드로 다시 resolve 할 수 있다(거부는 영구적이지 않음).
-    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
-    const restored = await resolveCard(secondCardId);
-    expect(restored.status, JSON.stringify(restored.body)).toBe(200);
-    expect(restored.body.data).toMatchObject({ applied: true, decision: { status: "resolved" } });
+    // [2026-11-08 개정] 종결 앵커도 사람 resolve 를 막지 않는다(mission_alive 정책) — 오너 회수
+    // run 이 앵커를 닫아도 사람이 답할 수 있어야 한다(2026-11-07 남발: 앵커 종결 → 409 +
+    // sweep 취소 → 5분마다 재발행 루프).
+    const resolvedOnTerminal = await resolveCard(secondCardId);
+    expect(resolvedOnTerminal.status, JSON.stringify(resolvedOnTerminal.body)).toBe(200);
+    expect(resolvedOnTerminal.body.data).toMatchObject({ applied: true, decision: { status: "resolved" } });
+    const [resolvedRow] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.id, secondCardId));
+    expect(resolvedRow).toMatchObject({ status: "resolved" });
+    // 이미 확정된 결정의 멱드 재요청은 그대로 두다(거부 아님).
+    const replayed = await resolveCard(secondCardId);
+    expect(replayed.status, JSON.stringify(replayed.body)).toBe(200);
+    expect(replayed.body.data).toMatchObject({ decision: { status: "resolved" } });
   }, 30_000);
 
   it("S5: escalate submissions satisfy the same card contract and deliver the resolve wake", async () => {
