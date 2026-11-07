@@ -6,6 +6,7 @@ import type { Db } from "@paperclipai/db";
 import { workflowWebhookConfigs, workflowWebhookDeliveries } from "@paperclipai/db";
 import type { WorkflowRunInput } from "@paperclipai/shared/validators/workflow-run-inputs";
 import { seedRunInputWorkflow } from "./workflow-run-input-fixture.js";
+import { signWorkflowWebhook } from "../../services/workflow/webhook-signature.js";
 import { errorHandler } from "../../middleware/index.js";
 import {
   webhookRawBodyErrorHandler,
@@ -18,7 +19,7 @@ import { secretService } from "../../services/secrets.js";
  * [목적] Task 6B HTTP 경계 통합 테스트 전용 픽스처. 회사 스코프 보드 액터 Express 앱과
  * raw webhook 앱 조립, 웹훅 서명·전송, 암호화 시크릿/컨피그 시드를 제공한다.
  * [care] 테스트 전용. 실제 회사가 아닌 픽스처가 만든 임시 회사에만 시크릿을 만든다.
- * 서명 규약은 기존 HMAC-SHA256("${timestamp}.${rawBody}") 그대로다(프로토콜 변경 없음).
+ * 발신 서명은 공통 웹훅 서명 함수의 현재 계약을 따른다.
  */
 
 // [선언] HTTP 경계 테스트 공통 runInputs 선언군. radio required+default, checkbox,
@@ -103,11 +104,8 @@ export function buildWebhookApp(db: Db): express.Express {
   return app;
 }
 
-export function signWebhookSecret(secret: string, timestamp: string, rawBody: string): string {
-  return crypto
-    .createHmac("sha256", secret)
-    .update(`${timestamp}.${rawBody}`)
-    .digest("hex");
+export function signWebhookSecret(secret: string, timestamp: string, rawBody: string, idempotencyKey: string): string {
+  return signWorkflowWebhook(secret, timestamp, idempotencyKey, rawBody);
 }
 
 /** 픽스처 회사 스코프에서 웹훅 시크릿(암호화 저장)과 컨피그를 만들고 평문 시크릿을 돌려준다. */
@@ -147,11 +145,12 @@ export async function signedWebhookPost(
   opts: SignedWebhookOptions = {},
 ) {
   const ts = opts.ts ?? String(Math.floor(Date.now() / 1000));
+  const key = opts.key ?? `idem-${crypto.randomUUID()}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Timestamp": ts,
-    "X-Idempotency-Key": opts.key ?? `idem-${crypto.randomUUID()}`,
-    "X-Signature": opts.sig ?? signWebhookSecret(secretValue, ts, rawBody),
+    "X-Idempotency-Key": key,
+    "X-Signature": opts.sig ?? signWebhookSecret(secretValue, ts, rawBody, key),
   };
   for (const header of opts.omit ?? []) delete headers[header];
   return request(app)

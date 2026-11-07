@@ -10,6 +10,7 @@ import {
   workflowWebhookConfigs,
   workflowWebhookDeliveries,
 } from "@paperclipai/db";
+import { signWorkflowWebhook } from "../services/workflow/webhook-signature.js";
 import { errorHandler } from "../middleware/index.js";
 import { WorkflowRunInputValidationError } from "../services/workflow/run-input-normalization.js";
 import { workflowRoutes } from "../routes/workflows.js";
@@ -159,10 +160,7 @@ describeEmbeddedPostgres("webhook route run-input error boundary (POST /api/webh
 
   const signedPost = (body: string, key = `idem-${crypto.randomUUID()}`) => {
     const ts = String(Math.floor(Date.now() / 1000));
-    const signature = crypto
-      .createHmac("sha256", secretValue)
-      .update(`${ts}.${body}`)
-      .digest("hex");
+    const signature = signWorkflowWebhook(secretValue, ts, key, body);
     return request(app)
       .post(`/api/webhooks/workflows/${workflowId}`)
       .set("Content-Type", "application/json")

@@ -243,8 +243,14 @@ export function WorkflowWebhookPanel({ workflowId }: { workflowId: string }): JS
           <pre style={{ ...hintStyle, margin: 0 }}>{`curl -X POST ${webhookDeliveryUrl(workflowId)} \\
   -H "X-Timestamp: <unix-seconds>" \\
   -H "X-Idempotency-Key: <uuid>" \\
-  -H "X-Signature: hex(HMAC-SHA256(secret, \\\`\${timestamp}.\${body}\\\`))" \\
+  -H "X-Signature: v2=<HMAC-SHA256-hex>" \\
   -H "content-type: application/json" -d '{...}'`}</pre>
+          <pre style={{ ...hintStyle, margin: 0 }}>{`v2 HMAC 입력: UTF-8("papercompany-webhook-v2") + 0x00 +
+  u32be(byteLength(timestamp)) + UTF-8(timestamp) +
+  u32be(byteLength(trim(key))) + UTF-8(trim(key)) +
+  u32be(byteLength(body)) + 원본 body 바이트
+timestamp와 key 길이는 UTF-8 바이트 수이고, body 길이는 실제 전송 바이트 수입니다.
+u32be는 뒤따르는 데이터의 바이트 길이를 4바이트 big-endian으로 표시합니다.`}</pre>
         </div>
       ) : null}
     </section>

@@ -28,7 +28,8 @@ function createInputFromDecision(row: DecisionRow) {
 
 // C08 resolve gate: lock mission/current lifetime before the pending card CAS. The stored card is
 // rebuilt byte-for-byte and checked through the same binding authority as creation.
-export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: DecisionRow): Promise<void> {
+export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: DecisionRow,
+  options: { allowTerminalAnchor?: boolean } = {}): Promise<void> {
   const [binding] = await tx.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, row.companyId),
     sql`${workflowTransitionEvents.payload}->>'operatorDecisionId' = ${row.id}`)).limit(1);
@@ -45,7 +46,7 @@ export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: Dec
     operatorDecisionId: row.id, code: "owner_human_decision_stale",
   });
   const guard = await lockOwnerHumanRequestCard(tx, row.companyId, input,
-    { type: "agent", id: row.requestedByAgentId });
+    { type: "agent", id: row.requestedByAgentId }, options);
   if (!guard) throw conflict("Owner human decision is not current", {
     operatorDecisionId: row.id, code: "owner_human_decision_stale",
   });
@@ -55,8 +56,11 @@ export async function assertOwnerHumanDecisionCurrent(tx: OwnerHumanTx, row: Dec
 }
 
 // [moi currentness] issueStatus 비교 정책 — "exact" 는 기존 정확-스냅샷(qa rebind·source defect 등
-//   전 유형 불변), "terminal_only" 는 moi 전용 완화(열린 상태 간 전환은 통과, 종결만 mismatch).
-export type IssueStatusCurrentnessPolicy = "exact" | "terminal_only";
+//   전 유형 불변), "terminal_only" 는 종결 도달만 mismatch 로 보는 완화,
+//   "mission_alive" 는 moi 전용(2026-11-08): 대상 상태 변화(앵커 종결 포함)로는 카드를 무효화하지
+//   않고 식별자 소멸만 mismatch 로 본다. 오너 회수 run 이 앵커를 종결시켜도 사람 결정 카드는
+//   살아 있어야 사람이 답할 수 있다(2026-11-07 남발: 앵커 종결 → sweep 취소 → 5분마다 재발행).
+export type IssueStatusCurrentnessPolicy = "exact" | "terminal_only" | "mission_alive";
 
 // [currentness gate] 저장된 sourceContext 에서 대상 스냅샷을 안전하게 꺼낸다. 스냅샷은 create 시점에
 //   zod 검증을 통과해 저장되며, 이전 규약 행(스냅샷 키 없음)은 null 을 반환해 기존 동작을 그대로 둔다.
@@ -84,13 +88,14 @@ export async function collectTargetSnapshotMismatch(
     if (!issue || issue.companyId !== companyId) mismatch.push("issueId");
     else if (issueStatusPolicy === "terminal_only") {
       if (TERMINAL_ISSUE_STATUSES.has(issue.status)) mismatch.push("issueStatus");
-    } else if (snapshot.issueStatus != null && issue.status !== snapshot.issueStatus) mismatch.push("issueStatus");
+    } else if (issueStatusPolicy === "exact" && snapshot.issueStatus != null && issue.status !== snapshot.issueStatus) mismatch.push("issueStatus");
+    // "mission_alive": 대상이 살아 있으면 상태 변화는 정상 churn — 비교 없음.
   }
   if (snapshot.workflowRunId != null) {
     const run = await tx.select({ companyId: workflowRuns.companyId, status: workflowRuns.status }).from(workflowRuns)
       .where(eq(workflowRuns.id, snapshot.workflowRunId)).then((rows) => rows[0] ?? null);
     if (!run || run.companyId !== companyId) mismatch.push("workflowRunId");
-    else if (snapshot.workflowRunStatus != null && run.status !== snapshot.workflowRunStatus) mismatch.push("workflowRunStatus");
+    else if (issueStatusPolicy !== "mission_alive" && snapshot.workflowRunStatus != null && run.status !== snapshot.workflowRunStatus) mismatch.push("workflowRunStatus");
   }
   if (snapshot.stepRunId != null) {
     const stepRun = await tx.select({
@@ -102,8 +107,8 @@ export async function collectTargetSnapshotMismatch(
       .where(eq(workflowStepRuns.id, snapshot.stepRunId)).then((rows) => rows[0] ?? null);
     if (!stepRun || stepRun.runCompanyId !== companyId) mismatch.push("stepRunId");
     else {
-      if (snapshot.stepRunStatus != null && stepRun.status !== snapshot.stepRunStatus) mismatch.push("stepRunStatus");
-      if (snapshot.executionGeneration != null && stepRun.executionGeneration !== snapshot.executionGeneration) {
+      if (issueStatusPolicy !== "mission_alive" && snapshot.stepRunStatus != null && stepRun.status !== snapshot.stepRunStatus) mismatch.push("stepRunStatus");
+      if (issueStatusPolicy !== "mission_alive" && snapshot.executionGeneration != null && stepRun.executionGeneration !== snapshot.executionGeneration) {
         mismatch.push("executionGeneration");
       }
     }

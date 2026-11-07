@@ -182,9 +182,10 @@
 - Root cause: Continuation fixtures mixed DB microsecond time and JavaScript millisecond time; competing test runners and PG resource pressure were observed, but original PG timeout/CU 401 causes remain unproven.
 - Category: test determinism / resource contention
 - Fix: Fixed fixture clock, restored CU environment with failure diagnostics, closed DB client before cleanup; waited for other Vitest processes, used fresh temp directories and one worker. Fresh full suite passed 991 files / 7,468 tests, with two expected skips.
-- Prevention rule: Do not count isolated reruns as full-suite success. Avoid competing full suites, explicitly set due times, restore fixture environment and inspect unexpected DB skips. Never kill another worktree's processes.
+- Prevention rule: Do not count isolated reruns as full-suite success. Avoid competing full suites. Before parallel builds or large typechecks on a shared host, check load and swap; if pressure is observed, use serial checks or CI for the same revision. Explicitly set due times, restore fixture environment and inspect unexpected DB skips. Never kill another worktree's processes.
 - Reuse trigger: Embedded Postgres full gates fail only under sustained suite execution.
 - Evidence: `/tmp/qag/full-test-serial-summary.md`, `/tmp/qag/test-determinism-focused.log`, `/tmp/qag/final-gates-summary.md`.
+- 2026-11-06 follow-up: For T16d PRs #585 and #586, two full builds started without first checking host load and were stopped by their owner during observed resource pressure (exit 143). Completed typechecks passed; local builds remained incomplete, and ignored generated files were not inspected. The builds were not established as the sole cause of system pressure. Evidence: `t16d-reports.log` in the `c5-candidate-backups` workspace.
 
 ### 2026-10-01 — authorize policy replacement against the locked current row
 - Date: 2026-10-01
@@ -458,3 +459,56 @@
 - Unconfirmed: The original test's socket state and precise trigger were not captured; the original failed result remains a failure.
 - Prevention rule: For this uncaught macOS Node HTTP error, retain the failure, record Node/undici versions, and compare an isolated loopback reproduction before attributing its cause.
 - Evidence files: `t16a-v2-after604-tests.log`, `t16a-undici-reset-repro.cjs`, and `t16a-undici-reset-repro.log` in `c5-candidate-backups`; upstream issue: https://github.com/nodejs/undici/issues/6075.
+### 2026-11-06 — inspect test bodies and fixtures for ownership
+- Task: T16c DAG and heartbeat test selection during parallel work.
+- What failed: Two Cursor scenarios ran 27 times in total, a real server shutdown integration scenario ran twice, and a simulated shutdown-state database scenario ran eight times despite the ownership split.
+- Root cause: Selection used names and filenames without inspecting hidden adapter input, fixture calls and shutdown state.
+- Fix: Reported the observed executions and inspected bodies and fixtures before excluding the owned scenarios on both sides of later comparisons.
+- Prevention rule: When dividing test ownership, inspect selected bodies and fixture imports for excluded inputs and process signals; exclude another worker's scenarios from both baseline and candidate runs.
+- Reuse trigger: Choosing related regression cases while another worker owns specific scenarios.
+- Evidence: `lessons-pending.md` and the T16c reports in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — validate the reviewer's selected test scope
+- Task: Independent review of T16c PRs #549 and #551.
+- What failed: PR #549 requested two cases and PR #551 requested three quality cases, but the reviewer ran the same 160 cases across four different files for each request.
+- Root cause: Why the reviewer broadened the selection is unverified.
+- Fix: Compared the collected results and direct fixture signals with the request and disclosed the broader run. Full indirect-fixture ownership and the reviewer's network isolation remain unverified.
+- Prevention rule: Compare a reviewer's actual command and collected cases with the allowed selection; report extras and missing isolation evidence before claiming compliance.
+- Reuse trigger: Requesting a limited independent test selection because other workers own adjacent scenarios.
+- Evidence: `t16c-pr549-independent-review-tests.json`, `t16c-pr551-independent-review-tests.json`, and T16c reports in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — honor worktree limits during independent review
+- Task: Independent review of T16c PR #551.
+- What failed: The task specified one reusable worktree, but the reviewer created a separate temporary Git worktree.
+- Root cause: The T16c review request omitted the task-specific worktree limit, while the common template requested a temporary checkout; there is no evidence the reviewer knew the limit.
+- Fix: Verified the temporary review worktree had been removed and reported the mismatch for coordination.
+- Prevention rule: Communicate task-specific worktree limits to independent reviewers, do not exceed them, and check the actual worktree list after review.
+- Reuse trigger: Independent review of a task with an explicit worktree limit.
+- Evidence: T16c reports and the review record in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — use the actual clock for review timestamps
+- Task: Recording independent reviews for T16c PRs #549 and #551.
+- What failed: Before 12:45 KST, the review lines already showed 13:05 and 13:35 respectively.
+- Root cause: The method used to choose those times is unverified.
+- Fix: Reported the inconsistency without editing the original lines and verified the reviewed heads, result records and blobs separately; the recorded times were not used to establish execution order.
+- Prevention rule: Read the system clock and time zone when recording review timestamps; do not treat future or inconsistent times as execution-order evidence until corrected.
+- Reuse trigger: Recording or comparing review results across concurrent workers.
+- Evidence: `t14a-answers.log` and T16c reports in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — compare complete Vitest failure blocks
+- Task: T16d PR #592 CI comparison against main.
+- What failed: An early comparison missed a file-level hook failure; another misclassified an error separated from its FAIL line by summary output.
+- Root cause: The diagnostic assumed test-level failures and a fixed order between FAIL, error and summary lines.
+- Fix: Compared file-level and test-level failures and inspected original logs after updating the diagnostic.
+- Prevention rule: Read raw failure blocks for both file-level and test-level failures, including interleaved summaries; keep unreadable errors unclassified.
+- Reuse trigger: Comparing Vitest CI failures with a main-branch baseline.
+- Evidence: `t16d-compare-ci-failures.py`, `t16c-pr597-595-ci-shard1.log`, and the T16d reports in the `c5-candidate-backups` workspace.
+
+### 2026-11-06 — concurrent workflow sync can create duplicate step issues
+- Task: T16c PR #551, workflow issue-creation extraction.
+- What failed: In isolated PostgreSQL, two overlapping ordinary sync calls each created an issue for the same step; the single step row pointed to one issue, and a mocked wake was called twice. Production occurrence and real agent execution were not checked.
+- Root cause: Both calls passed the reuse lookup before either bound an issue to the step. The existing run/step unique index protects the step row but does not serialize issue creation.
+- Fix: No behavior fix yet. The same result was reproduced before and after the pure move, and the PR handoff was held pending a separate scope decision.
+- Prevention rule: Exercise overlapping syncs for the same run and step against isolated PostgreSQL when changing issue creation or binding; verify a single issue and step binding and the intended wake count. A unique step row alone is insufficient.
+- Reuse trigger: Changing workflow sync, step issue reuse or creation, binding, or wake ordering.
+- Evidence: `t16c-pr551-race-comparison.json`, `t16c-pr551-race-diagnostic.test.ts`, and the paired logs in the `c5-candidate-backups` workspace.

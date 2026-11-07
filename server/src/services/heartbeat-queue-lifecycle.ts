@@ -184,3 +184,17 @@ export async function setHeartbeatRunStatus(
 
   return updated;
 }
+
+export function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
+    publishLiveEvent({
+      companyId: run.companyId, type: "heartbeat.run.queued",
+      payload: { runId: run.id, agentId: run.agentId, invocationSource: run.invocationSource,
+        triggerDetail: run.triggerDetail, wakeupRequestId: run.wakeupRequestId },
+    });
+  }
+
+// [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
+//   done/completed/cancelled(canceled)/closed 는 재시도 무의미 → request failed 로 종료.
+export const PROMOTED_REJECT_ISSUE_STATUSES = new Set(["done", "completed", "cancelled", "canceled", "closed", "wontfix"]);
+
+export const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];

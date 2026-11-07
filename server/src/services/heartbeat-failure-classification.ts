@@ -1,3 +1,4 @@
+import type { heartbeatRuns } from "@paperclipai/db";
 export type HeartbeatFailureClassification = {
   category: "timeout" | "cancelled" | "overload" | "quota" | "auth" | "command" | "adapter";
   reasonCode: string;
@@ -121,4 +122,9 @@ export function classifyHeartbeatRunFailure(input: {
     summary: "Adapter run failed without a more specific local classification.",
     fallbackCandidates,
   };
+}
+
+export function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelect) {
+  const text = [run.stdoutExcerpt, run.stderrExcerpt, run.error].filter(Boolean).join("\n");
+  return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
 }

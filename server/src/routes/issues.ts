@@ -58,6 +58,22 @@ import { completeUnblockActionWithSourceHandback } from "../services/missions/ow
 import { standaloneIssueExecutionContractService } from "../services/standalone-issue-execution-contract.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+// [목적] 목록 페이지 윈도우 상한. 기본 limit은 두지 않고(전체 보드 절단 방지) 호출자가 넘길 때만 적용한다.
+const MAX_ISSUE_LIST_LIMIT = 5000;
+
+/** [목적] 양의 정수 쿼리만 통과시키고 그 외(빈 값·NaN·0·음수·소수)는 무시한다. */
+function parsePositiveIntQuery(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+/** [목적] limit 쿼리를 해석해 상한을 적용한다. 값이 없거나 잘못되면 limit을 적용하지 않는다. */
+function parseIssueListLimit(value: unknown): number | undefined {
+  const parsed = parsePositiveIntQuery(value);
+  return parsed === undefined ? undefined : Math.min(parsed, MAX_ISSUE_LIST_LIMIT);
+}
 
 function contentTypeForWorkProductPath(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
@@ -414,6 +430,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
+      // [계약] 정확히 "full"인 때만 전체 필드(description 포함)를 돌려준다. 그 외 값·부재는 summary.
+      // [이유] 기본 목록 응답이 64.6MB였고 그 87%가 description이었다(첫 화면은 본문을 쓰지 않는다).
+      view: req.query.view === "full" ? "full" : "summary",
+      limit: parseIssueListLimit(req.query.limit),
+      offset: parsePositiveIntQuery(req.query.offset),
     });
     res.json(result);
   });

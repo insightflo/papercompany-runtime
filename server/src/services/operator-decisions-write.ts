@@ -117,11 +117,13 @@ export function operatorDecisionWriteService(db: Db) {
   //   재사용하고, 취소는 pending CAS 로만
   //   적용해 동시 resolve 승리 시 조용히 건너뛴다. 취소는 continuation/wakeup 을 만들지 않는다.
   //   Quality 연결 카드(qualityActionId)는 T5 전용 경로 계약대로 후보에서 제외한다.
-  // [moi terminal-anchor sweep 2026-10-17] mission_owner_human_input pending 카드는 완화 기준으로만
-  //   취소한다 — 앵커 이슈 종결(done/cancelled)·소멸, 스냅샷 식별자 소멸, 또는 미션 cancelled.
-  //   열린 상태 간 이슈 status churn 으로는 사람 결정 요청을 취소하지 않는다(사람이 볼 새 없이 승인
-  //   버튼이 사라진 2026-10-17 라이브 사고 재발 방지). 미션 completed 는 앵커 이슈 종결로 이미
-  //   커버되므로 취소 트리거에 넣지 않는다(미션명·이슈명 같은 예시 특수 로직 없음).
+  // [moi terminal-anchor sweep 2026-10-17 → 2026-11-08 개정] mission_owner_human_input pending
+  //   카드는 미션 종료(cancelled·completed) 또는 스냅샷 식별자 소멸시에만 취소한다.
+  //   기존 '앵커 이슈 종결 → 취소' 트리거는 2026-11-07 남발의 엔진이었다: 오너 회수 run 이 앵커를
+  //   종결시키면 sweep 이 사람이 답하기 전에 카드를 취소하고, 다음 5분 tick 이 새 앵커+카드를
+  //   발행해 tech-blog-radar 미션에서 40장이 반복 발행됐다. 앵커 종결·상태 churn 으로는 취소하지
+  //   않는다(사람이 볼 새 없이 승인 버튼이 사라진 2026-10-17 라이브 사고 방지 유지).
+  //   미션 completed 추가: 종료 미션에 남은 카드는 답할 수 없다(R3, 2026-11-02 미션에 5일 방치 사례).
   async function sweepStalePendingCards(now = new Date()) {
     const candidates = await db.select({
       id: operatorDecisions.id,
@@ -142,16 +144,18 @@ export function operatorDecisionWriteService(db: Db) {
       if (!snapshot || (snapshot.issueId == null && snapshot.workflowRunId == null && snapshot.stepRunId == null)) continue;
       checked += 1;
       const moi = candidate.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE;
+      // [moi 2026-11-08] mission_alive: 식별자 소멸만 취소 트리거 — 대상 상태 변화(앵커 종결 포함)는 취소하지 않는다.
       const mismatch = await collectTargetSnapshotMismatch(db, candidate.companyId, snapshot,
-        moi ? "terminal_only" : "exact");
-      if (moi && mismatch.length === 0) {
-        // [moi] 미션 cancelled 판정 — missionId 는 moi 카드 생성 시 항상 채워진다(빠면 판정 불가로 통과).
+        moi ? "mission_alive" : "exact");
+      if (moi) {
+        // [moi] 미션 종료 판정 — missionId 는 moi 카드 생성 시 항상 채워진다(빠면 판정 불가로 통과).
         const sourceContext = candidate.sourceContext as unknown as Record<string, unknown> | null;
         const missionId = typeof sourceContext?.missionId === "string" ? sourceContext.missionId : null;
         if (missionId) {
           const mission = await db.select({ companyId: missions.companyId, status: missions.status }).from(missions)
             .where(eq(missions.id, missionId)).then((rows) => rows[0] ?? null);
-          if (mission?.companyId === candidate.companyId && mission.status === "cancelled") mismatch.push("missionStatus");
+          if (mission?.companyId === candidate.companyId
+            && (mission.status === "cancelled" || mission.status === "completed")) mismatch.push("missionStatus");
         }
       }
       if (mismatch.length === 0) continue; // 여전히 일치 — 아무 것도 쓰지 않는다.

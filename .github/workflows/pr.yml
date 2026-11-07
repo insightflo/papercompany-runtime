@@ -4,9 +4,12 @@ on:
   pull_request:
     branches:
       - main
+  # lockfile 봇 PR은 GITHUB_TOKEN으로 만들어져 pull_request 이벤트가 발생하지 않는다.
+  # refresh-lockfile.yml 이 이 워크플로를 해당 ref로 직접 dispatch해 필수 검사(policy)만 붙인다.
+  workflow_dispatch:
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Block manual lockfile edits
-        if: github.head_ref != 'chore/refresh-lockfile'
+        if: github.event_name == 'pull_request' && github.head_ref != 'chore/refresh-lockfile'
         run: |
           changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
@@ -82,7 +85,14 @@ jobs:
 
       - name: Validate dependency resolution when manifests change
         run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # workflow_dispatch(lockfile 봇 PR 검사)에는 PR 컨텍스트가 없으므로 main 대비로 계산한다.
+          if [ -z "$base" ] || [ -z "$head" ]; then
+            base="$(git rev-parse origin/main)"
+            head="$(git rev-parse HEAD)"
+          fi
+          changed="$(git diff --name-only "$base" "$head")"
           manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
           if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
             pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
@@ -93,6 +103,8 @@ jobs:
   #   샤드당 실측 ~1/3(로컬 109s/292s 선형). verify(타입체크·빌드·카나리)와 병렬로 돈다.
   verify:
     needs: [policy]
+    # dispatch(lockfile 봇 PR)에서는 policy만 필요하다 — 무거운 작업은 PR 이벤트에서만 돈다.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -131,6 +143,7 @@ jobs:
 
   verify-tests:
     needs: [policy]
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -164,6 +177,7 @@ jobs:
 
   e2e:
     needs: [policy]
+    if: github.event_name == 'pull_request'
     # Playwright 1.58 does not support Chromium on Ubuntu 26.04 yet. Pin the
     # E2E runner so GitHub's ubuntu-latest migration cannot skip the tests.
     runs-on: ubuntu-24.04

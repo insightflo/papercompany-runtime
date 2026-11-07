@@ -17,6 +17,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # 필수 검사(policy)를 봇 PR에 붙이기 위해 pr.yml을 workflow_dispatch로 실행한다.
+      actions: write
 
     steps:
       - name: Checkout repository
@@ -83,8 +85,39 @@ jobs:
           fi
           echo "pr_created=true" >> "$GITHUB_OUTPUT"
 
+      - name: Attach required policy check to the lockfile PR
+        id: attach-checks
+        if: steps.upsert-pr.outputs.pr_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: chore/refresh-lockfile
+        run: |
+          set -uo pipefail
+          # GITHUB_TOKEN이 만든 PR은 pull_request 이벤트를 발생시키지 않아 필수 검사 policy가 붙지 않고
+          # required check(strict) 때문에 영구 BLOCKED가 된다. workflow_dispatch는 GITHUB_TOKEN으로도
+          # 트리거되므로, pr.yml을 같은 ref로 직접 실행해 policy 검사만 붙인다(pr.yml이 dispatch 시 무거운 job을 건너뛰게 되어 있다).
+          if ! gh workflow run pr.yml --ref "$BRANCH"; then
+            echo "::error::pr.yml dispatch failed"
+            exit 1
+          fi
+          head="$(gh pr view "$BRANCH" --json headRefOid --jq .headRefOid)"
+          for _ in $(seq 1 18); do
+            attached="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head/check-runs" \
+              --jq '[.check_runs[] | select(.name == "policy")] | length' 2>/dev/null || echo 0)"
+            if [ "${attached:-0}" -gt 0 ]; then
+              echo "policy check attached to $head"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::policy 검사가 3분 안에 붙지 않았다 — GITHUB_TOKEN workflow_dispatch 트리거 경로를 재검토해야 한다."
+          exit 1
+
       - name: Enable auto-merge for lockfile PR
         if: steps.upsert-pr.outputs.pr_created == 'true'
+        # 저장소 설정 allow_auto_merge=false 인 동안에는 실패가 정상이다(설정 변경은 승인 범위 밖).
+        # 검사가 붙은 PR은 병합 루프/운영자가 병합한다.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

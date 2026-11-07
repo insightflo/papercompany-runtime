@@ -13,6 +13,8 @@
 //   요청은 dirty 로 표시되고 버려지지 않는다. 진행 종료 시 dirty 면 1회 재진행(then 체인,
 //   동기 재귀 아님). 재진행 시작 시 dirty 를 해제해, 재진행 중에 다시 오는 요청만 다음
 //   dirty 가 된다. 연속 진행 상한(기본 5회/요청 체인)으로 dirty 무한 루프를 차단한다.
+import { parseObject } from "../../adapters/utils.js";
+import { readNonEmptyString } from "../heartbeat-run-context.js";
 import type { Db } from "@paperclipai/db";
 import { workflowRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
@@ -230,4 +232,26 @@ export function resetInstantWorkflowAdvanceForTests(): void {
 /** 테스트 전용 — 주입 시점 reopen-guard 플래그 판정 대기. 프로덕션 코드는 호출 금지. */
 export function reopenGuardJudgementForTests(): Promise<boolean> | null {
   return reopenGuardJudgement;
+}
+
+/**
+ * [instant-advance v1.2] 종말 확정된 런이 워크플로우 런에 속하면(contextSnapshot.workflowRunId)
+ *   즉시 진행을 요청한다 — fire-and-forget(fireWikiRecord 와 동일 non-blocking 패턴). 훅 실패가
+ *   런 완료 경로에 영향을 주지 않도록 전체를 try/catch 로 감싼다. 게이트 off 면 모듈 내부에서
+ *   no-op 다(PAPERCLIP_WORKFLOW_INSTANT_ADVANCE).
+ * [수정시 영향] 호출부는 런 종결 확정 지점 3곳(정상 outcome / inner catch / outer catch).
+ */
+export function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnapshot: unknown }): void {
+  try {
+    const workflowRunId = readNonEmptyString(
+      parseObject(run.contextSnapshot)["workflowRunId"],
+    );
+    if (!workflowRunId) return;
+    requestInstantWorkflowAdvance(workflowRunId);
+  } catch (err) {
+    logger.warn(
+      { err, runId: run.id, tag: "instant-advance" },
+      "failed to request instant workflow advance for terminal run",
+    );
+  }
 }

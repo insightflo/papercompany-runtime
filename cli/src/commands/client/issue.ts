@@ -80,6 +80,10 @@ export function registerIssueCommands(program: Command): void {
           if (opts.status) params.set("status", opts.status);
           if (opts.assigneeAgentId) params.set("assigneeAgentId", opts.assigneeAgentId);
           if (opts.projectId) params.set("projectId", opts.projectId);
+          // [목적] 이 명령은 목록 행에서 본문(description)을 읽는다(--match 로컬 매칭, --json 전체 출력).
+          // [이유] 서버 목록 기본 응답이 summary(description null)가 되어도 로컬 매칭·JSON 출력이
+          //        기존과 같게 유지되도록 전체 필드를 요청한다. view를 모르는 서버에서는 무시된다(no-op).
+          params.set("view", "full");
 
           const query = params.toString();
           const path = `/api/companies/${ctx.companyId}/issues${query ? `?${query}` : ""}`;

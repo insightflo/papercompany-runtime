@@ -82,7 +82,7 @@ Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` ali
 New plan documents belong in `doc/plans/` and should use `YYYY-MM-DD-slug.md` filenames.
 
 6. Keep branch/worktree ownership explicit.
-Before making code changes, inspect the current branch, `git status --short`, and existing worktrees. Do not start unrelated work in a dirty checkout. If existing changes are not part of the requested task, preserve them with a named stash or move the new task to a clean branch/worktree. One task purpose gets one branch/worktree; do not mix workflow, heartbeat, UI, docs, and cleanup changes in a leftover branch.
+Before making code changes, inspect the current branch, `git status --short`, and existing worktrees. Do not start unrelated work in a dirty checkout. If existing changes are not part of the requested task, preserve them with a named stash or move the new task to a clean branch/worktree. One task purpose gets one branch/worktree; do not mix workflow, heartbeat, UI, docs, and cleanup changes in a leftover branch. When a task limits worktree count, communicate the limit to independent reviewers, do not exceed it, and verify the worktree list after review.
 
 7. Do not modify execution-control code without impact proof.
 For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA paths, identify the execution source of truth before editing. Queue/run semantics must be preserved: status fields are display/result state, not proof that execution was requested or performed. Check callers, tests, and a live or DB-facing proof surface before claiming the change is safe.
@@ -90,6 +90,7 @@ For workflow, heartbeat, queue, issue status, mission planning, and PLAN-QA path
 - When accepting a webhook idempotency key, lock the receipt and bind its run in the same transaction before starting work; a concurrent unbound replay must not create a second run, and rejected inputs must preserve the existing receipt and quota contract.
 - When a local process adapter starts a child, forward its spawn callback through every wrapper and verify that the heartbeat stores the real child PID before relying on cross-process cancellation or recovery.
 - When upserting a mission runtime, acquire the referenced mission row’s key-share lock before the runtime unique key in the same transaction, and test contention in both arrival orders.
+- When changing workflow step issue creation or binding, test overlapping syncs against isolated PostgreSQL and verify one issue, its step binding, and the intended wake count; a unique step row alone does not prevent duplicate issues.
 
 8. Keep implementation files under 300 lines.
 During development, do not let a single source, test, or support file grow past 300 lines. Split cohesive helpers, components, fixtures, or focused tests into separate files before crossing the limit. If a legacy file already exceeds 300 lines, do not make it larger unless the change is a targeted reduction or an explicitly approved exception. Compare its line count with the base before editing and again before opening the PR; record any explicit exception.
@@ -137,6 +138,11 @@ If anything cannot be run, explicitly report what was not run and why.
 - When replacing process-status commands in isolated tests, inventory every invocation and validate the required state, parent and command-identity queries; an unsupported query must not be treated as proof that a process exited.
 - When a PostgreSQL lock-contention test requires both a blocker and specific blocked SQL as evidence, poll the same backend until both match; fail within the existing timeout if they never do.
 - When Node's HTTP client throws an uncaught `setTypeOfService EINVAL` on macOS, retain the failed result and compare Node/undici versions and an isolated loopback reproduction before attributing the cause.
+- When dividing test ownership among workers, inspect selected test bodies and imported fixtures for excluded inputs, shutdown behavior, and process signals; exclude another worker's scenarios from both baseline and candidate runs.
+- When an independent reviewer is given an allowed test selection, compare the executed command and collected cases with that selection; report extra cases or missing isolation evidence instead of claiming the selection was followed.
+- When recording a review time, read the system clock and time zone directly; do not use a future or inconsistent timestamp as execution-order evidence until corrected.
+- When comparing Vitest CI failures to a baseline, inspect raw file-level and test-level failure blocks even when summary lines interleave; leave errors that cannot be identified unclassified.
+- Before starting parallel full builds or large typechecks on a shared host, check load and swap; if pressure is observed, use serial checks or CI for the same revision.
 
 ## 8. API and Auth Expectations
 

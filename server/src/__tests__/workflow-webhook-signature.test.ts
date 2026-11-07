@@ -80,7 +80,7 @@ describe("verifyWebhookSignature", () => {
     ).toBe(false);
   });
 
-  it("rejects a body/timestamp mismatch (idempotency key covered by signature)", () => {
+  it("rejects a legacy signature when the body changes", () => {
     const ts = String(nowSeconds);
     const tampered = RAW_BODY.replace("test", "evil");
     expect(

@@ -102,16 +102,14 @@ export function useInboxBadge(companyId: string | null | undefined) {
     enabled: !!companyId,
   });
 
-  const { data: issues = [] } = useQuery({
-    queryKey: queryKeys.issues.list(companyId!),
-    queryFn: () => issuesApi.list(companyId!),
-    enabled: !!companyId,
-  });
-
   const unreadIssues = useMemo(
     () => getUnreadTouchedIssues(getRecentTouchedIssues(touchedIssues)),
     [touchedIssues],
   );
+
+  // [이유] 여기서 전체 이슈 목록(무필터, 10.5k행·64.6MB)을 받아오던 쿼리를 제거했다.
+  //        아래 attention 요약이 실패 런 수를 이미 정확히 주므로 computeInboxBadgeData는
+  //        failedRuns override 경로만 타고, 이 목록은 배지 계산에 기여하지 않았다.
 
   // Bounded attention summary (latest failed/timed_out/cancelled run per
   // agent, unresolved issues only) instead of full run history. The server
@@ -141,10 +139,9 @@ export function useInboxBadge(companyId: string | null | undefined) {
         dashboard,
         heartbeatRuns: [],
         failedRuns,
-        issues,
         unreadIssues,
         dismissed,
       }),
-    [approvals, joinRequests, dashboard, failedRuns, issues, unreadIssues, dismissed],
+    [approvals, joinRequests, dashboard, failedRuns, unreadIssues, dismissed],
   );
 }

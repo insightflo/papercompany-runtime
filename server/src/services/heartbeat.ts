@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { prioritizeProjectWorkspaceCandidatesForRun } from "./heartbeat-workspace-priority.js";
-import { hasWorkflowQaReworkContract, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
+import { describeSessionResetReason, shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 export { shouldResetTaskSessionForWake } from "./heartbeat-session-reset.js";
 import { detectCodexAuthFailureForAutoBlock, type CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classification.js";
 export { detectCodexAuthFailureForAutoBlock } from "./heartbeat-codex-auth-classification.js";
@@ -8,9 +8,7 @@ export type { CodexAuthAutoBlockInfo } from "./heartbeat-codex-auth-classificati
 import { resolveRuntimeSessionParamsForWorkspace, type ResolvedWorkspaceForRun } from "./heartbeat-workspace-session.js";
 export { resolveRuntimeSessionParamsForWorkspace } from "./heartbeat-workspace-session.js";
 export type { ResolvedWorkspaceForRun } from "./heartbeat-workspace-session.js";
-import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
-import { isDeepStrictEqual, promisify } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, is, isNotNull, isNull, lt, lte, not, or, sql } from "drizzle-orm";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -41,9 +39,8 @@ import {
   projectWorkspaces,
   workflowStepRuns,
 } from "@paperclipai/db";
-import { HttpError, conflict, notFound } from "../errors.js";
+import { conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
-import { loadConfig } from "../config.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore } from "./run-log-store.js";
 import { createHeartbeatRunLog } from "./heartbeat-run-log.js";
@@ -53,12 +50,9 @@ import type { AdapterExecutionResult, AdapterInvocationMeta, AdapterSessionCodec
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { assertHeartbeatAdapterMayStart, createHeartbeatAdapterScope, isHeartbeatUnstartedDeferral, runWithinHeartbeatAdapterScope } from "./heartbeat-adapter-scope.js";
 import { runtimeExecutionLifecycle, type RuntimeExecutionScope } from "./runtime-execution-lifecycle.js";
-import { parseObject, asBoolean, asNumber } from "../adapters/utils.js";
+import { parseObject } from "../adapters/utils.js";
 import { resolveAdapterFallbackThinking, resolveAdapterFallbackConfig, applyAdapterFallbackRuntimeConfig, type AdapterFallbackConfig } from "./heartbeat-adapter-fallback.js";
 import { withAgentStartLock } from "./heartbeat-start-lock.js";
-import { deriveRepoNameFromRepoUrl } from "./heartbeat-workspace-repo-name.js";
-import { normalizePaperclipApiUrl, resolveHostForPaperclipApiUrl } from "./heartbeat-api-address.js";
-import { normalizeMaxConcurrentRuns } from "./heartbeat-concurrency-limit.js";
 import { isProcessAlive, terminateRecordedProcess } from "./heartbeat-process-liveness.js";
 import { hasSatisfiedWorkProductRegistration } from "./heartbeat-artifact-registration.js";
 export { hasSatisfiedWorkProductRegistration, workProductReferencesClaimedArtifact } from "./heartbeat-artifact-registration.js";
@@ -87,7 +81,7 @@ import { buildRequestChangesValidationGateComment, buildMissingWorkflowValidatio
 export { classifyHeartbeatRunFailure, type HeartbeatFailureClassification } from "./heartbeat-failure-classification.js";
 import { finalizeHermesChatRun } from "./hermes-chat.js";
 import { missionSessionStore } from "./sessions/mission-session-store.js";
-import { resolveDefaultAgentWorkspaceDir, resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import { capHeartbeatRunResultJsonForStorage, summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
 import {
   attentionHeartbeatRuns,
@@ -105,7 +99,6 @@ import {
   persistAdapterManagedRuntimeServices,
   realizeExecutionWorkspace,
   releaseRuntimeServicesForRun,
-  sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
 import { writeQualityFinding } from "./quality-finding-writer.js";
@@ -116,7 +109,7 @@ import {
   queuePausedAgentWakeupRequest,
 } from "./quality/heartbeat-admission.js";
 import { isBoundedExecutionWakeKey } from "./quality/native-wake.js";
-import { agentWikiService, formatWikiLessons, type RecordFailureInput } from "./agent-wiki.js";
+import { agentWikiService, formatWikiLessons } from "./agent-wiki.js";
 import {
   formatKnowledgePatternCards,
   injectionGroupFor,
@@ -154,7 +147,7 @@ import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
 import {
   configureInstantWorkflowAdvanceDb,
-  requestInstantWorkflowAdvance,
+  fireInstantWorkflowAdvanceForTerminalRun,
 } from "./workflow/instant-advance.js";
 import { buildSessionHandoffArtifact, type SessionHandoffArtifact } from "./session-handoff-artifact.js";
 import { buildContextSafeFileViews } from "./context-safe-file-views.js";
@@ -253,6 +246,7 @@ import {
   type TerminalFollowup,
 } from "./heartbeat-terminal-release-continuation.js";
 import { readTerminalContinuationSource, settleTerminalContinuationFromQaSuccessor } from "./heartbeat-terminal-successor-settlement.js";
+import { reapOrphanedRuns } from "./heartbeat-orphan-reaper.js";
 import {
   assertIssueResumeScopeIdentity,
   recordResumeStaleResultRejected,
@@ -261,61 +255,13 @@ import {
 import { trackHeartbeatExecution } from "./heartbeat-execution-tracker.js";
 import { failWakeupForFailedHeartbeat } from "./heartbeat-wakeup-failure.js";
 
-type ActiveHeartbeatExecutionFrame = {
-  readonly run: typeof heartbeatRuns.$inferSelect;
-  readonly finalizationVersion: number | null;
-  adapterInvocationAttempted: boolean;
-  actualCaptured: boolean;
-  identityObserved: boolean;
-  actualDrainIdentity: HeartbeatActualDrainIdentity | null;
-  noActualInvocationConfirmed: boolean;
-  c5ExecutionOptedIn: boolean;
-  c5NotInvoked: { proof: C5NotInvokedProof; identity: QaCorrectionExecutionIdentity } | null;
-  c5TerminalWriterSnapshot: typeof heartbeatRuns.$inferSelect | null;
-  ownerReleaseBlocked: boolean;
-  conflicted: boolean;
-};
+
 
 type HeartbeatServiceOptions = {
   qaCorrectionExecution?: { ownerRuntime: QaFileOwnerRuntime };
 };
 
-// A root Db keeps its explicitly supplied owner runtime across bare service recreation.
-// The WeakMap keys by the exact Db object and does not share execution contexts or roots.
 import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "./heartbeat-attempt-identity.js";
-
-const heartbeatC5OwnerRuntimeByDb = new WeakMap<Db, QaFileOwnerRuntime>();
-
-function bindHeartbeatC5OwnerRuntime(db: Db, explicit: QaFileOwnerRuntime | undefined) {
-  const bound = heartbeatC5OwnerRuntimeByDb.get(db);
-  if (explicit) {
-    if (bound && bound !== explicit) throw new Error("heartbeat_c5_owner_runtime_binding_conflict");
-    if (!bound) heartbeatC5OwnerRuntimeByDb.set(db, explicit);
-    return explicit;
-  }
-  if (bound) return bound;
-  const ownerRuntime = createQaFileOwnerRuntime(loadConfig());
-  heartbeatC5OwnerRuntimeByDb.set(db, ownerRuntime);
-  return ownerRuntime;
-}
-
-function createHeartbeatC5SharedAdmission(ownerRuntime: QaFileOwnerRuntime): QaRemediationSharedAdmissionRuntime {
-  const outerNotifications = createReplacementRootNotifications();
-  const resolutionMap = new Map<string, unknown>();
-  const rootResolutionMaps = new WeakMap<ReplacementRootNotifications, Map<string, unknown>>();
-  return {
-    ownerRuntime,
-    outerNotifications,
-    resolutionMap,
-    bindResolutionMap: (notifications, map) => rootResolutionMaps.set(notifications, map),
-    driftBudget: { corrections: 0 },
-  };
-}
-
-function mergeHeartbeatRootNotifications(target: ReplacementRootNotifications, source: ReplacementRootNotifications) {
-  for (const agentId of source.agentIds) target.agentIds.add(agentId);
-  for (const wakeupRequestId of source.correctionWakeupRequestIds) target.correctionWakeupRequestIds.add(wakeupRequestId);
-}
 
 class C5NotInvokedExecutionError extends Error {
   readonly code = "c5_held_not_invoked";
@@ -323,21 +269,6 @@ class C5NotInvokedExecutionError extends Error {
     super("heartbeat adapter start held by pending QA remediation preparation");
   }
 }
-
-// heartbeatService(db) is created by several control-plane callers. Share only live frames
-// for that exact Db object so cancellation can consult the active actual without persistence.
-const activeHeartbeatExecutionFramesByDb = new WeakMap<Db, Map<string, ActiveHeartbeatExecutionFrame>>();
-
-function activeHeartbeatExecutionFrames(db: Db) {
-  let frames = activeHeartbeatExecutionFramesByDb.get(db);
-  if (!frames) {
-    frames = new Map();
-    activeHeartbeatExecutionFramesByDb.set(db, frames);
-  }
-  return frames;
-}
-
-
 
 const NONWORKFLOW_EXECUTION_SCOPES = new Set([
   "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
@@ -361,16 +292,14 @@ import {
 import { isC5PreInvocationRollback, QaRemediationAdmissionHold, readC5NotInvokedProof, type C5NotInvokedProof, type QaCorrectionExecutionIdentity,
   type QaRemediationSharedAdmissionRuntime }
   from "./workflow/control-flow/qa-remediation-admission-root.js";
-import { createQaFileOwnerRuntime, type QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
+import type { QaFileOwnerRuntime } from "./workflow/control-flow/qa-remediation-runtime.js";
 import { lifecycleActiveClause, lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { missionDedupExemptOversightReviewClause } from "./heartbeat-mission-dedup.js";
 import { createHeartbeatQueuedStaleRecovery } from "./heartbeat-queued-stale-recovery.js";
 import {
   countSessionFileMessages,
   hasSessionCompactionThresholds,
-  resolveSessionCompactionPolicy,
   RUN_TOOL_CONTRACT_CONTEXT_KEY,
-  type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 
 export {
@@ -385,259 +314,9 @@ type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1]
 
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
-// [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
-//   done/completed/cancelled(canceled)/closed 는 재시도 무의미 → request failed 로 종료.
-const PROMOTED_REJECT_ISSUE_STATUSES = new Set(["done", "completed", "cancelled", "canceled", "closed", "wontfix"]);
-const DETACHED_PROCESS_ERROR_CODE = "process_detached";
-// orphaned-but-alive child 강제 회수 시한. handle 상실 후에도 child pid 가 살아 reaper 가 process_detached
-// 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
-const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
-const DETACHED_GRACE_SEC = 5;
-// [paperclip-stuck 2026-08-06, A2] detached 유예 창 동안 agents.status 가 `running`에 갇히는
-// (phantom running) 것을 끊는다. reapOrphanedRuns 는 detached child 를 DETACHED_REAP_AFTER_MS 까지
-// 유예하지만, 그 동안 finalizeAgentStatus 가 호출되지 않아 agent 가 최장 30분간 running 으로 보임.
-// agent.updatedAt 기준으로 이 임계를 넘기면 agent 를 `error` 로 강등해 보드/QA 가 실상을 반영하게 한다.
-// (run 자체는 longevity cap 에 따라 별도 회수 — 여기서는 agent 가시성만 교정.)
-const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
+
+
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
-
-function workflowStepIdFromIssueDescription(description: string | null | undefined): string | null {
-  if (!description) return null;
-  return description.match(/(?:^|\n)-?\s*stepId:\s*([a-z0-9_-]+)/i)?.[1] ?? null;
-}
-
-function firstDependencyIssueFromDescription(description: string | null | undefined): {
-  targetStepId: string;
-  targetIssueIdentifier: string;
-  targetIssueTitle: string;
-} | null {
-  if (!description) return null;
-  const match = description.match(/\n-\s*([a-z0-9_-]+):\s*([A-Z][A-Z0-9]{1,9}-\d+)\s*\([^)]*\)\s*—\s*([^\n]+)/i);
-  if (!match) return null;
-  return {
-    targetStepId: match[1],
-    targetIssueIdentifier: match[2],
-    targetIssueTitle: match[3].trim(),
-  };
-}
-const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
-const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
-const execFile = promisify(execFileCallback);
-const SESSIONED_LOCAL_ADAPTERS = new Set([
-  "claude_local",
-  "codex_local",
-  "cursor",
-  "gemini_local",
-  "opencode_local",
-  "pi_local",
-  "commandcode_local",
-]);
-
-
-
-
-/**
- * [스테이지 A + 봇 bug·high 조사 결과 기록] 이 헬퍼의 3개 호출부 함수
- * (autoRegisterWorkProductFromIssueDocument / FromClaimedFile /
- *  applyMissionOwnerUnblockArtifactUrlToSource)는 현재 트리에서 호출부가 없다 —
- * 과거 리팩터에서 유실(이 PR 이전 상태, 활동 로그 액션명은 유입됨). savepoint 복구는
- * 호출부 복원 시 그대로 유효하다. 복원 여부는 별도 제품 결정으로 보고됨.
- *
- * [스테이지 A + 봇 bug·medium 교정] heartbeat 자동 등록의 삽입. 대표 부분 유니크 인덱스
- * 도입 후 동시 첫 대표 등록은 23505 하드 실패가 된다(종전엔 조용한 이중 대표 드리프트).
- * savepoint 로 위반을 끊어낸 뒤 (동일 산출물이면 기존 행 재사용, 아니면) 비대표로
- * 재시기한다 — 자동 등록은 늘 성공해야 한다.
- * [주의] tx 는 트랜잭션 객체(input.tx)여야 한다 — 최상위 db 를 넘기면 savepoint 가
- * 아니라 독립 트랜잭션이 시작된다(호출부 계약).
- */
-async function insertAutoWorkProduct(
-  tx: Pick<Db, "insert" | "select"> & { transaction?: Db["transaction"] },
-  values: typeof issueWorkProducts.$inferInsert,
-): Promise<typeof issueWorkProducts.$inferSelect | null> {
-  if (typeof tx.transaction !== "function") {
-    // 테스트 더블(부분 mock) — 성공 경로만 시뮬레이션한다.
-    return await tx
-      .insert(issueWorkProducts)
-      .values(values)
-      .returning()
-      .then((rows) => rows[0] ?? null);
-  }
-  try {
-    return await tx.transaction(async (nested) =>
-      nested
-        .insert(issueWorkProducts)
-        .values(values)
-        .returning()
-        .then((rows) => rows[0] ?? null));
-  } catch (error) {
-    // [봇 bug·high 교정] drizzle 은 원본 PG 오류를 cause 체인에 둔다 — 공용 판별 사용.
-    if (!isPgUniqueViolation(error)) throw error;
-    // [봇 bug·medium 교정] 동시 등록이 같은 산출물이었으면 이중 행이 된다 — 동일
-    //   (provider, externalId/url, issue) 행이 이미 있으면 그것을 재사용한다.
-    const externalId = typeof values.externalId === "string" ? values.externalId : null;
-    const url = typeof values.url === "string" ? values.url : null;
-    const provider = typeof values.provider === "string" ? values.provider : null;
-    // [봇 bug·medium 교정] 재사용 술부는 실제 충돌 키(company, issue, type — 부분 유니크)
-    //   와 일치해야 한다. provider/externalId/url 까지 같아야 "동일 산출물"이다.
-    const existing = await tx
-      .select()
-      .from(issueWorkProducts)
-      .where(and(
-        eq(issueWorkProducts.companyId, values.companyId),
-        eq(issueWorkProducts.issueId, values.issueId),
-        ...(typeof values.type === "string" ? [eq(issueWorkProducts.type, values.type)] : []),
-    // [봇 bug·medium 교정] null 식별자는 eq(col, null) — SQL 에서 항상 거짓 — 이 아니라
-    //   isNull 으로 명시해야 "식별자 없는 산출물끼리"만 재사용된다(모든 값 일치 방지).
-        ...(provider
-          ? [eq(issueWorkProducts.provider, provider)]
-          : [isNull(issueWorkProducts.provider)]),
-        ...(externalId
-          ? [eq(issueWorkProducts.externalId, externalId)]
-          : [isNull(issueWorkProducts.externalId)]),
-        ...(url
-          ? [eq(issueWorkProducts.url, url)]
-          : [isNull(issueWorkProducts.url)]),
-      ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
-    return await tx
-      .insert(issueWorkProducts)
-      .values({ ...values, isPrimary: false })
-      .returning()
-      .then((rows) => rows[0] ?? null);
-  }
-}
-
-async function ensureManagedProjectWorkspace(input: {
-  companyId: string;
-  agentId: string;
-  projectId: string;
-  repoUrl: string | null;
-  worktreeCheck?: (opts: { tool: string; args: Record<string, unknown>; cwd?: string; filePath?: string; command?: string }) => Promise<void>;
-}): Promise<{ cwd: string; warning: string | null }> {
-  const cwd = resolveManagedProjectWorkspaceDir({
-    companyId: input.companyId,
-    projectId: input.projectId,
-    repoName: deriveRepoNameFromRepoUrl(input.repoUrl),
-  });
-  await fs.mkdir(path.dirname(cwd), { recursive: true });
-  const stats = await fs.stat(cwd).catch(() => null);
-
-  if (!input.repoUrl) {
-    if (!stats) {
-      await fs.mkdir(cwd, { recursive: true });
-    }
-    return { cwd, warning: null };
-  }
-
-  const gitDirExists = await fs
-    .stat(path.resolve(cwd, ".git"))
-    .then((entry) => entry.isDirectory())
-    .catch(() => false);
-  if (gitDirExists) {
-    return { cwd, warning: null };
-  }
-
-  if (stats) {
-    const entries = await fs.readdir(cwd).catch(() => []);
-    if (entries.length > 0) {
-      return {
-        cwd,
-        warning: `Managed workspace path "${cwd}" already exists but is not a git checkout. Using it as-is.`,
-      };
-    }
-    await fs.rm(cwd, { recursive: true, force: true });
-  }
-
-  try {
-    // worktree: check command-execute before git clone
-    if (input.worktreeCheck) {
-      await input.worktreeCheck({
-        tool: "command-execute",
-        args: { command: "git clone", repoUrl: input.repoUrl ?? "" },
-        cwd,
-        command: `git clone ${input.repoUrl} ${cwd}`,
-      });
-    }
-    await execFile("git", ["clone", input.repoUrl, cwd], {
-      env: sanitizeRuntimeServiceBaseEnv(process.env),
-      timeout: MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS,
-    });
-    return { cwd, warning: null };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to prepare managed checkout for "${input.repoUrl}" at "${cwd}": ${reason}`);
-  }
-}
-
-const heartbeatRunListColumns = {
-  id: heartbeatRuns.id,
-  companyId: heartbeatRuns.companyId,
-  agentId: heartbeatRuns.agentId,
-  invocationSource: heartbeatRuns.invocationSource,
-  triggerDetail: heartbeatRuns.triggerDetail,
-  status: heartbeatRuns.status,
-  startedAt: heartbeatRuns.startedAt,
-  finishedAt: heartbeatRuns.finishedAt,
-  error: heartbeatRuns.error,
-  wakeupRequestId: heartbeatRuns.wakeupRequestId,
-  exitCode: heartbeatRuns.exitCode,
-  signal: heartbeatRuns.signal,
-  usageJson: heartbeatRuns.usageJson,
-  resultJson: heartbeatRuns.resultJson,
-  sessionIdBefore: heartbeatRuns.sessionIdBefore,
-  sessionIdAfter: heartbeatRuns.sessionIdAfter,
-  logStore: heartbeatRuns.logStore,
-  logRef: heartbeatRuns.logRef,
-  logBytes: heartbeatRuns.logBytes,
-  logSha256: heartbeatRuns.logSha256,
-  logCompressed: heartbeatRuns.logCompressed,
-  stdoutExcerpt: sql<string | null>`NULL`.as("stdoutExcerpt"),
-  stderrExcerpt: sql<string | null>`NULL`.as("stderrExcerpt"),
-  errorCode: heartbeatRuns.errorCode,
-  externalRunId: heartbeatRuns.externalRunId,
-  processPid: heartbeatRuns.processPid,
-  processStartedAt: heartbeatRuns.processStartedAt,
-  retryOfRunId: heartbeatRuns.retryOfRunId,
-  processLossRetryCount: heartbeatRuns.processLossRetryCount,
-  contextSnapshot: heartbeatRuns.contextSnapshot,
-  createdAt: heartbeatRuns.createdAt,
-  updatedAt: heartbeatRuns.updatedAt,
-} as const;
-
-
-const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
-
-
-function hasResumableSessionForRun(
-  runtime: {
-    sessionId: string | null;
-    sessionParams: Record<string, unknown> | null;
-  },
-  cwd: string,
-) {
-  return (
-    typeof runtime.sessionId === "string" &&
-    runtime.sessionId.length > 0 &&
-    (() => {
-      const runtimeSessionCwd = readNonEmptyString(parseObject(runtime.sessionParams).cwd) ?? "";
-      return runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(cwd);
-    })()
-  );
-}
-
-interface WakeupOptions {
-  source?: "timer" | "assignment" | "on_demand" | "automation" | "scheduler";
-  triggerDetail?: string | null;
-  reason?: string | null;
-  payload?: Record<string, unknown> | null;
-  idempotencyKey?: string | null;
-  requestedByActorType?: "user" | "agent" | "system";
-  requestedByActorId?: string | null;
-  contextSnapshot?: Record<string, unknown>;
-}
-
 
 type SessionCompactionDecision = {
   rotate: boolean;
@@ -647,1155 +326,11 @@ type SessionCompactionDecision = {
   previousRunId: string | null;
 };
 
-interface ParsedIssueAssigneeAdapterOverrides {
-  adapterConfig: Record<string, unknown> | null;
-  useProjectWorkspace: boolean | null;
-}
+
 
 
 
 export { prioritizeProjectWorkspaceCandidatesForRun };
-
-/**
- * [instant-advance v1.2] 종말 확정된 런이 워크플로우 런에 속하면(contextSnapshot.workflowRunId)
- *   즉시 진행을 요청한다 — fire-and-forget(fireWikiRecord 와 동일 non-blocking 패턴). 훅 실패가
- *   런 완료 경로에 영향을 주지 않도록 전체를 try/catch 로 감싼다. 게이트 off 면 모듈 내부에서
- *   no-op 다(PAPERCLIP_WORKFLOW_INSTANT_ADVANCE).
- * [수정시 영향] 호출부는 런 종결 확정 지점 3곳(정상 outcome / inner catch / outer catch).
- */
-function fireInstantWorkflowAdvanceForTerminalRun(run: { id: string; contextSnapshot: unknown }): void {
-  try {
-    const workflowRunId = readNonEmptyString(
-      parseObject(run.contextSnapshot)["workflowRunId"],
-    );
-    if (!workflowRunId) return;
-    requestInstantWorkflowAdvance(workflowRunId);
-  } catch (err) {
-    logger.warn(
-      { err, runId: run.id, tag: "instant-advance" },
-      "failed to request instant workflow advance for terminal run",
-    );
-  }
-}
-
-
-
-
-
-function resolveCurrentPaperclipApiUrl(): string {
-  const explicit = normalizePaperclipApiUrl(process.env.PAPERCLIP_API_URL);
-  if (explicit) return explicit;
-  const host = resolveHostForPaperclipApiUrl(process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST);
-  const port = process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3200";
-  return `http://${host}:${port}`;
-}
-
-function applyPaperclipApiContext(context: Record<string, unknown>): void {
-  const apiUrl = resolveCurrentPaperclipApiUrl();
-  context.paperclipApiUrl = apiUrl;
-  context.paperclipApiBaseUrl = `${apiUrl.replace(/\/+$/, "")}/api`;
-}
-
-function isHermesOperationsLiaisonAgent(agent: Pick<typeof agents.$inferSelect, "name" | "adapterType" | "runtimeConfig" | "metadata">) {
-  return isMissionExecutionLiaisonAgent(agent);
-}
-
-function isMissionOwnerControlIssue(issue: Pick<typeof issues.$inferSelect, "originKind" | "description">) {
-  return isMissionOwnerTaskIssue(issue);
-}
-
-function truncateContextText(value: string | null | undefined, max = 220) {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  return trimmed.length > max ? `${trimmed.slice(0, max - 3)}...` : trimmed;
-}
-
-function isMissionOwnerTaskIssue(issue: {
-  originKind: string | null;
-  description: string | null;
-}) {
-  return (
-    issue.originKind === "mission_main_executor_oversight" ||
-    issue.originKind === "mission_main_executor_unblock" ||
-    parseMissionOwnerActionMarker(issue.description) !== null
-  );
-}
-
-function canApplyRequestChangesValidationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  const title = issue.title?.trim() ?? "";
-  return (
-    /^\s*\[QA\]/iu.test(title) ||
-    /\b(QA|audit|auditor|validator|validation|validate|verify|review|check)\b/iu.test(title) ||
-    title.includes("검증")
-  );
-}
-
-function canApplyMissingWorkProductRegistrationGate(issue: {
-  originKind: string | null;
-  title?: string | null;
-  description?: string | null;
-}, stepRunRequiresWorkProduct?: boolean) {
-  if (issue.originKind === "mission_main_executor_plan") return false;
-  if (issue.originKind === "mission_main_executor_oversight") return false;
-  if (issue.originKind === "mission_main_executor_unblock") return false;
-
-  // workflow step의 명시 graphWorkProductRequired 플래그(workflow_step_runs.metadata에 stamp)가
-  // 권위 source. present면 title/contract 휴리스틱을 무시한다.
-  if (stepRunRequiresWorkProduct === true) return true;
-  if (stepRunRequiresWorkProduct === false) return false;
-
-  // Legacy fallback: 플래그 미스탬프 step-run(pre-deploy / 미동기화)용 종래 휴리스틱.
-  const title = issue.title?.trim() ?? "";
-  if (/\b(lead|approval|approve|audit|auditor|validator|validation|validate|verify|QA|review|check)\b/iu.test(title)) return false;
-  if (hasDeliverableOutputContract(issue.description)) return true;
-  return (
-    /\b(synthesi[sz]e|synthesis|generate|produce|create|draft|artifact|document|note|infographic|export|deliver|html|pdf|report)\b/iu.test(title) ||
-    /(작성|생성|제작|산출물|문서|자료|보고서|리포트|HTML|PDF)/u.test(title)
-  );
-}
-
-function hasDeliverableOutputContract(description: string | null | undefined) {
-  const text = description?.trim() ?? "";
-  return text.includes("Deliverable output (use exactly this directory)") && /`?\[?ARTIFACT\]?`?\s*:/iu.test(text);
-}
-
-/**
- * workflow_step_runs.metadata 에서 graphWorkProductRequired 플래그를 3상으로 판정.
- * - true  → 명시 산출물 step (gate 발동)
- * - false → 명시 비산출물 step (gate 스킵, 휴리스틱도 무시)
- * - undefined → 필드 미스탬프(legacy row / metadata={} / non-boolean) → 종래 휴리스틱 fallback
- * buildWorkflowStepRunMetadata 가 항상 boolean 으로 stamp 하므로 non-boolean은 undefined 취급(legacy 호환).
- */
-export function resolveStepRunRequiresWorkProduct(metadata: unknown): boolean | undefined {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
-  const value = (metadata as Record<string, unknown>).graphWorkProductRequired;
-  if (value === true) return true;
-  if (value === false) return false;
-  return undefined;
-}
-
-
-
-
-async function autoRegisterWorkProductFromIssueDocument(input: {
-  tx: Pick<Db, "select" | "insert">;
-  issue: {
-    id: string;
-    companyId: string;
-    projectId?: string | null;
-  };
-  run: typeof heartbeatRuns.$inferSelect;
-  claimedArtifactPaths: string[];
-  allowedArtifactRoot?: string | null;
-}) {
-  // [Task6c-C-ii] resume-linked issue 의 workProduct 자동등록은 같은 세대 정체 검증을 공유한다.
-  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: input.issue.companyId, issueId: input.issue.id }))) {
-    return null;
-  }
-  const issueDocs = await input.tx
-    .select({
-      id: documents.id,
-      key: issueDocuments.key,
-      title: documents.title,
-      latestBody: documents.latestBody,
-    })
-    .from(issueDocuments)
-    .innerJoin(documents, eq(issueDocuments.documentId, documents.id))
-    .where(eq(issueDocuments.issueId, input.issue.id))
-    .limit(25);
-
-  const matchingDocument = issueDocs.find((doc) => {
-    if (doc.key !== "work-product" && doc.key !== "workproduct") return false;
-    const haystack = [doc.title, doc.latestBody].filter(Boolean).join("\n");
-    return input.claimedArtifactPaths
-      .filter((artifactPath) => !input.allowedArtifactRoot || isPathInsideOrEqual(artifactPath, input.allowedArtifactRoot))
-      .some((artifactPath) => haystack.includes(artifactPath));
-  });
-  if (!matchingDocument) return null;
-
-  const artifactPath = input.claimedArtifactPaths.find((candidate) => {
-    if (input.allowedArtifactRoot && !isPathInsideOrEqual(candidate, input.allowedArtifactRoot)) return false;
-    const haystack = [matchingDocument.title, matchingDocument.latestBody].filter(Boolean).join("\n");
-    return haystack.includes(candidate);
-  });
-  if (!artifactPath) return null;
-
-  const isPrimary = !(await input.tx
-    .select({ id: issueWorkProducts.id })
-    .from(issueWorkProducts)
-    .where(eq(issueWorkProducts.issueId, input.issue.id))
-    .limit(1)
-    .then((rows) => rows[0] ?? null));
-
-  const created = await insertAutoWorkProduct(input.tx, {
-      companyId: input.issue.companyId,
-      projectId: input.issue.projectId ?? null,
-      issueId: input.issue.id,
-      type: "document",
-      provider: "local",
-      externalId: artifactPath,
-      title: matchingDocument.title ?? path.basename(artifactPath),
-      status: "active",
-      reviewState: "none",
-      isPrimary,
-      healthStatus: "unknown",
-      summary: "Auto-registered from issue document key `work-product` after a successful run reported this artifact path.",
-      metadata: {
-        path: artifactPath,
-        autoRegisteredFrom: "issue_document_work_product",
-        issueDocumentId: matchingDocument.id,
-        issueDocumentKey: matchingDocument.key,
-        claimedArtifactPaths: input.claimedArtifactPaths,
-      },
-      createdByRunId: input.run.id,
-    });
-
-  await input.tx.insert(activityLog).values({
-    companyId: input.issue.companyId,
-    actorType: "system",
-    actorId: "heartbeat",
-    action: "issue.work_product_auto_registered_from_document",
-    entityType: "issue",
-    entityId: input.issue.id,
-    agentId: input.run.agentId,
-    runId: input.run.id,
-    details: {
-      workProductId: created?.id ?? null,
-      issueDocumentId: matchingDocument.id,
-      issueDocumentKey: matchingDocument.key,
-      path: artifactPath,
-    },
-  });
-
-  return created ?? null;
-}
-
-async function autoRegisterWorkProductFromClaimedFile(input: {
-  tx: Pick<Db, "select" | "insert">;
-  issue: {
-    id: string;
-    companyId: string;
-    projectId?: string | null;
-  };
-  run: typeof heartbeatRuns.$inferSelect;
-  claimedArtifactPaths: string[];
-  allowedArtifactRoot?: string | null;
-  preferClaimedArtifactPath?: boolean;
-  registrationSource?: {
-    type: "issue_comment_artifact_marker" | "issue_comment_claimed_file";
-    commentClaimedArtifactPaths: string[];
-    sourceCommentIds: string[];
-  };
-  requireExistingLocalFile?: boolean;
-}) {
-  // [Task6c-C-ii] resume-linked issue 의 workProduct 자동등록은 같은 세대 정체 검증을 공유한다.
-  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: input.issue.companyId, issueId: input.issue.id }))) {
-    return null;
-  }
-  // [목적] producer 가 산출물 파일은 만들고 경로까지 출력(claimed)했으나 POST /work-products 등록 절차를
-  //   안 지킨 케이스의 회복. 문서 기반 자동등록(autoRegisterWorkProductFromIssueDocument)이 "work-product"
-  //   문서가 없어 못 잡을 때, claimed 절대경로가 실제 파일이면 그 파일을 workProduct 로 등록한다.
-  // [주의] 절대경로 + fs.isFile() 확인으로만 등록(오등록/과등록 위험 최소화). CMPAA-163(existing WP 를
-  //   missing 으로 오탐하는 false-positive)과는 다른 경로 — 여기는 진짜 등록 안 된 실제 파일을 보강 등록.
-  // [수정시 영향] 모든 producer(workflow/수동)에 적용. 조건 완화 시 오등록 위험.
-  // producer 가 명시한 claimed 경로(artifact-path regex 추출)를 권위로 그대로 등록한다. 파일 존재 검사/
-  //   workspace resolve 는 의도적으로 생략 — (a) producer 가 project-relative("/tech-scout/...") 등 다양한
-  //   형태로 경로를 보고해 단일 resolve base 를 정하기 어렵고, (b) downstream validator 가 같은 workspace
-  //   맥락에서 같은 경로를 resolve 하므로 producer 가 쓴 형태를 보존하는 쪽이 일관된다. 파일이 진짜 없으면
-  //   downstream REQUEST_CHANGES 로 자교정(현재 gate block 보다 낫다). CMPAA-163(existing WP missing 오탐)
-  //   과는 다른, 진짜 미등록 claimed 산출물의 보강 등록 경로.
-  // producer 가 여러 경로를 claimed 할 때 deliverable-like(report/draft/.md/.html/.pdf 등) 경로를 선호하고
-  //   misc(favicon/.svg/.ico/.json 등)는 배제. 잘못된 artifact 를 등록해 downstream 가 엉뚱한 파일을 쓰는 것을
-  //   막는다(이전 run: synthesize 가 favicon.svg 를 대신 등록해 build 가 report.md 를 못 찾음).
-  const DELIVERABLE_NAME_RE = /(report|draft|outline|article|document|deliverable|artifact|manual|guide|summary|brief|synthesi[sz]e)/i;
-  const DELIVERABLE_EXT_RE = /\.(md|html?|pdf|txt)$/i;
-  const MISC_ARTIFACT_RE = /(favicon|\.svg$|\.ico$|\.json$|\.lock$|\.log$|\.map$|node_modules|package\.json|\/config\.)/i;
-  const runDateStr = input.run.startedAt instanceof Date
-    ? input.run.startedAt.toISOString().slice(0, 10).replace(/-/g, "")
-    : "";
-  const eligibleClaimedArtifactPaths = input.claimedArtifactPaths
-    .filter((c): c is string => typeof c === "string" && c.trim().length > 0 && !c.includes("{"))
-    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
-  // explicit `[ARTIFACT]: <abs path>` 마커로 선언된 경로를 권위로 우선한다. generic scraping noise
-  // (raw-tech-scout.json, /design.md 등)가 eligible 을 여러 개로 만들어도, explicit 선언 1개면
-  // 그것을 등록(.json 이라도). extractExplicitArtifactPaths 가 Set dedup + backslash strip 하므로
-  // `evidence.json\`(command escaping)과 `evidence.json`(final line)은 하나로 정규화된다.
-  const explicitRunText = [stringifyRunResultJson(input.run.resultJson), input.run.stdoutExcerpt, input.run.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  const explicitEligiblePaths = extractExplicitArtifactPaths(explicitRunText)
-    .filter((p) => isActionableClaimedArtifactPath(p))
-    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot));
-  const commentRegistrationSource = input.registrationSource ?? null;
-  const commentRegistrationSourceKind = commentRegistrationSource?.type ?? null;
-  const explicitCommentEligiblePaths = commentRegistrationSource?.commentClaimedArtifactPaths
-    .filter((p) => isActionableClaimedArtifactPath(p))
-    .filter((p) => !input.allowedArtifactRoot || isPathInsideOrEqual(p, input.allowedArtifactRoot)) ?? [];
-  const declaredArtifactPath = explicitCommentEligiblePaths.length === 1
-    ? explicitCommentEligiblePaths[0]
-    : input.preferClaimedArtifactPath && explicitEligiblePaths.length >= 1
-    ? explicitEligiblePaths[0]
-    : null;
-  const scored = eligibleClaimedArtifactPaths
-    .map((p) => {
-      let score = (DELIVERABLE_NAME_RE.test(p) ? 2 : 0) + (DELIVERABLE_EXT_RE.test(p) ? 2 : 0) - (MISC_ARTIFACT_RE.test(p) ? 3 : 0);
-      // run-date awareness: current-run 날짜 경로 선호(+5), stale 날짜 패널티(-5)
-      if (runDateStr && p.includes(runDateStr)) score += 5;
-      else if (/\d{8}/.test(p)) score -= 5;
-      return { p, score };
-    })
-    .sort((a, b) => b.score - a.score);
-  // deliverable-like(점수>0)인 것만 등록. 전부 misc 면 등록 안 함(gate block — 잘못된 artifact 등록 방지).
-  const resolvedArtifactPath = declaredArtifactPath ?? (scored.length > 0 && scored[0].score > 0 ? scored[0].p : null);
-  if (!resolvedArtifactPath) return null;
-  if (input.requireExistingLocalFile === true && !(await isExistingLocalFile(resolvedArtifactPath))) return null;
-
-  const isPrimary = !(await input.tx
-    .select({ id: issueWorkProducts.id })
-    .from(issueWorkProducts)
-    .where(eq(issueWorkProducts.issueId, input.issue.id))
-    .limit(1)
-    .then((rows) => rows[0] ?? null));
-
-  const created = await insertAutoWorkProduct(input.tx, {
-      companyId: input.issue.companyId,
-      projectId: input.issue.projectId ?? null,
-      issueId: input.issue.id,
-      type: "file",
-      provider: "local",
-      externalId: resolvedArtifactPath,
-      title: path.basename(resolvedArtifactPath),
-      status: "active",
-      reviewState: "none",
-      isPrimary,
-      healthStatus: "unknown",
-      summary: commentRegistrationSource
-        ? "Auto-registered from one same-run issue comment artifact path."
-        : "Auto-registered from a claimed artifact path that resolves to a real file (producer reported the path but did not register a workProduct).",
-      metadata: commentRegistrationSource
-        ? {
-            path: resolvedArtifactPath,
-            autoRegisteredFrom: commentRegistrationSourceKind,
-            commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
-            sourceCommentIds: commentRegistrationSource.sourceCommentIds,
-          }
-        : {
-            path: resolvedArtifactPath,
-            autoRegisteredFrom: "claimed_artifact_file",
-            claimedArtifactPaths: input.claimedArtifactPaths,
-          },
-      createdByRunId: input.run.id,
-    });
-
-  await input.tx.insert(activityLog).values({
-    companyId: input.issue.companyId,
-    actorType: "system",
-    actorId: "heartbeat",
-    action: commentRegistrationSource
-      ? "issue.work_product_auto_registered_from_comment"
-      : "issue.work_product_auto_registered_from_file",
-    entityType: "issue",
-    entityId: input.issue.id,
-    agentId: input.run.agentId,
-    runId: input.run.id,
-    details: commentRegistrationSource
-      ? {
-          workProductId: created?.id ?? null,
-          path: resolvedArtifactPath,
-          autoRegisteredFrom: commentRegistrationSourceKind,
-          commentClaimedArtifactPaths: commentRegistrationSource.commentClaimedArtifactPaths,
-          sourceCommentIds: commentRegistrationSource.sourceCommentIds,
-        }
-      : {
-          workProductId: created?.id ?? null,
-          path: resolvedArtifactPath,
-          autoRegisteredFrom: "claimed_artifact_file",
-          claimedArtifactPaths: input.claimedArtifactPaths,
-        },
-  });
-
-  return created ?? null;
-}
-
-async function isExistingLocalFile(artifactPath: string): Promise<boolean> {
-  try {
-    const stats = await fs.stat(artifactPath);
-    return stats.isFile();
-  } catch (error) {
-    if (error instanceof Error) return false;
-    throw error;
-  }
-}
-
-function extractMissionOwnerUnblockArtifactUrl(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string | null {
-  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  return extractExplicitArtifactUrls(text)[0] ?? null;
-}
-
-async function applyMissionOwnerUnblockArtifactUrlToSource(input: {
-  tx: Pick<Db, "select" | "insert" | "update" | "transaction">;
-  ownerActionIssue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "missionId" | "identifier" | "originKind" | "originId">;
-  run: typeof heartbeatRuns.$inferSelect;
-  artifactUrl: string;
-  now: Date;
-}): Promise<{ sourceIssueId: string; workProductId: string | null } | null> {
-  const ownerActionIssue = input.ownerActionIssue;
-  if (
-    ownerActionIssue.originKind !== "mission_main_executor_unblock" ||
-    !ownerActionIssue.originId ||
-    !ownerActionIssue.missionId
-  ) {
-    return null;
-  }
-
-  const sourceIssue = await input.tx
-    .select({
-      id: issues.id,
-      companyId: issues.companyId,
-      projectId: issues.projectId,
-      missionId: issues.missionId,
-      identifier: issues.identifier,
-      title: issues.title,
-      status: issues.status,
-      assigneeAgentId: issues.assigneeAgentId,
-      hiddenAt: issues.hiddenAt,
-      completedAt: issues.completedAt,
-    })
-    .from(issues)
-    .where(and(eq(issues.id, ownerActionIssue.originId), eq(issues.companyId, ownerActionIssue.companyId)))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-
-  if (!sourceIssue || sourceIssue.hiddenAt || sourceIssue.missionId !== ownerActionIssue.missionId) return null;
-  if (sourceIssue.status === "cancelled") return null;
-
-  // [Task6c-C-ii] resume-linked source issue 의 owner-unblock artifact 자동등록도 같은 세대
-  //   정체 검증을 공유한다 — 어긋나면 등록/완료 mutation 전에 무음 스킵한다.
-  if (!(await assertIssueResumeScopeIdentity(input.tx as unknown as Parameters<typeof assertIssueResumeScopeIdentity>[0], { companyId: sourceIssue.companyId, issueId: sourceIssue.id }))) {
-    return null;
-  }
-
-  const existingWorkProduct = await input.tx
-    .select({ id: issueWorkProducts.id })
-    .from(issueWorkProducts)
-    .where(and(
-      eq(issueWorkProducts.companyId, sourceIssue.companyId),
-      eq(issueWorkProducts.issueId, sourceIssue.id),
-      or(
-        eq(issueWorkProducts.url, input.artifactUrl),
-        eq(issueWorkProducts.externalId, input.artifactUrl),
-      ),
-    ))
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-
-  let workProductId: string | null = existingWorkProduct?.id ?? null;
-  if (!workProductId) {
-    const hasExistingWorkProduct = await input.tx
-      .select({ id: issueWorkProducts.id })
-      .from(issueWorkProducts)
-      .where(eq(issueWorkProducts.issueId, sourceIssue.id))
-      .limit(1)
-      .then((rows) => Boolean(rows[0]));
-
-    const created = await insertAutoWorkProduct(input.tx, {
-        companyId: sourceIssue.companyId,
-        projectId: sourceIssue.projectId ?? null,
-        issueId: sourceIssue.id,
-        type: "preview_url",
-        provider: "mission_owner_unblock",
-        externalId: input.artifactUrl,
-        title: sourceIssue.title,
-        url: input.artifactUrl,
-        status: "active",
-        reviewState: "none",
-        isPrimary: !hasExistingWorkProduct,
-        healthStatus: "unknown",
-        summary: "Auto-registered from a successful mission-owner unblock run that emitted an [ARTIFACT] URL.",
-        metadata: {
-          autoRegisteredFrom: "mission_owner_unblock_artifact_url",
-          ownerActionIssueId: ownerActionIssue.id,
-          ownerActionIssueIdentifier: ownerActionIssue.identifier,
-          ownerActionRunId: input.run.id,
-        },
-        createdByRunId: input.run.id,
-      });
-    workProductId = created?.id ?? null;
-
-    await input.tx.insert(activityLog).values({
-      companyId: sourceIssue.companyId,
-      actorType: "system",
-      actorId: "heartbeat",
-      action: "issue.work_product_auto_registered_from_owner_unblock_url",
-      entityType: "issue",
-      entityId: sourceIssue.id,
-      agentId: input.run.agentId,
-      runId: input.run.id,
-      details: {
-        workProductId,
-        artifactUrl: input.artifactUrl,
-        ownerActionIssueId: ownerActionIssue.id,
-      },
-    });
-  }
-
-  if (sourceIssue.status !== "done") {
-    await input.tx
-      .update(issues)
-      .set({
-        status: "done",
-        checkoutRunId: null,
-        executionRunId: null,
-        executionAgentNameKey: null,
-        executionLockedAt: null,
-        completedAt: input.now,
-        updatedAt: input.now,
-      })
-      .where(and(eq(issues.id, sourceIssue.id), eq(issues.companyId, sourceIssue.companyId)));
-  }
-  const completedStepRunIds = await completeLinkedWorkflowStepRunsForIssue({
-    db: input.tx,
-    issueId: sourceIssue.id,
-    completedAt: sourceIssue.completedAt ?? input.now,
-    source: "heartbeat_promotion",
-    heartbeatRunId: input.run.id,
-  });
-
-  await input.tx.insert(issueComments).values({
-    companyId: sourceIssue.companyId,
-    issueId: sourceIssue.id,
-    authorAgentId: input.run.agentId,
-    body: [
-      "### Mission owner unblock result applied",
-      `Owner-action issue: ${ownerActionIssue.identifier ?? ownerActionIssue.id} (${ownerActionIssue.id})`,
-      `Owner-action run: ${input.run.id}`,
-      "Action: successful owner-unblock run emitted an [ARTIFACT] URL, so the source issue was reconciled to done.",
-      workProductId ? `WorkProduct: ${workProductId}` : "WorkProduct: already registered",
-      `[ARTIFACT]: ${input.artifactUrl}`,
-    ].join("\n"),
-  });
-
-  await input.tx.insert(activityLog).values({
-    companyId: sourceIssue.companyId,
-    actorType: "system",
-    actorId: "heartbeat",
-    action: "mission.owner_unblock_source_completed_from_artifact_url",
-    entityType: "issue",
-    entityId: sourceIssue.id,
-    agentId: input.run.agentId,
-    runId: input.run.id,
-    details: {
-      previousStatus: sourceIssue.status,
-      nextStatus: "done",
-      ownerActionIssueId: ownerActionIssue.id,
-      workflowStepRunIds: completedStepRunIds,
-      artifactUrl: input.artifactUrl,
-      workProductId,
-    },
-  });
-
-  return { sourceIssueId: sourceIssue.id, workProductId };
-}
-
-function canCreateMissionOwnerUnblockForRequestChanges(issue: {
-  originKind: string | null;
-  title?: string | null;
-}) {
-  return canApplyRequestChangesValidationGate(issue);
-}
-
-export type MissionOwnerTaskContext = {
-  available: true;
-  gating: "originKind" | "mission-owner-action-marker";
-  mission: {
-    id: string;
-    title: string;
-    status: string;
-  };
-  ownerTaskIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    originKind: string | null;
-    status: string;
-  };
-  sourceIssue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    status: string;
-    assigneeAgentId: string | null;
-  } | null;
-  latestOwnerActionDecision: ExtractedMissionOwnerDecision | null;
-  governanceEvidence: string;
-  allowedDecisionOptions: string[];
-  requiredDecisionFormat: string[];
-};
-
-async function resolveMissionOwnerTaskContext(input: {
-  db: Db;
-  companyId: string;
-  issue: {
-    id: string;
-    identifier: string | null;
-    title: string;
-    description: string | null;
-    status: string;
-    missionId: string | null;
-    originKind: string | null;
-    originId: string | null;
-  } | null;
-}): Promise<MissionOwnerTaskContext | null> {
-  const { db, companyId, issue } = input;
-  if (!issue || !isMissionOwnerTaskIssue(issue)) return null;
-
-  const marker = parseMissionOwnerActionMarker(issue.description);
-  const missionId = issue.missionId ?? marker?.missionId ?? null;
-  if (!missionId) return null;
-
-  const mission = await db
-    .select({ id: missions.id, title: missions.title, status: missions.status })
-    .from(missions)
-    .where(and(eq(missions.id, missionId), eq(missions.companyId, companyId)))
-    .then((rows) => rows[0] ?? null);
-  if (!mission) return null;
-
-  const sourceIssueId = issue.originKind === "mission_main_executor_unblock"
-    ? issue.originId
-    : marker?.sourceIssueId ?? null;
-  const sourceIssue = sourceIssueId
-    ? await db
-        .select({
-          id: issues.id,
-          identifier: issues.identifier,
-          title: issues.title,
-          status: issues.status,
-          assigneeAgentId: issues.assigneeAgentId,
-        })
-        .from(issues)
-        .where(and(eq(issues.id, sourceIssueId), eq(issues.companyId, companyId)))
-        .then((rows) => rows[0] ?? null)
-    : null;
-
-  // Structured recovery ledger only — comment/description decision prose is display-only.
-  const structuredDecision = await loadLatestMissionOwnerDecision({
-    db,
-    companyId,
-    ownerActionIssueId: issue.id,
-  });
-  const latestOwnerActionDecision = structuredDecision?.decision ?? null;
-
-  return {
-    available: true,
-    gating: issue.originKind === "mission_main_executor_oversight" || issue.originKind === "mission_main_executor_unblock"
-      ? "originKind"
-      : "mission-owner-action-marker",
-    mission: {
-      id: mission.id,
-      title: truncateContextText(mission.title, 160) ?? "Untitled mission",
-      status: mission.status,
-    },
-    ownerTaskIssue: {
-      id: issue.id,
-      identifier: issue.identifier,
-      title: truncateContextText(issue.title, 160) ?? "Untitled issue",
-      originKind: issue.originKind,
-      status: issue.status,
-    },
-    sourceIssue: sourceIssue
-      ? {
-          id: sourceIssue.id,
-          identifier: sourceIssue.identifier,
-          title: truncateContextText(sourceIssue.title, 160) ?? "Untitled source issue",
-          status: sourceIssue.status,
-          assigneeAgentId: sourceIssue.assigneeAgentId,
-        }
-      : null,
-    latestOwnerActionDecision,
-    governanceEvidence: "Governance evidence: unavailable in this context builder",
-    allowedDecisionOptions: [...MISSION_OWNER_DECISION_OPTIONS],
-    requiredDecisionFormat: [
-      "Submit structured Mission owner decision via the dedicated recovery API / ledger (owner_recovery_api).",
-      "Comments and Markdown decision blocks are display-only and are not control-plane authority.",
-      "Decision options:",
-      ...MISSION_OWNER_DECISION_OPTIONS.map((option) => `- ${option}`),
-    ],
-  };
-}
-
-function normalizeLedgerBillingType(value: unknown): BillingType {
-  const raw = readNonEmptyString(value);
-  switch (raw) {
-    case "api":
-    case "metered_api":
-      return "metered_api";
-    case "subscription":
-    case "subscription_included":
-      return "subscription_included";
-    case "subscription_overage":
-      return "subscription_overage";
-    case "credits":
-      return "credits";
-    case "fixed":
-      return "fixed";
-    default:
-      return "unknown";
-  }
-}
-
-function resolveLedgerBiller(result: AdapterExecutionResult): string {
-  return readNonEmptyString(result.biller) ?? readNonEmptyString(result.provider) ?? "unknown";
-}
-
-function normalizeBilledCostCents(costUsd: number | null | undefined, billingType: BillingType): number {
-  if (billingType === "subscription_included") return 0;
-  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
-  return Math.max(0, Math.round(costUsd * 100));
-}
-function missionRuntimeCostCents(costUsd: number | null | undefined): number | null {
-  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return null;
-  return Math.round(costUsd * 100);
-}
-
-async function resolveLedgerScopeForRun(
-  db: Db,
-  companyId: string,
-  run: typeof heartbeatRuns.$inferSelect,
-) {
-  const context = parseObject(run.contextSnapshot);
-  const contextIssueId = run.issueId ?? readNonEmptyString(context.issueId);
-  const contextProjectId = readNonEmptyString(context.projectId);
-
-  if (!contextIssueId) {
-    return {
-      issueId: null,
-      projectId: contextProjectId,
-    };
-  }
-
-  const issue = await db
-    .select({
-      id: issues.id,
-      projectId: issues.projectId,
-    })
-    .from(issues)
-    .where(and(eq(issues.id, contextIssueId), eq(issues.companyId, companyId)))
-    .then((rows) => rows[0] ?? null);
-
-  return {
-    issueId: issue?.id ?? null,
-    projectId: issue?.projectId ?? contextProjectId,
-  };
-}
-
-
-export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
-}
-
-
-
-function parseIssueAssigneeAdapterOverrides(
-  raw: unknown,
-): ParsedIssueAssigneeAdapterOverrides | null {
-  const parsed = parseObject(raw);
-  const parsedAdapterConfig = parseObject(parsed.adapterConfig);
-  const adapterConfig =
-    Object.keys(parsedAdapterConfig).length > 0 ? parsedAdapterConfig : null;
-  const useProjectWorkspace =
-    typeof parsed.useProjectWorkspace === "boolean"
-      ? parsed.useProjectWorkspace
-      : null;
-  if (!adapterConfig && useProjectWorkspace === null) return null;
-  return {
-    adapterConfig,
-    useProjectWorkspace,
-  };
-}
-
-
-
-export function formatRuntimeWorkspaceWarningLog(warning: string) {
-  return {
-    stream: "stdout" as const,
-    chunk: `[paperclip] ${warning}\n`,
-  };
-}
-
-
-
-export function buildCodexAuthAutoBlockedComment(input: CodexAuthAutoBlockInfo & { runId: string }): string {
-  const detected = input.authErrorCode
-    ? `codex_local 실행 중 401 Unauthorized (auth error code: \`${input.authErrorCode}\`)`
-    : "codex_local 실행 중 401 Unauthorized";
-  return [
-    "## 자동 차단: codex_local 인증 오류",
-    `- 원인코드: \`${input.reasonCode}\``,
-    `- 감지: ${detected}`,
-    `- 실행 runId: \`${input.runId}\``,
-    "- 조치 1: `codex login`으로 Codex CLI를 재인증",
-    "- 조치 2: Hermes `openai-codex`도 같은 계정 세션을 쓰면 `hermes auth`로 별도 재인증 상태 확인",
-    "- 조치 3: OPENAI API 키 사용 모드면 `OPENAI_API_KEY` 유효성 재확인",
-    "- 재개: 인증 복구 후 에이전트 일시정지를 해제하고 heartbeat 재실행",
-  ].join("\n");
-}
-
-function describeSessionResetReason(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-) {
-  if (contextSnapshot?.forceFreshSession === true) return "forceFreshSession was requested";
-  if (hasWorkflowQaReworkContract(contextSnapshot)) return "workflow QA rework requires a fresh session";
-
-  const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_assigned") return "wake reason is issue_assigned";
-  if (wakeReason === "mission_unblock_action_created") return "wake reason is mission_unblock_action_created";
-  if (wakeReason === "mission_unblock_action_stalled") return "wake reason is mission_unblock_action_stalled";
-  return null;
-}
-
-function deriveCommentId(
-  contextSnapshot: Record<string, unknown> | null | undefined,
-  payload: Record<string, unknown> | null | undefined,
-) {
-  return (
-    readNonEmptyString(contextSnapshot?.wakeCommentId) ??
-    readNonEmptyString(contextSnapshot?.commentId) ??
-    readNonEmptyString(payload?.commentId) ??
-    null
-  );
-}
-
-function enrichWakeContextSnapshot(input: {
-  contextSnapshot: Record<string, unknown>;
-  reason: string | null;
-  source: WakeupOptions["source"];
-  triggerDetail: WakeupOptions["triggerDetail"] | null;
-  payload: Record<string, unknown> | null;
-}) {
-  const { contextSnapshot, reason, source, triggerDetail, payload } = input;
-  const issueIdFromPayload = readNonEmptyString(payload?.["issueId"]);
-  const commentIdFromPayload = readNonEmptyString(payload?.["commentId"]);
-  const missionIdFromPayload = readNonEmptyString(payload?.["missionId"]);
-  const taskKey = deriveTaskKey(contextSnapshot, payload);
-  const wakeCommentId = deriveCommentId(contextSnapshot, payload);
-
-  if (!readNonEmptyString(contextSnapshot["wakeReason"]) && reason) {
-    contextSnapshot.wakeReason = reason;
-  }
-  if (!readNonEmptyString(contextSnapshot["issueId"]) && issueIdFromPayload) {
-    contextSnapshot.issueId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["missionId"]) && missionIdFromPayload) {
-    contextSnapshot.missionId = missionIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskId"]) && issueIdFromPayload) {
-    contextSnapshot.taskId = issueIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["taskKey"]) && taskKey) {
-    contextSnapshot.taskKey = taskKey;
-  }
-  if (!readNonEmptyString(contextSnapshot["commentId"]) && commentIdFromPayload) {
-    contextSnapshot.commentId = commentIdFromPayload;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeCommentId"]) && wakeCommentId) {
-    contextSnapshot.wakeCommentId = wakeCommentId;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeSource"]) && source) {
-    contextSnapshot.wakeSource = source;
-  }
-  if (!readNonEmptyString(contextSnapshot["wakeTriggerDetail"]) && triggerDetail) {
-    contextSnapshot.wakeTriggerDetail = triggerDetail;
-  }
-
-  return {
-    contextSnapshot,
-    issueIdFromPayload,
-    commentIdFromPayload,
-    taskKey,
-    wakeCommentId,
-  };
-}
-
-function mergeCoalescedContextSnapshot(
-  existingRaw: unknown,
-  incoming: Record<string, unknown>,
-) {
-  const existing = parseObject(existingRaw);
-  const merged: Record<string, unknown> = {
-    ...existing,
-    ...incoming,
-  };
-  const commentId = deriveCommentId(incoming, null);
-  if (commentId) {
-    merged.commentId = commentId;
-    merged.wakeCommentId = commentId;
-  }
-  return merged;
-}
-
-
-function isTrackedLocalChildProcessAdapter(adapterType: string) {
-  return SESSIONED_LOCAL_ADAPTERS.has(adapterType);
-}
-
-
-
-
-function isTerminalAdapterFallbackConfigurationFailure(run: typeof heartbeatRuns.$inferSelect) {
-  const text = [
-    heartbeatRunFailureText({
-      errorCode: run.errorCode,
-      errorMessage: run.error,
-      stdoutExcerpt: run.stdoutExcerpt,
-      stderrExcerpt: run.stderrExcerpt,
-    }),
-    stringifyRunResultJson(run.resultJson),
-    stringifyRunResultJson(run.usageJson),
-  ].join("\n").toLowerCase();
-
-  return (
-    /api error:\s*400\b[\s\S]*param incorrect/.test(text) ||
-    /\bparam incorrect\b/.test(text) ||
-    /\bnot supported model\b/.test(text) ||
-    /\bunsupported model\b/.test(text) ||
-    /\binvalid model\b/.test(text) ||
-    /\bunknown model\b/.test(text) ||
-    /\bmodel\b[\s\S]{0,80}\bnot (?:found|supported)\b/.test(text)
-  );
-}
-
-function shouldQueueRunFailureAdapterFallback(input: {
-  run: typeof heartbeatRuns.$inferSelect;
-  fallback: Pick<AdapterFallbackConfig, "command" | "provider" | "model" | "maxAttempts">;
-}) {
-  const context = parseObject(input.run.contextSnapshot);
-  const fallbackAttempt = resolveAdapterFallbackAttempt(context);
-  if (fallbackAttempt >= input.fallback.maxAttempts) return false;
-
-  const activeFallbackCommand = readNonEmptyString(context.fallbackCommand);
-  const activeFallbackProvider = readNonEmptyString(context.fallbackProvider);
-  const activeFallbackModel = readNonEmptyString(context.fallbackModel);
-  const fallbackProvider = input.fallback.provider ?? null;
-  const fallbackModel = input.fallback.model ?? null;
-  const isSameFallbackCommand = activeFallbackCommand === input.fallback.command;
-  const isSameFallbackRoute =
-    isSameFallbackCommand &&
-    activeFallbackProvider === fallbackProvider &&
-    activeFallbackModel === fallbackModel;
-  const isFallbackRun = readNonEmptyString(context.wakeReason) === "adapter_fallback";
-  if (isFallbackRun && isSameFallbackRoute && isTerminalAdapterFallbackConfigurationFailure(input.run)) {
-    return false;
-  }
-
-  return true;
-}
-
-
-function truncateDisplayId(value: string | null | undefined, max = 128) {
-  if (!value) return null;
-  return value.length > max ? value.slice(0, max) : value;
-}
-
-const defaultSessionCodec: AdapterSessionCodec = {
-  deserialize(raw: unknown) {
-    const asObj = parseObject(raw);
-    if (Object.keys(asObj).length > 0) return asObj;
-    const sessionId = readNonEmptyString((raw as Record<string, unknown> | null)?.sessionId);
-    if (sessionId) return { sessionId };
-    return null;
-  },
-  serialize(params: Record<string, unknown> | null) {
-    if (!params || Object.keys(params).length === 0) return null;
-    return params;
-  },
-  getDisplayId(params: Record<string, unknown> | null) {
-    return readNonEmptyString(params?.sessionId);
-  },
-};
-
-function getAdapterSessionCodec(adapterType: string) {
-  const adapter = getServerAdapter(adapterType);
-  return adapter.sessionCodec ?? defaultSessionCodec;
-}
-
-function buildMissionSessionSecretName(input: {
-  missionId: string;
-  agentId: string;
-  adapterType: string;
-}) {
-  return `mission-session:${input.missionId}:${input.agentId}:${input.adapterType}`;
-}
-
-function isRecoverableMissionSessionSecretReadError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof HttpError) {
-    return error.status === 400 && message.includes("Invalid local_encrypted secret material");
-  }
-  return (
-    message.includes("Unsupported state or unable to authenticate data") ||
-    message.includes("Invalid initialization vector") ||
-    message.includes("Invalid authentication tag length")
-  );
-}
-
-function normalizeSessionParams(params: Record<string, unknown> | null | undefined) {
-  if (!params) return null;
-  return Object.keys(params).length > 0 ? params : null;
-}
-
-export type MissionSessionAuthorityDecision = {
-  missionKnown: boolean;
-  defaultAuthority: "mission_session" | "task_session" | "runtime_state" | "none";
-  compatibilitySeedSessionId: string | null;
-  preferredSessionId: string | null;
-};
-
-export function resolveMissionSessionAuthorityDecision(input: {
-  missionId?: string | null;
-  missionSessionId?: string | null;
-  taskSessionDisplayId?: string | null;
-  taskSessionLegacySessionId?: string | null;
-  runtimeSessionId?: string | null;
-  resetTaskSession?: boolean;
-}): MissionSessionAuthorityDecision {
-  const missionId = readNonEmptyString(input.missionId);
-  const resetTaskSession = input.resetTaskSession === true;
-  const taskSessionDisplayId = truncateDisplayId(readNonEmptyString(input.taskSessionDisplayId));
-  const taskSessionLegacySessionId = readNonEmptyString(input.taskSessionLegacySessionId);
-  const runtimeSessionId = readNonEmptyString(input.runtimeSessionId);
-
-  if (missionId) {
-    return {
-      missionKnown: true,
-      defaultAuthority: "mission_session",
-      compatibilitySeedSessionId:
-        resetTaskSession ? null : (taskSessionDisplayId ?? taskSessionLegacySessionId ?? null),
-      preferredSessionId: readNonEmptyString(input.missionSessionId),
-    };
-  }
-
-  if (resetTaskSession) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "none",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: null,
-    };
-  }
-
-  const taskSessionId = taskSessionDisplayId ?? taskSessionLegacySessionId ?? null;
-  if (taskSessionId) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "task_session",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: taskSessionId,
-    };
-  }
-
-  if (runtimeSessionId) {
-    return {
-      missionKnown: false,
-      defaultAuthority: "runtime_state",
-      compatibilitySeedSessionId: null,
-      preferredSessionId: runtimeSessionId,
-    };
-  }
-
-  return {
-    missionKnown: false,
-    defaultAuthority: "none",
-    compatibilitySeedSessionId: null,
-    preferredSessionId: null,
-  };
-}
-
-function resolveNextSessionState(input: {
-  codec: AdapterSessionCodec;
-  adapterResult: AdapterExecutionResult;
-  previousParams: Record<string, unknown> | null;
-  previousDisplayId: string | null;
-  previousLegacySessionId: string | null;
-}) {
-  const { codec, adapterResult, previousParams, previousDisplayId, previousLegacySessionId } = input;
-
-  if (adapterResult.clearSession) {
-    return {
-      params: null as Record<string, unknown> | null,
-      displayId: null as string | null,
-      legacySessionId: null as string | null,
-    };
-  }
-
-  const explicitParams = adapterResult.sessionParams;
-  const hasExplicitParams = adapterResult.sessionParams !== undefined;
-  const hasExplicitSessionId = adapterResult.sessionId !== undefined;
-  const explicitSessionId = readNonEmptyString(adapterResult.sessionId);
-  const hasExplicitDisplay = adapterResult.sessionDisplayId !== undefined;
-  const explicitDisplayId = readNonEmptyString(adapterResult.sessionDisplayId);
-  const shouldUsePrevious = !hasExplicitParams && !hasExplicitSessionId && !hasExplicitDisplay;
-
-  const candidateParams =
-    hasExplicitParams
-      ? explicitParams
-      : hasExplicitSessionId
-        ? (explicitSessionId ? { sessionId: explicitSessionId } : null)
-        : previousParams;
-
-  const serialized = normalizeSessionParams(codec.serialize(normalizeSessionParams(candidateParams) ?? null));
-  const deserialized = normalizeSessionParams(codec.deserialize(serialized));
-
-  const displayId = truncateDisplayId(
-    explicitDisplayId ??
-      (codec.getDisplayId ? codec.getDisplayId(deserialized) : null) ??
-      readNonEmptyString(deserialized?.sessionId) ??
-      (shouldUsePrevious ? previousDisplayId : null) ??
-      explicitSessionId ??
-      (shouldUsePrevious ? previousLegacySessionId : null),
-  );
-
-  const legacySessionId =
-    explicitSessionId ??
-    readNonEmptyString(deserialized?.sessionId) ??
-    displayId ??
-    (shouldUsePrevious ? previousLegacySessionId : null);
-
-  return {
-    params: serialized,
-    displayId,
-    legacySessionId,
-  };
-}
-
-export function isSucceededHeartbeatRunStatus(status: string | null | undefined): status is "succeeded" {
-  return status === "succeeded";
-}
-function containsToolLimitLifecycleFailure(run: typeof heartbeatRuns.$inferSelect) {
-  const text = [run.stdoutExcerpt, run.stderrExcerpt, run.error].filter(Boolean).join("\n");
-  return /reached maximum iterations|tool[-\s]?call limit|tool capacity|could not post|couldn't post|not able to post|before i could post|could not .*mark|couldn't .*mark/iu.test(text);
-}
-
-
-
-
-function stringifyRunResultJson(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
 
 function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): RequestChangesVerdict | null {
   const result = parseObject(run.resultJson);
@@ -1825,38 +360,6 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
         ? requestChangesCandidate.slice(requestChangesCandidate.length - MISSION_CHILD_RUN_OUTPUT_COMMENT_MAX_CHARS)
         : requestChangesCandidate,
   };
-}
-
-
-export function extractClaimedArtifactPaths(run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson" | "stdoutExcerpt" | "stderrExcerpt">): string[] {
-  const text = [stringifyRunResultJson(run.resultJson), run.stdoutExcerpt, run.stderrExcerpt]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join("\n");
-  return extractClaimedArtifactPathsFromText(text);
-}
-
-
-
-/**
- * [목적] fireWikiRecord — agent 자가학습 wiki에 실패 패턴을 기록한다. fire-and-forget(non-blocking):
- *   recordFailure를 await하지 않고 .catch로 에러를 삼켜, wiki 로깅이 절대 main flow를
- *   깨뜨리지 않도록 한다(activity-log.ts의 plugin event fanout .catch 선례와 동일 패턴).
- * [입력] wiki: agentWikiService(db) 인스턴스. input: RecordFailureInput. runIdForLog: 로깅용 run id.
- * [수정시 영향] 호출부는 모두 heartbeatService 클로저 내부. 에러는 logger.warn으로만 남는다.
- */
-function fireWikiRecord(
-  wiki: ReturnType<typeof agentWikiService>,
-  input: RecordFailureInput,
-  runIdForLog?: string,
-): void {
-  void wiki
-    .recordFailure(input)
-    .catch((err: unknown) =>
-      logger.warn(
-        { err, runId: runIdForLog, pattern: input.pattern },
-        "agent-wiki.recordFailure non-blocking failure",
-      ),
-    );
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -1924,15 +427,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
-  function isMissionOwnerActionParentPlacementRejected(error: unknown) {
-    return error instanceof HttpError &&
-      error.status === 422 &&
-      (
-        error.message.includes("Mission downstream issue creation is not allowed") ||
-        error.message.includes("Mission nested child issue creation is not allowed") ||
-        error.message.includes("Mission child issue burst limit exceeded")
-      );
-  }
+
 
   async function createMissionOwnerActionIssue(companyId: string, data: IssueCreateInput) {
     if (!data.parentId) return issuesSvc.create(companyId, data);
@@ -3266,17 +1761,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   //   heartbeat-retry-enqueue.ts 로 기계적 이동했다(동작 무변경). deps 는 이 팩토리 클로저를 그대로 주입.
   const retryEnqueueDeps: HeartbeatRetryEnqueueDeps = { db, resolveSessionBeforeForWakeup, appendRunEvent };
 
-  function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
-    const runtimeConfig = parseObject(agent.runtimeConfig);
-    const heartbeat = parseObject(runtimeConfig.heartbeat);
 
-    return {
-      enabled: asBoolean(heartbeat.enabled, true),
-      intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
-      wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
-      maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
-    };
-  }
 
   async function countRunningRunsForAgent(agentId: string) {
     const activeClause = await lifecycleActiveClause(db);
@@ -3614,425 +2099,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
     }
     return summary;
-  }
-
-  async function reapOrphanedRuns(opts?: {
-    staleThresholdMs?: number;
-    activeExecutionTimeoutMs?: number;
-    queuedStaleThresholdMs?: number;
-  }) {
-    const staleThresholdMs = opts?.staleThresholdMs ?? 0;
-    const activeExecutionTimeoutMs = opts?.activeExecutionTimeoutMs ?? 0;
-    const queuedStaleThresholdMs = opts?.queuedStaleThresholdMs ?? 0;
-    const now = new Date();
-
-    // Find all runs stuck in "running" state. Queued runs are handled below only
-    // when they have exceeded an explicit queued staleness threshold.
-    const activeRuns = await db
-      .select({
-        run: heartbeatRuns,
-        adapterType: agents.adapterType,
-      })
-      .from(heartbeatRuns)
-      .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
-      .where(eq(heartbeatRuns.status, "running"));
-
-    const reaped: string[] = [];
-
-    // [approval-waiting marker] running 런의 이슈에 pending 운영자 결정/승인이 있으면
-    // '멈춤(stuck)'이 아니라 '사람 대기'다 — 배치 판정 후 타임아웃 회수에서 면제한다(스캔 N+1 금지).
-    const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
-      activeRuns.map((row) => row.run.issueId).filter((issueId): issueId is string => Boolean(issueId)),
-    );
-
-    for (const { run, adapterType } of activeRuns) {
-      const trackedProcess = runningProcesses.get(run.id) ?? null;
-      const hasActiveExecution = activeRunExecutions.has(run.id);
-      if (trackedProcess || hasActiveExecution) {
-        // [issue done → 자식 즉시 kill] 에이전트가 issue 를 done/cancelled 처리했는데도
-        // 어댑터 자식(opencode 등)이 exit 안 하고 살아있으면 maxConcurrentRuns 블록이
-        // execution_stale(15min)까지 지속된다. issue 상태가 done/cancelled 면 자식을
-        // 즉시 종료해 블록을 푼다.
-        if (trackedProcess && run.issueId) {
-          const [issueRow] = await db.select({ status: issues.status }).from(issues)
-            .where(eq(issues.id, run.issueId)).limit(1);
-          if (issueRow && (issueRow.status === "done" || issueRow.status === "cancelled")) {
-            trackedProcess.child.kill("SIGTERM");
-            setTimeout(() => {
-              if (!trackedProcess.child.killed) {
-                trackedProcess.child.kill("SIGKILL");
-              }
-            }, Math.max(1, trackedProcess.graceSec) * 1000);
-            runningProcesses.delete(run.id);
-            await setRunStatus(run.id, issueRow.status === "done" ? "succeeded" : "cancelled", {
-              error: `Issue ${issueRow.status} but adapter child did not exit; terminated`,
-              errorCode: "issue_done_child_not_exited",
-              finishedAt: now,
-            }, { expectedStatuses: ["running"] });
-            // Agent self-learning wiki (Phase 1): adapter 자식 미종료 패턴 기록 (non-blocking).
-            fireWikiRecord(wikiSvc, {
-              companyId: run.companyId,
-              agentId: run.agentId,
-              missionId: null,
-              pattern: "adapter 자식 미종료 (issue done/cancelled)",
-              cause: "이슈가 done/cancelled로 종료됐는데도 어댑터 자식(opencode 등)이 exit하지 않아 maxConcurrentRuns 블록이 execution_stale까지 지속됨.",
-              solution: "이슈 done/cancelled 처리 후 어댑터 자식이 확실히 exit하도록 종료 시그널/플래그 점검. 작업 완료 시 프로세스를 즉시 종료할 것.",
-              errorCode: "issue_done_child_not_exited",
-            }, run.id);
-            continue;
-          }
-        }
-        if (activeExecutionTimeoutMs <= 0) continue;
-        // [run stability] step 등급 타임아웃 — QA/검수 step이거나 명시적 step timeout이 있으면
-        //   기본 부실 역치(900s) 대신 그 등급의 역치로 판정한다(낮추지 않는다).
-        const stepAwareTimeoutMs = await resolveRunActiveExecutionTimeoutMs(run, activeExecutionTimeoutMs);
-        if (stepAwareTimeoutMs <= 0) continue;
-        const refTime = new Date(run.updatedAt).getTime();
-        if (now.getTime() - refTime < stepAwareTimeoutMs) continue;
-
-        // [approval-waiting marker] 실행이 pending 운영자 결정/승인 대기 중이면 stuck 이 아니다.
-        // 프로세스는 살아있고 사람 결정에 막혀 있으므로 타임아웃/kill 을 보류한다(자동취소 금지).
-        const approvalWait = run.issueId ? approvalWaitByIssueId.get(run.issueId) : undefined;
-        if (approvalWait?.waiting) {
-          logger.info(
-            {
-              runId: run.id,
-              issueId: run.issueId,
-              operatorDecisionIds: approvalWait.operatorDecisionIds,
-              approvalIds: approvalWait.approvalIds,
-              activeExecutionTimeoutMs,
-            },
-            "run is waiting on a pending operator decision/approval; skipping stale execution timeout",
-          );
-          continue;
-        }
-
-        if (trackedProcess) {
-          trackedProcess.child.kill("SIGTERM");
-          setTimeout(() => {
-            if (!trackedProcess.child.killed) {
-              trackedProcess.child.kill("SIGKILL");
-            }
-          }, Math.max(1, trackedProcess.graceSec) * 1000);
-          runningProcesses.delete(run.id);
-        }
-
-        const timeoutMessage = `Heartbeat execution exceeded ${Math.round(stepAwareTimeoutMs / 1000)}s without reaching a terminal state`;
-        const timedOutRun = await setRunStatus(run.id, "timed_out", {
-          error: timeoutMessage,
-          errorCode: "execution_stale_timeout",
-          finishedAt: now,
-        }, { expectedStatuses: ["running"] });
-        await setWakeupStatus(run.wakeupRequestId, "timed_out", {
-          finishedAt: now,
-          error: timeoutMessage,
-        });
-        if (timedOutRun) {
-          await appendRunEvent(timedOutRun, await nextRunEventSeq(timedOutRun.id), {
-            eventType: "lifecycle",
-            stream: "system",
-            level: "error",
-            message: timeoutMessage,
-            payload: {
-              activeExecution: hasActiveExecution,
-              trackedProcess: Boolean(trackedProcess),
-              activeExecutionTimeoutMs,
-            },
-          });
-          // [recovery liveness hardening] per-run isolation: 이 run 의 terminal 처리(release,
-          // finalize, startNext) 중 어느 단계가 실패/정지해도 전체 sweep 과 recovery lane 을
-          // 중단시키지 않고 다음 run 으로 진행한다.
-          try {
-            await releaseIssueExecutionAndPromote(timedOutRun, { skipLocked: true });
-            const terminalRun = await getRun(timedOutRun.id);
-            if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
-              await settleHeartbeatAfterExecution(db, terminalRun, now);
-            }
-            await finalizeAgentStatus(run.agentId, "timed_out");
-            await startNextQueuedRunForAgent(run.agentId);
-            reaped.push(run.id);
-          } catch (err) {
-            logger.warn({ err, runId: run.id }, "failed to finalize timed-out run; continuing sweep");
-          }
-        }
-        // Agent self-learning wiki (Phase 1): execution stale(hang) 패턴 기록 (non-blocking).
-        fireWikiRecord(wikiSvc, {
-          companyId: run.companyId,
-          agentId: run.agentId,
-          missionId: null,
-          pattern: "execution stale (hang)",
-          cause: "어댑터 실행이 타임아웃(activeExecutionTimeout) 전에 종단 상태에 도달하지 못해 hang으로 판정됨.",
-          solution: "API_TIMEOUT(10분)과 idle 점검. 장기 실행 명령은 타임아웃/백그라운드 분리. 자식이 stdout을 닫지 않고 누수하는지 확인.",
-          errorCode: "execution_stale_timeout",
-        }, run.id);
-        continue;
-      }
-
-      // Apply staleness threshold to avoid false positives
-      if (staleThresholdMs > 0) {
-        const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
-        if (now.getTime() - refTime < staleThresholdMs) continue;
-      }
-
-      const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
-      if (tracksLocalChild && run.processPid && isProcessAlive(run.processPid)) {
-        if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
-          const detachedMessage = `Lost in-memory process handle, but child pid ${run.processPid} is still alive`;
-          const detachedRun = await setRunStatus(run.id, "running", {
-            error: detachedMessage,
-            errorCode: DETACHED_PROCESS_ERROR_CODE,
-          }, { expectedStatuses: ["running"] });
-          if (detachedRun) {
-            await appendRunEvent(detachedRun, await nextRunEventSeq(detachedRun.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: detachedMessage,
-              payload: {
-                processPid: run.processPid,
-              },
-            });
-          }
-        }
-        // FIX 2b: orphaned-but-alive child longevity cap. child 가 DETACHED_REAP_AFTER_MS 초과 실행 중이면
-        // 강제 kill 후 아래 기존 process_lost/retry 경로로 fall-through(무한 defer 방지 — CMPA-5519 대응).
-        const detachedChildStartedMs = run.processStartedAt
-          ? new Date(run.processStartedAt).getTime()
-          : run.startedAt
-            ? new Date(run.startedAt).getTime()
-            : 0;
-        if (
-          DETACHED_REAP_AFTER_MS > 0 &&
-          detachedChildStartedMs > 0 &&
-          now.getTime() - detachedChildStartedMs > DETACHED_REAP_AFTER_MS
-        ) {
-          terminateRecordedProcess(run.processPid, "SIGTERM");
-          setTimeout(
-            () => terminateRecordedProcess(run.processPid, "SIGKILL"),
-            Math.max(1, DETACHED_GRACE_SEC) * 1000,
-          );
-          // fall through to process_lost/retry below (의도적 continue 생략).
-        } else {
-          // [A2] run 은 longevity cap 까지 detached 로 유예하지만, 그동안 agent 가 phantom running
-          // 에 갇히지 않도록 agent 가시성을 직접 교정한 뒤 유예한다.
-          await demoteAgentStuckDetached(run, now);
-          continue;
-        }
-      }
-
-      const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
-      const baseMessage = run.processPid
-        ? `Process lost -- child pid ${run.processPid} is no longer running`
-        : "Process lost -- server may have restarted";
-
-      let finalizedRun = await setRunStatus(run.id, "failed", {
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
-        finishedAt: now,
-      }, { expectedStatuses: ["running"] });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: now,
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-      });
-      if (!finalizedRun) finalizedRun = await getRun(run.id);
-      if (!finalizedRun) continue;
-
-      // Agent wiki hook (process_lost): adapter 자식 프로세스 상실 교훈 축적 (non-blocking).
-      // detached 30min cap fall-through 도 이 process_lost 경로를 타므로 이 hook 하나로 커버.
-      fireWikiRecord(wikiSvc, {
-        companyId: run.companyId,
-        agentId: run.agentId,
-        pattern: "process_lost (adapter 자식 프로세스 상실)",
-        cause: "어댑터 자식 프로세스가 예기치 않게 종료/상실돼 run 실패. in-memory handle 상실(→orphan), 서버 재시작, 자식 crash 등. CMPA-5519 hang의 주요 원인.",
-        solution: "detached 30min cap + graceful shutdown 자식 회수로 handle-loss 회수 지연을 보강. 반복 시 adapter command·리소스·안정성 점검.",
-        errorCode: "process_lost",
-      }, run.id);
-
-      let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
-      let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
-      if (shouldRetry) {
-        const agent = await getAgent(run.agentId);
-        if (agent) {
-          retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, finalizedRun, agent, now);
-        }
-      } else {
-        const agent = await getAgent(run.agentId);
-        const fallback = agent ? resolveAdapterFallbackConfig(agent.adapterConfig) : null;
-        const fallbackAttempt = resolveAdapterFallbackAttempt(run.contextSnapshot);
-        const shouldFallback =
-          Boolean(agent) &&
-          Boolean(fallback) &&
-          fallbackAttempt < fallback!.maxAttempts;
-        if (agent && fallback && shouldFallback) {
-          fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, finalizedRun, agent, now, {
-            fallbackCommand: fallback.command,
-            fallbackProvider: fallback.provider,
-            fallbackModel: fallback.model,
-            fallbackThinking: resolveAdapterFallbackThinking(
-              fallback,
-              resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot) + 1,
-            ),
-            fallbackReason: "process_lost",
-          });
-        } else {
-          // [recovery liveness hardening] per-run isolation: fallback 없는 run 의 release+promote
-          // 실패가 전체 sweep 을 중단시키지 않게 격리.
-          try {
-            await releaseIssueExecutionAndPromote(finalizedRun, { skipLocked: true });
-          } catch (err) {
-            logger.warn({ err, runId: run.id }, "failed to release+promote finalized run; continuing sweep");
-          }
-        }
-      }
-
-      await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "error",
-        message: shouldRetry
-          ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
-          : fallbackRun
-            ? `${baseMessage}; queued adapter fallback ${fallbackRun.id}`
-          : baseMessage,
-        payload: {
-          ...(run.processPid ? { processPid: run.processPid } : {}),
-          ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
-          ...(fallbackRun ? { fallbackRunId: fallbackRun.id } : {}),
-        },
-      });
-
-      // [recovery liveness hardening] terminal 체인 후속(finalize/startNext) 도 격리 — 이 run 의
-      // 실패가 전체 sweep 을 중단시키지 않는다.
-      try {
-        await finalizeAgentStatus(run.agentId, "failed");
-        await startNextQueuedRunForAgent(run.agentId);
-        runningProcesses.delete(run.id);
-        reaped.push(run.id);
-      } catch (err) {
-        logger.warn({ err, runId: run.id }, "failed to finalize process-lost run; continuing sweep");
-      }
-    }
-
-    // [checkpoint+graceful shutdown 백스톱] 종료 플러시가 마킹(failed+shutdown_interrupted)까지는
-    // 커밋했으나 재시도 등록 직전에 프로세스가 죽거나 데드라인에 걸린 런의 회수 사각지대 방어.
-    // 이 스캔이 없으면 마킹된 런은 위 running 스캔 대상에서 빠져 아무도 회수하지 못한다(요구사항:
-    // 종료 시 마킹된 런은 기존 회수 경로에 반드시 진입해야 한다). 조건 — processLossRetryCount<1
-    // (재시도 자격, 소진 규칙 동일) + 후계 런(retryOfRunId, retry/fallback 공통) 부재 → 정확히 1회.
-    // retryCount 소진 마킹 런의 fallback 누락은 여기서 보충하지 않는다(이슈 락은
-    // reapStalledIssueExecutionLocks 가 회수 — 데드라인 스킵 시 의도된 우아한 강등).
-    try {
-      const interruptedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.status, "failed"),
-            eq(heartbeatRuns.errorCode, SHUTDOWN_INTERRUPTED_ERROR_CODE),
-            sql`${heartbeatRuns.processLossRetryCount} < 1`,
-          ),
-        )
-        .limit(50);
-      for (const run of interruptedRuns) {
-        try {
-          if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
-          const successors = await db
-            .select({ id: heartbeatRuns.id })
-            .from(heartbeatRuns)
-            .where(eq(heartbeatRuns.retryOfRunId, run.id))
-            .limit(1);
-          if (successors.length > 0) continue;
-          const agent = await getAgent(run.agentId);
-          if (!agent) continue;
-          const retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, run, agent, now);
-          if (retriedRun) {
-            await setWakeupStatus(run.wakeupRequestId, "failed", {
-              finishedAt: now,
-              error: run.error ?? "shutdown_interrupted recovered by backstop",
-            });
-            await appendRunEvent(run, await nextRunEventSeq(run.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: `Recovered shutdown-interrupted run; queued retry ${retriedRun.id}`,
-              payload: { retryRunId: retriedRun.id },
-            });
-            reaped.push(run.id);
-          }
-        } catch (err) {
-          logger.warn({ err, runId: run.id }, "failed to recover shutdown-interrupted run; continuing sweep");
-        }
-      }
-    } catch (err) {
-      logger.warn({ err }, "shutdown-interrupted backstop scan failed; continuing sweep");
-    }
-
-    if (queuedStaleThresholdMs > 0) {
-      const recoverQueuedStaleWork = createHeartbeatQueuedStaleRecovery({
-        db,
-        activeExecutionTimeoutMs,
-        withAgentStartLock,
-        startNextQueuedRunForAgent,
-        countActiveRunsForAgent: countRunningRunsForAgent,
-        maxConcurrentRuns: agent => parseHeartbeatPolicy(agent).maxConcurrentRuns,
-        hasActiveExecution: runId => activeRunExecutions.has(runId),
-        hasLiveTrackedChild: runId => {
-          const child = runningProcesses.get(runId)?.child;
-          return Boolean(child && child.exitCode === null && child.signalCode === null && isProcessAlive(child.pid));
-        },
-        resolveActiveExecutionTimeoutMs: resolveRunActiveExecutionTimeoutMs,
-        setRunStatus: setHeartbeatRunStatus,
-        publishRunStatus: run => publishHeartbeatRunStatus(publishLiveEvent, run),
-        nextRunEventSeq,
-        appendRunEvent,
-        releaseIssueExecutionAndPromote,
-        getRun,
-        settleHeartbeatAfterExecution,
-        finalizeAgentStatus,
-        recordQueueTransitionEvent,
-      });
-      const queuedRecovery = await recoverQueuedStaleWork(queuedStaleThresholdMs);
-      reaped.push(...queuedRecovery.reapedRunIds);
-    }
-
-    const continuationCursor = terminalContinuationScanCursor;
-    const continuationPredicate = continuationCursor
-      ? and(eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE), or(
-          gt(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
-          and(eq(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
-            gt(workflowTransitionEvents.id, continuationCursor.id)),
-        ))
-      : eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE);
-    const continuationRows = await db.select({ id: workflowTransitionEvents.id, createdAt: sql<string>`${workflowTransitionEvents.createdAt}::text` })
-      .from(workflowTransitionEvents).where(continuationPredicate)
-      .orderBy(asc(workflowTransitionEvents.createdAt), asc(workflowTransitionEvents.id)).limit(50);
-    if (continuationRows.length === 0) {
-      terminalContinuationScanCursor = null;
-    } else {
-      const last = continuationRows[continuationRows.length - 1]!;
-      terminalContinuationScanCursor = { createdAt: last.createdAt, id: last.id };
-      for (const row of continuationRows) {
-        if (terminalContinuationInflight.has(row.id)) continue;
-        const manifest = await readTerminalReleaseManifest(db, row.id);
-        if (manifest.kind !== "found") {
-          logger.warn({ continuationEventId: row.id, reason: manifest.reason },
-            "terminal release reaper left malformed continuation held");
-          continue;
-        }
-        const execution = runTerminalReleaseContinuation(row.id).then(result => {
-          if (result.kind === "held") logger.warn({ continuationEventId: row.id, reason: result.reason },
-            "terminal release reaper left continuation pending");
-        }).catch(error => {
-          logger.warn({ err: error, continuationEventId: row.id },
-            "terminal release reaper continuation failed; durable obligation remains pending");
-        });
-        trackHeartbeatExecution(db, execution);
-      }
-    }
-
-    if (reaped.length > 0) {
-      logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
-    }
-    return { reaped: reaped.length, runIds: reaped };
   }
 
   async function finalizeLinkedRunsForIssueStatus(input: {
@@ -4444,7 +2510,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const execution = executeRun(claimedRun.id).catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         });
-        trackHeartbeatExecution(db, execution);
+        // [C5 queue drain guard] 성공한 정착 run 만 같은 agent 의 queued wake/run 을 한 번 더 승격한다.
+        //   실행 중에 만들어진 정착 wake(QA refire 등)는 그 run 이 유일한 슬롯을 점유한 탓에
+        //   after-commit drain 시점에 승격되지 못하고 회수 lane(기본 5분)까지 기다려야 한다.
+        //   다만 실패/재시도 run 이나 종료(flush) 중에 승격하면 shutdown 재시작 계약(queued 유지)과
+        //   재시도 예산 판정이 깨지므로(2026-11-07 #623 회귀), 성공 && 비-종료일 때만 승격한다.
+        //   승격은 기존 startNextQueuedRunForAgent 경로를 그대로 써 중복 실행을 만들지 않는다.
+        const drained = execution.then(async () => {
+          if (runtimeExecutionLifecycle.shutdownState()) return;
+          const settled = await db
+            .select({ status: heartbeatRuns.status })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, claimedRun.id))
+            .then((rows) => rows[0] ?? null);
+          if (settled?.status !== "succeeded") return;
+          await resumeQueuedRuns(claimedRun.agentId);
+        }).catch((err) => {
+          logger.warn({ err, agentId: claimedRun.agentId }, "post-run heartbeat queue drain failed");
+        });
+        trackHeartbeatExecution(db, drained);
       }
       return claimedRuns;
     });
@@ -4533,11 +2617,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { kind: result.kind, run };
   }
 
-  async function isCorrectionRun(execDb: Db, run: typeof heartbeatRuns.$inferSelect) {
-    if (!run.wakeupRequestId) return false;
-    const [wake] = await execDb.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
-    return !!wake && !!readQaCorrectionWakeRef(wake);
-  }
+
 
   async function deliverStoredQaCorrectionWake(wakeupRequestId: string,
     transactionProfile: "public_callback" | "recovery_skip_locked", resumeQueue: boolean) {
@@ -4560,13 +2640,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
-  function publishQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
-    publishLiveEvent({
-      companyId: run.companyId, type: "heartbeat.run.queued",
-      payload: { runId: run.id, agentId: run.agentId, invocationSource: run.invocationSource,
-        triggerDetail: run.triggerDetail, wakeupRequestId: run.wakeupRequestId },
-    });
-  }
+
 
   async function executeRun(runId: string) {
     let run = await getRun(runId);
@@ -9901,7 +7975,42 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     reportRunActivity: clearDetachedRunWarning,
 
-    reapOrphanedRuns,
+    // 고아 런 reaper 본문은 heartbeat-orphan-reaper.ts 로 이동(동작 무변경).
+    // 인스턴스 스코프 상태(터미널 연속 스캔 커서·in-flight set·retry deps)는 접근자로 주입한다.
+    reapOrphanedRuns: (opts?: {
+      staleThresholdMs?: number;
+      activeExecutionTimeoutMs?: number;
+      queuedStaleThresholdMs?: number;
+    }) => reapOrphanedRuns({
+      db,
+      appendRunEvent,
+      nextRunEventSeq,
+      setRunStatus,
+      setWakeupStatus,
+      recordQueueTransitionEvent,
+      finalizeAgentStatus,
+      countRunningRunsForAgent,
+      getAgent,
+      getRun,
+      demoteAgentStuckDetached,
+      startNextQueuedRunForAgent,
+      releaseIssueExecutionAndPromote,
+      resolveRunActiveExecutionTimeoutMs,
+      runTerminalReleaseContinuation,
+      retryEnqueueDeps,
+      wikiSvc,
+      activeRunExecutions,
+      terminalContinuationInflight,
+      getTerminalContinuationScanCursor: () => terminalContinuationScanCursor,
+      setTerminalContinuationScanCursor: (v) => { terminalContinuationScanCursor = v; },
+      publishHeartbeatRunStatus,
+      setHeartbeatRunStatus,
+      enqueueProcessLossRetry,
+      enqueueAdapterFallbackRun,
+      settleHeartbeatAfterExecution,
+      readTerminalReleaseManifest,
+      TERMINAL_RELEASE_EVENT_TYPE,
+    }, opts),
 
     // Exact durable recovery entrypoint: the manifest, actual-drain receipt and current source are
     // revalidated before any existing writer can run; this does not grant execution authority.
@@ -9990,3 +8099,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   };
 }
 import { isPgUniqueViolation } from "./pg-error.js";
+import { isHermesOperationsLiaisonAgent, isMissionOwnerControlIssue, canCreateMissionOwnerUnblockForRequestChanges, resolveMissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+export { type MissionOwnerTaskContext } from "./heartbeat-mission-owner-context.js";
+import { canApplyMissingWorkProductRegistrationGate, resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";
+import { truncateDisplayId, getAdapterSessionCodec, buildMissionSessionSecretName, isRecoverableMissionSessionSecretReadError, normalizeSessionParams, resolveMissionSessionAuthorityDecision, resolveNextSessionState, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
+import { enrichWakeContextSnapshot, mergeCoalescedContextSnapshot, type WakeupOptions } from "./heartbeat-wake-context.js";
+import { normalizeLedgerBillingType, resolveLedgerBiller, normalizeBilledCostCents, missionRuntimeCostCents, resolveLedgerScopeForRun } from "./heartbeat-cost-ledger-context.js";
+import { isTerminalAdapterFallbackConfigurationFailure, shouldQueueRunFailureAdapterFallback } from "./heartbeat-adapter-fallback.js";
+import { ensureManagedProjectWorkspace } from "./heartbeat-managed-workspace.js";
+import { parseHeartbeatPolicy } from "./heartbeat-concurrency-limit.js";
+import { publishQueuedRun } from "./heartbeat-queue-lifecycle.js";
+import { hasResumableSessionForRun } from "./heartbeat-workspace-session.js";
+import { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
+import { applyPaperclipApiContext } from "./heartbeat-api-address.js";
+import { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
+import { isMissionOwnerActionParentPlacementRejected } from "./heartbeat-mission-owner-context.js";
+import { isCorrectionRun } from "./heartbeat-correction-run.js";
+import { parseIssueAssigneeAdapterOverrides } from "./heartbeat-assignee-adapter-overrides.js";
+import { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
+import { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
+import { containsToolLimitLifecycleFailure } from "./heartbeat-failure-classification.js";
+import { isTrackedLocalChildProcessAdapter } from "./heartbeat-process-liveness.js";
+import { fireWikiRecord } from "./heartbeat-failure-wiki.js";
+import { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
+import { heartbeatRunListColumns } from "./heartbeat-bounded-reads.js";
+import { REPO_ONLY_CWD_SENTINEL } from "./heartbeat-managed-workspace.js";
+import { ISSUE_RUN_START_STATUSES, PROMOTED_REJECT_ISSUE_STATUSES } from "./heartbeat-queue-lifecycle.js";
+import { DETACHED_PROCESS_ERROR_CODE, DETACHED_REAP_AFTER_MS, DETACHED_GRACE_SEC, HEARTBEAT_AGENT_DETACHED_DEMOTE_MS } from "./heartbeat-process-liveness.js";
+import { bindHeartbeatC5OwnerRuntime, createHeartbeatC5SharedAdmission, mergeHeartbeatRootNotifications } from "./heartbeat-c5-runtime-context.js";
+import { activeHeartbeatExecutionFrames, activeHeartbeatExecutionFramesByDb, type ActiveHeartbeatExecutionFrame } from "./heartbeat-execution-frames.js";
+export { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
+export { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
+export { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
+export { formatRuntimeWorkspaceWarningLog } from "./heartbeat-managed-workspace.js";
+export { buildCodexAuthAutoBlockedComment } from "./heartbeat-run-presentation.js";
+export { resolveMissionSessionAuthorityDecision, type MissionSessionAuthorityDecision } from "./heartbeat-session-state.js";
+export { resolveStepRunRequiresWorkProduct } from "./heartbeat-output-validation.js";

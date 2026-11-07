@@ -14,6 +14,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { workflowAgentApiRoutes } from "../routes/workflow-agent-api.js";
 import { errorHandler } from "../middleware/index.js";
 import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
+import { operatorDecisionWriteService } from "../services/operator-decisions-write.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
 import { lockOwnerHumanRequestAuthority } from "../services/missions/owner-human-request-authority.js";
 import { closeOwnerHumanRequest } from "../services/missions/owner-human-request-state.js";
@@ -85,6 +86,14 @@ describeDb("C08 actual owner human submission", () => {
     await expect(operation()).rejects.toMatchObject({ status });
     expect(await snapshot(w)).toEqual(before); expect(alerts(w)).toHaveLength(emissions);
   }
+  // [R2 2026-11-08] 미션당 열린 사람 카드 1장 계약 — 교체/재요청은 현재 카드에 사람이
+  // 답한 뒤에만 가능하다. 테스트는 카드를 답하는 것으로 다음 라운드를 연다.
+  async function answerPendingCard(w: World) {
+    const [pending] = (await cards(w)).filter((row) => row.status === "pending");
+    if (!pending) return;
+    await operatorDecisionWriteService(db).resolve(pending.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "테스트 응답" }, "board");
+  }
 
   it("actual HTTP preserves a public-valid 12000-byte key and replays one event/lifetime/moi2 card", async () => {
     const w = await world(), key = randomBytes(9000).toString("base64"), body = keyed(key);
@@ -112,8 +121,13 @@ describeDb("C08 actual owner human submission", () => {
 
   it("A→B→A requires new keys and distinct originals; old keys, changed bodies and stale CAS leave state untouched", async () => {
     const w = await world(), a = await submit(w, keyed("A1"));
+    // [R2 2026-11-08] 카드가 답변 대기 중인 동안의 교체 요청은 422 로 거부된다.
+    await expect(submit(w, keyed("B", a.lifetimeId!, "B"))).rejects.toMatchObject({ status: 422,
+      details: expect.objectContaining({ code: "mission_owner_human_input_card_pending" }) });
+    await answerPendingCard(w);
     const b = await submit(w, keyed("B", a.lifetimeId!, "B"));
     expect(await submit(w, keyed("B", a.lifetimeId!, "B"))).toEqual(b);
+    await answerPendingCard(w); // CAS 거부 계약 검증은 카드가 답답한 상태에서(과거 상태 그대로).
     await unchanged(w, () => submit(w, keyed("A1", b.lifetimeId!)));
     await unchanged(w, () => submit(w, keyed("B", b.lifetimeId!, "different")));
     await unchanged(w, () => submit(w, keyed("B", null, "B")));
@@ -127,6 +141,7 @@ describeDb("C08 actual owner human submission", () => {
 
   it("two real connections serialize replacements so only one same-CAS candidate wins", async () => {
     const w = await world(), a = await submit(w);
+    await answerPendingCard(w); // [R2] 카드 대기 중 교체 차단 — 답한 뒤 경합한다.
     const results = await Promise.allSettled([submit(w, keyed("left", a.lifetimeId!, "L")),
       submit(w, keyed("right", a.lifetimeId!, "R"), other)]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
