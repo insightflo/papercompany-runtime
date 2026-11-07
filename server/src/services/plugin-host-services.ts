@@ -886,7 +886,12 @@ export function buildHostServices(
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return applyWindow((await issues.list(companyId, params as any)) as Issue[], params);
+        // [목적] 플러그인 호스트의 목록 계약(Issue[], description 포함)과 단일 windowing을 유지한다.
+        // [이유] 이 경로는 params를 필터로 그대로 넘기고 window는 applyWindow가 적용한다. 목록 기본 뷰가
+        //        summary로 바뀌었으므로 view="full"을 고정하고, limit/offset은 DB가 아닌 applyWindow에만
+        //        맡긴다(둘 다 적용되면 offset 페이지가 이중 slice로 비어 버린다).
+        const { limit: _windowLimit, offset: _windowOffset, ...filters } = params;
+        return applyWindow((await issues.list(companyId, { ...filters, view: "full" } as any)) as Issue[], params);
       },
       async get(params) {
         const companyId = ensureCompanyId(params.companyId);

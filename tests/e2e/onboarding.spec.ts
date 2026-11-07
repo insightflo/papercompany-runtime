@@ -114,8 +114,10 @@ test.describe("Onboarding wizard", () => {
       instructionsBundle.files.map((file: { path: string }) => file.path).sort()
     ).toEqual(["AGENTS.md", "HEARTBEAT.md", "SOUL.md", "TOOLS.md"]);
 
+    // [이유] 이 단언은 시드된 CEO 작업의 본문을 읽는다. 목록은 기본이 view=summary(description=null)이므로
+    //        본문이 필요한 호출자는 view=full을 명시한다(PR #667 계약).
     const issuesRes = await page.request.get(
-      `${baseUrl}/api/companies/${company.id}/issues`
+      `${baseUrl}/api/companies/${company.id}/issues?view=full`
     );
     expect(issuesRes.ok()).toBe(true);
     const issues = await issuesRes.json();
