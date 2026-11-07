@@ -78,6 +78,31 @@ const currentChanged = (): never => { throw conflict("Owner human request curren
   reason: "owner_human_request_current_changed",
 }); };
 
+function ownerHumanSubmissionRequestKey(
+  auth: OwnerHumanAuthority,
+  submission: OwnerHumanSubmission,
+  request: ReturnType<typeof ownerHumanRequestSchema.parse> | undefined,
+): string {
+  return request?.requestKey ?? `legacy-exact:${buildMissionOwnerDecisionIdempotencyKey({
+    companyId: auth.scope.companyId, ownerActionIssueId: auth.anchor.id,
+    sourceIssueId: auth.source?.id ?? null, submission, heartbeatRunId: auth.heartbeatRunId,
+  })}`;
+}
+
+/** [R2 2026-11-08] 게이트용 재전송(replay) 판정 — 기록 없이, 이 제출이 현재 lifetime 의
+ *  원요청과 동일한지만 본다. 동일 재전송은 새 카드가 아니므로 R2 게이트를 통과한다. */
+export async function isExactOwnerHumanReplay(
+  auth: OwnerHumanAuthority,
+  input: OwnerHumanSubmissionInput,
+): Promise<boolean> {
+  const { humanRequest, ...body } = input;
+  const submission = ownerHumanSubmissionSchema.parse(body);
+  const request = humanRequest ? ownerHumanRequestSchema.parse(humanRequest) : undefined;
+  const current = await readOwnerHumanCurrent(auth);
+  const requestKey = ownerHumanSubmissionRequestKey(auth, submission, request);
+  return current?.lifetime.requestKey === requestKey;
+}
+
 export async function recordOwnerHumanSubmission(auth: OwnerHumanAuthority, input: OwnerHumanSubmissionInput) {
   const { humanRequest, ...body } = input;
   const submission = ownerHumanSubmissionSchema.parse(body);
@@ -85,10 +110,7 @@ export async function recordOwnerHumanSubmission(auth: OwnerHumanAuthority, inpu
   const current = await readOwnerHumanCurrent(auth);
   // Legacy identity is exactly the existing ledger contract, only within its original author
   // run and anchor. Do not extend that compatibility rule into cross-run semantic matching.
-  const requestKey = request?.requestKey ?? `legacy-exact:${buildMissionOwnerDecisionIdempotencyKey({
-    companyId: auth.scope.companyId, ownerActionIssueId: auth.anchor.id,
-    sourceIssueId: auth.source?.id ?? null, submission, heartbeatRunId: auth.heartbeatRunId,
-  })}`;
+  const requestKey = ownerHumanSubmissionRequestKey(auth, submission, request);
   if (!request) {
     if (current && (!current.pointer.recoveryNeeded || current.lifetime.identityMode !== "legacy_exact"
       || current.lifetime.heartbeatRunId !== auth.heartbeatRunId

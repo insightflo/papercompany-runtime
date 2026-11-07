@@ -108,7 +108,8 @@ describe("C08 closed tool request recurrence", () => {
     await expect(submitMissionOwnerDecision({ db, issueId: next.issue.id, actor: nextActor, data: {
       decision: "request_input", reason: "old tool request", recoveryTarget: target,
       humanRequest: { schemaVersion: 1, requestKey: originalKey, expectedCurrentLifetimeId: before.lifetimeId },
-    } })).rejects.toMatchObject({ status: 409 });
+    } })).rejects.toMatchObject({ status: 422,
+      details: expect.objectContaining({ code: "mission_owner_human_input_card_pending" }) }); // [R2] 대기 중 카드 있으면 재요청 차단
   });
 
   it("creates a fresh owner card after a cancelled legacy human handoff", async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agentWakeupRequests,
@@ -25,6 +25,7 @@ import { settleRunIfReady } from "../services/heartbeat-finalization/settlement.
 import { STAGE_CLASS, Q_STAGE, C_STAGE } from "../services/heartbeat-finalization/stage-classifier.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { recoverTerminalUnsettledRuns } from "../services/heartbeat-finalization/recovery.js";
+import { lifecycleActiveClause } from "../services/heartbeat-finalization/lifecycle-active.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -266,5 +267,70 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, run.id));
     expect(recovered?.settledAt).not.toBeNull();
+  });
+
+  it("recovers terminal-unsettled runs of every error code (adapter_failed, issue_status_blocked, cancelled)", async () => {
+    const finishedAt = new Date("2026-03-19T00:00:00.000Z");
+    const seeds: Array<Record<string, unknown>> = [
+      { status: "failed", errorCode: "adapter_failed", terminalOutcome: "failed",
+        terminalDecisionSource: "heartbeat_status:failed:adapter_failed" },
+      { status: "failed", errorCode: "issue_status_blocked", terminalOutcome: "failed",
+        terminalDecisionSource: "heartbeat_status:failed:issue_status_blocked" },
+      { status: "cancelled", errorCode: null, terminalOutcome: "cancelled",
+        terminalDecisionSource: "heartbeat_status:cancelled" },
+    ];
+    const runs = [];
+    for (const overrides of seeds) {
+      runs.push(await seedRun(db, companyId, agentId, { ...overrides,
+        finishedAt, updatedAt: finishedAt, settledAt: null }));
+    }
+    // Before the fix these codes only got Q stages; the compensable C stages were
+    // never materialized, so settlement stayed not_ready and the sources kept
+    // feeding the unblock-anchor loop.
+    const processed = await recoverTerminalUnsettledRuns(
+      db, new Date("2026-03-19T00:10:00.000Z"), 5 * 60 * 1000);
+    expect(processed).toBeGreaterThanOrEqual(3);
+    for (const run of runs) {
+      const [recovered] = await db
+        .select({ settledAt: heartbeatRuns.settledAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, run.id));
+      expect(recovered?.settledAt).not.toBeNull();
+    }
+  });
+
+  it("a cancelled terminal-unsettled run releases its agent capacity slot after recovery", async () => {
+    // 전용 에이전트로 격리 — 이 파일의 다른 시험 run 이 슬롯 집계를 오염시키지 않게 한다.
+    const zombieAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: zombieAgentId, companyId, name: "Zombie slot agent", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const finishedAt = new Date("2026-03-19T00:00:00.000Z");
+    const run = await seedRun(db, companyId, zombieAgentId, {
+      status: "cancelled", errorCode: null, terminalOutcome: "cancelled",
+      terminalDecisionSource: "heartbeat_status:cancelled",
+      finishedAt, updatedAt: finishedAt, settledAt: null,
+    });
+    // countRunningRunsForAgent 와 같은 경로(같은 clause · 같은 count)로 슬롯을 센다.
+    const activeCount = async (agentId: string) => {
+      const clause = await lifecycleActiveClause(db);
+      const [{ n }] = await db.select({ n: count() }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), clause));
+      return Number(n ?? 0);
+    };
+    // 좀비 슬롯: 취소로 종결됐지만 미정산(fv=1, settled_at NULL)이라 capacity 를 계속 점유한다.
+    expect(run.settledAt).toBeNull();
+    expect(await activeCount(zombieAgentId)).toBe(1);
+
+    const processed = await recoverTerminalUnsettledRuns(
+      db, new Date("2026-03-19T00:10:00.000Z"), 5 * 60 * 1000);
+    expect(processed).toBeGreaterThanOrEqual(1);
+    const [recovered] = await db
+      .select({ settledAt: heartbeatRuns.settledAt })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, run.id));
+    expect(recovered?.settledAt).not.toBeNull();
+    expect(await activeCount(zombieAgentId)).toBe(0);
   });
 });
