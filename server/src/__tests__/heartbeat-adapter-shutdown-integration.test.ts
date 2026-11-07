@@ -93,6 +93,30 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(state.execute).toHaveBeenCalledTimes(1);
   }, 60_000);
 
+  it("does not promote a queued run while shutdown is in progress", async () => {
+    await db.update(instanceSettings).set({ experimental: {} }).where(eq(instanceSettings.singletonKey, "default"));
+    const companyId = randomUUID(), agentId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Shutdown drain guard", issuePrefix: `G${companyId.replace(/-/g, "").slice(0, 7).toUpperCase()}`, requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Agent", role: "engineer", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} });
+    state.lifecycle = createRuntimeExecutionLifecycle(); state.stopAtLookup = false;
+    let finish!: (value: ReturnType<typeof successfulAdapterResult>) => void;
+    state.execute.mockReset().mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const heartbeat = heartbeatService(db);
+    const running = await heartbeat.invoke(agentId, "on_demand", {}, "manual", { actorType: "system", actorId: "test" });
+    await vi.waitFor(() => expect(state.execute).toHaveBeenCalledTimes(1));
+    // 같은 agent 의 유일한 슬롯을 점유한 채로 대기 run 을 하나 남긴다.
+    const [queued] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, invocationSource: "on_demand", status: "queued",
+    }).returning();
+    state.lifecycle.beginShutdown("SIGTERM");
+    finish(successfulAdapterResult());
+    await waitForHeartbeatExecutionsToDrain(db);
+    expect(await heartbeat.getRun(running!.id)).toMatchObject({ status: "succeeded" });
+    // 종료 중에는 성공한 정착 run 이 있어도 대기 run 을 승격하지 않는다.
+    expect(await heartbeat.getRun(queued!.id)).toMatchObject({ status: "queued", startedAt: null });
+    expect(state.execute).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
   it.each([[false, false], [true, false], [false, true], [true, true]])(
     "fails safely and retries a rejected first child once after restart (issue=%s, finalization=%s)", async (withIssue, finalization) => {
     vi.stubEnv("PAPERCLIP_ADAPTER_FAILED_TRANSIENT_RETRY_MAX_SEC", "300");
