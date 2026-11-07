@@ -511,6 +511,25 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
     return mission;
   }
 
+  /**
+   * [목적] 하위 라우트(agents/issues/workflow-runs/governance-thread/runtime-snapshot 등)가 company 접근
+   *        검사만 필요할 때 상세 전체(쿼리 여러 개)를 만드는 비용을 없앤다.
+   * [이유] 2026-11-07 A1 실측: 상세 화면 1회 로드에 /missions/:id 와 /missions/:id/workflow-runs 가
+   *        각각 getById()를 호출해 같은 상세 쿼리가 두 번 실행됐다.
+   * [주의] getById()와 같은 거부 규칙을 유지한다(형식 오류 400, 없는 id 404). 라우트가 이 경계를
+   *        쓰므로 단위 시험은 missionService mock의 readCompanyId로 같은 계약을 고정한다.
+   */
+  async function readCompanyId(id: string): Promise<string> {
+    assertMissionId(id);
+    const [mission] = await db
+      .select({ companyId: missions.companyId })
+      .from(missions)
+      .where(eq(missions.id, id))
+      .limit(1);
+    if (!mission) throw notFound(`Mission not found: ${id}`);
+    return mission.companyId;
+  }
+
   /** Project stored state only; lifecycle reconciliation belongs to explicit writers. */
   async function getById(id: string): Promise<MissionDetail> {
     return buildMissionDetail(db, await readMissionRow(id));
@@ -1164,6 +1183,7 @@ export function missionService(db: Db, deps: MissionServiceDeps = {}) {
   return {
     create,
     getById,
+    readCompanyId,
     reconcileById,
     list,
     update,

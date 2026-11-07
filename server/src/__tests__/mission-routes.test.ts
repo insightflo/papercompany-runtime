@@ -8,6 +8,7 @@ import { logActivity } from "../services/activity-log.js";
 const mockMissionService = vi.hoisted(() => ({
   create: vi.fn(),
   getById: vi.fn(),
+  readCompanyId: vi.fn(),
   getIssueTree: vi.fn(),
   list: vi.fn(),
   listWorkflowRuns: vi.fn(),
@@ -48,6 +49,11 @@ describe("mission routes subresources", () => {
       companyId: "company-1",
       title: "Mission",
       status: "active",
+    });
+    // 하위 라우트는 상세(getById) 대신 companyId만 읽는다(2026-11-07 중복 상세 제거).
+    mockMissionService.readCompanyId.mockImplementation(async (id: string) => {
+      const mission = await mockMissionService.getById(id);
+      return mission.companyId;
     });
   });
 
@@ -384,5 +390,6 @@ describe("mission routes subresources", () => {
 
     expect(res.status).toBe(403);
     expect(mockMissionService.listWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockMissionService.readCompanyId).toHaveBeenCalledWith("mission-2");
   });
 });
