@@ -77,3 +77,5 @@ export function formatRuntimeWorkspaceWarningLog(warning: string) {
     chunk: `[paperclip] ${warning}\n`,
   };
 }
+
+export const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";

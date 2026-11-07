@@ -377,26 +377,13 @@ type IssueCreateInput = Parameters<ReturnType<typeof issueService>["create"]>[1]
 
 const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
-// [목적] queued wakeup promote 시 "이 issue 는 이미 끝났으니 재실행 거절" 판정할 terminal 상태.
-//   done/completed/cancelled(canceled)/closed 는 재시도 무의미 → request failed 로 종료.
-const PROMOTED_REJECT_ISSUE_STATUSES = new Set(["done", "completed", "cancelled", "canceled", "closed", "wontfix"]);
-const DETACHED_PROCESS_ERROR_CODE = "process_detached";
-// orphaned-but-alive child 강제 회수 시한. handle 상실 후에도 child pid 가 살아 reaper 가 process_detached
-// 로 매 tick defer 만 하던 무한 대기(CMPA-5519 ~72분 hang)를 상한으로 끊고 process_lost+retry 로 회수.
-const DETACHED_REAP_AFTER_MS = 30 * 60 * 1000;
-const DETACHED_GRACE_SEC = 5;
-// [paperclip-stuck 2026-08-06, A2] detached 유예 창 동안 agents.status 가 `running`에 갇히는
-// (phantom running) 것을 끊는다. reapOrphanedRuns 는 detached child 를 DETACHED_REAP_AFTER_MS 까지
-// 유예하지만, 그 동안 finalizeAgentStatus 가 호출되지 않아 agent 가 최장 30분간 running 으로 보임.
-// agent.updatedAt 기준으로 이 임계를 넘기면 agent 를 `error` 로 강등해 보드/QA 가 실상을 반영하게 한다.
-// (run 자체는 longevity cap 에 따라 별도 회수 — 여기서는 agent 가시성만 교정.)
-const HEARTBEAT_AGENT_DETACHED_DEMOTE_MS = 10 * 60 * 1000;
+
+
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 
 
 
 
-const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 
 
@@ -409,43 +396,11 @@ const REPO_ONLY_CWD_SENTINEL = "/__paperclip_repo_only__";
 
 
 
-const heartbeatRunListColumns = {
-  id: heartbeatRuns.id,
-  companyId: heartbeatRuns.companyId,
-  agentId: heartbeatRuns.agentId,
-  invocationSource: heartbeatRuns.invocationSource,
-  triggerDetail: heartbeatRuns.triggerDetail,
-  status: heartbeatRuns.status,
-  startedAt: heartbeatRuns.startedAt,
-  finishedAt: heartbeatRuns.finishedAt,
-  error: heartbeatRuns.error,
-  wakeupRequestId: heartbeatRuns.wakeupRequestId,
-  exitCode: heartbeatRuns.exitCode,
-  signal: heartbeatRuns.signal,
-  usageJson: heartbeatRuns.usageJson,
-  resultJson: heartbeatRuns.resultJson,
-  sessionIdBefore: heartbeatRuns.sessionIdBefore,
-  sessionIdAfter: heartbeatRuns.sessionIdAfter,
-  logStore: heartbeatRuns.logStore,
-  logRef: heartbeatRuns.logRef,
-  logBytes: heartbeatRuns.logBytes,
-  logSha256: heartbeatRuns.logSha256,
-  logCompressed: heartbeatRuns.logCompressed,
-  stdoutExcerpt: sql<string | null>`NULL`.as("stdoutExcerpt"),
-  stderrExcerpt: sql<string | null>`NULL`.as("stderrExcerpt"),
-  errorCode: heartbeatRuns.errorCode,
-  externalRunId: heartbeatRuns.externalRunId,
-  processPid: heartbeatRuns.processPid,
-  processStartedAt: heartbeatRuns.processStartedAt,
-  retryOfRunId: heartbeatRuns.retryOfRunId,
-  processLossRetryCount: heartbeatRuns.processLossRetryCount,
-  contextSnapshot: heartbeatRuns.contextSnapshot,
-  createdAt: heartbeatRuns.createdAt,
-  updatedAt: heartbeatRuns.updatedAt,
-} as const;
 
 
-const ISSUE_RUN_START_STATUSES = ["backlog", "todo", "blocked", "in_review", "in_progress"];
+
+
+
 
 
 
@@ -8745,6 +8700,10 @@ import { containsToolLimitLifecycleFailure } from "./heartbeat-failure-classific
 import { isTrackedLocalChildProcessAdapter } from "./heartbeat-process-liveness.js";
 import { fireWikiRecord } from "./heartbeat-failure-wiki.js";
 import { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
+import { heartbeatRunListColumns } from "./heartbeat-bounded-reads.js";
+import { REPO_ONLY_CWD_SENTINEL } from "./heartbeat-managed-workspace.js";
+import { ISSUE_RUN_START_STATUSES, PROMOTED_REJECT_ISSUE_STATUSES } from "./heartbeat-queue-lifecycle.js";
+import { DETACHED_PROCESS_ERROR_CODE, DETACHED_REAP_AFTER_MS, DETACHED_GRACE_SEC, HEARTBEAT_AGENT_DETACHED_DEMOTE_MS } from "./heartbeat-process-liveness.js";
 export { extractClaimedArtifactPaths } from "./heartbeat-artifact-registration.js";
 export { parseSessionCompactionPolicy } from "./heartbeat-session-state.js";
 export { isSucceededHeartbeatRunStatus } from "./heartbeat-run-status.js";
