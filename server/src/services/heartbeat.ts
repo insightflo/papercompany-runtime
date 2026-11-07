@@ -262,26 +262,12 @@ type HeartbeatServiceOptions = {
 
 import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "./heartbeat-attempt-identity.js";
 
-
-
-
-
-
-
-
-
 class C5NotInvokedExecutionError extends Error {
   readonly code = "c5_held_not_invoked";
   constructor(readonly proof: C5NotInvokedProof) {
     super("heartbeat adapter start held by pending QA remediation preparation");
   }
 }
-
-
-
-
-
-
 
 const NONWORKFLOW_EXECUTION_SCOPES = new Set([
   "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
@@ -331,33 +317,6 @@ export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 type SessionCompactionDecision = {
   rotate: boolean;
   reason: string | null;
@@ -371,121 +330,6 @@ type SessionCompactionDecision = {
 
 
 export { prioritizeProjectWorkspaceCandidatesForRun };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): RequestChangesVerdict | null {
   const result = parseObject(run.resultJson);
@@ -516,13 +360,6 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
         : requestChangesCandidate,
   };
 }
-
-
-
-
-
-
-
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const c5OwnerRuntime = bindHeartbeatC5OwnerRuntime(db, options.qaCorrectionExecution?.ownerRuntime);
@@ -3091,7 +2928,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const execution = executeRun(claimedRun.id).catch((err) => {
           logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
         });
-        trackHeartbeatExecution(db, execution);
+        // [C5 queue drain guard] 성공한 정착 run 만 같은 agent 의 queued wake/run 을 한 번 더 승격한다.
+        //   실행 중에 만들어진 정착 wake(QA refire 등)는 그 run 이 유일한 슬롯을 점유한 탓에
+        //   after-commit drain 시점에 승격되지 못하고 회수 lane(기본 5분)까지 기다려야 한다.
+        //   다만 실패/재시도 run 이나 종료(flush) 중에 승격하면 shutdown 재시작 계약(queued 유지)과
+        //   재시도 예산 판정이 깨지므로(2026-11-07 #623 회귀), 성공 && 비-종료일 때만 승격한다.
+        //   승격은 기존 startNextQueuedRunForAgent 경로를 그대로 써 중복 실행을 만들지 않는다.
+        const drained = execution.then(async () => {
+          if (runtimeExecutionLifecycle.shutdownState()) return;
+          const settled = await db
+            .select({ status: heartbeatRuns.status })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, claimedRun.id))
+            .then((rows) => rows[0] ?? null);
+          if (settled?.status !== "succeeded") return;
+          await resumeQueuedRuns(claimedRun.agentId);
+        }).catch((err) => {
+          logger.warn({ err, agentId: claimedRun.agentId }, "post-run heartbeat queue drain failed");
+        });
+        trackHeartbeatExecution(db, drained);
       }
       return claimedRuns;
     });
