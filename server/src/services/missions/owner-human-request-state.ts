@@ -2,7 +2,7 @@
 // Acquire any existing quality-prefix locks before authority, and card/continuation locks afterward.
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { issues, missions, workflowStepRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { issues, missions, workflowStepRuns, workflowTransitionEvents, operatorDecisions, activityLog } from "@paperclipai/db";
 import type { z } from "zod";
 import { conflict } from "../../errors.js";
 import { assertOwnerHumanOriginalDecision, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
@@ -258,6 +258,30 @@ export async function closeOwnerHumanRequest(auth: OwnerHumanAuthority, expected
   }
   if (!reason) return fail("owner_human_request_recovery_still_needed");
   const eventId = await appendEnd(auth, current.lifetime, reason, null);
+  // [R2/R3 2026-11-08] 요청 종결 시 남아 있는 pending 카드를 같은 사유로 회수한다.
+  // stale sweep 의 앵커-종결 회수 트리거를 폐지한 대신, 요청 상태가 닫히는 이 지점이
+  // 카드의 정상 수명 종점이다(사람이 답하기 전에 카드가 사라지는 남발 경로와 무관).
+  const now = new Date();
+  const cardKey = current.lifetime.identityMode === "legacy_exact"
+    ? `moi1:${current.lifetime.decisionEventId}`
+    : `moi2:${current.lifetime.lifetimeId}`;
+  const withdrawn = await auth.tx.update(operatorDecisions).set({
+    status: "cancelled", cancelledAt: now, updatedAt: now,
+  }).where(and(
+    eq(operatorDecisions.companyId, auth.scope.companyId),
+    eq(operatorDecisions.requestKey, cardKey),
+    eq(operatorDecisions.status, "pending"),
+  )).returning({ id: operatorDecisions.id });
+  if (withdrawn.length > 0) {
+    await auth.tx.insert(activityLog).values(withdrawn.map((row) => ({
+      companyId: auth.scope.companyId, actorType: "system" as const,
+      actorId: "system:owner-human-request-close", action: "operator_decision.cancelled",
+      entityType: "operator_decision", entityId: row.id,
+      details: { schemaVersion: 1, operatorDecisionId: row.id, requestKey: cardKey,
+        missionId: auth.scope.missionId, lifetimeId: current.lifetime.lifetimeId,
+        reason: `owner_human_request_${reason}` },
+    })));
+  }
   return writePointer(auth, current, { ...current.pointer, revision: current.pointer.revision + 1,
     recoveryNeeded: false, closure: { eventId, reason } }, current.lifetime);
 }

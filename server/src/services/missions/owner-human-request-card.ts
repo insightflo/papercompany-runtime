@@ -54,7 +54,9 @@ function cardMatchesInput(card: Card, input: CreateOperatorDecisionInput, author
 // native prefix using its predecessor, then validate the current target separately. A forged
 // new-anchor/old-heartbeat pair without the stored renewal chain still fails closed.
 export async function lockOwnerHumanRequestCard(tx: OwnerHumanTx, companyId: string,
-  input: CreateOperatorDecisionInput, actor: OperatorDecisionActor): Promise<Guard | null> {
+  input: CreateOperatorDecisionInput, actor: OperatorDecisionActor,
+  options: { allowTerminalAnchor?: boolean } = {},
+): Promise<Guard | null> {
   if (!isOwnerHumanLifetimeCard(input)) return null;
   const id = z.string().uuid().safeParse(input.requestKey.slice("moi2:".length));
   if (!id.success) return fail();
@@ -79,14 +81,15 @@ export async function lockOwnerHumanRequestCard(tx: OwnerHumanTx, companyId: str
     ...(lifetime.renewal ? { renewal: { previousLifetimeId: lifetime.renewal.previousLifetimeId,
       anchorIssueId: lifetime.anchorIssueId } } : {}),
   });
-  return lockOwnerHumanCurrentCard(auth, input, actor);
+  return lockOwnerHumanCurrentCard(auth, input, actor, options);
 }
 
 // Used by the renewal writer after it owns the full prefix and pointer. No earlier locks are
 // acquired here. State validation proves the immutable origin, every replaced ending and the
 // current pointer; the author is retained while the card is bound to today's recovery anchor.
 export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
-  input: CreateOperatorDecisionInput, actor: OperatorDecisionActor): Promise<Guard> {
+  input: CreateOperatorDecisionInput, actor: OperatorDecisionActor,
+  options: { allowTerminalAnchor?: boolean } = {}): Promise<Guard> {
   const { tx } = auth, companyId = auth.scope.companyId;
   const current = await readOwnerHumanCurrent(auth);
   const lifetime = current?.lifetime;
@@ -94,7 +97,11 @@ export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
   const [mission] = await tx.select().from(missions).where(and(
     eq(missions.companyId, companyId), eq(missions.id, auth.scope.missionId)));
   if (!current || !lifetime || !anchor || !mission || ["completed", "cancelled"].includes(mission.status)
-    || mission.ownerAgentId !== auth.agentId || ["done", "cancelled"].includes(anchor.status)
+    || mission.ownerAgentId !== auth.agentId
+    // [R3/R4 2026-11-08] 사람 resolve 경로는 종결 앵커도 허용한다 — 오너 회수 run 이 앵커를
+    // 닫아도 사람이 카드에 답할 수 있어야 한다(남발 루프의 교착 방지). 생성·갱신 경로는
+    // 기존대로 살아 있는 앵커만 허용한다.
+    || (!options.allowTerminalAnchor && ["done", "cancelled"].includes(anchor.status))
     || anchor.assigneeAgentId !== auth.agentId
     || actor.type !== "agent" || actor.id !== lifetime.authorAgentId || actor.id !== auth.agentId
     || lifetime.heartbeatRunId !== auth.heartbeatRunId || !isOwnerHumanLifetimeCard(input)

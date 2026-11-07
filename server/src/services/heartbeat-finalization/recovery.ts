@@ -1,12 +1,9 @@
 import { and, eq, isNull, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns, heartbeatRunFinalizations } from "@paperclipai/db";
+import { heartbeatRuns } from "@paperclipai/db";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
-import { ensureFinalization, recordStage } from "./finalization-state.js";
-import { observeQuiescenceProof } from "./quiescence-probe.js";
-import { attemptFullSettlement, settleRunIfReady } from "./settlement.js";
+import { attemptFullSettlement } from "./settlement.js";
 import { syncWorkflowAfterHeartbeatSettlement } from "./post-execution.js";
-import { STAGE_CLASS, Q_STAGE } from "./stage-classifier.js";
 
 const DEFAULT_GRACE_MS = 5 * 60 * 1000;
 const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"];
@@ -54,37 +51,13 @@ export async function recoverTerminalUnsettledRuns(
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, candidate.id));
       if (!run || run.finalizationVersion !== 1 || run.settledAt) continue;
 
-      // These failure paths complete issue/workflow promotion before terminalizing
-      // the run. Older runs missed only the full settlement call.
-      if (run.errorCode === "stale_queued" || run.errorCode === "commandcode_permission_denied") {
-        const settlement = await attemptFullSettlement(db, run, now);
-        if (settlement === "settled") {
-          await syncWorkflowAfterHeartbeatSettlement(db, run);
-        }
-        processed += 1;
-        continue;
-      }
-
-      const fin = await ensureFinalization(db, run, now);
-
-      // Observe quiescence and record Q stages if proven.
-      const proof = await observeQuiescenceProof(db, run);
-      if (proof) {
-        for (const kind of [Q_STAGE.executorQuiescence, Q_STAGE.workspaceOperationsSettled, Q_STAGE.runtimeServicesStopped, Q_STAGE.missionRuntimeIdle]) {
-          await recordStage(db, {
-            companyId: run.companyId,
-            runId: run.id,
-            finalizationId: fin.id,
-            stageClass: STAGE_CLASS.quiescence,
-            stageKind: kind,
-            idempotencyKey: `recovery-q:${kind}:${run.id}`,
-            state: "done",
-            payload: { source: "terminal_unsettled_replay", proof },
-          }).catch(() => undefined);
-        }
-      }
-
-      const settlement = await settleRunIfReady(db, run, now);
+      // Every terminal-unsettled v1 run replays the same full settlement pipeline
+      // the normal execution path uses. settleRunIfReady alone never materializes
+      // the compensable C stages (issue promotion / workflow evidence sync), so
+      // runs that terminalized with any other error code (adapter_failed,
+      // issue_status_blocked, cancelled, timed_out, ...) stayed pending forever,
+      // kept their sources classified as stale, and fed the unblock-anchor loop.
+      const settlement = await attemptFullSettlement(db, run, now);
       if (settlement === "settled") {
         await syncWorkflowAfterHeartbeatSettlement(db, run);
       }

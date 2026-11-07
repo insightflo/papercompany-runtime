@@ -80,6 +80,15 @@ describeDb("C08 actual current-request HTTP routes", () => {
   }
   const url = (w: World) => `/api/issues/${w.issueId}/owner-recovery/decision`;
   const post = (w: World, data = keyed()) => request(app(w)).post(url(w)).send(data);
+  // [R2 2026-11-08] 미션당 열린 사람 카드 1장 계약 — 교체(replacement)는 현재 카드에 사람이
+  // 답한 뒤에만 가능하다. 테스트는 카드를 답하는 것으로 다음 라운드를 연다.
+  async function answerPendingCard(w: World) {
+    const [pending] = (await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, w.companyId)))
+      .filter((row) => row.status === "pending");
+    if (!pending) return;
+    await operatorDecisionWriteService(db).resolve(pending.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "테스트 응답" }, "board");
+  }
   const events = (w: World) => db.select().from(workflowTransitionEvents)
     .where(eq(workflowTransitionEvents.companyId, w.companyId)).orderBy(workflowTransitionEvents.id);
   const snapshot = (w: World) => Promise.all([
@@ -126,10 +135,12 @@ describeDb("C08 actual current-request HTTP routes", () => {
       const recovered = await get(w); // Ignore the first response as a caller would after response loss.
       expect(recovered.requestKey).toBe("caller-A");
       expect((await post(w, recovered.resubmit)).body).toEqual(first.body);
+      await answerPendingCard(w);
       const changed = await post(w, keyed("caller-B", recovered.lifetimeId));
       expect(changed.status).toBe(201); expect(changed.body.lifetimeId).not.toBe(first.body.lifetimeId);
       expect(changed.body.humanRequest.expectedCurrentLifetimeId).toBe(changed.body.lifetimeId);
-      expect((await post(w, recovered.resubmit)).status).toBe(409);
+      // [R2 2026-11-08] 대기 중인 카드가 있는 동안의 이전 키 재게시는 422 card_pending 이다.
+      expect((await post(w, recovered.resubmit)).status).toBe(422);
       expect((await get(w)).requestKey).toBe("caller-B");
     });
 
@@ -168,10 +179,11 @@ describeDb("C08 actual current-request HTTP routes", () => {
 
   it("returns only B after replacement and replays legacy moi1 through the structured current body", async () => {
     const w = await world(), a = await post(w);
+    await answerPendingCard(w); // [R2] 카드 대기 중 교체 차단 — 답한 뒤 교체한다.
     const b = await post(w, keyed("B", a.body.lifetimeId, "B")); expect(b.status).toBe(201);
     expect(await get(w)).toMatchObject({ lifetimeId: b.body.lifetimeId, requestKey: "B",
       card: { id: b.body.operatorDecisionId }, resubmit: { reason: "B" } });
-    const old = await post(w); expect(old.status).toBe(409);
+    const old = await post(w); expect(old.status).toBe(422); // [R2] 카드 대기 중 재요청 차단
     const legacy = await world(), first = await post(legacy, { decision: "request_input", reason: "legacy" });
     expect(first.status).toBe(201);
     const current = await get(legacy);
@@ -181,7 +193,9 @@ describeDb("C08 actual current-request HTTP routes", () => {
 
   it.each(["missing_pointer", "pointer_schema", "reference", "request_key", "anchor", "card", "link"])(
     "rejects %s damage instead of returning historical A or repairing state", async (damage) => {
-      const w = await world(), a = await post(w), b = await post(w, keyed("B", a.body.lifetimeId, "B"));
+      const w = await world(), a = await post(w);
+      await answerPendingCard(w); // [R2] 카드 대기 중 교체 차단 — 답한 뒤 교체한다.
+      const b = await post(w, keyed("B", a.body.lifetimeId, "B"));
       expect(b.status).toBe(201);
       const pointer = (await events(w)).find((row) => row.eventType === "owner_human_current_v1")!;
       const payload = pointer.payload as Record<string, unknown>;
@@ -248,7 +262,9 @@ describeDb("C08 actual current-request HTTP routes", () => {
         expect(text).toContain(field);
       expect(text).toContain(language === "ko" ? "응답 유실만으로 새 키를 자동 발급하지 마세요" : "Never automatically issue a new key after response loss");
     }
-    const current = await get(w), submitted = await post(w, { ...keyed("tool-key", current.lifetimeId),
+    const current = await get(w);
+    await answerPendingCard(w); // [R2] 카드 대기 중 교체 차단 — 답한 뒤 tool-step 스코프으로 교체한다.
+    const submitted = await post(w, { ...keyed("tool-key", current.lifetimeId),
       recoveryTarget: facts.recoveryTarget });
     expect(submitted.status, JSON.stringify(submitted.body)).toBe(201);
     const replay = await get(w); expect(replay.resubmit.recoveryTarget).toEqual(facts.recoveryTarget);

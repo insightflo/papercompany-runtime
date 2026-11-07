@@ -267,4 +267,34 @@ describeEP("heartbeat finalization v1 settlement gate", () => {
       .where(eq(heartbeatRuns.id, run.id));
     expect(recovered?.settledAt).not.toBeNull();
   });
+
+  it("recovers terminal-unsettled runs of every error code (adapter_failed, issue_status_blocked, cancelled)", async () => {
+    const finishedAt = new Date("2026-03-19T00:00:00.000Z");
+    const seeds: Array<Record<string, unknown>> = [
+      { status: "failed", errorCode: "adapter_failed", terminalOutcome: "failed",
+        terminalDecisionSource: "heartbeat_status:failed:adapter_failed" },
+      { status: "failed", errorCode: "issue_status_blocked", terminalOutcome: "failed",
+        terminalDecisionSource: "heartbeat_status:failed:issue_status_blocked" },
+      { status: "cancelled", errorCode: null, terminalOutcome: "cancelled",
+        terminalDecisionSource: "heartbeat_status:cancelled" },
+    ];
+    const runs = [];
+    for (const overrides of seeds) {
+      runs.push(await seedRun(db, companyId, agentId, { ...overrides,
+        finishedAt, updatedAt: finishedAt, settledAt: null }));
+    }
+    // Before the fix these codes only got Q stages; the compensable C stages were
+    // never materialized, so settlement stayed not_ready and the sources kept
+    // feeding the unblock-anchor loop.
+    const processed = await recoverTerminalUnsettledRuns(
+      db, new Date("2026-03-19T00:10:00.000Z"), 5 * 60 * 1000);
+    expect(processed).toBeGreaterThanOrEqual(3);
+    for (const run of runs) {
+      const [recovered] = await db
+        .select({ settledAt: heartbeatRuns.settledAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, run.id));
+      expect(recovered?.settledAt).not.toBeNull();
+    }
+  });
 });
