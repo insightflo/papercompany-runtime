@@ -8,6 +8,7 @@ import { unprocessable } from "../errors.js";
 
 const mockMissionService = vi.hoisted(() => ({
   getById: vi.fn(),
+  readCompanyId: vi.fn(),
   create: vi.fn(),
   list: vi.fn(),
   getIssueTree: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("../services/activity-log.js", () => ({ logActivity: vi.fn(async () => u
 describe("mission decision report routes", () => {
   const mockMissionService = vi.hoisted(() => ({
     getById: vi.fn(),
+    readCompanyId: vi.fn(),
     create: vi.fn(),
     list: vi.fn(),
     getIssueTree: vi.fn(),
@@ -64,6 +66,7 @@ describe("mission decision report routes", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockMissionService.getById.mockResolvedValue(mission);
+    mockMissionService.readCompanyId.mockResolvedValue(mission.companyId);
   });
 
   it("POST /missions/:id/decision-reports applies reports and logs activity", async () => {

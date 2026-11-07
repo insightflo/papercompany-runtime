@@ -430,8 +430,8 @@ export function missionRoutes(db: Db) { const router = Router();
    * List cross-company mission delegations created from this mission.
    */
   router.get("/missions/:id/delegations", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const companyId = await svc.readCompanyId(req.params.id);
+    assertCompanyAccess(req, companyId);
 
     const delegations = await delegationSvc.listForMission(req.params.id);
     res.json(delegations);
@@ -500,12 +500,13 @@ export function missionRoutes(db: Db) { const router = Router();
    * 규칙 8: 표시·맥락 전달용 상태일 뿐, 실행 통제가 이를 읽지 않는다.
    */
   router.get("/missions/:id/decision-log", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
-    const log = await getMissionDecisionLog(db, { missionId: mission.id });
+    const missionId = req.params.id;
+    const companyId = await svc.readCompanyId(missionId);
+    assertCompanyAccess(req, companyId);
+    const log = await getMissionDecisionLog(db, { missionId });
     // 롤링 상태 행이 아직 없으면 404 대신 빈 뷰 — “기록 없음”은 오류가 아니다(UI/에이전트 소비 단순화).
     res.json(log ?? {
-      missionId: mission.id,
+      missionId,
       revision: 0,
       updatedAt: null,
       decisions: [],
@@ -662,8 +663,8 @@ export function missionRoutes(db: Db) { const router = Router();
    * List agents in a mission.
    */
   router.get("/missions/:id/agents", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const companyId = await svc.readCompanyId(req.params.id);
+    assertCompanyAccess(req, companyId);
 
     const agents = await svc.listAgents(req.params.id);
     res.json(agents);
@@ -733,20 +734,21 @@ export function missionRoutes(db: Db) { const router = Router();
    * Read the mission governance thread projection for this mission.
    */
   router.get("/missions/:id/governance-thread", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const missionId = req.params.id;
+    const companyId = await svc.readCompanyId(missionId);
+    assertCompanyAccess(req, companyId);
 
     const thread = await listMissionGovernanceThread(db, {
-      companyId: mission.companyId,
-      missionId: mission.id,
+      companyId,
+      missionId,
     });
     if (!thread) {
       throw notFound("Mission not found");
     }
 
     res.json({
-      missionId: mission.id,
-      companyId: mission.companyId,
+      missionId,
+      companyId,
       events: thread.events,
       summary: thread.summary,
     });
@@ -758,17 +760,18 @@ export function missionRoutes(db: Db) { const router = Router();
    * Read structured mission runtime state for Ops/Hermes/oversight.
    */
   router.get("/missions/:id/runtime-snapshot", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const missionId = req.params.id;
+    const companyId = await svc.readCompanyId(missionId);
+    assertCompanyAccess(req, companyId);
 
     const snapshot = await loadMissionRuntimeSnapshot(db, {
-      companyId: mission.companyId,
-      missionId: mission.id,
+      companyId,
+      missionId,
     });
 
     res.json({
-      missionId: mission.id,
-      companyId: mission.companyId,
+      missionId,
+      companyId,
       snapshot,
     });
   });
@@ -783,8 +786,8 @@ export function missionRoutes(db: Db) { const router = Router();
    */
   router.get("/companies/:companyId/missions/:missionId/recovery-advice", async (req, res) => {
     const { companyId, missionId } = req.params;
-    const mission = await svc.getById(missionId);
-    if (mission.companyId !== companyId) {
+    const missionCompanyId = await svc.readCompanyId(missionId);
+    if (missionCompanyId !== companyId) {
       throw notFound("Mission not found");
     }
     assertCompanyAccess(req, companyId);
@@ -800,8 +803,8 @@ export function missionRoutes(db: Db) { const router = Router();
    * Get the issue tree for a mission.
    */
   router.get("/missions/:id/issues", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const companyId = await svc.readCompanyId(req.params.id);
+    assertCompanyAccess(req, companyId);
 
     const issueTree = await svc.getIssueTree(req.params.id);
     res.json(issueTree);
@@ -813,8 +816,8 @@ export function missionRoutes(db: Db) { const router = Router();
    * List workflow runs associated with this mission.
    */
   router.get("/missions/:id/workflow-runs", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const companyId = await svc.readCompanyId(req.params.id);
+    assertCompanyAccess(req, companyId);
 
     const runs = await svc.listWorkflowRuns(req.params.id);
     res.json(runs);
@@ -828,8 +831,8 @@ export function missionRoutes(db: Db) { const router = Router();
    * Read-only download — board/operator context, company access enforced.
    */
   router.get("/missions/:id/workflow-runs/:runId/flowmap", async (req, res) => {
-    const mission = await svc.getById(req.params.id);
-    assertCompanyAccess(req, mission.companyId);
+    const companyId = await svc.readCompanyId(req.params.id);
+    assertCompanyAccess(req, companyId);
 
     const html = await svc.buildMissionRunFlowmapHtml(req.params.id, req.params.runId);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
