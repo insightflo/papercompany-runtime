@@ -262,26 +262,12 @@ type HeartbeatServiceOptions = {
 
 import { sameHeartbeatExecutionAttempt, heartbeatActualIdentityMatchesRun, producedExecutionScopeKind, sameC5ExecutionIdentityBeforeOwnerRelease } from "./heartbeat-attempt-identity.js";
 
-
-
-
-
-
-
-
-
 class C5NotInvokedExecutionError extends Error {
   readonly code = "c5_held_not_invoked";
   constructor(readonly proof: C5NotInvokedProof) {
     super("heartbeat adapter start held by pending QA remediation preparation");
   }
 }
-
-
-
-
-
-
 
 const NONWORKFLOW_EXECUTION_SCOPES = new Set([
   "issue_nonworkflow", "mission_nonworkflow", "timer", "manual_on_demand", "automation_nonworkflow",
@@ -331,33 +317,6 @@ export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 
 export const CODEX_REAUTH_REQUIRED_PAUSE_REASON = "reauth_required";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 type SessionCompactionDecision = {
   rotate: boolean;
   reason: string | null;
@@ -371,121 +330,6 @@ type SessionCompactionDecision = {
 
 
 export { prioritizeProjectWorkspaceCandidatesForRun };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): RequestChangesVerdict | null {
   const result = parseObject(run.resultJson);
@@ -516,13 +360,6 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
         : requestChangesCandidate,
   };
 }
-
-
-
-
-
-
-
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const c5OwnerRuntime = bindHeartbeatC5OwnerRuntime(db, options.qaCorrectionExecution?.ownerRuntime);
