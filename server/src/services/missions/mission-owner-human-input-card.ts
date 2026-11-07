@@ -8,6 +8,7 @@ import type {
   CreateOperatorDecisionInput,
   OperatorDecisionDefinition,
 } from "@paperclipai/shared/types/operator-decision";
+import type { OperatorDecisionSourceContextJson } from "@paperclipai/db";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { unprocessable } from "../../errors.js";
@@ -242,6 +243,50 @@ export async function createMissionOwnerHumanInputDecisionCard(db: Db, spec: Mis
   const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
   if (historicalReplay) return historicalReplay;
   return operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+}
+
+// [R2 2026-11-08] 미션 단위 열린 사람 카드 1장 계약의 조회·사유 누적 헬퍼.
+// 게이트(새 발행 차단)는 submitMissionOwnerDecision 가, 사유 누적(repeatCount)은
+// 기존 카드 행·요청키를 바꾸지 않고 이 메타데이터만 갱신한다 — resolve 권한 불변.
+export async function findPendingMissionHumanCard(
+  db: Pick<Db, "select">,
+  companyId: string,
+  missionId: string,
+): Promise<{ id: string; requestKey: string; sourceContext: OperatorDecisionSourceContextJson } | null> {
+  const [existing] = await db.select({
+    id: operatorDecisions.id,
+    requestKey: operatorDecisions.requestKey,
+    sourceContext: operatorDecisions.sourceContext,
+  }).from(operatorDecisions).where(and(
+    eq(operatorDecisions.companyId, companyId),
+    eq(operatorDecisions.status, "pending"),
+    eq(operatorDecisions.sourceType, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE),
+    sql`${operatorDecisions.sourceContext}->>'missionId' = ${missionId}`,
+  )).orderBy(desc(operatorDecisions.createdAt)).limit(1);
+  return existing ?? null;
+}
+
+/** [R2 2026-11-08] 기존 pending 카드에 반복 사유 누적 — repeatCount 만 증가(카드 행 불변). */
+export async function bumpPendingMissionHumanCard(
+  db: Db,
+  companyId: string,
+  missionId: string,
+): Promise<boolean> {
+  const existing = await findPendingMissionHumanCard(db, companyId, missionId);
+  if (!existing) return false;
+  const previous = existing.sourceContext?.missionOwnerHumanInput?.repeatCount;
+  const repeatCount = (typeof previous === "number" && Number.isFinite(previous) && previous >= 0 ? previous : 0) + 1;
+  const [updated] = await db.update(operatorDecisions).set({
+    updatedAt: new Date(),
+    sourceContext: {
+      ...existing.sourceContext,
+      missionOwnerHumanInput: { repeatCount },
+    },
+  }).where(and(
+    eq(operatorDecisions.id, existing.id),
+    eq(operatorDecisions.status, "pending"),
+  )).returning({ id: operatorDecisions.id });
+  return Boolean(updated);
 }
 
 async function replayHistoricalDefaultHumanInputCard(db: Db, spec: MissionOwnerHumanInputCardSpec,

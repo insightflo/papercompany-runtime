@@ -413,7 +413,9 @@ describeDb("operator decision continuation worker", () => {
         .resolves.toEqual({ checked: 1, cancelled: 0 });
     });
 
-    it("SW-M2: cancels a moi pending card when the anchor issue is terminal (done)", async () => {
+    // [2026-11-08 개정] 앵커 이슈 종결만으로는 moi 카드를 취소하지 않는다 — 오너 회수 run 이
+    // 앵커를 닫아도 사람이 답할 기회를 보존한다(2026-11-07 남발의 엔진 제거).
+    it("SW-M2: keeps a moi pending card alive when only the anchor issue is terminal (done)", async () => {
       await db.delete(operatorDecisionContinuations);
       const missionFixtureId = await insertMissionFixture("active");
       const cardId = await insertSweepCard({
@@ -422,10 +424,23 @@ describeDb("operator decision continuation worker", () => {
       });
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
       expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-moi-2" }).pollOnce(fixtureTime)).toBe(0);
+      expect(await cardRow(cardId)).toMatchObject({ status: "pending" });
+    });
+
+    // [R3 2026-11-08] 미션 completed 도 취소 트리거다(종료 미션의 카드는 답을 가져올 수 없다).
+    it("SW-M2b: cancels a moi pending card when the mission is completed even if the issue stays open", async () => {
+      await db.delete(operatorDecisionContinuations);
+      const missionFixtureId = await insertMissionFixture("completed");
+      const cardId = await insertSweepCard({
+        sourceType: "mission_owner_human_input", missionId: missionFixtureId,
+        targetSnapshot: { issueId, issueStatus: "in_progress" },
+      });
+      await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+      expect(await operatorDecisionContinuationWorker(db, { wakeup: vi.fn(), workerId: "sweep-moi-2b" }).pollOnce(fixtureTime)).toBe(0);
       expect(await cardRow(cardId)).toMatchObject({ status: "cancelled", cancelledAt: fixtureTime });
       const [cancelActivity] = (await cardActivities(cardId)).filter((row) => row.action === "operator_decision.cancelled");
       expect(cancelActivity).toMatchObject({ actorId: "system:operator-decision-stale-sweep" });
-      expect(cancelActivity?.details).toMatchObject({ reason: "target_changed", mismatch: ["issueStatus"] });
+      expect(cancelActivity?.details).toMatchObject({ mismatch: ["missionStatus"] });
     });
 
     it("SW-M3: cancels a moi pending card when the mission is cancelled even if the issue stays open", async () => {
