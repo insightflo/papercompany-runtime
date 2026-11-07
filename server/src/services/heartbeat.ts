@@ -246,6 +246,7 @@ import {
   type TerminalFollowup,
 } from "./heartbeat-terminal-release-continuation.js";
 import { readTerminalContinuationSource, settleTerminalContinuationFromQaSuccessor } from "./heartbeat-terminal-successor-settlement.js";
+import { reapOrphanedRuns } from "./heartbeat-orphan-reaper.js";
 import {
   assertIssueResumeScopeIdentity,
   recordResumeStaleResultRejected,
@@ -2098,425 +2099,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       );
     }
     return summary;
-  }
-
-  async function reapOrphanedRuns(opts?: {
-    staleThresholdMs?: number;
-    activeExecutionTimeoutMs?: number;
-    queuedStaleThresholdMs?: number;
-  }) {
-    const staleThresholdMs = opts?.staleThresholdMs ?? 0;
-    const activeExecutionTimeoutMs = opts?.activeExecutionTimeoutMs ?? 0;
-    const queuedStaleThresholdMs = opts?.queuedStaleThresholdMs ?? 0;
-    const now = new Date();
-
-    // Find all runs stuck in "running" state. Queued runs are handled below only
-    // when they have exceeded an explicit queued staleness threshold.
-    const activeRuns = await db
-      .select({
-        run: heartbeatRuns,
-        adapterType: agents.adapterType,
-      })
-      .from(heartbeatRuns)
-      .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
-      .where(eq(heartbeatRuns.status, "running"));
-
-    const reaped: string[] = [];
-
-    // [approval-waiting marker] running 런의 이슈에 pending 운영자 결정/승인이 있으면
-    // '멈춤(stuck)'이 아니라 '사람 대기'다 — 배치 판정 후 타임아웃 회수에서 면제한다(스캔 N+1 금지).
-    const approvalWaitByIssueId = await operatorApprovalWaitService(db).markersForIssueIds(
-      activeRuns.map((row) => row.run.issueId).filter((issueId): issueId is string => Boolean(issueId)),
-    );
-
-    for (const { run, adapterType } of activeRuns) {
-      const trackedProcess = runningProcesses.get(run.id) ?? null;
-      const hasActiveExecution = activeRunExecutions.has(run.id);
-      if (trackedProcess || hasActiveExecution) {
-        // [issue done → 자식 즉시 kill] 에이전트가 issue 를 done/cancelled 처리했는데도
-        // 어댑터 자식(opencode 등)이 exit 안 하고 살아있으면 maxConcurrentRuns 블록이
-        // execution_stale(15min)까지 지속된다. issue 상태가 done/cancelled 면 자식을
-        // 즉시 종료해 블록을 푼다.
-        if (trackedProcess && run.issueId) {
-          const [issueRow] = await db.select({ status: issues.status }).from(issues)
-            .where(eq(issues.id, run.issueId)).limit(1);
-          if (issueRow && (issueRow.status === "done" || issueRow.status === "cancelled")) {
-            trackedProcess.child.kill("SIGTERM");
-            setTimeout(() => {
-              if (!trackedProcess.child.killed) {
-                trackedProcess.child.kill("SIGKILL");
-              }
-            }, Math.max(1, trackedProcess.graceSec) * 1000);
-            runningProcesses.delete(run.id);
-            await setRunStatus(run.id, issueRow.status === "done" ? "succeeded" : "cancelled", {
-              error: `Issue ${issueRow.status} but adapter child did not exit; terminated`,
-              errorCode: "issue_done_child_not_exited",
-              finishedAt: now,
-            }, { expectedStatuses: ["running"] });
-            // Agent self-learning wiki (Phase 1): adapter 자식 미종료 패턴 기록 (non-blocking).
-            fireWikiRecord(wikiSvc, {
-              companyId: run.companyId,
-              agentId: run.agentId,
-              missionId: null,
-              pattern: "adapter 자식 미종료 (issue done/cancelled)",
-              cause: "이슈가 done/cancelled로 종료됐는데도 어댑터 자식(opencode 등)이 exit하지 않아 maxConcurrentRuns 블록이 execution_stale까지 지속됨.",
-              solution: "이슈 done/cancelled 처리 후 어댑터 자식이 확실히 exit하도록 종료 시그널/플래그 점검. 작업 완료 시 프로세스를 즉시 종료할 것.",
-              errorCode: "issue_done_child_not_exited",
-            }, run.id);
-            continue;
-          }
-        }
-        if (activeExecutionTimeoutMs <= 0) continue;
-        // [run stability] step 등급 타임아웃 — QA/검수 step이거나 명시적 step timeout이 있으면
-        //   기본 부실 역치(900s) 대신 그 등급의 역치로 판정한다(낮추지 않는다).
-        const stepAwareTimeoutMs = await resolveRunActiveExecutionTimeoutMs(run, activeExecutionTimeoutMs);
-        if (stepAwareTimeoutMs <= 0) continue;
-        const refTime = new Date(run.updatedAt).getTime();
-        if (now.getTime() - refTime < stepAwareTimeoutMs) continue;
-
-        // [approval-waiting marker] 실행이 pending 운영자 결정/승인 대기 중이면 stuck 이 아니다.
-        // 프로세스는 살아있고 사람 결정에 막혀 있으므로 타임아웃/kill 을 보류한다(자동취소 금지).
-        const approvalWait = run.issueId ? approvalWaitByIssueId.get(run.issueId) : undefined;
-        if (approvalWait?.waiting) {
-          logger.info(
-            {
-              runId: run.id,
-              issueId: run.issueId,
-              operatorDecisionIds: approvalWait.operatorDecisionIds,
-              approvalIds: approvalWait.approvalIds,
-              activeExecutionTimeoutMs,
-            },
-            "run is waiting on a pending operator decision/approval; skipping stale execution timeout",
-          );
-          continue;
-        }
-
-        if (trackedProcess) {
-          trackedProcess.child.kill("SIGTERM");
-          setTimeout(() => {
-            if (!trackedProcess.child.killed) {
-              trackedProcess.child.kill("SIGKILL");
-            }
-          }, Math.max(1, trackedProcess.graceSec) * 1000);
-          runningProcesses.delete(run.id);
-        }
-
-        const timeoutMessage = `Heartbeat execution exceeded ${Math.round(stepAwareTimeoutMs / 1000)}s without reaching a terminal state`;
-        const timedOutRun = await setRunStatus(run.id, "timed_out", {
-          error: timeoutMessage,
-          errorCode: "execution_stale_timeout",
-          finishedAt: now,
-        }, { expectedStatuses: ["running"] });
-        await setWakeupStatus(run.wakeupRequestId, "timed_out", {
-          finishedAt: now,
-          error: timeoutMessage,
-        });
-        if (timedOutRun) {
-          await appendRunEvent(timedOutRun, await nextRunEventSeq(timedOutRun.id), {
-            eventType: "lifecycle",
-            stream: "system",
-            level: "error",
-            message: timeoutMessage,
-            payload: {
-              activeExecution: hasActiveExecution,
-              trackedProcess: Boolean(trackedProcess),
-              activeExecutionTimeoutMs,
-            },
-          });
-          // [recovery liveness hardening] per-run isolation: 이 run 의 terminal 처리(release,
-          // finalize, startNext) 중 어느 단계가 실패/정지해도 전체 sweep 과 recovery lane 을
-          // 중단시키지 않고 다음 run 으로 진행한다.
-          try {
-            await releaseIssueExecutionAndPromote(timedOutRun, { skipLocked: true });
-            const terminalRun = await getRun(timedOutRun.id);
-            if (terminalRun && isTerminalHeartbeatRunStatus(terminalRun.status)) {
-              await settleHeartbeatAfterExecution(db, terminalRun, now);
-            }
-            await finalizeAgentStatus(run.agentId, "timed_out");
-            await startNextQueuedRunForAgent(run.agentId);
-            reaped.push(run.id);
-          } catch (err) {
-            logger.warn({ err, runId: run.id }, "failed to finalize timed-out run; continuing sweep");
-          }
-        }
-        // Agent self-learning wiki (Phase 1): execution stale(hang) 패턴 기록 (non-blocking).
-        fireWikiRecord(wikiSvc, {
-          companyId: run.companyId,
-          agentId: run.agentId,
-          missionId: null,
-          pattern: "execution stale (hang)",
-          cause: "어댑터 실행이 타임아웃(activeExecutionTimeout) 전에 종단 상태에 도달하지 못해 hang으로 판정됨.",
-          solution: "API_TIMEOUT(10분)과 idle 점검. 장기 실행 명령은 타임아웃/백그라운드 분리. 자식이 stdout을 닫지 않고 누수하는지 확인.",
-          errorCode: "execution_stale_timeout",
-        }, run.id);
-        continue;
-      }
-
-      // Apply staleness threshold to avoid false positives
-      if (staleThresholdMs > 0) {
-        const refTime = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
-        if (now.getTime() - refTime < staleThresholdMs) continue;
-      }
-
-      const tracksLocalChild = isTrackedLocalChildProcessAdapter(adapterType);
-      if (tracksLocalChild && run.processPid && isProcessAlive(run.processPid)) {
-        if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
-          const detachedMessage = `Lost in-memory process handle, but child pid ${run.processPid} is still alive`;
-          const detachedRun = await setRunStatus(run.id, "running", {
-            error: detachedMessage,
-            errorCode: DETACHED_PROCESS_ERROR_CODE,
-          }, { expectedStatuses: ["running"] });
-          if (detachedRun) {
-            await appendRunEvent(detachedRun, await nextRunEventSeq(detachedRun.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: detachedMessage,
-              payload: {
-                processPid: run.processPid,
-              },
-            });
-          }
-        }
-        // FIX 2b: orphaned-but-alive child longevity cap. child 가 DETACHED_REAP_AFTER_MS 초과 실행 중이면
-        // 강제 kill 후 아래 기존 process_lost/retry 경로로 fall-through(무한 defer 방지 — CMPA-5519 대응).
-        const detachedChildStartedMs = run.processStartedAt
-          ? new Date(run.processStartedAt).getTime()
-          : run.startedAt
-            ? new Date(run.startedAt).getTime()
-            : 0;
-        if (
-          DETACHED_REAP_AFTER_MS > 0 &&
-          detachedChildStartedMs > 0 &&
-          now.getTime() - detachedChildStartedMs > DETACHED_REAP_AFTER_MS
-        ) {
-          terminateRecordedProcess(run.processPid, "SIGTERM");
-          setTimeout(
-            () => terminateRecordedProcess(run.processPid, "SIGKILL"),
-            Math.max(1, DETACHED_GRACE_SEC) * 1000,
-          );
-          // fall through to process_lost/retry below (의도적 continue 생략).
-        } else {
-          // [A2] run 은 longevity cap 까지 detached 로 유예하지만, 그동안 agent 가 phantom running
-          // 에 갇히지 않도록 agent 가시성을 직접 교정한 뒤 유예한다.
-          await demoteAgentStuckDetached(run, now);
-          continue;
-        }
-      }
-
-      const shouldRetry = tracksLocalChild && !!run.processPid && (run.processLossRetryCount ?? 0) < 1;
-      const baseMessage = run.processPid
-        ? `Process lost -- child pid ${run.processPid} is no longer running`
-        : "Process lost -- server may have restarted";
-
-      let finalizedRun = await setRunStatus(run.id, "failed", {
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-        errorCode: "process_lost",
-        finishedAt: now,
-      }, { expectedStatuses: ["running"] });
-      await setWakeupStatus(run.wakeupRequestId, "failed", {
-        finishedAt: now,
-        error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
-      });
-      if (!finalizedRun) finalizedRun = await getRun(run.id);
-      if (!finalizedRun) continue;
-
-      // Agent wiki hook (process_lost): adapter 자식 프로세스 상실 교훈 축적 (non-blocking).
-      // detached 30min cap fall-through 도 이 process_lost 경로를 타므로 이 hook 하나로 커버.
-      fireWikiRecord(wikiSvc, {
-        companyId: run.companyId,
-        agentId: run.agentId,
-        pattern: "process_lost (adapter 자식 프로세스 상실)",
-        cause: "어댑터 자식 프로세스가 예기치 않게 종료/상실돼 run 실패. in-memory handle 상실(→orphan), 서버 재시작, 자식 crash 등. CMPA-5519 hang의 주요 원인.",
-        solution: "detached 30min cap + graceful shutdown 자식 회수로 handle-loss 회수 지연을 보강. 반복 시 adapter command·리소스·안정성 점검.",
-        errorCode: "process_lost",
-      }, run.id);
-
-      let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
-      let fallbackRun: typeof heartbeatRuns.$inferSelect | null = null;
-      if (shouldRetry) {
-        const agent = await getAgent(run.agentId);
-        if (agent) {
-          retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, finalizedRun, agent, now);
-        }
-      } else {
-        const agent = await getAgent(run.agentId);
-        const fallback = agent ? resolveAdapterFallbackConfig(agent.adapterConfig) : null;
-        const fallbackAttempt = resolveAdapterFallbackAttempt(run.contextSnapshot);
-        const shouldFallback =
-          Boolean(agent) &&
-          Boolean(fallback) &&
-          fallbackAttempt < fallback!.maxAttempts;
-        if (agent && fallback && shouldFallback) {
-          fallbackRun = await enqueueAdapterFallbackRun(retryEnqueueDeps, finalizedRun, agent, now, {
-            fallbackCommand: fallback.command,
-            fallbackProvider: fallback.provider,
-            fallbackModel: fallback.model,
-            fallbackThinking: resolveAdapterFallbackThinking(
-              fallback,
-              resolveAdapterFallbackAttempt(finalizedRun.contextSnapshot) + 1,
-            ),
-            fallbackReason: "process_lost",
-          });
-        } else {
-          // [recovery liveness hardening] per-run isolation: fallback 없는 run 의 release+promote
-          // 실패가 전체 sweep 을 중단시키지 않게 격리.
-          try {
-            await releaseIssueExecutionAndPromote(finalizedRun, { skipLocked: true });
-          } catch (err) {
-            logger.warn({ err, runId: run.id }, "failed to release+promote finalized run; continuing sweep");
-          }
-        }
-      }
-
-      await appendRunEvent(finalizedRun, await nextRunEventSeq(finalizedRun.id), {
-        eventType: "lifecycle",
-        stream: "system",
-        level: "error",
-        message: shouldRetry
-          ? `${baseMessage}; queued retry ${retriedRun?.id ?? ""}`.trim()
-          : fallbackRun
-            ? `${baseMessage}; queued adapter fallback ${fallbackRun.id}`
-          : baseMessage,
-        payload: {
-          ...(run.processPid ? { processPid: run.processPid } : {}),
-          ...(retriedRun ? { retryRunId: retriedRun.id } : {}),
-          ...(fallbackRun ? { fallbackRunId: fallbackRun.id } : {}),
-        },
-      });
-
-      // [recovery liveness hardening] terminal 체인 후속(finalize/startNext) 도 격리 — 이 run 의
-      // 실패가 전체 sweep 을 중단시키지 않는다.
-      try {
-        await finalizeAgentStatus(run.agentId, "failed");
-        await startNextQueuedRunForAgent(run.agentId);
-        runningProcesses.delete(run.id);
-        reaped.push(run.id);
-      } catch (err) {
-        logger.warn({ err, runId: run.id }, "failed to finalize process-lost run; continuing sweep");
-      }
-    }
-
-    // [checkpoint+graceful shutdown 백스톱] 종료 플러시가 마킹(failed+shutdown_interrupted)까지는
-    // 커밋했으나 재시도 등록 직전에 프로세스가 죽거나 데드라인에 걸린 런의 회수 사각지대 방어.
-    // 이 스캔이 없으면 마킹된 런은 위 running 스캔 대상에서 빠져 아무도 회수하지 못한다(요구사항:
-    // 종료 시 마킹된 런은 기존 회수 경로에 반드시 진입해야 한다). 조건 — processLossRetryCount<1
-    // (재시도 자격, 소진 규칙 동일) + 후계 런(retryOfRunId, retry/fallback 공통) 부재 → 정확히 1회.
-    // retryCount 소진 마킹 런의 fallback 누락은 여기서 보충하지 않는다(이슈 락은
-    // reapStalledIssueExecutionLocks 가 회수 — 데드라인 스킵 시 의도된 우아한 강등).
-    try {
-      const interruptedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.status, "failed"),
-            eq(heartbeatRuns.errorCode, SHUTDOWN_INTERRUPTED_ERROR_CODE),
-            sql`${heartbeatRuns.processLossRetryCount} < 1`,
-          ),
-        )
-        .limit(50);
-      for (const run of interruptedRuns) {
-        try {
-          if (runningProcesses.has(run.id) || activeRunExecutions.has(run.id)) continue;
-          const successors = await db
-            .select({ id: heartbeatRuns.id })
-            .from(heartbeatRuns)
-            .where(eq(heartbeatRuns.retryOfRunId, run.id))
-            .limit(1);
-          if (successors.length > 0) continue;
-          const agent = await getAgent(run.agentId);
-          if (!agent) continue;
-          const retriedRun = await enqueueProcessLossRetry(retryEnqueueDeps, run, agent, now);
-          if (retriedRun) {
-            await setWakeupStatus(run.wakeupRequestId, "failed", {
-              finishedAt: now,
-              error: run.error ?? "shutdown_interrupted recovered by backstop",
-            });
-            await appendRunEvent(run, await nextRunEventSeq(run.id), {
-              eventType: "lifecycle",
-              stream: "system",
-              level: "warn",
-              message: `Recovered shutdown-interrupted run; queued retry ${retriedRun.id}`,
-              payload: { retryRunId: retriedRun.id },
-            });
-            reaped.push(run.id);
-          }
-        } catch (err) {
-          logger.warn({ err, runId: run.id }, "failed to recover shutdown-interrupted run; continuing sweep");
-        }
-      }
-    } catch (err) {
-      logger.warn({ err }, "shutdown-interrupted backstop scan failed; continuing sweep");
-    }
-
-    if (queuedStaleThresholdMs > 0) {
-      const recoverQueuedStaleWork = createHeartbeatQueuedStaleRecovery({
-        db,
-        activeExecutionTimeoutMs,
-        withAgentStartLock,
-        startNextQueuedRunForAgent,
-        countActiveRunsForAgent: countRunningRunsForAgent,
-        maxConcurrentRuns: agent => parseHeartbeatPolicy(agent).maxConcurrentRuns,
-        hasActiveExecution: runId => activeRunExecutions.has(runId),
-        hasLiveTrackedChild: runId => {
-          const child = runningProcesses.get(runId)?.child;
-          return Boolean(child && child.exitCode === null && child.signalCode === null && isProcessAlive(child.pid));
-        },
-        resolveActiveExecutionTimeoutMs: resolveRunActiveExecutionTimeoutMs,
-        setRunStatus: setHeartbeatRunStatus,
-        publishRunStatus: run => publishHeartbeatRunStatus(publishLiveEvent, run),
-        nextRunEventSeq,
-        appendRunEvent,
-        releaseIssueExecutionAndPromote,
-        getRun,
-        settleHeartbeatAfterExecution,
-        finalizeAgentStatus,
-        recordQueueTransitionEvent,
-      });
-      const queuedRecovery = await recoverQueuedStaleWork(queuedStaleThresholdMs);
-      reaped.push(...queuedRecovery.reapedRunIds);
-    }
-
-    const continuationCursor = terminalContinuationScanCursor;
-    const continuationPredicate = continuationCursor
-      ? and(eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE), or(
-          gt(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
-          and(eq(workflowTransitionEvents.createdAt, sql`${continuationCursor.createdAt}::timestamptz`),
-            gt(workflowTransitionEvents.id, continuationCursor.id)),
-        ))
-      : eq(workflowTransitionEvents.eventType, TERMINAL_RELEASE_EVENT_TYPE);
-    const continuationRows = await db.select({ id: workflowTransitionEvents.id, createdAt: sql<string>`${workflowTransitionEvents.createdAt}::text` })
-      .from(workflowTransitionEvents).where(continuationPredicate)
-      .orderBy(asc(workflowTransitionEvents.createdAt), asc(workflowTransitionEvents.id)).limit(50);
-    if (continuationRows.length === 0) {
-      terminalContinuationScanCursor = null;
-    } else {
-      const last = continuationRows[continuationRows.length - 1]!;
-      terminalContinuationScanCursor = { createdAt: last.createdAt, id: last.id };
-      for (const row of continuationRows) {
-        if (terminalContinuationInflight.has(row.id)) continue;
-        const manifest = await readTerminalReleaseManifest(db, row.id);
-        if (manifest.kind !== "found") {
-          logger.warn({ continuationEventId: row.id, reason: manifest.reason },
-            "terminal release reaper left malformed continuation held");
-          continue;
-        }
-        const execution = runTerminalReleaseContinuation(row.id).then(result => {
-          if (result.kind === "held") logger.warn({ continuationEventId: row.id, reason: result.reason },
-            "terminal release reaper left continuation pending");
-        }).catch(error => {
-          logger.warn({ err: error, continuationEventId: row.id },
-            "terminal release reaper continuation failed; durable obligation remains pending");
-        });
-        trackHeartbeatExecution(db, execution);
-      }
-    }
-
-    if (reaped.length > 0) {
-      logger.warn({ reapedCount: reaped.length, runIds: reaped }, "reaped orphaned heartbeat runs");
-    }
-    return { reaped: reaped.length, runIds: reaped };
   }
 
   async function finalizeLinkedRunsForIssueStatus(input: {
@@ -8375,7 +7957,42 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     reportRunActivity: clearDetachedRunWarning,
 
-    reapOrphanedRuns,
+    // 고아 런 reaper 본문은 heartbeat-orphan-reaper.ts 로 이동(동작 무변경).
+    // 인스턴스 스코프 상태(터미널 연속 스캔 커서·in-flight set·retry deps)는 접근자로 주입한다.
+    reapOrphanedRuns: (opts?: {
+      staleThresholdMs?: number;
+      activeExecutionTimeoutMs?: number;
+      queuedStaleThresholdMs?: number;
+    }) => reapOrphanedRuns({
+      db,
+      appendRunEvent,
+      nextRunEventSeq,
+      setRunStatus,
+      setWakeupStatus,
+      recordQueueTransitionEvent,
+      finalizeAgentStatus,
+      countRunningRunsForAgent,
+      getAgent,
+      getRun,
+      demoteAgentStuckDetached,
+      startNextQueuedRunForAgent,
+      releaseIssueExecutionAndPromote,
+      resolveRunActiveExecutionTimeoutMs,
+      runTerminalReleaseContinuation,
+      retryEnqueueDeps,
+      wikiSvc,
+      activeRunExecutions,
+      terminalContinuationInflight,
+      getTerminalContinuationScanCursor: () => terminalContinuationScanCursor,
+      setTerminalContinuationScanCursor: (v) => { terminalContinuationScanCursor = v; },
+      publishHeartbeatRunStatus,
+      setHeartbeatRunStatus,
+      enqueueProcessLossRetry,
+      enqueueAdapterFallbackRun,
+      settleHeartbeatAfterExecution,
+      readTerminalReleaseManifest,
+      TERMINAL_RELEASE_EVENT_TYPE,
+    }, opts),
 
     // Exact durable recovery entrypoint: the manifest, actual-drain receipt and current source are
     // revalidated before any existing writer can run; this does not grant execution authority.
