@@ -94,6 +94,16 @@ export interface IssueFilters {
   missionId?: string;
   includeRoutineExecutions?: boolean;
   q?: string;
+  /**
+   * [목적] 목록 응답 필드 범위 요청. 지금은 선언만 있고 이 파일의 조회는 아직 이 값을 읽지 않는다.
+   * [이유] 목록 기본 응답을 summary(description null)로 바꾸는 후속 변경에서, 본문이 필요한 호출자는
+   *        그 전에 view="full"을 넘겨 두어야 배포 시점에 동작이 유지된다. 이 값을 무시하는 동안에도
+   *        결과는 기존과 같으므로 미리 넘겨도 안전하다(no-op).
+   */
+  view?: "summary" | "full";
+  /** 페이지 윈도우 — 선언만 있고 조회는 아직 적용하지 않는다(기본 limit 없음). */
+  limit?: number;
+  offset?: number;
 }
 
 type IssueRow = typeof issues.$inferSelect;

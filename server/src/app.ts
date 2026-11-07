@@ -119,6 +119,23 @@ function isHttpCoreExecuteRequest(req: ExpressRequest): boolean {
   return /^\/api\/plugins\/tools\/execute\/?$/i.test(req.path) || req.path === "/plugins/tools/execute";
 }
 
+// [목적] 목록 페이지 윈도우 상한. 기본 limit은 두지 않고(전체 보드 절단 방지) 호출자가 넘길 때만 적용한다.
+const MAX_WORK_ITEMS_LIST_LIMIT = 5000;
+
+/** [목적] 양의 정수 쿼리만 통과시키고 그 외(빈 값·NaN·0·음수·소수)는 무시한다. */
+function parsePositiveIntQuery(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+/** [목적] limit 쿼리를 해석해 상한을 적용한다. 값이 없거나 잘못되면 limit을 적용하지 않는다. */
+function parseWorkItemsListLimit(value: unknown): number | undefined {
+  const parsed = parsePositiveIntQuery(value);
+  return parsed === undefined ? undefined : Math.min(parsed, MAX_WORK_ITEMS_LIST_LIMIT);
+}
+
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
     return serverPort + 10_000;
@@ -519,6 +536,12 @@ export async function createApp(
       includeRoutineExecutions:
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
+      // [목적] /issues 목록과 같이 보기 범위·페이지 윈도우를 넘길 수 있게 해 둔다.
+      // [이유] 이 라우트는 agents/tool이 쓰는 work-items 별칭면이라, 목록 기본이 summary가 된 뒤에도
+      //        본문이 필요하면 view=full로 탈출구를 유지해야 한다. 정확히 "full"인 때만 full이다.
+      view: req.query.view === "full" ? "full" : "summary",
+      limit: parseWorkItemsListLimit(req.query.limit),
+      offset: parsePositiveIntQuery(req.query.offset),
     });
     res.json(
       result.map((issue) => ({

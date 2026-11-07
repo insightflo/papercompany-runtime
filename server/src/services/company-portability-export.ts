@@ -240,7 +240,9 @@ export async function exportBundle(
       continue;
     }
     selectedProjects.set(match.id, match);
-    const projectIssues = await issuesSvc.list(companyId, { projectId: match.id });
+    // [목적] 내보내기는 이슈 본문을 파일로 내보내므로 목록 기본 응답이 summary로 바뀌어도 전체 필드를 요청한다.
+    // [이유] summary 행은 description이 null이라 본문이 빈 채로 내보내진다. view를 모르는 현재 코드에서는 무시된다.
+    const projectIssues = await issuesSvc.list(companyId, { projectId: match.id, view: "full" });
     for (const issue of projectIssues) {
       selectedIssues.set(issue.id, issue);
     }
@@ -253,7 +255,8 @@ export async function exportBundle(
   }
 
   if (include.issues && selectedIssues.size === 0) {
-    const allIssues = await issuesSvc.list(companyId);
+    // [목적] 같은 이유로 회사 전체 이슈 목록도 전체 필드를 요청한다(본문 포함 내보내기).
+    const allIssues = await issuesSvc.list(companyId, { view: "full" });
     for (const issue of allIssues) {
       selectedIssues.set(issue.id, issue);
       if (issue.projectId) {
