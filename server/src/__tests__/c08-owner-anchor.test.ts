@@ -56,6 +56,13 @@ describeDb("C08 source anchor producer", () => {
   type World = Awaited<ReturnType<typeof world>>;
   const produce = (w: World, connection = db, deps: MissionServiceDeps = {}) =>
     createOwnerActions({ db: connection, deps }).ensureMainExecutorUnblockIssue(w.mission, w.source);
+  // The 2026-11-07 runaway fix makes a still-pending human card block renewal, so
+  // tests that exercise the renewal path answer the current card first.
+  const resolveCard = async (w: World) => {
+    const [pending] = (await cards(w)).filter((row) => row.status === "pending");
+    if (pending) await operatorDecisionWriteService(db).resolve(pending.id,
+      { actionId: "approve", selectedOptionIds: ["approve"], comment: "승인" }, "board");
+  };
   const events = (w: World) => db.select().from(workflowTransitionEvents)
     .where(eq(workflowTransitionEvents.companyId, w.companyId)).orderBy(workflowTransitionEvents.id);
   const cards = (w: World) => db.select().from(operatorDecisions)
@@ -79,7 +86,8 @@ describeDb("C08 source anchor producer", () => {
       row.id === pointer.payload!.lifetimeId)!.payload);
   };
   it("creates one new anchor/lifetime/key/pending card and preserves original author, bytes and history", async () => {
-    const w = await world(), old = await currentLifetime(w), before = await snapshot(w);
+    const w = await world(); await resolveCard(w);
+    const old = await currentLifetime(w), before = await snapshot(w);
     const next = await produce(w), now = await currentLifetime(w);
     expect(next.id).not.toBe(w.oldId);
     expect(next).toMatchObject({ status: "todo", originKind: "mission_main_executor_unblock",
@@ -105,7 +113,7 @@ describeDb("C08 source anchor producer", () => {
     expect(after[0].filter((row) => row.eventType === "mission_owner_decision")).toHaveLength(1);
   });
   it("serializes independent connections, replays after response loss and notifies only after commit", async () => {
-    const w = await world();
+    const w = await world(); await resolveCard(w);
     const notify = vi.fn<NonNullable<MissionServiceDeps["onOwnerActionCreated"]>>(async ({ issue }) => {
       const [stored] = await other.select().from(issues).where(eq(issues.id, issue.id));
       const linked = await other.select().from(operatorDecisions).where(eq(operatorDecisions.issueId, issue.id));
@@ -122,7 +130,8 @@ describeDb("C08 source anchor producer", () => {
     expect((await anchors(w))).toHaveLength(2); expect(await cards(w)).toHaveLength(2);
   });
   it("rolls the anchor, issue counter, lifetime, ending, pointer, card and audit back on real link write failure", async () => {
-    const w = await world(), before = await snapshot(w), notify = vi.fn();
+    const w = await world(); await resolveCard(w);
+    const before = await snapshot(w), notify = vi.fn();
     // Owned isolated DB only; the real writer reaches this CHECK after creating its card.
     await db.execute(sql.raw(`alter table workflow_transition_events add constraint c08_anchor_injected
       check (company_id <> '${w.companyId}' or event_type <> 'owner_human_card_v1') not valid`));
@@ -154,7 +163,8 @@ describeDb("C08 source anchor producer", () => {
     expect(after[1].find((row) => row.issueId === next.id)).toMatchObject({ status: "pending", result: null });
   });
   it("current GET and exact POST replay use the renewed anchor while retaining the original decision", async () => {
-    const w = await world(), old = await currentLifetime(w), next = await produce(w), runId = randomUUID();
+    const w = await world(), old = await currentLifetime(w); await resolveCard(w);
+    const next = await produce(w), runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId: w.companyId, agentId: w.agentId,
       issueId: next.id, status: "running" }); // Current caller identity only.
     await issueService(db).checkout(next.id, w.agentId, ["todo"], runId);
@@ -170,12 +180,41 @@ describeDb("C08 source anchor producer", () => {
   });
 
   it("reuses the one open current anchor even when an older terminal anchor sorts first", async () => {
-    const w = await world(), next = await produce(w), before = await snapshot(w);
+    const w = await world(); await resolveCard(w);
+    const next = await produce(w), before = await snapshot(w);
     expect((await produce(w)).id).toBe(next.id); expect(await snapshot(w)).toEqual(before);
     await issueService(db).update(next.id, { status: "cancelled" });
-    const second = await produce(w);
-    expect(second.id).not.toBe(next.id); expect((await currentRow(w)).payload!.revision).toBe(3);
+    // The renewed lifetime still holds a pending card, so a terminal anchor no
+    // longer mints another anchor/lifetime/card round (2026-11-07 runaway fix).
+    expect((await produce(w)).id).toBe(next.id); expect((await anchors(w))).toHaveLength(2);
+    expect((await currentRow(w)).payload!.revision).toBe(2);
     expect((await currentLifetime(w)).heartbeatRunId).toBe(w.heartbeatId);
+  });
+
+  it("stops the supervision-tick storm: repeated ensures reuse the anchor while the human card is pending", async () => {
+    const w = await world(); // old anchor terminal, escalate card still pending
+    const before = await snapshot(w);
+    for (let tick = 0; tick < 6; tick += 1) {
+      const anchor = await produce(w, tick % 2 ? other : db);
+      expect(anchor.id).toBe(w.oldId);
+    }
+    expect(await snapshot(w)).toEqual(before); // no new anchors, lifetimes or cards
+    expect((await anchors(w))).toHaveLength(1); expect((await cards(w))).toHaveLength(1);
+  });
+
+  it("caps anchor creation per source when cards keep ending without recovery", async () => {
+    const w = await world();
+    let latest = w.oldId;
+    for (let round = 0; round < 6; round += 1) {
+      await resolveCard(w); // every card is answered, so renewal stays legitimate
+      const anchor = await produce(w);
+      if (round < 4) {
+        expect(anchor.id).not.toBe(latest); latest = anchor.id; // rounds 0-3 mint anchors 2-5
+      } else {
+        expect(anchor.id).toBe(latest); // cap reached: reuse, do not create a 6th
+      }
+    }
+    expect((await anchors(w))).toHaveLength(5);
   });
 
   it("keeps nonhuman blockers and legacy human input working without inventing a new submission", async () => {

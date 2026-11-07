@@ -1,6 +1,6 @@
 // C08 producer: mission/run/heartbeat/sorted issues precede the current pointer and card.
 // Creation uses the caller's transaction; notifications run only after it commits.
-import { heartbeatRuns, issues, missions, workflowRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issues, missions, operatorDecisions, workflowRuns, workflowTransitionEvents, type Db } from "@paperclipai/db";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { conflict } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
@@ -21,6 +21,10 @@ type OwnerUnblockAnchorDependencies = {
   deps: Pick<MissionServiceDeps, "onOwnerActionCreated">;
   createMissionOwnerActionIssue: (tx: Db, companyId: string, data: IssueCreateInput) => Promise<IssueRow>;
 };
+// Circuit breaker for the 2026-11-07 card runaway: each legitimately answered human
+// decision round needs at most one anchor. Anything faster is an automated loop
+// re-issuing anchors/lifetimes/cards and must stop at this bound per source issue.
+const MAX_SOURCE_ANCHORS = 5;
 const fail = (): never => { throw conflict("Owner unblock anchor conflict", {
   reason: "owner_unblock_anchor_changed",
 }); };
@@ -115,6 +119,28 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
         if (!historical) return fail();
         return { mission, source, issue: historical, created: false };
       }
+      // A still-pending human decision card is the live surface for this source.
+      // Renewing here would mint a fresh anchor, lifetime and card on every
+      // supervision tick while the original request merely waits for a human
+      // answer (2026-11-07 runaway: 38 anchors / 40 cards in one mission).
+      // Reuse the current lifetime's anchor until that card resolves or cancels.
+      if (current?.pointer.recoveryNeeded) {
+        const [pendingCard] = await tx.select({ id: operatorDecisions.id }).from(operatorDecisions).where(and(
+          eq(operatorDecisions.companyId, mission.companyId),
+          eq(operatorDecisions.requestKey, `moi2:${current.lifetime.lifetimeId}`),
+          eq(operatorDecisions.status, "pending"))).limit(1);
+        if (pendingCard) {
+          return { mission, source, issue: locked.get(current.pointer.anchorIssueId)!, created: false };
+        }
+      }
+      // Anchor cap: bound how many anchors one source issue can accumulate even
+      // when every card keeps dying without recovery. Reuse the latest anchor.
+      if (visible.length >= MAX_SOURCE_ANCHORS) {
+        const latest = visible[visible.length - 1]!;
+        logger.warn({ missionId: mission.id, sourceIssueId: source.id, anchors: visible.length },
+          "owner unblock anchor cap reached; reusing the latest anchor instead of creating another");
+        return { mission, source, issue: latest, created: false };
+      }
       // A real blocked source needs a live anchor even without any human lifetime.
       // Preserve the existing explicit no-action renewal for nonblocked legacy callers.
       if (historical && !current && source.status !== "blocked") {
@@ -155,10 +181,12 @@ export function createOwnerUnblockAnchor({ db, deps, createMissionOwnerActionIss
       });
       // A closed lifetime cannot be renewed. The owner submits fresh content/key on
       // this anchor through the existing CAS writer; historical approval grants nothing.
+      // The renewal key is derived from the predecessor lifetime only (never the new
+      // anchor id), so retries and replays dedupe onto one stable key per round.
       if (current?.pointer.recoveryNeeded) {
         await renewOwnerHumanRequestWithCard(tx, { companyId: mission.companyId,
           previousLifetimeId: current.lifetime.lifetimeId, anchorIssueId: issue.id,
-          requestKey: `owner-anchor-renewal:v1:${current.lifetime.lifetimeId}:${issue.id}` });
+          requestKey: `owner-anchor-renewal:v2:${current.lifetime.lifetimeId}` });
       }
       return { mission, source, issue, created: true };
     });
