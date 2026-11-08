@@ -10,6 +10,7 @@ import { activePlanDecisionHash } from "./operator-decision-server-context.js";
 import type { operatorDecisionReadService } from "./operator-decisions-read.js";
 import { connectOwnerHumanRequestCard, isOwnerHumanLifetimeCard, lockOwnerHumanRequestCard } from "./missions/owner-human-request-card.js";
 import { lockLegacyOwnerHumanCardMission } from "./missions/owner-human-legacy-card-lock.js";
+import { withdrawPendingMissionHumanCard } from "./missions/mission-owner-human-input-card.js";
 
 export type OperatorDecisionActor = { type: "agent" | "user"; id: string };
 
@@ -83,6 +84,15 @@ export function operatorDecisionCreateService(db: Db, { read, conflictFor }: Ope
         const ownerCard = await lockOwnerHumanRequestCard(tx, companyId, validated.input, actor);
         if (ownerCard?.card) return { id: ownerCard.card.id, replayed: true };
         await lockLegacyOwnerHumanCardMission(tx, companyId, validated.input);
+        // [C1 2026-11-08] 현재 수명(moi2)의 새 카드를 발행하기 전에 미션에 남은 다른 pending
+        // 사람 카드(교체된 이전 수명의 카드·SELECT→INSERT 레이스 잔존)를 같은 트랜잭션에서
+        // 회수한다 — 미션당 pending 1장 부분 고유 인덱스 계약. 현재 수명 카드가 표면을
+        // 이어받으므로 남은 카드는 resolve 불가(stale) 교착이 되지 않는다.
+        if (ownerCard && validated.input.sourceContext.missionId) {
+          await withdrawPendingMissionHumanCard(tx, companyId, validated.input.sourceContext.missionId, {
+            actorId: "system:owner-human-card-dedupe", reason: "superseded_by_current_lifetime",
+          });
+        }
         let storedSourceContext: typeof operatorDecisions.$inferInsert.sourceContext = validated.input.sourceContext;
         if (validated.input.sourceType === MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE
           && validated.input.sourceContext.missionId) {

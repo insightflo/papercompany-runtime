@@ -8,7 +8,7 @@ import { validateAndHashOperatorDecisionCreate } from "../operator-decision-resu
 import { buildMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
 import { lockOwnerHumanRequestAuthority } from "./owner-human-request-authority.js";
 import { connectOwnerHumanRequestCard, lockOwnerHumanCurrentCard } from "./owner-human-request-card.js";
-import { findPendingMissionHumanCard } from "./mission-owner-human-input-card.js";
+import { findPendingMissionHumanCard, withdrawPendingMissionHumanCard } from "./mission-owner-human-input-card.js";
 import { ownerHumanLifetimeSchema, type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { renewOwnerHumanRequest } from "./owner-human-request-state.js";
 import { activePlanDecisionHash } from "../operator-decision-server-context.js";
@@ -55,26 +55,11 @@ export async function renewOwnerHumanRequestWithCard(tx: OwnerHumanTx, input: {
   // (갱신된 이전 수명의 카드·SELECT→INSERT 레이스 잔존)를 같은 트랜잭션에서 회수한다.
   // 시스템 갱신 경로(anchor·tool-recovery)는 기존대로 사전검사에서 보류되므로 여기까지
   // pending 이 있는 경우는 직접 갱신·동시 레이스 경로뿐이다.
-  const superseded = await findPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId);
-  if (superseded) {
-    const now = new Date();
-    const withdrawn = await tx.update(operatorDecisions).set({
-      status: "cancelled", cancelledAt: now, updatedAt: now,
-    }).where(and(
-      eq(operatorDecisions.companyId, input.companyId),
-      eq(operatorDecisions.id, superseded.id),
-      eq(operatorDecisions.status, "pending"),
-    )).returning({ id: operatorDecisions.id });
-    if (withdrawn.length > 0) {
-      await tx.insert(activityLog).values(withdrawn.map((row) => ({
-        companyId: input.companyId, actorType: "system" as const,
-        actorId: "system:owner-human-request-renewal", action: "operator_decision.cancelled",
-        entityType: "operator_decision", entityId: row.id,
-        details: { schemaVersion: 1, operatorDecisionId: row.id, requestKey: superseded.requestKey,
-          missionId: previous.scope.missionId, previousLifetimeId: previous.lifetimeId,
-          reason: "owner_human_request_replaced" },
-      })));
-    }
+  if (await findPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId)) {
+    await withdrawPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId, {
+      actorId: "system:owner-human-request-renewal", reason: "owner_human_request_replaced",
+      details: { previousLifetimeId: previous.lifetimeId },
+    });
   }
   // Only immutable request fields are copied. Results, approvals, cancellation and delivery
   // state are never inherited, and replay never resets a card that has since been resolved.
