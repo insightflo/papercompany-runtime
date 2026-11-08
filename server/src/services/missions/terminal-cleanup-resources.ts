@@ -14,6 +14,7 @@ import { ACTIVE_MISSION_RUNTIME_STATUSES } from "./mission-runtime-manager.js";
 import { captureMissionTerminalProcesses } from "./terminal-cleanup-processes.js";
 import { logger } from "../../middleware/logger.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { ensureFinalization } from "../heartbeat-finalization/finalization-state.js";
 import {
   decideHeartbeatTerminalOutcomeFirstWins,
@@ -168,9 +169,14 @@ export async function resetSafeTerminalAgents(
   executor: MissionTerminalCleanupDb, companyId: string, affectedAgentIds: string[], now: Date,
 ): Promise<void> {
   if (!affectedAgentIds.length) return;
+  // [C2 2026-11-08] 표시 상태(idle 판정)와 슬롯 계산(countRunningRunsForAgent — lifecycleActiveClause)
+  // 이 같은 기준을 쓴다. 미정산 terminal v1 run 도 점유로 센다 — 그 창구에 idle 로 덮어쓰면
+  // 보드는 idle 인데 슬롯이 점유된 불일치가 생긴다(2026-11-07 A1 관측). 플래그 OFF 시
+  // 기존 queued/running 판정과 바이트 동일하다.
+  const inFlight = await lifecycleInFlightClause(executor);
   const remainingHeartbeats = await executor.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.agentId, affectedAgentIds),
-    inArray(heartbeatRuns.status, ["queued", "running"]),
+    inFlight,
   ));
   const remainingRuntimes = await executor.select({ agentId: missionAgentRuntimes.agentId }).from(missionAgentRuntimes).where(and(
     eq(missionAgentRuntimes.companyId, companyId), inArray(missionAgentRuntimes.agentId, affectedAgentIds),

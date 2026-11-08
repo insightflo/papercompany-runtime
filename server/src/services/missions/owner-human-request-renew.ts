@@ -8,6 +8,7 @@ import { validateAndHashOperatorDecisionCreate } from "../operator-decision-resu
 import { buildMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
 import { lockOwnerHumanRequestAuthority } from "./owner-human-request-authority.js";
 import { connectOwnerHumanRequestCard, lockOwnerHumanCurrentCard } from "./owner-human-request-card.js";
+import { findPendingMissionHumanCard, withdrawPendingMissionHumanCard } from "./mission-owner-human-input-card.js";
 import { ownerHumanLifetimeSchema, type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { renewOwnerHumanRequest } from "./owner-human-request-state.js";
 import { activePlanDecisionHash } from "../operator-decision-server-context.js";
@@ -49,6 +50,17 @@ export async function renewOwnerHumanRequestWithCard(tx: OwnerHumanTx, input: {
   const guard = await lockOwnerHumanCurrentCard(auth, validated.input,
     { type: "agent", id: current.lifetime.authorAgentId });
   if (guard.card) return { current, card: guard.card, cardCreated: false };
+  // [C1 2026-11-08] 미션당 pending 사람 카드 1장(부분 고유 인덱스) 계약 아래 갱신은 표면 교체다.
+  // 새 카드를 발행하는 경로(재전송·기존 카드 채택이 아닌 경우)에서만, 교체 대상 pending 카드
+  // (갱신된 이전 수명의 카드·SELECT→INSERT 레이스 잔존)를 같은 트랜잭션에서 회수한다.
+  // 시스템 갱신 경로(anchor·tool-recovery)는 기존대로 사전검사에서 보류되므로 여기까지
+  // pending 이 있는 경우는 직접 갱신·동시 레이스 경로뿐이다.
+  if (await findPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId)) {
+    await withdrawPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId, {
+      actorId: "system:owner-human-request-renewal", reason: "owner_human_request_replaced",
+      details: { previousLifetimeId: previous.lifetimeId },
+    });
+  }
   // Only immutable request fields are copied. Results, approvals, cancellation and delivery
   // state are never inherited, and replay never resets a card that has since been resolved.
   const value = guard.input;

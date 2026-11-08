@@ -3,7 +3,7 @@
 // Only callers that verified a workflowRuns row may set workflowRunId; unresolved anchors fail with 422.
 // Card writes remain post-commit and retain the caller's existing 5xx contract.
 import type { Db } from "@paperclipai/db";
-import { operatorDecisions } from "@paperclipai/db";
+import { activityLog, operatorDecisions } from "@paperclipai/db";
 import type {
   CreateOperatorDecisionInput,
   OperatorDecisionDefinition,
@@ -25,6 +25,17 @@ import {
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
+export const PENDING_MISSION_HUMAN_INPUT_UQ = "operator_decisions_pending_mission_human_input_uq";
+
+/** [C1 2026-11-08] 미션당 pending 카드 1장 부분 고유 인덱스 위반(23505) 판정 — 충돌 시 사유 누적 분기. */
+export function isPendingMissionHumanCardUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown };
+  return (candidate.code === "23505" || candidate.code === 23505)
+    && (candidate.constraint === PENDING_MISSION_HUMAN_INPUT_UQ
+      || candidate.constraint_name === PENDING_MISSION_HUMAN_INPUT_UQ
+      || (typeof candidate.message === "string" && candidate.message.includes(PENDING_MISSION_HUMAN_INPUT_UQ)));
+}
 
 export function buildHumanInputDecisionCardRequestKey(decisionEventId: string): string {
   return `moi1:${decisionEventId}`;
@@ -238,11 +249,26 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
 /** Merge an equivalent pending request, replay an exact terminal legacy card, or create normally. */
 export async function createMissionOwnerHumanInputDecisionCard(db: Db, spec: MissionOwnerHumanInputCardSpec) {
   const cardInput = buildMissionOwnerHumanInputDecisionCard(spec);
-  const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
-  if (merged) return merged;
-  const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
-  if (historicalReplay) return historicalReplay;
-  return operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+  try {
+    const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
+    if (merged) return merged;
+    const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
+    if (historicalReplay) return historicalReplay;
+    return await operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+  } catch (error) {
+    // [C1 2026-11-08] 미션당 pending 카드 1장 부분 고유 인덱스가 동시 제출의 두 번째 insert 를
+    // 거부한다(R2 게이트의 SELECT→INSERT 레이스). legacy(moi1) 발행은 새 카드 대신 기존 pending
+    // 카드에 사유를 누적하고 그 카드를 반환한다 — R2 의 재요청 처리와 같은 계약.
+    // 현재 수명(moi2) 발행은 create 트랜잭션 안에서 교체 대상을 먼저 회수하므로 여기서
+    // 위반되면 예상 밖이다 — 조용히 접히면 stale 카드로 resolve 교착이 생길 수 있어 그대로
+    // 노출한다(기존 카드 쓰기 5xx 계약 유지).
+    if (!isPendingMissionHumanCardUniqueViolation(error)) throw error;
+    if (cardInput.requestKey.startsWith("moi2:")) throw error;
+    const bumped = await bumpPendingMissionHumanCard(db, spec.companyId, spec.missionId);
+    const existing = bumped ? await findPendingMissionHumanCard(db, spec.companyId, spec.missionId) : null;
+    if (!existing) throw error;
+    return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
+  }
 }
 
 // [R2 2026-11-08] 미션 단위 열린 사람 카드 1장 계약의 조회·사유 누적 헬퍼.
@@ -287,6 +313,34 @@ export async function bumpPendingMissionHumanCard(
     eq(operatorDecisions.status, "pending"),
   )).returning({ id: operatorDecisions.id });
   return Boolean(updated);
+}
+
+/** [C1 2026-11-08] 미션의 남은 pending 사람 카드 1장을 회수(cancelled)한다 — 미션당 pending 1장
+ * 부분 고유 인덱스 계약의 표면 교체. 현재 수명·갱신 카드 발행 경로가 같은 트랜잭션에서 호출한다. */
+export async function withdrawPendingMissionHumanCard(
+  db: Pick<Db, "select" | "update" | "insert">,
+  companyId: string,
+  missionId: string,
+  audit: { actorId: string; reason: string; details?: Record<string, unknown> },
+): Promise<{ id: string; requestKey: string } | null> {
+  const existing = await findPendingMissionHumanCard(db, companyId, missionId);
+  if (!existing) return null;
+  const now = new Date();
+  const [updated] = await db.update(operatorDecisions).set({
+    status: "cancelled", cancelledAt: now, updatedAt: now,
+  }).where(and(
+    eq(operatorDecisions.companyId, companyId),
+    eq(operatorDecisions.id, existing.id),
+    eq(operatorDecisions.status, "pending"),
+  )).returning({ id: operatorDecisions.id });
+  if (!updated) return null;
+  await db.insert(activityLog).values({
+    companyId, actorType: "system" as const, actorId: audit.actorId,
+    action: "operator_decision.cancelled", entityType: "operator_decision", entityId: existing.id,
+    details: { schemaVersion: 1, operatorDecisionId: existing.id, requestKey: existing.requestKey,
+      missionId, reason: audit.reason, ...(audit.details ?? {}) },
+  });
+  return { id: existing.id, requestKey: existing.requestKey };
 }
 
 async function replayHistoricalDefaultHumanInputCard(db: Db, spec: MissionOwnerHumanInputCardSpec,
