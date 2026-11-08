@@ -11,12 +11,15 @@ import {
   heartbeatRuns,
   issues,
   workflowRuns,
+  workflowStepRuns,
   workflowTerminalDecisions,
   workflowTerminalEffectIntents,
 } from "@paperclipai/db";
 import { issueService } from "../issues.js";
 import { buildTerminalCloseoutComment } from "../missions/system-comment-display.js";
 import { stopMissionRuntimesForMission } from "../missions/mission-runtime-manager.js";
+import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
+import { maybeRecordTerminalFinalization } from "../heartbeat-finalization/shadow-terminal-hook.js";
 import { sanitizeErrorSummary } from "./retry-metadata.js";
 
 type TerminalEffectIntent = typeof workflowTerminalEffectIntents.$inferSelect;
@@ -42,7 +45,21 @@ async function executeKillRuntime(db: Db, intent: TerminalEffectIntent, ctx: Eff
   });
 }
 
-/** cancel_heartbeat_run — bounded settlement 의 guard 형태를 단일 run 스코프로 축소 복제. */
+/** terminal_decision_source 로 남길 이 경로의 결정 근거(#679 mission_terminal_cleanup 과 대칭). */
+const WORKFLOW_TERMINAL_CANCEL_SOURCE = "workflow_terminal_cancel";
+
+/** cancel_heartbeat_run — bounded settlement 의 guard 형태를 단일 run 스코프로 축소 복제.
+ * [v1 계약 2026-11-08] flag ON + v1 run 에서는 종결이 v1 finalization 초크포인트를 우회하지
+ * 않는다(미션 종료 정리 #679 와 같은 계약): raw status UPDATE 만 남기면 terminal_outcome 이
+ * NULL 로 남고 executor_owner_released_at 도 기록되지 않아 quiescence 가 영구 실패하며(2026-11-08
+ * A1 좀비 bbe15a31), run 이 정산되지 못하고 capacity 슬롯을 영구 점유한다. 따라서:
+ *   1. [B2 성공 보존] 취소 시점에 성공 증거(먼저 결정된 succeeded outcome, 완료된 workflow
+ *      step run, 기록된 성공 결과 resultJson + exitCode 0)가 있으면 cancelled 로 덮지 않고
+ *      succeeded 로 종결한다. 실행 중이던 run 만 cancelled 로 결정한다.
+ *   2. maybeRecordTerminalFinalization(source=workflow_terminal_cancel)로 first-wins outcome +
+ *      finalization parent + executor owner release 를 기록해 recovery lane 이 정산을 마친다.
+ *      finalization 기록 실패는 cancel 효과를 롤백하지 않는다(shadow-terminal-hook 동일 계약).
+ * flag OFF(또는 v0 run)에서는 기존 레거시 취소와 바이트 동일 동작을 유지한다. */
 async function executeCancelHeartbeatRun(db: Db, intent: TerminalEffectIntent, now: Date): Promise<void> {
   const error = `Cancelled because workflow run reached terminal decision ${intent.terminalDecisionId}`;
   const scope = and(
@@ -50,10 +67,7 @@ async function executeCancelHeartbeatRun(db: Db, intent: TerminalEffectIntent, n
     eq(heartbeatRuns.id, intent.targetId),
     inArray(heartbeatRuns.status, ["queued", "running"]),
   );
-  const [active] = await db
-    .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, wakeupRequestId: heartbeatRuns.wakeupRequestId })
-    .from(heartbeatRuns)
-    .where(scope);
+  const [active] = await db.select().from(heartbeatRuns).where(scope);
   if (!active) {
     // 대상 행이 삭제되었으면 할 일이 없다. 행이 남아 있는데 비활성이면 캡처 후 세상이
     // 바뀐 것이므로 실패로 남겨 재처리/조사 대상이 된다.
@@ -64,16 +78,45 @@ async function executeCancelHeartbeatRun(db: Db, intent: TerminalEffectIntent, n
     if (!current) return;
     throw new Error("heartbeat run already settled before cancel effect");
   }
-  const cancelled = await db
+  // [B2] flag ON + v1 run 인 경우에만 성공 증거를 평가한다(레거시 동작 보존).
+  let terminalStatus: "cancelled" | "succeeded" = "cancelled";
+  if (await isHeartbeatFinalizationV1Enabled(db) && active.finalizationVersion === 1) {
+    const stepCompleted = active.workflowStepRunId
+      ? (await db
+        .select({ id: workflowStepRuns.id })
+        .from(workflowStepRuns)
+        .where(and(
+          eq(workflowStepRuns.id, active.workflowStepRunId),
+          eq(workflowStepRuns.status, "completed"),
+        ))
+        .limit(1)).length > 0
+      : false;
+    const successEvidence = active.terminalOutcome === "succeeded"
+      || stepCompleted
+      || (active.resultJson !== null && (active.exitCode ?? 0) === 0);
+    if (successEvidence) terminalStatus = "succeeded";
+  }
+  const terminalized = await db
     .update(heartbeatRuns)
-    .set({ status: "cancelled", finishedAt: now, error, errorCode: "cancelled", updatedAt: now })
+    .set(
+      terminalStatus === "cancelled"
+        ? { status: "cancelled", finishedAt: now, error, errorCode: "cancelled", updatedAt: now }
+        : { status: "succeeded", finishedAt: now, updatedAt: now },
+    )
     .where(scope)
-    .returning({ id: heartbeatRuns.id });
-  if (cancelled.length === 0) return;
+    .returning();
+  if (terminalized.length === 0) return;
+  const updated = terminalized[0]!;
+  // [v1] 종결 결정(first-wins) + finalization parent + executor owner release.
+  await maybeRecordTerminalFinalization(db, updated, now, { source: WORKFLOW_TERMINAL_CANCEL_SOURCE });
   if (active.wakeupRequestId) {
     await db
       .update(agentWakeupRequests)
-      .set({ status: "cancelled", finishedAt: now, error, updatedAt: now })
+      .set(
+        terminalStatus === "succeeded"
+          ? { status: "completed", finishedAt: now, updatedAt: now }
+          : { status: "cancelled", finishedAt: now, error, updatedAt: now },
+      )
       .where(and(
         eq(agentWakeupRequests.id, active.wakeupRequestId),
         eq(agentWakeupRequests.companyId, intent.companyId),

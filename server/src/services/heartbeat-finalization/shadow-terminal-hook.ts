@@ -1,6 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
+import { logger } from "../../middleware/logger.js";
 import { isHeartbeatFinalizationV1Enabled } from "./flag.js";
 import { ensureFinalization } from "./finalization-state.js";
 import { decideHeartbeatTerminalOutcomeFirstWins, releaseExecutorOwnerCapability } from "./owner-capability.js";
@@ -32,6 +33,7 @@ export async function maybeRecordTerminalFinalization(
   db: Db,
   updatedRun: HeartbeatRun,
   now: Date,
+  opts?: { source?: string },
 ): Promise<void> {
   try {
     if (!(await isHeartbeatFinalizationV1Enabled(db))) return;
@@ -43,7 +45,7 @@ export async function maybeRecordTerminalFinalization(
     const [fresh] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
     if (!fresh || fresh.finalizationVersion !== 1) return;
 
-    await decideHeartbeatTerminalOutcomeFirstWins(db, { run: fresh, outcome, source: `heartbeat_terminal:${updatedRun.status}`, now });
+    await decideHeartbeatTerminalOutcomeFirstWins(db, { run: fresh, outcome, source: opts?.source ?? `heartbeat_terminal:${updatedRun.status}`, now });
     // Re-read so the finalization parent reflects the first-wins terminal outcome just written.
     const [decided] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, updatedRun.id));
     if (decided) {
@@ -52,7 +54,9 @@ export async function maybeRecordTerminalFinalization(
       // executorOwnerReleasedAt != null and the run can settle.
       await releaseExecutorOwnerCapability(db, decided, now);
     }
-  } catch {
-    // Never propagate. The real terminal flow has already committed.
+  } catch (err) {
+    // Never propagate. The real terminal flow has already committed. 다만 조용히 삼키면
+    // finalization 누락(→ 미정산 좀비)이 로그에 남지 않아 진단이 불가하다 — warn 로그만 남긴다.
+    logger.warn({ err, runId: updatedRun.id, status: updatedRun.status }, "terminal finalization recording failed; settlement deferred to recovery lane");
   }
 }
