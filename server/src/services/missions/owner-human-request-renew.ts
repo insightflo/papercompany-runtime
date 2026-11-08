@@ -41,10 +41,20 @@ export async function renewOwnerHumanRequestWithCard(tx: OwnerHumanTx, input: {
   // Human resolution is not source settlement. An unresolved recovery pointer and an actual
   // current blocker are required, even when the historical card already contains an approval.
   if (!auth.source || auth.source.hiddenAt) return fail();
+  const current = await renewOwnerHumanRequest(auth, {
+    requestKey: input.requestKey, expectedCurrentLifetimeId: input.previousLifetimeId,
+  });
+  const validated = validateAndHashOperatorDecisionCreate(buildMissionOwnerHumanInputDecisionCard({
+    ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
+  }));
+  const guard = await lockOwnerHumanCurrentCard(auth, validated.input,
+    { type: "agent", id: current.lifetime.authorAgentId });
+  if (guard.card) return { current, card: guard.card, cardCreated: false };
   // [C1 2026-11-08] 미션당 pending 사람 카드 1장(부분 고유 인덱스) 계약 아래 갱신은 표면 교체다.
-  // 교체 대상 pending 카드(레이스로 남은 타 계열 카드 포함)를 같은 트랜잭션에서 회수한 뒤
-  // 새 카드를 발행한다. 시스템 갱신 경로(anchor·tool-recovery)는 기존대로 사전검사에서
-  // 보류되므로 여기까지 pending 이 있는 경우는 직접 갱신·동시 레이스 경로뿐이다.
+  // 새 카드를 발행하는 경로(재전송·기존 카드 채택이 아닌 경우)에서만, 교체 대상 pending 카드
+  // (갱신된 이전 수명의 카드·SELECT→INSERT 레이스 잔존)를 같은 트랜잭션에서 회수한다.
+  // 시스템 갱신 경로(anchor·tool-recovery)는 기존대로 사전검사에서 보류되므로 여기까지
+  // pending 이 있는 경우는 직접 갱신·동시 레이스 경로뿐이다.
   const superseded = await findPendingMissionHumanCard(tx, input.companyId, previous.scope.missionId);
   if (superseded) {
     const now = new Date();
@@ -66,15 +76,6 @@ export async function renewOwnerHumanRequestWithCard(tx: OwnerHumanTx, input: {
       })));
     }
   }
-  const current = await renewOwnerHumanRequest(auth, {
-    requestKey: input.requestKey, expectedCurrentLifetimeId: input.previousLifetimeId,
-  });
-  const validated = validateAndHashOperatorDecisionCreate(buildMissionOwnerHumanInputDecisionCard({
-    ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
-  }));
-  const guard = await lockOwnerHumanCurrentCard(auth, validated.input,
-    { type: "agent", id: current.lifetime.authorAgentId });
-  if (guard.card) return { current, card: guard.card, cardCreated: false };
   // Only immutable request fields are copied. Results, approvals, cancellation and delivery
   // state are never inherited, and replay never resets a card that has since been resolved.
   const value = guard.input;

@@ -448,16 +448,22 @@ describeEP("mission owner human input card duplicate merge", () => {
     expect(cards[0]!.definition).toEqual(before.definition);
   });
 
-  it("keeps separate cards when the decision kind differs (request_input vs escalate)", async () => {
+  it("folds a differing decision kind (escalate) into the mission's one pending card [C1 2026-11-08]", async () => {
     const s = await seedDedupCase();
-    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "request_input" }));
-    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "escalate" }));
+    // 미션당 pending 1장 부분 고유 인덱스 이후 의사결 종류가 달라도 두 번째 발행은
+    // 새 카드가 아니라 기존 pending 카드의 사유 누적(repeatCount)으로 접힌다.
+    const first = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "request_input" }));
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { decision: "escalate" }));
     const cards = await cardsOf(s.companyId);
-    expect(cards).toHaveLength(2);
-    expect(new Set(cards.map((card) => card.title))).toHaveLength(2);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.id).toBe(first.decision.id);
+    expect(second.decision.id).toBe(first.decision.id);
+    expect(second.replayed).toBe(true);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
   });
 
-  it("keeps separate cards when the anchor issue differs", async () => {
+  it("folds a different-anchor issuance into the mission's one pending card [C1 2026-11-08]", async () => {
     const s = await seedDedupCase();
     const sourceIssueId = randomUUID();
     const otherIssueId = randomUUID();
@@ -474,11 +480,14 @@ describeEP("mission owner human input card duplicate merge", () => {
       sourceIssueId, heartbeatRunId,
       submission: { decision: "request_input", reason: "사람 승인이 필요합니다" } });
     await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s));
-    await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId,
+    const second = await createMissionOwnerHumanInputDecisionCard(dedupDb, dedupSpec(s, { ownerActionIssueId: otherIssueId,
       decisionEventId: recorded.eventId, sourceIssueId }));
     const cards = await cardsOf(s.companyId);
-    expect(cards).toHaveLength(2);
-    expect(new Set(cards.map((card) => card.issueId))).toHaveLength(2);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.issueId).toBe(s.issueId); // 첫 카드(첫 앵커)가 계속 표면
+    expect(second.replayed).toBe(true);
+    const context = cards[0]!.sourceContext as { missionOwnerHumanInput?: { repeatCount: number } };
+    expect(context.missionOwnerHumanInput?.repeatCount).toBe(1);
   });
 
   it("creates a fresh card when the previous card is no longer pending", async () => {
