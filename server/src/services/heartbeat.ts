@@ -34,6 +34,7 @@ import {
   issues,
   missionSessions,
   missions,
+  missionAgentRuntimes,
   operatorDecisions,
   projects,
   projectWorkspaces,
@@ -5086,6 +5087,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   if (!current || !sameHeartbeatExecutionAttempt(executionFrame.run, current)
                     || current.status !== "failed" || current.errorCode !== "c5_held_not_invoked") {
                     throw new Error("c5_no_invocation_terminal_attempt_unproven");
+                  }
+                  // [C3-β 관련 결함 해결] c5 미호출 종결 run 은 미션 런타임을 실제로 쓰지 않았다.
+                  // #464 가 c5Held 의 런타임 완결을 생략(!c5Held)한 탓에 이 run 이 마지막으로 점유한
+                  // 런타임이 활성(starting/ready/busy/stopping)으로 남으면 mission_runtime_idle 정산
+                  // 증명이 영구 불가해 v1 슬롯이 회수되지 않는다. 종결 증명 직후 이 run 의 활성 런타임만
+                  // 정상 실패 완결로 돌려놓는다(미호출이므로 세션 증거는 없다).
+                  const heldActiveRuntimes = await settleDb.select({ id: missionAgentRuntimes.id })
+                    .from(missionAgentRuntimes)
+                    .where(and(
+                      eq(missionAgentRuntimes.companyId, current.companyId),
+                      eq(missionAgentRuntimes.lastRunId, current.id),
+                      inArray(missionAgentRuntimes.status, ["starting", "ready", "busy", "stopping"]),
+                      isNull(missionAgentRuntimes.stoppedAt),
+                    ));
+                  for (const runtime of heldActiveRuntimes) {
+                    await completeMissionAgentRuntimeRun(settleDb, {
+                      runtimeId: runtime.id,
+                      status: "failed",
+                      sessionId: null,
+                      error: "c5_held_not_invoked",
+                    });
                   }
                   const settlement = await attemptFullSettlement(settleDb, current, now);
                   if (settlement !== "settled" && settlement !== "not_ready") {

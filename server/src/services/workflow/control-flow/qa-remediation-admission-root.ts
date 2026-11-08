@@ -7,6 +7,7 @@ import { replacementApprovalPayloadSchema, type ReplacementApprovalPayload }
   from "@paperclipai/shared/validators/workflow-replacement";
 import { readQaCorrectionWakeRef } from "../../work-products/qa-correction-producer-attempt.js";
 import { readQaRemediationActualDrain } from "../../heartbeat-actual-drain.js";
+import { logger } from "../../../middleware/logger.js";
 import { createReplacementRootNotifications, registerQaCorrectionRootDrain, withReplacementRootNotificationDb,
   type ReplacementRootNotifications } from "../../issue-assignment-wakeup.js";
 import { QA_REMEDIATION_EVENT_TYPE } from "./qa-remediation-contract.js";
@@ -431,6 +432,28 @@ function blockingPending(context: QaRemediationAdmissionContext, db: Db, executi
   }
   const sourceIds = new Set(binding.sourceEventIds);
   return context.pending.filter(item => !sourceIds.has(item.eventId));
+}
+
+export type QaRemediationClaimExecutingUnit = Readonly<{
+  readonly workflowStepRunId: string | null;
+  readonly issueId: string | null;
+}>;
+
+/** C3-β(§6-a): claim 단계 실행 단위 — identity 의 step/issue 식별자를 그대로 쓴다(추정·정규화·부분일치 금지).
+ * 둘 다 없으면 단위를 식별할 수 없다(null) → 현행 전체 차단(fail-closed)을 유지한다. */
+export function claimExecutingUnit(identity: QaCorrectionExecutionIdentity): QaRemediationClaimExecutingUnit | null {
+  if (identity.workflowStepRunId === null && identity.issueId === null) return null;
+  return Object.freeze({ workflowStepRunId: identity.workflowStepRunId, issueId: identity.issueId });
+}
+
+/** C3-β(§6-a): pending preparation 이 claim 실행 단위와 정확히 일치하는 식별자(producer·QA 축)를
+ * 하나라도 가지는가. remediation 대상 step/issue 는 claim 단계에서도 절대 승격되지 않는다. */
+export function pendingInvolvesExecutingUnit(pending: QaRemediationAdmissionContext["pending"][number],
+  unit: QaRemediationClaimExecutingUnit): boolean {
+  const attempts = [pending.preparation.producer, ...pending.preparation.verdicts.map(verdict => verdict.qa)];
+  return attempts.some(attempt =>
+    (unit.workflowStepRunId !== null && attempt.stepRunId === unit.workflowStepRunId)
+    || (unit.issueId !== null && attempt.issueId === unit.issueId));
 }
 
 async function revalidateReplacementSourcePreservation(db: Db, context: QaRemediationAdmissionContext,
@@ -918,7 +941,16 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
       }
     }
     const eventIds = idsOf(before.pending);
-    const ownerTargets = execution || scope?.source ? before.allTargets : before.targets;
+    // C3-β(§6-a): claim phase 는 실행 단위 관련 pending 만 네이티브 오너·차단 대상으로 좁힌다.
+    // 단위를 식별할 수 없으면(null) 필터 없이 현행 전체 차단·전체 ownerTargets 를 유지한다(fail-closed).
+    // adapter_start 는 run 전체 차단 + 전체 ownerTargets 그대로(invocation 안전 계층은 이곳에 남는다).
+    const claimUnit = execution?.phase === "claim" ? claimExecutingUnit(execution.identity) : null;
+    const ownerTargets = execution
+      ? (claimUnit
+          ? sorted(before.pending.filter(item => pendingInvolvesExecutingUnit(item, claimUnit))
+              .flatMap(item => item.preparation.files.map(file => file.path)))
+          : before.allTargets)
+      : scope?.source ? before.allTargets : before.targets;
     let owner: QaRemediationFileOwner | null = null;
     let callbackEntrySealed = false;
     let ownerClosing = false;
@@ -937,11 +969,27 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
 
     try {
       if (ownerTargets.length) {
-        owner = await input.ownerRuntime.begin(ownerTargets);
+        // C3-β(§6-e): lock_wait 관찰성 — 프로덕션에서 네이티브 오너 대기가 로그에 남지 않던 갭을 메운다.
+        const lockWaitTargets = new Set<string>();
+        const admissionPhase = execution?.phase ?? "work";
+        owner = await input.ownerRuntime.begin(ownerTargets, {
+          onEvent: event => {
+            if (event.type !== "lock_wait") return;
+            lockWaitTargets.add(event.target);
+            logger.warn({ target: event.target, phase: admissionPhase,
+              agentId: execution?.identity.agentId, heartbeatRunId: execution?.identity.heartbeatRunId,
+              ownerTargetCount: ownerTargets.length }, "qa_file_owner_lock_wait");
+          },
+        });
         if (!isDeepStrictEqual([...owner.targets()], ownerTargets)) {
           throw hold("owner_target_mismatch", eventIds);
         }
         nativeOwnerForProof = owner;
+        if (lockWaitTargets.size) {
+          logger.info({ phase: admissionPhase, targets: [...lockWaitTargets].sort(),
+            agentId: execution?.identity.agentId, heartbeatRunId: execution?.identity.heartbeatRunId },
+            "qa_file_owner_lock_wait_resolved");
+        }
       }
       if (owner) {
         void owner.awaitExit().then(exit => {
@@ -983,7 +1031,15 @@ export async function withQaRemediationSharedAdmission<T>(input: SharedAdmission
                 : Object.freeze({ pending: after.pending });
               c5ScopeVersion = JSON.stringify([execution.identity, currentExecutionScope, after.signature, after.allTargets,
                 workContext.replacementSourcePreservation ?? null]);
-              const blocking = blockingPending(workContext, t, currentExecutionScope.primaryWorkflowRunId);
+              const claimBlocking = blockingPending(workContext, t, currentExecutionScope.primaryWorkflowRunId);
+              const blocking = claimUnit
+                ? claimBlocking.filter(item => pendingInvolvesExecutingUnit(item, claimUnit))
+                : claimBlocking;
+              // C3-β(R3): before/after 필터 정합 — 오너 없이 blocking 이 남는 상태는 정합 결함이므로
+              // 느슨한 통과가 아니라 명시적 오류로 실패시킨다(drift 재시도로 우회하지 않는다).
+              if (claimUnit && blocking.length && !nativeOwnerForProof) {
+                throw hold("claim_unit_filter_mismatch", idsOf(blocking));
+              }
               if (blocking.length) {
                 await assertPendingActualsDrained(t, { pending: blocking });
                 throw new C5PreparationRefusal(idsOf(blocking));

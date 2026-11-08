@@ -109,6 +109,8 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
       workflowStepRunId: lifecycle.claimConsumerStep.id });
     expect(consumerBefore.issue).toMatchObject({ id: lifecycle.claimConsumerIssueId, status: "in_progress" });
     expect(consumerBefore.step).toMatchObject({ id: lifecycle.claimConsumerStep.id, status: "pending" });
+    // C3-β(§6-b/§9-2 승인): 무관 claim 은 승격되고, pre-invocation hold 는 adapter_start 에서
+    // typed 실패(c5_held_not_invoked)로 종결된다. 어댑터 미호출·행/웨이크 단일성·드레인 0·재시도 비재현은 그대로 검증한다.
     const assertConsumerInventory = async () => {
       const [consumerRows, consumerWakes] = await Promise.all([
         fixture.peer.select().from(heartbeatRuns).where(and(
@@ -121,8 +123,8 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
           eq(agentWakeupRequests.issueId, lifecycle.claimConsumerIssueId),
           eq(agentWakeupRequests.workflowStepRunId, lifecycle.claimConsumerStep.id))),
       ]);
-      expect(consumerRows).toEqual([consumerBefore.heartbeat]);
-      expect(consumerWakes).toEqual([consumerBefore.wake]);
+      expect(consumerRows).toHaveLength(1);
+      expect(consumerWakes).toHaveLength(1);
       const heartbeat = consumerRows[0]!;
       const wake = consumerWakes[0]!;
       expect(heartbeat).toMatchObject({
@@ -130,10 +132,14 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
         companyId: lifecycle.companyId,
         agentId: lifecycle.downstreamAgentId,
         issueId: lifecycle.claimConsumerIssueId,
-        status: "queued",
+        status: "failed",
+        errorCode: "c5_held_not_invoked",
+        terminalOutcome: "failed",
+        finalizationVersion: 1,
         wakeupRequestId: consumer.wakeupRequestId,
-        workflowStepRunId: null,
-        workflowExecutionGeneration: null,
+        // C3-β: 승격된 claim 이 wake 의 step identity 를 run 행에 확정한다(기존 null 관측은 claim-hold 시절 것).
+        workflowStepRunId: lifecycle.claimConsumerStep.id,
+        workflowExecutionGeneration: consumerBefore.step!.executionGeneration,
       });
       expect(heartbeat.wakeupRequestId).toBe(wake.id);
       expect(wake).toMatchObject({
@@ -144,25 +150,18 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
         issueId: lifecycle.claimConsumerIssueId,
         missionId: lifecycle.missionId,
         requestKind: "workflow_resume",
-        status: "queued",
         workflowRunId: lifecycle.runId,
         workflowStepRunId: lifecycle.claimConsumerStep.id,
         workflowExecutionGeneration: consumerBefore.step!.executionGeneration,
       });
-      expect(readWorkflowAttemptProof(wake)).toEqual({
-        schemaVersion: 1,
-        companyId: lifecycle.companyId,
-        agentId: lifecycle.downstreamAgentId,
-        issueId: lifecycle.claimConsumerIssueId,
-        missionId: lifecycle.missionId,
-        workflowRunId: lifecycle.runId,
-        stepRunId: lifecycle.claimConsumerStep.id,
-        executionGeneration: consumerBefore.step!.executionGeneration,
-        retryCount: consumerBefore.step!.retryCount,
-        iterationIndex: consumerBefore.step!.iterationIndex,
-        wakeupRequestId: wake.id,
-        parentHeartbeatRunId: null,
-      });
+      const drains = await fixture.peer.select().from(workflowTransitionEvents).where(and(
+        eq(workflowTransitionEvents.companyId, lifecycle.companyId),
+        eq(workflowTransitionEvents.workflowRunId, lifecycle.runId),
+        eq(workflowTransitionEvents.workflowStepRunId, lifecycle.claimConsumerStep.id),
+        eq(workflowTransitionEvents.heartbeatRunId, consumer.id),
+        eq(workflowTransitionEvents.eventType, "heartbeat_actual_drained_v1")));
+      expect(drains).toHaveLength(0);
+      expect(adapter.mock.calls.some(([context]) => context.runId === consumer.id)).toBe(false);
     };
 
     await new Promise(resolve => setTimeout(resolve, 3));
@@ -173,7 +172,8 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
 
     heldArtifact = await lifecycle.holdArtifact();
     lifecycle.releaseSlotBlocker();
-    await within(nativeLockWait.promise, "S1 public claim root waits on the exact native artifact owner");
+    // C3-β(§6-b): 무관 소비자 run 의 claim 은 승격되고, 오너 대기는 adapter_start 루트에서 관측된다.
+    await within(nativeLockWait.promise, "S1 consumer adapter start waits on the exact native artifact owner");
 
     const mutation = await fixture.peer.transaction(async tx => {
       const [updated] = await tx.update(missions).set({ updatedAt: new Date() })
@@ -192,7 +192,14 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
 
     await heldArtifact.release();
     heldArtifact = null;
-    const sameAgentRunId = await within(lifecycle.sameAgentUEntered, "S1 queued same-agent U after the proven claim hold");
+    // C3-β(§6-b): 해제 후 소비자 run 은 adapter_start 에서 typed 실패로 종결된다(어댑터 미호출).
+    await within(vi.waitFor(async () => {
+      expect((await lifecycle.readIdentity(consumer.id)).heartbeat).toMatchObject({ id: consumer.id,
+        status: "failed", errorCode: "c5_held_not_invoked" });
+    }, { timeout: 30_000, interval: 20 }), "S1 consumer typed failure after the artifact hold");
+    // 실패로 끝난 소비자 run 뒤 큐는 표준 resume 레인으로 진행된다 — same-agent U 가 슬롯을 이어받는다.
+    await optedService.resumeQueuedRuns(lifecycle.downstreamAgentId);
+    const sameAgentRunId = await within(lifecycle.sameAgentUEntered, "S1 queued same-agent U after the typed consumer failure");
     expect(sameAgentRunId).toBe(sameAgentU.id);
     await vi.waitFor(async () => {
       expect((await lifecycle.readIdentity(sameAgentU.id)).heartbeat).toMatchObject({ id: sameAgentU.id,
@@ -200,15 +207,10 @@ it("S1: typed claim hold preserves C while same-agent U and separate U progress"
       expect((await lifecycle.readIdentity(blocker.id)).heartbeat).toMatchObject({ id: blocker.id,
         status: "succeeded", resultJson: { stdout: "c5-public-slot-blocker", stderr: "" } });
     }, { timeout: 30_000, interval: 20 });
-
-    const consumerAfterHold = await lifecycle.readIdentity(consumer.id);
-    expect(consumerAfterHold).toEqual(consumerBefore);
-    expect(adapter.mock.calls.some(([context]) => context.runId === consumer.id)).toBe(false);
     await assertConsumerInventory();
 
     await optedService.resumeQueuedRuns(lifecycle.downstreamAgentId);
     await optedService.resumeQueuedRuns(lifecycle.downstreamAgentId);
-    expect(await lifecycle.readIdentity(consumer.id)).toEqual(consumerBefore);
     await assertConsumerInventory();
     const consumerDrains = await fixture.peer.select().from(workflowTransitionEvents).where(and(
       eq(workflowTransitionEvents.companyId, lifecycle.companyId),
@@ -280,14 +282,17 @@ it("S2: exact-Db recreation and replacement notifications retain C5 authority", 
     const recreated = heartbeatService(fixture.db);
     expect(configured).not.toBe(recreated);
 
+    // C3-β(§6-b/§9-2 승인): wakeup 이 claim 을 즉시 승격하므로 아티팩트 네이티브 홀더를 먼저 잡고,
+    // 소비자 run 의 adapter_start 오너 대기가 같은 exact-Db ownerRuntime 바인딩에서 관측되는지를 확인한다.
+    heldArtifact = await lifecycle.holdArtifact();
     const consumer = await lifecycle.startClaimConsumer();
     const consumerBefore = await lifecycle.readIdentity(consumer.id);
-    expect(consumerBefore.heartbeat).toMatchObject({ id: consumer.id, status: "queued",
+    expect(consumerBefore.heartbeat).toMatchObject({ id: consumer.id, status: "running",
       companyId: lifecycle.companyId, agentId: lifecycle.downstreamAgentId, issueId: lifecycle.claimConsumerIssueId });
     expect(consumerBefore.wake).toMatchObject({ id: consumer.wakeupRequestId, runId: consumer.id,
       companyId: lifecycle.companyId, agentId: lifecycle.downstreamAgentId, issueId: lifecycle.claimConsumerIssueId,
       workflowRunId: lifecycle.runId, workflowStepRunId: lifecycle.claimConsumerStep.id,
-      workflowExecutionGeneration: lifecycle.claimConsumerStep.executionGeneration, status: "queued" });
+      workflowExecutionGeneration: lifecycle.claimConsumerStep.executionGeneration, status: "claimed" });
     const consumerProof = readWorkflowAttemptProof(consumerBefore.wake!);
     expect(consumerProof).toMatchObject({ companyId: lifecycle.companyId, agentId: lifecycle.downstreamAgentId,
       issueId: lifecycle.claimConsumerIssueId, missionId: lifecycle.missionId, workflowRunId: lifecycle.runId,
@@ -296,7 +301,13 @@ it("S2: exact-Db recreation and replacement notifications retain C5 authority", 
       retryCount: lifecycle.claimConsumerStep.retryCount, iterationIndex: lifecycle.claimConsumerStep.iterationIndex,
       wakeupRequestId: consumer.wakeupRequestId });
 
+    // C3-β(§6-b/§9-2 승인): 무관 소비자 run 은 승격 후 adapter_start 에서 typed 실패로 종결된다.
+    // 행/웨이크 단일성·어댑터 미호출·드레인 0·C02 원본 불변은 그대로 검증한다.
     const assertConsumerUnchanged = async () => {
+      await within(vi.waitFor(async () => {
+        expect((await lifecycle.readIdentity(consumer.id)).heartbeat).toMatchObject({ id: consumer.id,
+          status: "failed", errorCode: "c5_held_not_invoked", terminalOutcome: "failed" });
+      }, { timeout: 30_000, interval: 20 }), "S2 consumer typed failure after the artifact hold");
       const [rows, wakes] = await Promise.all([
         fixture.peer.select().from(heartbeatRuns).where(and(
           eq(heartbeatRuns.companyId, lifecycle.companyId), eq(heartbeatRuns.agentId, lifecycle.downstreamAgentId),
@@ -305,11 +316,17 @@ it("S2: exact-Db recreation and replacement notifications retain C5 authority", 
           eq(agentWakeupRequests.companyId, lifecycle.companyId), eq(agentWakeupRequests.agentId, lifecycle.downstreamAgentId),
           eq(agentWakeupRequests.issueId, lifecycle.claimConsumerIssueId))),
       ]);
-      expect(rows).toEqual([consumerBefore.heartbeat]);
-      expect(wakes).toEqual([consumerBefore.wake]);
-      expect(rows[0]).toMatchObject({ status: "queued", wakeupRequestId: consumer.wakeupRequestId,
-        workflowStepRunId: null, workflowExecutionGeneration: null });
+      expect(rows).toHaveLength(1);
+      expect(wakes).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: consumer.id, status: "failed", errorCode: "c5_held_not_invoked",
+        terminalOutcome: "failed", finalizationVersion: 1, wakeupRequestId: consumer.wakeupRequestId,
+        // C3-β: 승격된 claim 이 wake 의 step identity 를 run 행에 확정한다.
+        workflowStepRunId: lifecycle.claimConsumerStep.id,
+        workflowExecutionGeneration: lifecycle.claimConsumerStep.executionGeneration });
       expect(wakes[0]?.id).toBe(consumerBefore.heartbeat?.wakeupRequestId);
+      expect(wakes[0]).toMatchObject({ id: consumer.wakeupRequestId, runId: consumer.id,
+        requestKind: "workflow_resume", workflowRunId: lifecycle.runId,
+        workflowStepRunId: lifecycle.claimConsumerStep.id });
       const drains = await fixture.peer.select().from(workflowTransitionEvents).where(and(
         eq(workflowTransitionEvents.companyId, lifecycle.companyId),
         eq(workflowTransitionEvents.workflowRunId, lifecycle.runId),
@@ -321,9 +338,9 @@ it("S2: exact-Db recreation and replacement notifications retain C5 authority", 
     };
 
     // The bare exact-Db factory must reuse the explicit owner runtime and hold this authentic C.
-    heldArtifact = await lifecycle.holdArtifact();
     const bareSweep = recreated.resumeQueuedRuns(lifecycle.downstreamAgentId);
-    await within(nativeLockWait.promise, "S2 recreated bare service enters the native C5 claim root");
+    // C3-β(§6-b): 승격된 소비자 run 의 오너 대기는 adapter-start 루트에서 관측된다(exact-Db 바인딩 재사용).
+    await within(nativeLockWait.promise, "S2 recreated bare service enters the native C5 adapter-start root");
     await heldArtifact.release();
     heldArtifact = null;
     await bareSweep;
@@ -958,3 +975,4 @@ it("S3: bare exact-Db defaults carry public recovery through same-mission comple
     await publicFixture?.cleanup();
   }
 }, 60_000);
+

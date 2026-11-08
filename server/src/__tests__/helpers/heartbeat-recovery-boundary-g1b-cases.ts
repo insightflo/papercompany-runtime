@@ -487,19 +487,10 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     const pendingIds = [pair.sourceUnit.preparationEventId!, pair.targetUnit.preparationEventId!].sort();
 
     const targetPending = await addG1BDetachedExecutionCandidate(harness, targetRunSnapshot, "G1-B target pending claim");
-    const pendingClaim = await runCandidate(targetPending.heartbeat, "claim", ownerRuntime);
-    expect(pendingClaim.kind).toBe("c5_held_not_invoked");
-    if (pendingClaim.kind !== "c5_held_not_invoked") throw new Error("G1-B target-pending claim was not held before work");
-    const pendingClaimBinding = readC5NotInvokedProof(pendingClaim.proof, harness.db,
-      captureQaCorrectionExecutionIdentity(targetPending.heartbeat), "claim");
-    expect(pendingClaimBinding.scope).toMatchObject({ kind: "linked", primaryWorkflowRunId: pair.targetRun.id });
-    expect(pendingClaimBinding.nativeOwner.targets()).toEqual(unionPaths);
-    expect(await pendingClaimBinding.nativeOwner.awaitExit()).toMatchObject({ code: 0, signal: null });
-    const pendingClaimObservation = admissionObservations.find(item => item.heartbeatRunId === targetPending.heartbeat.id
-      && item.phase === "claim");
-    expect(pendingClaimObservation?.pendingEventIds).toEqual(pendingIds);
-    expect(pendingClaimObservation?.scopeRunIds).toEqual(expect.arrayContaining([pair.sourceUnit.runId, pair.targetRun.id]));
-
+    // C3-β(§6-c): 무관 step 의 claim hold 관측은 제거(단언 총량 유지). 동일 hold 계약 — union targets,
+    // proof binding, admission observation(pendingEventIds), scopeRunIds, work 미호출 — 은 바로 아래
+    // pendingStart(adapter_start) 가 동일 단언으로 그대로 담보하고, claim 은 정상 경로로 승격만 한다.
+    // 단위 관련 claim typed hold 는 P1 의 신규 케이스(§6-d)가 직접 증명한다.
     const targetPendingStarted = await claimExecutionCandidate(harness, targetPending.heartbeat);
     const pendingStart = await runCandidate(targetPendingStarted, "adapter_start", ownerRuntime);
     expect(pendingStart.kind).toBe("c5_held_not_invoked");
@@ -904,7 +895,9 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     }
     console.log("G1B_BRANCH_PROOF", JSON.stringify(targetRefireWork.map(item => item.kind === "captured" ? { phase: item.entry.phase, sourcePendingCount: item.entry.sourcePendingEventIds.length } : { phase: item.phase, error: item.message })));
     const refireOwners = ownerObservations.filter(item => item.heartbeatRunId === refireHeartbeat.id);
-    expect(refireOwners.map(item => item.phase).sort()).toEqual(["adapter_start", "claim"]);
+    // C3-β(§6-a/§6-c): refire claim 시점에는 단위 관련 pending 이 없다(완료가 refire 를 만든다) →
+    // claim 은 네이티브 오너 없이 즉시 승급하고, 오너 계약은 adapter_start(union targets·clean exit)에서 관측된다.
+    expect(refireOwners.map(item => item.phase).sort()).toEqual(["adapter_start"]);
     for (const owner of refireOwners) {
       expect([...owner.targets].sort()).toEqual(unionPaths);
       expect(owner.exit).toMatchObject({ code: 0, signal: null });
