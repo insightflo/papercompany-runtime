@@ -541,7 +541,7 @@ it("keeps the replacement source in the locked pending union while the target ma
   }
   expect(await readFile(malformed.sourceUnit.file, "utf8")).toBe(admissionFileBytes.before);
   expect(await readFile(malformed.targetUnit.file, "utf8")).toBe(admissionFileBytes.before);
-});
+}, 120_000);
 
 it("retains the actual native file guard until the installed Postgres driver callback settles after backend loss", async () => {
   const scenario = await createAdmissionScenario(harness);

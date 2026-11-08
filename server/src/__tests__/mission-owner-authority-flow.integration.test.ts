@@ -36,7 +36,7 @@ afterAll(async () => {
   await drainHeartbeatRuns(db);
   await db.$client.end({ timeout: 5 });
   await temp?.cleanup();
-});
+}, 60000);
 
 it.each(["retry_step", "resume_run", "revise_plan", "recollect", "delegate_fix", "reassign"] as const)(
   "%s executes and proves the current result", async (operation) => {

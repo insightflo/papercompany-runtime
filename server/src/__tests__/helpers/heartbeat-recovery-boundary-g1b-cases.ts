@@ -274,6 +274,15 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     adapterResult: AdapterExecutionResult,
   ) => {
     if (!beforeAttempt) throw new Error("original QA full attempt was missing before its verified finish");
+    const expectedStatus = adapterResult.exitCode === 0 && !adapterResult.timedOut ? "succeeded" : "failed";
+    // finish() 는 adapter 결과·terminal status 까지만 보장하고 settledAt(정산 표식)은 뒤늦게 쓴다.
+    // 1회성 read 는 정산과 경쟁하므로 settled 상태를 관측할 때까지 폴링하고, 그 뒤 값은 아래
+    // 기존 단언으로 그대로 검사한다(완화 없음).
+    await vi.waitFor(async () => {
+      const [heartbeat] = await harness!.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, beforeHeartbeat.id));
+      if (!heartbeat) throw new Error("original QA heartbeat disappeared after verified finish");
+      expect(heartbeat).toMatchObject({ status: expectedStatus, finalizationVersion: 1, settledAt: expect.any(Date) });
+    }, { timeout: 30_000, interval: 100 });
     const [heartbeat] = await harness!.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, beforeHeartbeat.id));
     const [wake] = await harness!.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, beforeWake.id));
     const [step] = await harness!.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, unit.qa.id));
@@ -300,7 +309,6 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
       workflowRunId: unit.runId, stepRunId: unit.qa.id, issueId: unit.qaIssue.id });
     expect(Array.isArray(verdictPayload.remediations?.items)).toBe(true);
     expect(hashQaCorrectionPayload(verdictPayload.remediations?.items)).toBe(unit.verdictRemediationsHash);
-    const expectedStatus = adapterResult.exitCode === 0 && !adapterResult.timedOut ? "succeeded" : "failed";
     expect(heartbeatOwnerIdentity(heartbeat)).toEqual(heartbeatOwnerIdentity(beforeHeartbeat));
     expect(heartbeat).toMatchObject({ id: beforeHeartbeat.id, companyId: unit.companyId, agentId: unit.verifierId,
       issueId: unit.qaIssue.id, wakeupRequestId: beforeWake.id,
