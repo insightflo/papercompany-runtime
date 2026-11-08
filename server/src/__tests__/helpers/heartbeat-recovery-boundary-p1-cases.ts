@@ -403,6 +403,10 @@ it("P1 execution root proves a pre-invocation C5 hold and returns adapter work b
         return owner;
       },
     };
+    // C3-β(§6-b): 무관 step 의 pre-invocation hold 관측을 adapter_start 로 이동(단언 삭제 없음, 관측 지점만 교체).
+    // claim 은 이제 정상 경로(claimExecutionCandidate)로 승격되고, lock_wait·DB row lock 미보유·typed proof
+    // 행 불변은 adapter_start 오너 대기에서 동일하게 관측한다(phase 문자열만 claim→adapter_start).
+    const queuedStarted = await claimExecutionCandidate(harness, queued);
     const [heldIssue] = await harness.peer.select().from(issues).where(eq(issues.id, queuedTarget.issueId));
     const [heldStep] = await harness.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, queuedTarget.stepRun.id));
     const [heldWake] = await harness.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId!));
@@ -413,8 +417,8 @@ it("P1 execution root proves a pre-invocation C5 hold and returns adapter work b
       .orderBy(asc(agentWakeupRequests.id))).map(row => row.id);
     let c5WorkCalls = 0;
     nativeBlocker = await realRuntime.begin([scenario.file]);
-    const c5Work = withQaCorrectionExecutionRoot(harness.db, queued, {
-      phase: "claim",
+    const c5Work = withQaCorrectionExecutionRoot(harness.db, queuedStarted, {
+      phase: "adapter_start",
       admit: (tx, run) => assertHeartbeatRecoveryAdmission(tx, run),
       work: async () => { c5WorkCalls++; throw new Error("pending C5 preparation must hold before work"); },
       sharedAdmission: executionAdmission(ownerRuntime),
@@ -438,15 +442,15 @@ it("P1 execution root proves a pre-invocation C5 hold and returns adapter work b
     expect(c5Result.kind).toBe("c5_held_not_invoked");
     if (c5Result.kind !== "c5_held_not_invoked") throw new Error("P1 C5 hold did not return its typed boundary");
     expect(isC5NotInvokedProof(c5Result.proof)).toBe(true);
-    const expectedIdentity = captureQaCorrectionExecutionIdentity(queued);
-    const proofBinding = readC5NotInvokedProof(c5Result.proof, harness.db, expectedIdentity, "claim");
+    const expectedIdentity = captureQaCorrectionExecutionIdentity(queuedStarted);
+    const proofBinding = readC5NotInvokedProof(c5Result.proof, harness.db, expectedIdentity, "adapter_start");
     expect(Object.isFrozen(proofBinding)).toBe(true);
     expect(proofBinding.scope).toMatchObject({ kind: "linked", primaryWorkflowRunId: scenario.runId });
-    expect(() => readC5NotInvokedProof(c5Result.proof, harness.peer, expectedIdentity, "claim"))
+    expect(() => readC5NotInvokedProof(c5Result.proof, harness.peer, expectedIdentity, "adapter_start"))
       .toThrow(QaRemediationAdmissionHold);
     expect(() => readC5NotInvokedProof(c5Result.proof, harness.db,
-      { ...expectedIdentity, heartbeatRunId: randomUUID() }, "claim")).toThrow(QaRemediationAdmissionHold);
-    expect(() => readC5NotInvokedProof(c5Result.proof, harness.db, expectedIdentity, "adapter_start"))
+      { ...expectedIdentity, heartbeatRunId: randomUUID() }, "adapter_start")).toThrow(QaRemediationAdmissionHold);
+    expect(() => readC5NotInvokedProof(c5Result.proof, harness.db, expectedIdentity, "claim"))
       .toThrow(QaRemediationAdmissionHold);
     cleanOwnerExit(await nativeExits[0]!);
     expect(c5WorkCalls).toBe(0);
@@ -493,6 +497,29 @@ it("P1 execution root proves a pre-invocation C5 hold and returns adapter work b
       sharedAdmission: executionAdmission(ownerRuntime),
     });
     expect(ordinaryResult).toMatchObject({ kind: "performed", value: "ordinary performed" });
+
+    // C3-β(§6-d): 시험 약화 방지 증거 — pending 의 대상 step 이 실행 단위와 정확 일치하는 claim 은
+    // 여전히 claim 단계에서 typed hold 된다(승격 대상만 좁혔을 뿐 hold 계약은 유지).
+    const relatedRetry = await addExecutionCandidate(harness, scenario, scenario.authorId,
+      { issueId: scenario.producerIssueId, stepRun: scenario.producer });
+    let relatedWorkCalls = 0;
+    const relatedClaim = await withQaCorrectionExecutionRoot(harness.db, relatedRetry, {
+      phase: "claim",
+      admit: (tx, run) => assertHeartbeatRecoveryAdmission(tx, run),
+      work: async () => { relatedWorkCalls++; throw new Error("unit-related pending must hold at claim"); },
+      sharedAdmission: executionAdmission(realRuntime),
+    });
+    expect(relatedClaim.kind).toBe("c5_held_not_invoked");
+    if (relatedClaim.kind !== "c5_held_not_invoked") throw new Error("C3-β §6-d unit-related claim was not held");
+    const relatedBinding = readC5NotInvokedProof(relatedClaim.proof, harness.db,
+      captureQaCorrectionExecutionIdentity(relatedRetry), "claim");
+    expect(relatedBinding.scope).toMatchObject({ kind: "linked", primaryWorkflowRunId: scenario.runId });
+    // claim 오너 대상은 단위 관련 pending 파일로 좁혀졌다(전체 allTargets 가 아님).
+    expect(relatedBinding.nativeOwner.targets()).toEqual([scenario.file]);
+    expect(await relatedBinding.nativeOwner.awaitExit()).toMatchObject({ code: 0, signal: null });
+    expect(relatedWorkCalls).toBe(0);
+    const [relatedRow] = await harness.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, relatedRetry.id));
+    expect(relatedRow).toMatchObject({ id: relatedRetry.id, status: "queued" });
 
     qaEntryPhase = "QA release";
     qaRelease.resolve();
