@@ -27,6 +27,10 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
   let db: ReturnType<typeof createDb>;
   const companyId = randomUUID(), ownerId = randomUUID(), missionId = randomUUID();
   const issueId = randomUUID(), heartbeatId = randomUUID(), workflowId = randomUUID(), runId = randomUUID();
+  // [C1 2026-11-08] 미션당 pending 사람 카드 1장 부분 고유 인덱스(0129) 계약 — pending 카드가 여러 장 필요한
+  // 단언(중성화·identity·배치 읽기)은 서로 다른 미션에 발행한다. 단언은 카드 단위라 미션 분포와 무관하다.
+  const historicalMissionId = randomUUID(), customMissionId = randomUUID(), hashMismatchMissionId = randomUUID();
+  const resolvedMissionId = randomUUID(), cancelledMissionId = randomUUID(), noReviewMissionId = randomUUID();
 
   beforeAll(async () => {
     pg = await startEmbeddedPostgresTestDatabase("operator-recovery-advice-");
@@ -35,6 +39,16 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
     await db.insert(agents).values({ id: ownerId, companyId, name: "Owner", status: "active" });
     await db.insert(missions).values({ id: missionId, companyId, ownerAgentId: ownerId,
       title: "Recovery mission", status: "active" });
+    // [C1 2026-11-08] 각 pending/terminal 카드 전용 미션 행 — 재시작 resolve 트랜잭션이 카드의
+    // sourceContext.missionId 로 missions 행을 잠그므로 실재해야 한다(부분 고유 인덱스 계약과 동일선상).
+    await db.insert(missions).values([
+      { id: historicalMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (historical)", status: "active" },
+      { id: customMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (custom)", status: "active" },
+      { id: hashMismatchMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (hash mismatch)", status: "active" },
+      { id: resolvedMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (resolved)", status: "active" },
+      { id: cancelledMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (cancelled)", status: "active" },
+      { id: noReviewMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (no review)", status: "active" },
+    ]);
     await db.insert(issues).values({ id: issueId, companyId, missionId, title: "Owner oversight",
       status: "in_progress", assigneeAgentId: ownerId, originKind: "mission_main_executor_oversight" });
     await db.insert(heartbeatRuns).values({ id: heartbeatId, companyId, agentId: ownerId, issueId, status: "running" });
@@ -78,10 +92,10 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
     const currentId = currentCreated.decision.id;
     const writer = operatorDecisionWriteService(db);
 
-    async function createLegacyCard(mode: "historical" | "custom" | "plain" = "historical",
+    async function createLegacyCard(legacyMissionId: string, mode: "historical" | "custom" | "plain" = "historical",
       request?: Pick<MissionOwnerHumanInputCardSpec, "reason" | "nextAction">) {
       const decisionEventId = randomUUID();
-      const spec: MissionOwnerHumanInputCardSpec = { companyId, missionId, decisionEventId,
+      const spec: MissionOwnerHumanInputCardSpec = { companyId, missionId: legacyMissionId, decisionEventId,
         decision: "request_input", ownerActionIssueId: issueId, ownerActionIssueStatus: "in_progress",
         requestedByAgentId: ownerId, reason: request?.reason ?? "Review retained work",
         nextAction: request?.nextAction ?? "Continue the narrow review",
@@ -99,19 +113,19 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
 
     const capReason = "The producer reached its two-iteration cap.";
     const capNextAction = "Approve one bounded producer iteration after cap two.";
-    const historicalId = await createLegacyCard("historical", { reason: capReason, nextAction: capNextAction });
-    const customId = await createLegacyCard("custom");
-    const hashMismatchId = await createLegacyCard();
+    const historicalId = await createLegacyCard(historicalMissionId, "historical", { reason: capReason, nextAction: capNextAction });
+    const customId = await createLegacyCard(customMissionId, "custom");
+    const hashMismatchId = await createLegacyCard(hashMismatchMissionId);
     await db.update(operatorDecisions).set({ requestHash: "0".repeat(64) })
       .where(eq(operatorDecisions.id, hashMismatchId));
-    const resolvedId = await createLegacyCard();
+    const resolvedId = await createLegacyCard(resolvedMissionId);
     await db.update(operatorDecisions).set({ status: "resolved", resolvedByUserId: "board-user",
       resolvedAt: new Date(), result: { actionId: "approve", outcome: "approve",
         selectedOptionIds: [WORKFLOW_RESTART_FROM_START_OPTION_ID], comment: "reviewed" } }).where(eq(operatorDecisions.id, resolvedId));
-    const cancelledId = await createLegacyCard();
+    const cancelledId = await createLegacyCard(cancelledMissionId);
     await writer.cancel(cancelledId, { type: "user", id: "board-user" }, "closed for test");
 
-    const noReviewBase = buildMissionOwnerHumanInputDecisionCard({ companyId, missionId, decisionEventId: randomUUID(),
+    const noReviewBase = buildMissionOwnerHumanInputDecisionCard({ companyId, missionId: noReviewMissionId, decisionEventId: randomUUID(),
       decision: "request_input", ownerActionIssueId: issueId, ownerActionIssueStatus: "in_progress",
       requestedByAgentId: ownerId, reason: "Review", nextAction: "Keep work", issueTitle: "Owner oversight",
       issueIdentifier: null, sourceIssueId: null, workflowRunId: runId });
