@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, workflowRuns } from "@paperclipai/db";
 import { syncCancelledWorkflowRunState } from "./workflow-cancelled-state.js";
@@ -31,6 +31,35 @@ export async function cancelOutstandingWorkflowIssues(
 }
 
 const WORKFLOW_RUN_TERMINAL_STATUSES = new Set(["completed", "cancelled", "aborted", "failed", "timed-out"]);
+
+/**
+ * [orphan-run close R1] 미션 취소 시 그 미션의 비종결 workflow_runs 을 기존 취소 계약으로 종결한다.
+ *
+ * cancelWorkflowRunWithCleanup 가 이슈 취소(cancelOutstandingWorkflowIssues)·step 상태 동기화
+ * (syncCancelledWorkflowRunState)·자식 run 전파를 한 몸으로 수행한다. 종결 run/step·done 이슈·
+ * 성공 결과는 그 계약 자체가 이미 보존한다(#679/#682 원칙: 무조건 cancel 금지·성공 증거 보존).
+ * 선택은 비종결 run 으로 좁고(회사·미션 범위), 이미 종결된 run 은 건드리지 않는다.
+ */
+export async function cancelMissionWorkflowRuns(
+  db: Db,
+  input: { companyId: string; missionId: string },
+): Promise<{ cancelledRunIds: string[] }> {
+  const openRuns = await db
+    .select({ id: workflowRuns.id })
+    .from(workflowRuns)
+    .where(and(
+      eq(workflowRuns.companyId, input.companyId),
+      eq(workflowRuns.missionId, input.missionId),
+      sql`${workflowRuns.status} not in ('completed', 'cancelled', 'aborted', 'failed', 'timed-out')`,
+    ))
+    .orderBy(asc(workflowRuns.createdAt), asc(workflowRuns.id));
+  const cancelledRunIds: string[] = [];
+  for (const run of openRuns) {
+    const cancelled = await cancelWorkflowRunWithCleanup(db, run.id, input.companyId);
+    if (cancelled) cancelledRunIds.push(run.id);
+  }
+  return { cancelledRunIds };
+}
 
 export async function cancelWorkflowRunWithCleanup(
   db: Db,

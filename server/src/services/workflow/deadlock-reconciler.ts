@@ -1,6 +1,6 @@
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns, issues, workflowDefinitions, workflowRuns, workflowStepRuns } from "@paperclipai/db";
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { classifyStepActivation, workflowHasConditionalEdges } from "./control-flow/edge-condition.js";
 import {
   getWorkflowLaunchSteps,
@@ -9,6 +9,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { buildPredFactsMap, buildStepRunMap } from "./reconciler-edge-helpers.js";
 import type { ReconciliationResult } from "./reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
+import { lifecycleActiveClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { isHeartbeatFinalizationV1Enabled } from "../heartbeat-finalization/flag.js";
 import { logger } from "../../middleware/logger.js";
 // [run-terminal-boundary v1] deadlock 수렴의 경계 우회 + 커밋 후 부작용 즉시 실행(플래그 게이팅은 호출자 책임).
@@ -33,6 +34,8 @@ export async function reconcileDeadlockedWorkflowRuns(
     .from(workflowRuns)
     .where(and(eq(workflowRuns.status, "running"), lt(workflowRuns.startedAt, settlingCutoff)));
 
+  // [orphan-run close R2] 생존 술어는 pass 당 1회만 읽는다(플래그 I/O 최소화 — reconciler 와 대칭).
+  const stepExecutionLiveness = await lifecycleActiveClause(db);
   const results: ReconciliationResult[] = [];
   for (const run of candidates) {
     try {
@@ -40,7 +43,7 @@ export async function reconcileDeadlockedWorkflowRuns(
         companyId: run.companyId,
         workflowRunId: run.id,
       })) continue;
-      if (await hasActiveWorkflowStep(db, run.id)) continue;
+      if (await hasActiveWorkflowStep(db, run.id, stepExecutionLiveness)) continue;
 
       const runSteps = await db.select().from(workflowStepRuns).where(eq(workflowStepRuns.workflowRunId, run.id));
       const pending = runSteps.filter((step) => step.status === "pending");
@@ -160,14 +163,27 @@ export async function reconcileDeadlockedWorkflowRuns(
   return results;
 }
 
-async function hasActiveWorkflowStep(db: Db, workflowRunId: string) {
+async function hasActiveWorkflowStep(db: Db, workflowRunId: string, stepExecutionLiveness: SQL) {
+  // [orphan-run close R2] reconciler.ts 의 activeStep 게이트와 동일 계약 — step 행 status='running'
+  //   자체는 생존이 아니며 heartbeat lifecycle 술어로 실제 실행 생존만 인정한다(stale running step 가
+  //   deadlock 수렴을 영구 차단하지 않게). 살아 있는 실행은 보호, 레거시 이슈/heartbeat 채널은 유지.
   return db
     .select({ id: workflowStepRuns.id })
     .from(workflowStepRuns)
     .where(and(
       eq(workflowStepRuns.workflowRunId, workflowRunId),
       sql`(
-        ${workflowStepRuns.status} = 'running'
+        (
+          ${workflowStepRuns.status} = 'running'
+          AND EXISTS (
+            SELECT 1 FROM ${heartbeatRuns}
+            WHERE (
+              ${heartbeatRuns.issueId} = ${workflowStepRuns.issueId}
+              OR ${heartbeatRuns.workflowStepRunId} = ${workflowStepRuns.id}
+            )
+            AND (${stepExecutionLiveness})
+          )
+        )
         OR EXISTS (
           SELECT 1 FROM ${issues}
           WHERE ${issues.id} = ${workflowStepRuns.issueId}
