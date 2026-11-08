@@ -96,6 +96,12 @@ export const operatorDecisions = pgTable(
     issueCreatedIdx: index("operator_decisions_issue_created_idx")
       .on(table.issueId, table.createdAt)
       .where(sql`${table.issueId} is not null`),
+    // [C1 2026-11-08] 미션당 pending mission_owner_human_input 카드 1장을 DB 수준에서 보장한다.
+    // R2 게이트(SELECT→INSERT)의 동시 제출 레이스가 두 번째 pending insert 를 거부한다.
+    // 충돌 시 서비스 계층이 기존 카드에 사유(repeatCount)를 누적한다(R2 계약과 동일).
+    pendingMissionHumanInputUq: uniqueIndex("operator_decisions_pending_mission_human_input_uq")
+      .on(table.companyId, sql`(${table.sourceContext} ->> 'missionId')`)
+      .where(sql`${table.sourceType} = 'mission_owner_human_input' and ${table.status} = 'pending'`),
     schemaVersionCheck: check("operator_decisions_schema_version_check", sql`${table.schemaVersion} = 1`),
     statusCheck: check("operator_decisions_status_check", sql`${table.status} in ('pending', 'resolved', 'cancelled')`),
     priorityCheck: check("operator_decisions_priority_check", sql`${table.priority} in ('critical', 'high', 'medium', 'low')`),
