@@ -15,6 +15,7 @@ import { reconcileGraceWaitingControlNodes } from "./grace-waiting-control-node-
 import { reconcileWorkflowChildStepWaits } from "./workflow-child-execution.js";
 import { reconcileUnmaterializedChildStartTimeout } from "./workflow-child-start-recovery-timeout.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
+import { lifecycleActiveClause } from "../heartbeat-finalization/lifecycle-active.js";
 import {
   isChildStartContention,
   isChildStartDatabaseTimeout,
@@ -116,6 +117,12 @@ export async function reconcileStuckWorkflowRuns(
         continue;
       }
 
+      // [orphan-run close R2] step 행 status='running' 은 생존 신호가 아니다 — executor 사망 후
+      //   heartbeat 정산까지 끝난 run 에도 stale running step 이 남아 stuck 판정을 영구 차단했다
+      //   (2026-11-08 장기 running 3건, longrun-check §6-①). 생존 판정은 lifecycleActiveClause 의
+      //   heartbeat 술어(status='running' 또는 terminal-unsettled v1)를 재사용한다. 살아 있는 실행은
+      //   계속 보호되고, 아래 레거시 이슈/heartbeat 채널도 그대로 유지된다.
+      const stepExecutionLiveness = await lifecycleActiveClause(db);
       const activeStep = await db
         .select({ id: workflowStepRuns.id })
         .from(workflowStepRuns)
@@ -123,7 +130,17 @@ export async function reconcileStuckWorkflowRuns(
           and(
             eq(workflowStepRuns.workflowRunId, run.id),
             sql`(
-              ${workflowStepRuns.status} = 'running'
+              (
+                ${workflowStepRuns.status} = 'running'
+                AND EXISTS (
+                  SELECT 1 FROM ${heartbeatRuns}
+                  WHERE (
+                    ${heartbeatRuns.issueId} = ${workflowStepRuns.issueId}
+                    OR ${heartbeatRuns.workflowStepRunId} = ${workflowStepRuns.id}
+                  )
+                  AND (${stepExecutionLiveness})
+                )
+              )
               OR EXISTS (
                 SELECT 1 FROM ${issues}
                 WHERE ${issues.id} = ${workflowStepRuns.issueId}

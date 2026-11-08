@@ -25,6 +25,7 @@ import { missionService } from "../services/missions.js";
 import { dispatchSourceIssueNativeResume } from "../services/workflow/source-issue-native-resume.js";
 import { missionDelegationService } from "../services/mission-delegations.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { cancelMissionWorkflowRuns } from "../services/workflow/workflow-cancellation.js";
 import { logger } from "../middleware/logger.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { notFound, badRequest, conflict } from "../errors.js";
@@ -588,6 +589,10 @@ export function missionRoutes(db: Db) { const router = Router();
           await heartbeat.cancelRun(run.id);
         }
       }
+      // [orphan-run close R1] 이 미션의 비종결 workflow_runs 도 기존 취소 계약으로 종결한다
+      //   (이슈 취소·step 상태 동기화·자식 run 전파 포함). 종결 run/step·done 이슈·성공 결과는
+      //   그 계약이 보존한다(#679/#682 원칙). heartbeat 실행 정지 후 run 을 닫는 순서를 유지한다.
+      await cancelMissionWorkflowRuns(db, { companyId: existing.companyId, missionId: existing.id });
     }
 
     const updated = await svc.update(req.params.id, {
