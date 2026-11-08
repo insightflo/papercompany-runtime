@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -25,9 +26,9 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.js";
-import { submitMissionOwnerDecision } from "../services/missions/mission-owner-recovery-agent-api.js";
-import { renewOwnerHumanRequestWithCard } from "../services/missions/owner-human-request-renew.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
+import { createMissionOwnerHumanInputDecisionCard } from "../services/missions/mission-owner-human-input-card.js";
+import { renewOwnerHumanRequestWithCard } from "../services/missions/owner-human-request-renew.js";
 import { lockOwnerHumanRequestAuthority } from "../services/missions/owner-human-request-authority.js";
 import { saveOwnerHumanRequest, type OwnerHumanCurrentRecord } from "../services/missions/owner-human-request-state.js";
 vi.mock("../services/live-events.js", () => ({ publishLiveEvent: vi.fn() }));
@@ -79,16 +80,22 @@ describeDb("one pending mission-owner human card per mission (race-safe)", () =>
     return { companyId, missionId, agentId, sourceId, anchorA, anchorB, runA, runB };
   }
   const submit = (w: Awaited<ReturnType<typeof twoAnchorWorld>>, anchorId: string, runId: string) =>
-    submitMissionOwnerDecision({ db, issueId: anchorId,
-      actor: { actorType: "agent" as const, actorId: w.agentId, agentId: w.agentId, runId },
-      data: { ...submission } });
+    recordMissionOwnerDecision({ db,
+      issue: { id: anchorId, companyId: w.companyId, missionId: w.missionId },
+      submission, sourceIssueId: w.sourceId, heartbeatRunId: runId })
+      .then((decision) => createMissionOwnerHumanInputDecisionCard(db, {
+        companyId: w.companyId, missionId: w.missionId, decisionEventId: decision.eventId,
+        decision: submission.decision, ownerActionIssueId: anchorId, ownerActionIssueStatus: "in_progress",
+        requestedByAgentId: w.agentId, sourceIssueId: w.sourceId }));
   const pendingCards = async (companyId: string) =>
     db.select().from(operatorDecisions).where(PENDING_MOI_FILTER(companyId));
 
-  it("two concurrent submissions on different anchors leave exactly one pending card and fold the repeat into it", async () => {
+  it("two concurrent card issuances on different anchors leave exactly one pending card and fold the repeat into it", async () => {
     const w = await twoAnchorWorld();
-    // legacy(moi1) 제출은 미션 lifetime CAS 대상이 아니므로 서로 다른 앵커의 동시 제출이
-    // R2 게이트(카드 없음 통과)를 함께 통과한다 — SELECT→INSERT 레이스의 실제 표면.
+    // R2 게이트의 SELECT→INSERT 레이스: 게이트가 pending 부재를 본 뒤(커밋 후) 카드 생성이
+    // 일어나는 창구에 서로 다른 앵커의 발행이 동시에 도달하면 두 insert 모두 통과했다.
+    // 카드 생성 계층에서 동시 발행을 직접 재현한다(제출 API의 게이트·lifetime CAS 와 무관하게
+    // 카드 계층 불변식이 닫는지 검증).
     await Promise.all([
       submit(w, w.anchorA, w.runA),
       submit(w, w.anchorB, w.runB),
@@ -119,7 +126,7 @@ describeDb("one pending mission-owner human card per mission (race-safe)", () =>
     expect(await pendingCards(companyId)).toHaveLength(2);
   }, 30_000);
 
-  it("renewal defers (no new card, no new lifetime) while a different pending card holds the mission", async () => {
+  it("renewal replaces the mission's pending surface: the old pending card is withdrawn and exactly one pending card remains", async () => {
     // c08 style world: 종결 앵커 + keyed lifetime(card 미생성) + 대기 중 갱신 앵커.
     const companyId = randomUUID(), missionId = randomUUID(), agentId = randomUUID(),
       sourceId = randomUUID(), oldId = randomUUID(), nextId = randomUUID(), heartbeatId = randomUUID();
@@ -152,15 +159,23 @@ describeDb("one pending mission-owner human card per mission (race-safe)", () =>
       companyId, previousLifetimeId: original.lifetime.lifetimeId, anchorIssueId: nextId,
       requestKey: `owner-anchor-renewal:v2:${original.lifetime.lifetimeId}`,
     }));
+    expect(result).toMatchObject({ cardCreated: true });
 
     const pending = await pendingCards(companyId);
     expect(pending).toHaveLength(1);
-    expect(pending[0]!.requestKey).toBe(foreign.requestKey);
+    expect(pending[0]!.requestKey).toBe(`moi2:${result.current.lifetime.lifetimeId}`);
+    const [supersededCard] = await db.select().from(operatorDecisions)
+      .where(eq(operatorDecisions.id, foreign.id));
+    expect(supersededCard).toMatchObject({ status: "cancelled" });
+    expect(supersededCard!.cancelledAt).not.toBeNull();
     const lifetimes = await db.select({ id: workflowTransitionEvents.id })
       .from(workflowTransitionEvents)
       .where(and(eq(workflowTransitionEvents.companyId, companyId),
         eq(workflowTransitionEvents.eventType, "owner_human_lifetime_v1")));
-    expect(lifetimes).toHaveLength(1);
-    expect(result).toMatchObject({ deferred: true });
+    expect(lifetimes).toHaveLength(2);
+    const cancelledLog = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, companyId), eq(activityLog.entityId, foreign.id),
+      eq(activityLog.action, "operator_decision.cancelled")));
+    expect(cancelledLog).toHaveLength(1);
   }, 30_000);
 });

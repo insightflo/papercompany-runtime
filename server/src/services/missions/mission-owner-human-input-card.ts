@@ -25,6 +25,17 @@ import {
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
+export const PENDING_MISSION_HUMAN_INPUT_UQ = "operator_decisions_pending_mission_human_input_uq";
+
+/** [C1 2026-11-08] 미션당 pending 카드 1장 부분 고유 인덱스 위반(23505) 판정 — 충돌 시 사유 누적 분기. */
+export function isPendingMissionHumanCardUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown };
+  return (candidate.code === "23505" || candidate.code === 23505)
+    && (candidate.constraint === PENDING_MISSION_HUMAN_INPUT_UQ
+      || candidate.constraint_name === PENDING_MISSION_HUMAN_INPUT_UQ
+      || (typeof candidate.message === "string" && candidate.message.includes(PENDING_MISSION_HUMAN_INPUT_UQ)));
+}
 
 export function buildHumanInputDecisionCardRequestKey(decisionEventId: string): string {
   return `moi1:${decisionEventId}`;
@@ -238,11 +249,22 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
 /** Merge an equivalent pending request, replay an exact terminal legacy card, or create normally. */
 export async function createMissionOwnerHumanInputDecisionCard(db: Db, spec: MissionOwnerHumanInputCardSpec) {
   const cardInput = buildMissionOwnerHumanInputDecisionCard(spec);
-  const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
-  if (merged) return merged;
-  const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
-  if (historicalReplay) return historicalReplay;
-  return operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+  try {
+    const merged = await tryMergePendingHumanInputCard(db, spec, cardInput);
+    if (merged) return merged;
+    const historicalReplay = await replayHistoricalDefaultHumanInputCard(db, spec, cardInput);
+    if (historicalReplay) return historicalReplay;
+    return await operatorDecisionWriteService(db).create(spec.companyId, cardInput, { type: "agent", id: spec.requestedByAgentId });
+  } catch (error) {
+    // [C1 2026-11-08] 미션당 pending 카드 1장 부분 고유 인덱스가 동시 제출의 두 번째 insert 를
+    // 거부한다(R2 게이트의 SELECT→INSERT 레이스). 새 카드 대신 기존 pending 카드에 사유를
+    // 누적하고 그 카드를 반환한다 — R2 의 재요청 처리와 같은 계약, 카드 5xx 는 유지되지 않는다.
+    if (!isPendingMissionHumanCardUniqueViolation(error)) throw error;
+    const bumped = await bumpPendingMissionHumanCard(db, spec.companyId, spec.missionId);
+    const existing = bumped ? await findPendingMissionHumanCard(db, spec.companyId, spec.missionId) : null;
+    if (!existing) throw error;
+    return { decision: await operatorDecisionReadService(db).getRequired(existing.id), replayed: true };
+  }
 }
 
 // [R2 2026-11-08] 미션 단위 열린 사람 카드 1장 계약의 조회·사유 누적 헬퍼.

@@ -15,6 +15,7 @@ import {
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
+import { lifecycleActiveClause } from "./heartbeat-finalization/lifecycle-active.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 import {
   requireAgentApiKeyResponsibleUserBinding,
@@ -281,10 +282,15 @@ export function deduplicateAgentName(
 // cannot actually be executing (its handle is gone), so reset it to 'idle'. Agents that
 // genuinely own a running heartbeat run are left untouched.
 export async function reconcilePersistedAgentStatusOnStartup(db: Db) {
+  // [C2 2026-11-08] 슬롯 계산(countRunningRunsForAgent — lifecycleActiveClause)과 같은 기준으로
+  // 'running' 소유자를 판정한다. 미정산 terminal v1 run 을 가진 에이전트는 점유 중이므로
+  // 시작 스윕이 idle 로 덮지 않는다(recovery 정산 후 회복된다). 플래그 OFF 시 기존
+  // status='running' 판정과 바이트 동일하다.
+  const activeClause = await lifecycleActiveClause(db);
   const runningAgentIds = await db
     .select({ agentId: heartbeatRuns.agentId })
     .from(heartbeatRuns)
-    .where(eq(heartbeatRuns.status, "running"))
+    .where(activeClause)
     .then((rows) => [...new Set(rows.map((row) => row.agentId))]);
 
   // inArray with an empty list is never true, so when no agent owns a running run there is
