@@ -40,6 +40,11 @@ import type { JudgmentDefinitionSnapshot } from "@paperclipai/shared";
 import { logger as defaultLogger } from "../../middleware/logger.js";
 import { createJudgmentService, type JudgmentService } from "./judgment-service.js";
 import { seedAgentJudgmentTool } from "./agent-judgment-tool.js";
+import {
+  createBoundedShadowLoop,
+  type BoundedShadowLoop,
+  type BoundedShadowLoopState,
+} from "./shadow-loop-runner.js";
 
 // ---------------------------------------------------------------------------
 // env 게이트 — agent-skill-optimizer(resolveAgentWikiEvolutionOwnership) 미러.
@@ -424,32 +429,18 @@ export async function runPlanQaShadowPass(
 }
 
 // ---------------------------------------------------------------------------
-// createPlanQaShadowLoop — agent-skill-optimizer(createAgentWikiEvolutionLoop) 미러.
+// createPlanQaShadowLoop — shadow-loop-runner 공용 상태 머신 위임.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SHADOW_INTERVAL_MS = 10 * 60_000; // 10분
+export type PlanQaShadowLoopState = BoundedShadowLoopState<PlanQaShadowPassResult>;
 
-export interface PlanQaShadowLoopState {
-  running: boolean;
-  tickCount: number;
-  lastTickAt: string | null;
-  lastResult: PlanQaShadowPassResult | null;
-  lastError: string | null;
-  /** 루프 시작 시 1회 실행한 정의 seed 결과. */
-  seed: { companies: number; seeded: number } | null;
-}
-
-export interface PlanQaShadowLoop {
-  start: () => void;
-  stop: () => void;
-  /** 1틱 수동 실행(테스트/운영 점검용). */
-  observe: (now?: Date) => Promise<void>;
-  getState: () => PlanQaShadowLoopState;
-}
+export type PlanQaShadowLoop = BoundedShadowLoop<PlanQaShadowPassResult>;
 
 export interface CreatePlanQaShadowLoopOptions {
   db: Db;
   intervalMs?: number;
+  /** 정지(drain) 시 진행 중 틱 대기 상한(ms). 기본 5_000. */
+  drainTimeoutMs?: number;
   /** env 오버라이드 주입용(테스트). 기본 process.env. */
   env?: Record<string, string | undefined>;
   service?: JudgmentService;
@@ -458,85 +449,31 @@ export interface CreatePlanQaShadowLoopOptions {
 
 /**
  * [목적] createPlanQaShadowLoop — 섀도 관측 주기 루프. setInterval + tickInFlight 가드 +
- *   unref + per-tick try/catch. start 시 정의 seed 1회 + 즉시 1틱 후 interval arm(idempotent).
+ *   unref + per-tick try/catch + 유한 시간 drain(기본 5초). start 시 정의 seed 1회 + 즉시 1틱.
  * [주의] PAPERCLIP_JUDGMENT_ENABLED off 시 app.ts 가 이 팩터리를 호출하지 않아 완전 inert.
  */
 export function createPlanQaShadowLoop(options: CreatePlanQaShadowLoopOptions): PlanQaShadowLoop {
-  const intervalMs = options.intervalMs ?? DEFAULT_SHADOW_INTERVAL_MS;
   const config = resolvePlanQaShadowConfig(options.env ?? process.env);
   const runPass = options.runPass ?? runPlanQaShadowPass;
-  const log = defaultLogger;
 
-  let interval: ReturnType<typeof setInterval> | null = null;
-  let tickInFlight = false;
-  let tickCount = 0;
-  let lastTickAt: string | null = null;
-  let lastResult: PlanQaShadowPassResult | null = null;
-  let lastError: string | null = null;
-  let seed: { companies: number; seeded: number } | null = null;
-  let seededOnce = false;
-
-  async function observe(now = new Date()): Promise<void> {
-    if (!seededOnce) {
-      // 리컨사일러 시작 1회: 전 회사 정의 seed(idempotent — 이미 있으면 no-op).
-      seededOnce = true;
-      try {
-        seed = await seedPlanQaPrescreenDefinitions(options.db);
-        await seedAgentJudgmentTool(options.db);
-        if (seed.seeded > 0) {
-          log.info({ ...seed }, "plan-qa shadow: seeded plan-qa-prescreen definitions");
-        }
-      } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
-        log.error({ err: lastError }, "plan-qa shadow: definition seeding failed at loop start");
-      }
-    }
-    if (tickInFlight) {
-      log.warn({ intervalMs }, "plan-qa shadow tick skipped — previous tick still running");
-      return;
-    }
-    tickInFlight = true;
-    try {
-      const passResult = await runPass(options.db, {
+  return createBoundedShadowLoop({
+    name: "plan-qa shadow",
+    seededLogMessage: "plan-qa shadow: seeded plan-qa-prescreen definitions",
+    startLogContext: { ...config },
+    intervalMs: options.intervalMs,
+    drainTimeoutMs: options.drainTimeoutMs,
+    seedOnce: async (setSeed) => {
+      const seeded = await seedPlanQaPrescreenDefinitions(options.db);
+      setSeed(seeded);
+      await seedAgentJudgmentTool(options.db);
+      return seeded;
+    },
+    runPass: (now) =>
+      runPass(options.db, {
         maxPerTick: config.maxPerTick,
         lookbackDays: config.lookbackDays,
         ...(options.service ? { service: options.service } : {}),
         now,
-      });
-      tickCount += 1;
-      lastTickAt = now.toISOString();
-      lastResult = passResult;
-      lastError = null;
-      if (passResult.processed > 0 || passResult.skipped > 0) {
-        log.info({ intervalMs, ...passResult }, "plan-qa shadow pass completed");
-      }
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      log.error({ intervalMs, err: lastError }, "plan-qa shadow tick failed");
-    } finally {
-      tickInFlight = false;
-    }
-  }
-
-  return {
-    start() {
-      if (interval) return;
-      log.info({ intervalMs, ...config }, "plan-qa shadow loop started");
-      void observe();
-      interval = setInterval(() => {
-        void observe();
-      }, intervalMs);
-      interval.unref?.();
-    },
-    stop() {
-      if (!interval) return;
-      clearInterval(interval);
-      interval = null;
-      log.info({ intervalMs }, "plan-qa shadow loop stopped");
-    },
-    observe,
-    getState() {
-      return { running: interval !== null, tickCount, lastTickAt, lastResult, lastError, seed };
-    },
-  };
+      }),
+  });
 }
