@@ -60,46 +60,25 @@ describeRetentionDb("runHeartbeatRunOutputRetention hardening (embedded postgres
     });
     const rewritten = { stdout: "fresh output written after selection" };
     // 선별 후 갱신 직전에 다른 경로가 같은 행의 result_json 을 덮어쓴 상황을
-    // 재현한다: 첫 .update() 빌더가 await 될 때 재기록을 먼저 확정한 뒤 원래
-    // UPDATE 를 진행시킨다(drizzle 빌더는 await 시점에 실행된다).
+    // 재현한다: execute 호출 순서가 선별 SELECT → 배치 UPDATE 이므로 두 번째
+    // execute 직전에 재기록을 먼저 확정한 뒤 원래 UPDATE 를 진행시킨다.
+    let calls = 0;
     let intercepted = false;
     const racing = new Proxy(fx.db, {
       get(target, prop, receiver) {
-        if (prop !== "update") return Reflect.get(target, prop, receiver);
-        return (...args: unknown[]) => {
-          const builder = Reflect.get(target, prop).apply(target, args);
-          if (intercepted) return builder;
-          intercepted = true;
-          // 체인 메서드가 자기 자신이든 새 빌더 객체든 thenable 이면 프록시를
-          // 다시 씌워, await 시점의 then 이 반드시 재기록 다음에 오도록 한다.
-          const wrap = (obj: object): object => {
-            const handler: ProxyHandler<object> = {
-              get(bTarget, bProp) {
-                if (bProp === "then") {
-                  return (onFulfilled?: unknown, onRejected?: unknown) =>
-                    target
-                      .execute(sql`UPDATE heartbeat_runs SET result_json = ${JSON.stringify(rewritten)}::jsonb WHERE id = ${id}`)
-                      .then(() => (bTarget as PromiseLike<unknown>).then(
-                        onFulfilled as never,
-                        onRejected as never,
-                      ));
-                }
-                const value = Reflect.get(bTarget, bProp);
-                if (typeof value !== "function") return value;
-                return (...mArgs: unknown[]) => {
-                  const out = value.apply(bTarget, mArgs);
-                  if (out === bTarget) return proxied;
-                  if (out && typeof out === "object" && typeof (out as { then?: unknown }).then === "function") {
-                    return wrap(out as object);
-                  }
-                  return out;
-                };
-              },
-            };
-            const proxied = new Proxy(obj, handler);
-            return proxied;
-          };
-          return wrap(builder as object);
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== "execute") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args: unknown[]) => {
+          calls += 1;
+          if (!intercepted && calls === 2) {
+            intercepted = true;
+            await (target.execute as (q: ReturnType<typeof sql>) => Promise<unknown>)(
+              sql`UPDATE heartbeat_runs SET result_json = ${JSON.stringify(rewritten)}::jsonb WHERE id = ${id}`,
+            );
+          }
+          return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         };
       },
     }) as Db;
@@ -110,5 +89,48 @@ describeRetentionDb("runHeartbeatRunOutputRetention hardening (embedded postgres
     const row = await fx.fetchRun(id);
     // 캡된 구스냅샷으로 덮어쓰지 않고 재기록된 값이 보존된다(조건부 UPDATE).
     expect(row.resultJson).toEqual(rewritten);
+  });
+
+  it("never selects non-string oversized stdout/stderr (no-op write starvation regression)", async () => {
+    // ->> 는 JSON 객체/배열도 직렬화 문자열로 반환하므로, jsonb_typeof='string'
+    // 조건 없는 길이 술어는 비문자열 대형 필드를 후보로 잘못 고른다. cap 계약은
+    // 문자열 키만 절단하므로 그런 행은 매번 물리 UPDATE 만 하고(비멱등) 선별
+    // 순서가 가장 오래된 행부터라 batchRows 만큼의 후속 정상 행을 기아시킨다.
+    const bulkyObject = { data: "y".repeat(STORED_OUTPUT_TRUNCATE_THRESHOLD + 5_000) };
+    const base = Date.now() - 8 * DAY_MS;
+    const nonStringId = await fx.seedRun({
+      createdAt: new Date(base),
+      resultJson: { stdout: bulkyObject },
+    });
+    const normalId = await fx.seedRun({
+      createdAt: new Date(base + 1_000),
+      resultJson: { stdout: "z".repeat(STORED_OUTPUT_TRUNCATE_THRESHOLD + 1) },
+    });
+
+    const first = await runHeartbeatRunOutputRetention(fx.db, {
+      retentionDays: 7,
+      batchRows: 1,
+      maxBatchesPerCycle: 5,
+      isBackupActive: noBackup,
+    });
+
+    // 비문자열 행은 후보가 아니다 — 갱신 0건·건너뜀 기록도 아니며 후행 정상
+    // 행이 같은 사이클에 절단된다(기아 없음).
+    expect(first.skipped).toBeNull();
+    expect(first.batches).toBe(1);
+    expect(first.rowsTruncated).toBe(1);
+    expect((await fx.fetchRun(nonStringId)).resultJson).toEqual({ stdout: bulkyObject });
+    const truncated = await fx.fetchRun(normalId);
+    expect(String(truncated.resultJson?.stdout)).toContain("truncated");
+
+    // 멱등: 두 번째 패스는 아무것도 하지 않는다.
+    const second = await runHeartbeatRunOutputRetention(fx.db, {
+      retentionDays: 7,
+      batchRows: 1,
+      maxBatchesPerCycle: 5,
+      isBackupActive: noBackup,
+    });
+    expect(second.rowsTruncated).toBe(0);
+    expect(second.batches).toBe(0);
   });
 });

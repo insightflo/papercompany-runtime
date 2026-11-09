@@ -56,6 +56,14 @@ export const workflowRuns = pgTable(
     //   실제 drizzle check() 헬퍼로 등록한다(raw sql.as() 는 getTableConfig().checks 에 나타나지
     //   않아 §10 패리티 검증과 drizzle-kit 재생성이 실패했다). 0101 DDL 의미론 동일 보존.
     childStartLeasePairCk: check("workflow_runs_child_start_lease_pair_ck", sql`(${table.childStartToken} is null) = (${table.childStartLeaseExpiresAt} is null)`),
+    // [TS하드닝 #1 DB절반 2026-11-09] 0046이 CREATE TABLE 안에 인라인으로 만든
+    //   workflow_runs_status_check(pending/running/completed/failed/cancelled)를
+    //   스키마에도 명시해 제약-스키마 표류를 해소한다. 값 목록 = 코드가 실제로
+    //   workflow_runs.status 에 쓰는 값 ∪ 운영 실측값 대조 확정. 'canceled'/'aborted'/
+    //   'timed-out' 은 코드 읽기용 종결집합에만 있고 이 컬럼에 쓰지 않으므로 제외.
+    //   새 상태값 추가 시 반드시 마이그레이션과 함께 이 목록을 갱신한다.
+    statusCheck: check("workflow_runs_status_check", sql`${table.status} in
+    ('pending','running','completed','failed','cancelled')`),
     workflowIdIdx: index("idx_workflow_runs_workflow_id").on(table.workflowId),
     companyIdMissionIdIdx: index("idx_workflow_runs_company_id_mission_id").on(
       table.companyId,

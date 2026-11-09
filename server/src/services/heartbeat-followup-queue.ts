@@ -17,8 +17,8 @@ import { shouldNoOpOversightWakeup } from "./missions/recovery-ownership-guard.j
 import { assertMissionRuntimeAcceptsWork } from "./missions/mission-runtime-manager.js";
 import type { FollowupContextInput, FollowupTx, HeartbeatFollowupPromotionDeps, QueuedWakeupPromotionInput } from "./heartbeat-followup-promotion.js";
 import { selectQueuedWakeupRequestIds } from "./quality/native-wake.js";
-import { deliverPauseResume, selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
-import { recheckPauseQuiescence } from "./heartbeat-pause-quiescence.js";
+import { selectPauseResumeCandidates } from "./heartbeat-pause-delivery.js";
+import { attemptPauseResumeDelivery } from "./heartbeat-pause-terminal-mission.js";
 import { writeSkippedWakeupRequest } from "./quality/heartbeat-admission.js";
 import { operatorApprovalWaitService } from "./operator-approval-wait.js";
 export { selectDeferredWakeupRequest } from "./quality/native-wake.js";
@@ -82,15 +82,9 @@ export async function promoteQueuedWakeupRequestsForAgent(
   if (!is(db, PgTransaction) && promotedRuns.length < limit) {
     for (const candidate of await selectPauseResumeCandidates(db, agent.id)) {
       if (promotedRuns.length >= limit) break;
-      try {
-        if (!await recheckPauseQuiescence(db, candidate.id)) continue;
-        const child = await deliverPauseResume(db, candidate.id);
-        // A concurrent winner may already be running: never present it as a new claim/start.
-        if (child?.status === "queued") promotedRuns.push(child);
-      } catch (err) {
-        // The writer rolled back. Preserve intent and allow independent ordinary work to proceed.
-        logger.warn({ err, agentId: agent.id, pauseReceiptId: candidate.id }, "pause resume delivery deferred");
-      }
+      const child = await attemptPauseResumeDelivery(db, agent.id, candidate.id);
+      // A concurrent winner may already be running: never present it as a new claim/start.
+      if (child?.status === "queued") promotedRuns.push(child);
     }
   }
   if (!is(db, PgTransaction) && promotedRuns.length < limit && deps.promoteDeferredOwner) {
