@@ -360,10 +360,13 @@ export async function createApp(
     registerStop(name, () => owner.stop());
     ownerDrains.set(name, () => owner.drain());
   };
-  const registerOptionalOwner = (name: string, owner: { stop(): void; drain?: () => Promise<void> } | null) => {
+  // [G2 drain 필수화] 선택적 루프도 활성화되었으면 drain 을 반드시 노출해야 한다(컴파일 타임 강제).
+  // 런타임 fail-closed 가드(아래 typeof 검사 + missingOptionalDrains)는 타입을 우회한
+  // 등록(예: 테스트 목업·JS 호출자)에 대한 방어로 그대로 유지한다(#685 계약 불변).
+  const registerOptionalOwner = (name: string, owner: ShutdownOwner | null) => {
     if (!owner) return;
     registerStop(name, () => owner.stop());
-    if (typeof owner.drain === "function") ownerDrains.set(name, () => owner.drain!());
+    if (typeof owner.drain === "function") ownerDrains.set(name, () => owner.drain());
     else missingOptionalDrains.add(name);
   };
 

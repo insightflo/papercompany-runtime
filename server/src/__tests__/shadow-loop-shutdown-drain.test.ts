@@ -18,7 +18,31 @@ import { startRuntimeShutdownProcessFixture } from "./helpers/runtime-shutdown-p
 const PRIOR_ENV = {
   PAPERCLIP_JUDGMENT_ENABLED: process.env.PAPERCLIP_JUDGMENT_ENABLED,
   AGENT_WIKI_EVOLUTION_ENABLED: process.env.AGENT_WIKI_EVOLUTION_ENABLED,
+  TEST_WIKI_LOOP_OMIT_DRAIN: process.env.TEST_WIKI_LOOP_OMIT_DRAIN,
 };
+
+// [G2 drain 필수화] app.ts 의 registerOptionalOwner 는 이제 drain 을 컴파일 타임에
+// 필수로 요구한다. 런타임 fail-closed 가드(타입을 우회한 등록 방어)는 그대로이므로,
+// TEST_WIKI_LOOP_OMIT_DRAIN=1 이면 런타임에 drain 이 없는 위키 루프(타입 무시 시뮬레이션)
+// 를 주입해 그 정책이 계속 작동함을 검증한다. 플래그가 없으면 실제 팩터리를 그대로 쓴다.
+vi.mock("../services/agent-skill-optimizer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/agent-skill-optimizer.js")>();
+  return {
+    ...actual,
+    createAgentWikiEvolutionLoop: (
+      ...args: Parameters<typeof actual.createAgentWikiEvolutionLoop>
+    ) => {
+      const loop = actual.createAgentWikiEvolutionLoop(...args);
+      if (process.env.TEST_WIKI_LOOP_OMIT_DRAIN !== "1") return loop;
+      return {
+        start: loop.start,
+        stop: loop.stop,
+        evolve: loop.evolve,
+        getState: loop.getState,
+      } as typeof loop;
+    },
+  };
+});
 
 function restoreEnv(): void {
   for (const [key, value] of Object.entries(PRIOR_ENV)) {
@@ -183,6 +207,7 @@ describe("shadow loops shutdown owner drain contract", () => {
   it("drains and disposes createApp cleanly when PAPERCLIP_JUDGMENT_ENABLED=1", async () => {
     process.env.PAPERCLIP_JUDGMENT_ENABLED = "1";
     delete process.env.AGENT_WIKI_EVOLUTION_ENABLED;
+    delete process.env.TEST_WIKI_LOOP_OMIT_DRAIN;
     try {
       const app = await createApp(f.db, {
         uiMode: "none",
@@ -204,9 +229,37 @@ describe("shadow loops shutdown owner drain contract", () => {
     }
   }, 60_000);
 
-  it("preserves app.ts fail-closed policy when an enabled optional owner lacks drain()", async () => {
+  it("drains the enabled agent-wiki-evolution owner cleanly now that drain is required (G2)", async () => {
     process.env.PAPERCLIP_JUDGMENT_ENABLED = "0";
     process.env.AGENT_WIKI_EVOLUTION_ENABLED = "1";
+    delete process.env.TEST_WIKI_LOOP_OMIT_DRAIN; // 실제 팩터리(드레인 노출) 경로
+    try {
+      const app = await createApp(f.db, {
+        uiMode: "none",
+        serverPort: 3100,
+        storageService: {} as never,
+        deploymentMode: "local_trusted",
+        deploymentExposure: "private",
+        allowedHostnames: [],
+        bindHost: "127.0.0.1",
+        authReady: true,
+        companyDeletionEnabled: false,
+        localPluginDir: pluginDir,
+      });
+
+      await expect(app.runtimeShutdown.drain()).resolves.toBeUndefined();
+      await expect(app.runtimeShutdown.dispose()).resolves.toBeUndefined();
+    } finally {
+      restoreEnv();
+    }
+  }, 60_000);
+
+  it("preserves app.ts fail-closed policy when a runtime owner lacks drain()", async () => {
+    process.env.PAPERCLIP_JUDGMENT_ENABLED = "0";
+    process.env.AGENT_WIKI_EVOLUTION_ENABLED = "1";
+    // 타입은 drain 을 필수로 요구하지만, 런타임 등록이 이를 우회한 경우(목업/JS 호출자)
+    // fail-closed 가드가 여전히 shutdown 을 실패시켜야 한다(#685 계약 불변).
+    process.env.TEST_WIKI_LOOP_OMIT_DRAIN = "1";
     try {
       const app = await createApp(f.db, {
         uiMode: "none",
