@@ -7365,7 +7365,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             .where(
               and(
                 eq(heartbeatRuns.companyId, issue.companyId),
-                await lifecycleInFlightClause(tx),
+                inArray(heartbeatRuns.status, ["queued", "running"]),
                 or(eq(heartbeatRuns.issueId, issue.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`),
               ),
             )
@@ -7685,7 +7685,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const activeRuns = await execDb
         .select()
         .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.agentId, agentId), await lifecycleInFlightClause(execDb)))
+        .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["queued", "running"])))
         .orderBy(desc(heartbeatRuns.createdAt));
 
       const mergeableRuns: Array<typeof heartbeatRuns.$inferSelect> = [];

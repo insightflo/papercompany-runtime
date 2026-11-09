@@ -27,6 +27,7 @@ import {
 import { hasActiveWorkflowReworkIteration } from "../services/workflow/rework-liveness.js";
 import { hasActiveWorkflowRetryRecoveryExecution } from "../services/workflow/retry-execution-state.js";
 import { hasBackingHeartbeatRun } from "../services/missions/mission-runtime-manager.js";
+import { sweepTerminalMissionOrphanRuns } from "../services/missions/terminal-mission-orphan-sweep.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -169,5 +170,29 @@ describeEP("lifecycle predicate unification (rework gate + in-flight occupancy)"
         .set({ experimental: { enableHeartbeatFinalizationV1: true } })
         .where(eq(instanceSettings.singletonKey, "default"));
     }
+  });
+
+  it("orphan sweep counts a run cancelled by its own cleanup (cancel domain stays literal)", async () => {
+    // agy 검수 수정 증거: countActiveRuns/후보 선별은 취소 대상 도메인 — in-flight 술어를
+    // 쓰면 V1 ON 에서 cleanup 이 방금 cancelled+미정산으로 둔 run 이 runsRemaining 에
+    // 잡혀 runsCancelled=0 이 되고 감사로그가 누락된다.
+    const [completedMission] = await db.insert(missions).values({
+      companyId, ownerAgentId: agentId, title: "done mission", status: "completed",
+      completedAt: new Date(Date.now() - 60 * MIN),
+    }).returning();
+    const [issue] = await db.insert(issues).values({
+      companyId, missionId: completedMission.id, title: "orphan issue", status: "in_progress",
+      assigneeAgentId: agentId,
+    }).returning();
+    const runId = await seedHeartbeat(db, {
+      companyId, agentId, issueId: issue.id, status: "queued", settledAt: null,
+    });
+    await db.update(heartbeatRuns)
+      .set({ updatedAt: new Date(Date.now() - 30 * MIN) })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await sweepTerminalMissionOrphanRuns(db, new Date());
+    expect(result.cancelledRuns).toBe(1);
+    expect(result.sweptMissions).toBe(1);
   });
 });
