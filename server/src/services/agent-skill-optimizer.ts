@@ -327,6 +327,7 @@ export interface AgentWikiEvolutionLoop {
   start: () => void;
   stop: () => void;
   evolve: (now?: Date) => Promise<void>;
+  drain: () => Promise<void>;
   getState: () => AgentWikiEvolutionLoopState;
 }
 
@@ -341,7 +342,8 @@ export interface CreateAgentWikiEvolutionLoopOptions {
  * [목적] createAgentWikiEvolutionLoop — wiki 자가진화 주기 루프. setInterval + tickInFlight 가드 +
  *   unref + per-tick try/catch(루퍼 불사). createNativeWorkflowReconciler 와 동일 구조.
  * [입력] { db, intervalMs?(기본 10분), passOptions?, runEvolutionPass?(주입용, 기본 runWikiEvolutionPass) }.
- * [출력] { start, stop, evolve, getState }. start 는 즉시 1회 evolve 후 interval arm(idempotent).
+ * [출력] { start, stop, evolve, drain, getState }. start 는 즉시 1회 evolve 후 interval arm(idempotent).
+ *   drain 은 진행 중 tick 을 바탕으로 대기하고 새 tick 을 스케줄하지 않는다(native-reconciler 계약 미러).
  * [주의] AGENT_WIKI_EVOLUTION_ENABLED off 시 app.ts 가 이 팩터리를 호출하지 않아 완전 inert.
  * [수정시 영향] intervalMs 변경은 진화 빈도/비용에 직결.
  */
@@ -355,10 +357,21 @@ export function createAgentWikiEvolutionLoop(
 
   let interval: ReturnType<typeof setInterval> | null = null;
   let tickInFlight = false;
+  const activeTasks = new Set<Promise<unknown>>();
   let tickCount = 0;
   let lastTickAt: string | null = null;
   let lastResult: WikiEvolutionPassResult | null = null;
   let lastError: string | null = null;
+
+  // createNativeWorkflowReconciler 와 동일 계약: 진행 중 tick 추적 후 drain 에서 완료 대기.
+  function trackTask<T>(task: Promise<T>): Promise<T> {
+    activeTasks.add(task);
+    void task.then(
+      () => activeTasks.delete(task),
+      () => activeTasks.delete(task),
+    );
+    return task;
+  }
 
   async function evolve(now = new Date()): Promise<void> {
     if (tickInFlight) {
@@ -387,9 +400,9 @@ export function createAgentWikiEvolutionLoop(
     start() {
       if (interval) return;
       log.info({ intervalMs }, "Agent wiki evolution loop started");
-      void evolve();
+      void trackTask(evolve());
       interval = setInterval(() => {
-        void evolve();
+        void trackTask(evolve());
       }, intervalMs);
       interval.unref?.();
     },
@@ -400,6 +413,11 @@ export function createAgentWikiEvolutionLoop(
       log.info({ intervalMs }, "Agent wiki evolution loop stopped");
     },
     evolve,
+    async drain() {
+      while (activeTasks.size > 0) {
+        await Promise.allSettled([...activeTasks]);
+      }
+    },
     getState() {
       return { running: interval !== null, tickCount, lastTickAt, lastResult, lastError };
     },

@@ -43,6 +43,16 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # [write-chokepoint static guard] heartbeat_runs/workflow_runs 직접 상태 쓰기(
+      # .update(heartbeatRuns|workflowRuns) 및 동등 raw SQL UPDATE)를 인가된 쓰기
+      # 계층(heartbeat-queue-lifecycle.ts, heartbeat-finalization/*)으로 강제한다.
+      # reboot-1107 §4.3 no-regret #1 — PR #679/#682 유형의 초크포인트 우회 재발 차단.
+      # --self-test 로 가드 자체의 탐지 능력(합성 bypass)을 매 실행마다 검증한다.
+      - name: Enforce run-status write chokepoint
+        run: |
+          node scripts/check-run-status-write-chokepoint.mjs --self-test
+          node scripts/check-run-status-write-chokepoint.mjs
+
       - name: Validate Dockerfile deps stage
         run: |
           missing=0
