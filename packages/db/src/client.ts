@@ -373,6 +373,23 @@ async function constraintExists(
   return rows[0]?.exists ?? false;
 }
 
+async function validatedConstraintExists(
+  sql: ReturnType<typeof postgres>,
+  constraintName: string,
+): Promise<boolean> {
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_constraint c
+      JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = 'public'
+        AND c.conname = ${constraintName}
+        AND c.convalidated
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
+}
+
 async function migrationStatementAlreadyApplied(
   sql: ReturnType<typeof postgres>,
   statement: string,
@@ -399,6 +416,13 @@ async function migrationStatementAlreadyApplied(
   const addConstraintMatch = normalized.match(/^ALTER TABLE "([^"]+)" ADD CONSTRAINT "([^"]+)"/i);
   if (addConstraintMatch) {
     return constraintExists(sql, addConstraintMatch[2]);
+  }
+
+  const validateConstraintMatch = normalized.match(
+    /^ALTER TABLE "([^"]+)" VALIDATE CONSTRAINT "([^"]+)"/i,
+  );
+  if (validateConstraintMatch) {
+    return validatedConstraintExists(sql, validateConstraintMatch[2]);
   }
 
   // If we cannot reason about a statement safely, require manual migration.

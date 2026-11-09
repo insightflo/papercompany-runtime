@@ -274,6 +274,19 @@ export function deduplicateAgentName(
   return `${candidateName} ${Date.now()}`;
 }
 
+/** [idle-def 2026-11-09 A] 슬롯 계산(countRunningRunsForAgent — lifecycleActiveClause)과 같은
+ * 기준으로 에이전트의 lifecycle-active run 수를 센다. resume 계열(manual/budget)이 표시 상태를
+ * 정할 때 쓴다 — 미정산 terminal v1 run 도 점유로 세므로 resume 직후 표시(idle/running)와
+ * 실제 점유가 어긋나지 않는다. 플래그 OFF 에서는 raw status='running' 카운트와 바이트 동일하다. */
+export async function countLifecycleActiveRunsForAgent(db: Db, agentId: string): Promise<number> {
+  const clause = await lifecycleActiveClause(db);
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.agentId, agentId), clause));
+  return Number(count ?? 0);
+}
+
 // [paperclip-stuck 2026-08-06, A1] On a cold server restart every in-memory process handle is
 // gone, but agents.status can still read 'running' from the DB (phantom running). The runtime
 // reaper (A2/B paths) only corrects this after its staleness windows elapse, so a restart can
@@ -281,6 +294,7 @@ export function deduplicateAgentName(
 // startup: any agent still marked 'running' with NO heartbeat_runs row still marked 'running'
 // cannot actually be executing (its handle is gone), so reset it to 'idle'. Agents that
 // genuinely own a running heartbeat run are left untouched.
+
 export async function reconcilePersistedAgentStatusOnStartup(db: Db) {
   // [C2 2026-11-08] 슬롯 계산(countRunningRunsForAgent — lifecycleActiveClause)과 같은 기준으로
   // 'running' 소유자를 판정한다. 미정산 terminal v1 run 을 가진 에이전트는 점유 중이므로
@@ -661,10 +675,15 @@ export function agentService(db: Db) {
         throw conflict("Pending approval agents cannot be resumed");
       }
 
+      // [idle-def 2026-11-09 A] resume 직후 표시를 슬롯 계산과 같은 기준(lifecycleActiveClause)으로
+      // 정한다. 미정산 terminal v1 run 이 아직 점유 중이면 idle 이 아니라 running 이어야 보드
+      // 표시와 실제 점유가 일치한다(시나리오 1). 점유는 이후 recovery 정산/종료 정리가 회수하며
+      // 그때 idle 로 정리된다. 플래그 OFF 에서는 raw running 카운트로 legacy 와 같은 결과를 낸다.
+      const activeCount = await countLifecycleActiveRunsForAgent(db, id);
       const updated = await db
         .update(agents)
         .set({
-          status: "idle",
+          status: activeCount > 0 ? "running" : "idle",
           pauseReason: null,
           pausedAt: null,
           updatedAt: new Date(),
