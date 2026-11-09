@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "declaration": false, "declarationMap": false },
+  "include": ["src"],
+  "files": [
+    "src/__tests__/engine-contract/helpers.ts",
+    "src/__tests__/engine-contract/seeds.ts",
+    "src/__tests__/engine-contract/01-terminal-cleanup.test.ts",
+    "src/__tests__/engine-contract/02-terminal-cancel-effect.test.ts",
+    "src/__tests__/engine-contract/03-orphan-reconcile.test.ts",
+    "src/__tests__/engine-contract/04-agent-occupancy.test.ts",
+    "src/__tests__/engine-contract/05-human-cards.test.ts",
+    "src/__tests__/engine-contract/06-retention.test.ts",
+    "src/__tests__/engine-contract/07-queue-writer.test.ts",
+    "src/__tests__/engine-contract/08-guards-drain.test.ts",
+    "src/__tests__/engine-contract/09-resume-contract.test.ts",
+    "src/__tests__/engine-contract/10-claim-unit.test.ts"
+  ]
+}
