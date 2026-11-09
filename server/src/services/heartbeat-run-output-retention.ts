@@ -12,23 +12,28 @@
  *   v1 종결화가 진행 중(finalization_version>0 & settled_at IS NULL)이 아닌 행.
  *   진행 중(queued/running)·미정산 실행은 절대 건드리지 않는다.
  * - 갱신: result_json 만. status·updated_at 등 다른 컬럼은 변경하지 않는다.
+ *   UPDATE 는 조건부: 선별 시점의 result_json 해시(md5(result_json::text))와
+ *   같을 때만 갱신해, 선별→갱신 사이에 재기록된 행은 건너뛴다(덮어쓰지 않음).
  * - 절단 표식: capHeartbeatRunResultJsonForStorage 와 동일(단일 소스 재사용).
  * - 주기: 하루 1회 이하(24h 간격, 기동 5분 후 첫 회). 프로세스 재시작이 같은 날
  *   스캔을 한 번 더 유발할 수 있으나 후보가 없으면 즉시 끝나는 멱등 스캔이다.
- * - 백업 보호: pg_dump(pg_stat_activity) 또는 인앱 백업 flight 실행 중에는
- *   건너뛴다(계획 §3-3: 백업과 동시 UPDATE 금지).
+ * - 백업 보호: 패스 시작 시뿐 아니라 **배치마다** pg_dump(pg_stat_activity)·
+ *   인앱 백업 flight 을 다시 확인해 도중 시작된 백업과 UPDATE 가 겹치지 않는다
+ *   (계획 §3-3). 확인 자체가 실패하면 그 패스를 중단한다(fail-closed + 경고).
  * - 배치: 한 번에 200행씩 짧은 행 단위 UPDATE 로 처리한다(긴 트랜잭션 없음).
  */
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { capHeartbeatRunResultJsonForStorage, STORED_OUTPUT_TRUNCATE_THRESHOLD } from "./heartbeat-run-summary.js";
-import { TERMINAL_HEARTBEAT_RUN_STATUS_VALUES } from "./heartbeat-run-status.js";
-import { isDatabaseBackupFlightActive } from "./database-backup-flight-state.js";
-
-export const DEFAULT_RUN_OUTPUT_RETENTION_DAYS = 7;
+import { capHeartbeatRunResultJsonForStorage } from "./heartbeat-run-summary.js";
+import {
+  defaultIsBackupActive,
+  resolveRunOutputRetentionDays,
+  resultJsonByteSize,
+  selectRetentionCandidates,
+} from "./heartbeat-run-output-retention-shared.js";
 
 const RETENTION_BATCH_ROWS = 200;
 // 사이클당 안전 밸브(200행 × 500배치 = 100,000행). 정상 운영은 훨씬 먼저 소진된다.
@@ -37,108 +42,12 @@ const RETENTION_MAX_BATCHES_PER_CYCLE = 500;
 export const RUN_OUTPUT_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RUN_OUTPUT_RETENTION_INITIAL_DELAY_MS = 5 * 60 * 1000;
 
-export type RunOutputRetentionSetting = {
-  enabled: boolean;
-  days: number;
-};
-
-/**
- * PAPERCLIP_RUN_OUTPUT_RETENTION_DAYS 해석.
- * - 미설정 → 기본 7일(활성).
- * - '0'·'off'·'false'(대소문자 무관) → 비활성.
- * - 숫자 1 이상 → 정수로 절사해 사용.
- * - 숫자 아님·1 미만(0 제외) → 기본 7일 + 경고(onInvalid 1회).
- */
-export function resolveRunOutputRetentionDays(
-  raw: string | undefined,
-  onInvalid?: (reason: string) => void,
-): RunOutputRetentionSetting {
-  const text = (raw ?? "").trim();
-  if (text === "") return { enabled: true, days: DEFAULT_RUN_OUTPUT_RETENTION_DAYS };
-  const lowered = text.toLowerCase();
-  if (text === "0" || lowered === "off" || lowered === "false") {
-    return { enabled: false, days: DEFAULT_RUN_OUTPUT_RETENTION_DAYS };
-  }
-  const parsed = Number(text);
-  if (Number.isFinite(parsed) && parsed === 0) {
-    return { enabled: false, days: DEFAULT_RUN_OUTPUT_RETENTION_DAYS };
-  }
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    onInvalid?.(
-      `Invalid PAPERCLIP_RUN_OUTPUT_RETENTION_DAYS '${text}'; ` +
-        `falling back to default ${DEFAULT_RUN_OUTPUT_RETENTION_DAYS} days`,
-    );
-    return { enabled: true, days: DEFAULT_RUN_OUTPUT_RETENTION_DAYS };
-  }
-  return { enabled: true, days: Math.trunc(parsed) };
-}
-
-function extractRows(result: unknown): Record<string, unknown>[] {
-  const rows = (result as unknown as { rows?: Record<string, unknown>[] }).rows
-    ?? (result as unknown as Record<string, unknown>[] | undefined);
-  return Array.isArray(rows) ? rows : [];
-}
-
-/**
- * pg_stat_activity 에서 이 DB 로 접속 중인 pg_dump 백엔드 수.
- * 외부 백업(A1 systemd papercompany-db-backup.service 등) 탐지용.
- * application_name 은 PostgreSQL 10+ 에서 모든 역할에게 보인다.
- */
-export async function countPgDumpBackends(db: Db): Promise<number> {
-  const result = await db.execute(sql`
-    SELECT count(*)::int AS n
-    FROM pg_stat_activity
-    WHERE application_name LIKE 'pg_dump%'
-  `);
-  const rows = extractRows(result);
-  return Number(rows[0]?.n ?? 0);
-}
-
-async function defaultIsBackupActive(db: Db): Promise<boolean> {
-  if (isDatabaseBackupFlightActive()) return true;
-  try {
-    return (await countPgDumpBackends(db)) > 0;
-  } catch (err) {
-    // 가시성 권한 등으로 조회 자체가 실패한 경우: 이 확인은 보호 계층이며, 배포
-    // 시퀀스(백업 → 재시작 → 5분 후 첫 회)가 이미 충돌을 회피하므로 진행한다.
-    logger.warn({ err }, "Heartbeat run output retention: pg_stat_activity backup check failed; proceeding");
-    return false;
-  }
-}
-
-type RetentionCandidate = {
-  id: string;
-  resultJson: Record<string, unknown>;
-};
-
-async function selectRetentionCandidates(db: Db, cutoff: Date, limit: number): Promise<RetentionCandidate[]> {
-  const statuses = sql.join(
-    TERMINAL_HEARTBEAT_RUN_STATUS_VALUES.map((status) => sql`${status}`),
-    sql`, `,
-  );
-  const result = await db.execute(sql`
-    SELECT h.id AS id, h.result_json AS "resultJson"
-    FROM heartbeat_runs h
-    WHERE h.created_at < ${cutoff.toISOString()}::timestamptz
-      AND h.status IN (${statuses})
-      AND NOT (h.finalization_version > 0 AND h.settled_at IS NULL)
-      AND jsonb_typeof(h.result_json) = 'object'
-      AND (length(h.result_json->>'stdout') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD}
-        OR length(h.result_json->>'stderr') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD})
-    ORDER BY h.created_at
-    LIMIT ${limit}
-  `);
-  return extractRows(result).map((row) => ({
-    id: String(row.id),
-    resultJson: (row.resultJson ?? {}) as Record<string, unknown>,
-  }));
-}
-
-function resultJsonByteSize(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
-}
-
 export type RunOutputRetentionResult = {
+  /**
+   * "backup" 은 백업 활성(또는 확인 불가 — fail-closed)으로 패스가 시작 전
+   * 건너뛰었거나 도중 중단됐음을 뜻한다. 도중 중단이면 이미 처리한
+   * rowsTruncated/batches 는 그대로 남는다.
+   */
   skipped: "disabled" | "spaced" | "backup" | null;
   rowsTruncated: number;
   bytesSaved: number;
@@ -149,6 +58,8 @@ export type RunOutputRetentionOptions = {
   retentionDays: number;
   now?: () => Date;
   isBackupActive?: (db: Db) => Promise<boolean>;
+  /** 배치당 행 수(기본 200). 시험용 튜닝 — 운영 경로는 기본값을 쓴다. */
+  batchRows?: number;
 };
 
 /**
@@ -159,23 +70,47 @@ export async function runHeartbeatRunOutputRetention(
   db: Db,
   opts: RunOutputRetentionOptions,
 ): Promise<RunOutputRetentionResult> {
-  const { retentionDays, now = () => new Date(), isBackupActive = defaultIsBackupActive } = opts;
+  const {
+    retentionDays,
+    now = () => new Date(),
+    isBackupActive = defaultIsBackupActive,
+    batchRows = RETENTION_BATCH_ROWS,
+  } = opts;
   if (retentionDays < 1) {
     return { skipped: "disabled", rowsTruncated: 0, bytesSaved: 0, batches: 0 };
-  }
-  if (await isBackupActive(db)) {
-    logger.info(
-      { retentionDays },
-      "Heartbeat run output retention: skipped while a database backup is running",
-    );
-    return { skipped: "backup", rowsTruncated: 0, bytesSaved: 0, batches: 0 };
   }
   const cutoff = new Date(now().getTime() - retentionDays * 24 * 60 * 60 * 1000);
   let rowsTruncated = 0;
   let bytesSaved = 0;
   let batches = 0;
   for (;;) {
-    const candidates = await selectRetentionCandidates(db, cutoff, RETENTION_BATCH_ROWS);
+    // 배치마다 백업 실행 여부를 다시 확인한다. 확인 자체가 실패하면 확인 불가
+    // 상태로 UPDATE 하지 않도록 그 패스를 중단한다(fail-closed).
+    let backupActive: boolean;
+    try {
+      backupActive = await isBackupActive(db);
+    } catch (err) {
+      logger.warn(
+        { err, batches, rowsTruncated },
+        "Heartbeat run output retention: backup check failed; aborting pass (fail-closed)",
+      );
+      return { skipped: "backup", rowsTruncated, bytesSaved, batches };
+    }
+    if (backupActive) {
+      if (batches === 0 && rowsTruncated === 0) {
+        logger.info(
+          { retentionDays },
+          "Heartbeat run output retention: skipped while a database backup is running",
+        );
+      } else {
+        logger.warn(
+          { retentionDays, batches, rowsTruncated },
+          "Heartbeat run output retention: aborting pass; a database backup started mid-cycle",
+        );
+      }
+      return { skipped: "backup", rowsTruncated, bytesSaved, batches };
+    }
+    const candidates = await selectRetentionCandidates(db, cutoff, batchRows);
     if (candidates.length === 0) break;
     for (const candidate of candidates) {
       const capped = capHeartbeatRunResultJsonForStorage(candidate.resultJson);
@@ -183,14 +118,27 @@ export async function runHeartbeatRunOutputRetention(
       if (capped === candidate.resultJson) continue;
       const before = resultJsonByteSize(candidate.resultJson);
       const after = resultJsonByteSize(capped);
-      await db.update(heartbeatRuns)
+      // 조건부 UPDATE: 선별 시점 result_json 해시와 같을 때만 갱신한다.
+      // 사이에 재기록된 행은 해시가 달라 0행이 갱신되고 건너뛴다.
+      const applied = await db.update(heartbeatRuns)
         .set({ resultJson: capped })
-        .where(eq(heartbeatRuns.id, candidate.id));
+        .where(and(
+          eq(heartbeatRuns.id, candidate.id),
+          sql`md5(${heartbeatRuns.resultJson}::text) = ${candidate.resultHash}`,
+        ))
+        .returning({ id: heartbeatRuns.id });
+      if (applied.length === 0) {
+        logger.info(
+          { runId: candidate.id },
+          "Heartbeat run output retention: row rewritten after selection; skipped",
+        );
+        continue;
+      }
       rowsTruncated += 1;
       bytesSaved += Math.max(before - after, 0);
     }
     batches += 1;
-    if (candidates.length < RETENTION_BATCH_ROWS) break;
+    if (candidates.length < batchRows) break;
     if (batches >= RETENTION_MAX_BATCHES_PER_CYCLE) {
       logger.warn(
         { batches, rowsTruncated },
@@ -301,3 +249,13 @@ export function createHeartbeatRunOutputRetentionJob(
 
   return { start, stop, drain, runPass, setting };
 }
+
+// split 이전 공개 표면 유지: 설정 해석·백업 탐지 심볼은 shared 파일의 단일
+// 구현을 재수출한다(테스트·외부 참조가 같은 선언을 본다).
+export {
+  countPgDumpBackends,
+  DEFAULT_RUN_OUTPUT_RETENTION_DAYS,
+  defaultIsBackupActive,
+  resolveRunOutputRetentionDays,
+} from "./heartbeat-run-output-retention-shared.js";
+export type { RunOutputRetentionSetting } from "./heartbeat-run-output-retention-shared.js";
