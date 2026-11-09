@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { and, asc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { revisionBoardWaitingMissionIds } from "./revision-board-wait.js";
 import { asRecord, trimmedString } from "./supervision-helpers.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 export async function loadActiveSupervisionData(db: Db, companyId: string, rowMissionIds: string[], staleCutoff: Date) {
       const staleFailedHeartbeatMissionIds = new Set(
@@ -57,7 +58,7 @@ export async function loadActiveSupervisionData(db: Db, companyId: string, rowMi
           .where(and(
             eq(issues.companyId, companyId),
             inArray(issues.missionId, rowMissionIds),
-            inArray(heartbeatRuns.status, ["queued", "running"]),
+            await lifecycleInFlightClause(db),
           )))
           .map((row) => row.missionId)
           .filter((missionId): missionId is string => Boolean(missionId)))

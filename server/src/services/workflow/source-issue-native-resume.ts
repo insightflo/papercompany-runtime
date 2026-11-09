@@ -28,10 +28,10 @@ import { queueSourceIssueResume } from "./source-issue-recovery-accept.js";
 import { applyOwnerCapOverrideRetry } from "./source-issue-cap-override.js";
 import { recoverOwnerCapOverride } from "./source-issue-cap-override-recovery.js";
 import { findExistingWorkflowResumeWake } from "../workflow-resume-wake.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 // "live" 실행 신호 상태 집합 — owner-action-unblock-handback.ts 와 동일. 이 상태의 wake/heartbeat 보유 시 중복 dispatch 금지.
 const LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution", "coalesced"] as const;
-const LIVE_HEARTBEAT_STATUSES = ["queued", "running"] as const;
 
 // 검증 실패 이유 — report-only 증거로 report comment 에 기록된다.
 export type SourceIssueNativeResumeReportReason =
@@ -242,7 +242,7 @@ export async function dispatchSourceIssueNativeResume(
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
       eq(heartbeatRuns.issueId, input.issueId),
-      inArray(heartbeatRuns.status, [...LIVE_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
     ))
     .limit(1);
   if (liveHeartbeat) {

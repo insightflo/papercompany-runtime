@@ -10,6 +10,7 @@ import {
   buildMissionOwnerDecisionWakeupDispatchedMarker,
   buildMissionOwnerDecisionWakeupIdempotencyKey,
 } from "./mission-owner-recovery-events.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { summarizeOwnerDecisionNotApplied } from "./mission-owner-recovery-comments.js"; import type { SystemLanguage } from "./system-language.js";
 import {
@@ -261,7 +262,7 @@ export async function applyAutomaticReassignSourceIssue(input: {
       inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]))).limit(1);
   const [liveHeartbeat] = await input.db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.issueId, input.issueId),
-      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+      await lifecycleInFlightClause(input.db))).limit(1);
   if (liveSignal || liveHeartbeat) return fail("reassign_target_in_flight"); // 같은 업무 병렬 시작 금지 — 정확한 대기
   const [targetAgent] = await input.db.select({ id: agents.id, name: agents.name, status: agents.status,
     adapterType: agents.adapterType, runtimeConfig: agents.runtimeConfig, metadata: agents.metadata })

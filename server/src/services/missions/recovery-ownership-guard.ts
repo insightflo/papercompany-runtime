@@ -8,9 +8,9 @@ import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import { isQaLikeStep } from "./supervision-helpers.js";
 import { loadExecutionDefinition } from "../workflow/execution-definition.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 export const RECOVERY_WAKEUP_STATUSES = ["queued", "claimed"] as const;
-export const RECOVERY_HEARTBEAT_STATUSES = ["queued", "running"] as const;
 export const RECOVERY_WAKEUP_REASONS = [
   "mission_validation_request_changes",
   "mission_owner_retry_source_issue",
@@ -62,7 +62,7 @@ export async function resolveRecoveryOwnership(db: Db, input: RecoveryOwnershipI
     .from(heartbeatRuns)
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
-      inArray(heartbeatRuns.status, [...RECOVERY_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
       inArray(heartbeatRuns.issueId, recoveryIssueIds),
     ))
     .limit(1)

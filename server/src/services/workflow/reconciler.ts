@@ -15,7 +15,10 @@ import { reconcileGraceWaitingControlNodes } from "./grace-waiting-control-node-
 import { reconcileWorkflowChildStepWaits } from "./workflow-child-execution.js";
 import { reconcileUnmaterializedChildStartTimeout } from "./workflow-child-start-recovery-timeout.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
-import { lifecycleActiveClause } from "../heartbeat-finalization/lifecycle-active.js";
+import {
+  lifecycleActiveClause,
+  lifecycleInFlightClause,
+} from "../heartbeat-finalization/lifecycle-active.js";
 import {
   isChildStartContention,
   isChildStartDatabaseTimeout,
@@ -123,6 +126,7 @@ export async function reconcileStuckWorkflowRuns(
       //   heartbeat 술어(status='running' 또는 terminal-unsettled v1)를 재사용한다. 살아 있는 실행은
       //   계속 보호되고, 아래 레거시 이슈/heartbeat 채널도 그대로 유지된다.
       const stepExecutionLiveness = await lifecycleActiveClause(db);
+      const heartbeatChannelLiveness = await lifecycleInFlightClause(db);
       const activeStep = await db
         .select({ id: workflowStepRuns.id })
         .from(workflowStepRuns)
@@ -149,7 +153,7 @@ export async function reconcileStuckWorkflowRuns(
               OR EXISTS (
                 SELECT 1 FROM ${heartbeatRuns}
                 WHERE ${heartbeatRuns.issueId} = ${workflowStepRuns.issueId}
-                  AND ${heartbeatRuns.status} IN ('queued', 'running')
+                  AND (${heartbeatChannelLiveness})
               )
             )`,
           ),

@@ -12,11 +12,11 @@ import {
 } from "@paperclipai/db";
 import { RECOVERY_UNBLOCK_ORIGIN_KIND } from "../missions/recovery-ownership-guard.js";
 import {
-  ACTIVE_HEARTBEAT_STATUSES,
   TERMINAL_ISSUE_STATUSES,
   type TerminalBoundaryDb,
   type TerminalStepRunRef,
 } from "./run-terminal-boundary-cause.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { readWorkflowRetryMetadata } from "./retry-metadata.js";
 
 export interface RecoveryChannelEvidence {
@@ -120,10 +120,12 @@ export async function evaluateRecoveryChannels(
     }
 
     // (c) 활성 heartbeat — 정산된 outcome 이 있으면 절대 열린 채널이 아니다.
+    // [predicate-unify] 생존 판정은 lifecycleInFlightClause: V1 ON 에서 terminal-but-unsettled
+    // (outcome 미기록) run 도 아직 열린 채널이다. OFF 에서는 IN ('queued','running') 과 동일.
     const heartbeatFilters = [
       eq(heartbeatRuns.companyId, input.companyId),
       inArray(heartbeatRuns.issueId, stepIssueIds),
-      inArray(heartbeatRuns.status, [...ACTIVE_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
       isNull(heartbeatRuns.terminalOutcome),
     ];
     if (input.triggerHeartbeatRunId) {

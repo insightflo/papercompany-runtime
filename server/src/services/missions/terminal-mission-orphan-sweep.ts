@@ -2,6 +2,7 @@ import { and, eq, inArray, lt } from "drizzle-orm";
 import { activityLog, heartbeatRuns, issues, missionAgentRuntimes, missions, type Db } from "@paperclipai/db";
 import { ACTIVE_MISSION_RUNTIME_STATUSES } from "./mission-runtime-manager.js";
 import { runMissionTerminalCleanup } from "./terminal-cleanup-fence.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 /**
  * [purpose] Slice-5 MISMATCH D: crash windows, missed transitions, and server restarts can
@@ -23,7 +24,7 @@ const SWEEP_BATCH_LIMIT = 25;
 async function countActiveRuns(db: Db, missionId: string): Promise<number> {
   return db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
     .innerJoin(issues, eq(issues.id, heartbeatRuns.issueId))
-    .where(and(eq(issues.missionId, missionId), inArray(heartbeatRuns.status, ["queued", "running"])))
+    .where(and(eq(issues.missionId, missionId), await lifecycleInFlightClause(db)))
     .then((rows) => rows.length);
 }
 
@@ -39,7 +40,7 @@ export async function sweepTerminalMissionOrphanRuns(
     .innerJoin(issues, eq(issues.id, heartbeatRuns.issueId))
     .innerJoin(missions, eq(missions.id, issues.missionId))
     .where(and(
-      inArray(heartbeatRuns.status, ["queued", "running"]),
+      await lifecycleInFlightClause(db),
       lt(heartbeatRuns.updatedAt, cutoff),
       inArray(missions.status, ["completed", "cancelled"]),
     ));

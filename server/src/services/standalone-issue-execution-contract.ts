@@ -6,6 +6,7 @@ import { companySkillService } from "./company-skills.js";
 import { mergeAgentConfig } from "./agents.js";
 import { hashStructuredValue } from "./issue-execution-cards/hash.js";
 import { listWorkflowToolCatalog } from "./workflow/tool-catalog.js";
+import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 
 type RecordValue = Record<string, unknown>;
 type IssueRow = typeof issues.$inferSelect;
@@ -54,7 +55,7 @@ async function stored(db: Db, companyId: string, issueId: string) {
   return db.select().from(issueExecutionCards).where(and(eq(issueExecutionCards.companyId, companyId), eq(issueExecutionCards.issueId, issueId))).limit(1).then((rows) => rows[0] ?? null);
 }
 async function active(db: Db, companyId: string, issueId: string) {
-  return db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, issueId), inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1).then((rows) => rows[0] ?? null);
+  return db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, issueId), await lifecycleInFlightClause(db))).limit(1).then((rows) => rows[0] ?? null);
 }
 function payload(value: unknown): Omit<StandaloneIssueExecutionCardV2, "version" | "executionMode" | "issue"> {
   const input = record(value);

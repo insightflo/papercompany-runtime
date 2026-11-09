@@ -1,8 +1,8 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
-const LIVE_HEARTBEAT_STATUSES = ["queued", "running"] as const;
 const DIRECT_LIVE_WAKEUP_STATUSES = ["queued", "claimed", "deferred_issue_execution"] as const;
 
 export interface WorkflowRetryExecutionStateInput {
@@ -39,7 +39,7 @@ export async function hasActiveWorkflowRetryRecoveryExecution(
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
       eq(heartbeatRuns.issueId, input.issueId),
-      inArray(heartbeatRuns.status, [...LIVE_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
     ))
     .limit(1);
 
@@ -71,7 +71,7 @@ export async function hasActiveWorkflowRetryRecoveryExecution(
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
       inArray(heartbeatRuns.id, coalescedRunIds),
-      inArray(heartbeatRuns.status, [...LIVE_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
     ))
     .limit(1);
 
@@ -114,7 +114,7 @@ export async function findAcceptedWorkflowRetryWakeEvidence(
     .where(and(
       eq(heartbeatRuns.companyId, input.companyId),
       inArray(heartbeatRuns.id, coalescedRunIds),
-      inArray(heartbeatRuns.status, [...LIVE_HEARTBEAT_STATUSES]),
+      await lifecycleInFlightClause(db),
     ))
     .limit(1);
 

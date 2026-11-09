@@ -9,6 +9,7 @@ import { buildMissionOwnerDecisionWakeupIdempotencyKey } from "./mission-owner-r
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { isQaLikeStep, resolveProducerStepIdFromDag } from "./supervision-helpers.js";
 import { isQaRecoveryLive, resolveRecoveryOwnership } from "./recovery-ownership-guard.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { readExactOwnerRetryHumanWait, type OwnerRetryHumanWaitContext,
   type OwnerRetryHumanWaitVerdict } from "./owner-retry-human-wait.js";
 
@@ -190,7 +191,7 @@ export async function applyAutomaticOwnerRetryIfClear(input: AutomaticOwnerRetry
     }
     const [activeHeartbeat] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.issueId, source.id),
-      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+      await lifecycleInFlightClause(tx))).limit(1);
     const failedHeartbeats = await tx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status,
       error: heartbeatRuns.error, errorCode: heartbeatRuns.errorCode, exitCode: heartbeatRuns.exitCode })
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.issueId, source.id)));
