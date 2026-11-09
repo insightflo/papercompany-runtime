@@ -5,6 +5,7 @@ import { conflict, unprocessable } from "../errors.js";
 import { hasMissionPlanQaCompletionLedger } from "./missions/mission-plan-qa-completion-gate.js";
 import { hasWorkflowValidationCompletionLedger } from "./workflow/validation-verdict-ledger.js";
 import { unblockIssueHasValidatedHandbackReport } from "./missions/owner-action-unblock-handback.js";
+import { ACTIVE_WORKFLOW_STEP_STATUS_CONDITION } from "./workflow/workflow-step-active-clause.js";
 
 export const TERMINAL_MISSION_STATUSES = new Set(["completed", "cancelled"]);
 
@@ -77,7 +78,7 @@ export async function assertCanCompleteMissionOversightIssue(db: Db, issue: type
     .where(and(
       eq(workflowRuns.companyId, issue.companyId),
       eq(workflowRuns.missionId, issue.missionId),
-      sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`,
+      ACTIVE_WORKFLOW_STEP_STATUS_CONDITION,
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);

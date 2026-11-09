@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import {
@@ -7,10 +7,11 @@ import {
 } from "./workflow-sync-source.js";
 import { readOwnResumeRequestId } from "./resume-scope-fence.js";
 import { readWorkflowReworkContract } from "./control-flow/rework-contract.js";
+import { ACTIVE_WORKFLOW_STEP_STATUS_CONDITION } from "./workflow-step-active-clause.js";
 
 type WorkflowStepRunWriteDb = Pick<Db, "select" | "update" | "insert" | "transaction">;
 
-const ACTIVE_STEP_STATUS_CONDITION = sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`;
+const ACTIVE_STEP_STATUS_CONDITION = ACTIVE_WORKFLOW_STEP_STATUS_CONDITION;
 
 export async function completeLinkedWorkflowStepRunsForIssue(input: {
   db: WorkflowStepRunWriteDb;

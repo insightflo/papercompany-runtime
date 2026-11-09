@@ -18,6 +18,7 @@ import { executeOwnerPlanAction, projectOwnerPlanActionResult } from "./mission-
 import { executeOwnerRecollect, preflightOwnerRecollect, projectOwnerRecollectResult } from "./mission-owner-recollect.js";
 import { executeOwnerDelegateFix, preflightOwnerDelegateFix, projectOwnerDelegateFixResult } from "./mission-owner-delegate-fix.js";
 import { executeOwnerReassign, preflightOwnerReassign, projectOwnerReassignResult } from "./mission-owner-reassign.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { executeOwnerUnblockPromotion } from "./mission-owner-promote-unblock.js";
 import { executeOwnerAdoptProducerEdits } from "./mission-owner-adopt-producer-edits.js";
 
@@ -111,7 +112,7 @@ export async function projectIssueActionResult(db: Db, companyId: string, missio
       eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.issueId, issueId), inArray(agentWakeupRequests.status, [...LIVE_WAKEUP_STATUSES]))).limit(1);
     const [liveHeartbeat] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, issueId),
-      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);    if (!liveWake && !liveHeartbeat) return { ...base, state: "delivery_pending", reasonCode: null, evidence };
+      await lifecycleInFlightClause(db))).limit(1);    if (!liveWake && !liveHeartbeat) return { ...base, state: "delivery_pending", reasonCode: null, evidence };
     return { ...base, state: "executing", reasonCode: null, evidence };
   }
   if (row.stepRun.status === "pending") return { ...base, state: "delivery_pending", reasonCode: null, evidence };

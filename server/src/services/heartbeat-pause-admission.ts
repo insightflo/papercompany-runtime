@@ -17,6 +17,7 @@ import { lockQualityAttemptBudget } from "./quality/retry-budget.js";
 import { readPolicyUsageTotals } from "./quality/policy-usage.js";
 import { qualityProducerRetryCount } from "./work-products/quality-producer-attempt.js";
 import { readQaCorrectionWakeRef } from "./work-products/qa-correction-producer-attempt.js";
+import { lifecycleActiveClause } from "./heartbeat-finalization/lifecycle-active.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Wake = typeof agentWakeupRequests.$inferSelect;
@@ -283,7 +284,7 @@ async function assertRuntime(tx: Db, run: Run, plan: Discovery, receipt: PauseRe
     || r.status === "cancelled" || (r.assigneeAgentId && r.assigneeAgentId !== run.agentId)
     || (!plan.qa && [r.executionRunId, r.checkoutRunId].some(id => id && !ids.includes(id))))) return reject();
   const live = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, run.companyId),
-    eq(heartbeatRuns.status, "running"), or(eq(heartbeatRuns.wakeupRequestId, run.wakeupRequestId!),
+    await lifecycleActiveClause(tx), or(eq(heartbeatRuns.wakeupRequestId, run.wakeupRequestId!),
       f ? eq(heartbeatRuns.workflowStepRunId, f.stepRunId) : undefined,
       run.issueId ? eq(heartbeatRuns.issueId, run.issueId) : undefined)));
   if (live.some(h => h.id !== run.id)) return reject();

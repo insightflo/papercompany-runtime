@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, agentWakeupRequests, workflowRuns, workflowStepRuns } from "@paperclipai/db";
+import { ACTIVE_WORKFLOW_STEP_STATUS_CONDITION } from "./workflow-step-active-clause.js";
 
 /**
  * [파일 목적] Task6c stale-generation result fence — resume run 의 결과 기록자(tool result,
@@ -130,7 +131,7 @@ export async function resolveHeartbeatResumeScopeFence(
   return { action: "allow" };
 }
 
-const ACTIVE_STEP_STATUS_CONDITION = sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`;
+const ACTIVE_STEP_STATUS_CONDITION = ACTIVE_WORKFLOW_STEP_STATUS_CONDITION;
 
 /**
  * issue 스코프 신원 검증: issue 에 link 된 active step run 이 resume run(run stamp 존재)이면,

@@ -15,6 +15,7 @@
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 
 export interface ExistingWorkflowResumeWake {
   id: string;
@@ -31,6 +32,7 @@ export async function findExistingWorkflowResumeWake(
   db: Db,
   input: { companyId: string; agentId: string; issueId: string },
 ): Promise<ExistingWorkflowResumeWake | null> {
+  const runLiveness = await lifecycleInFlightClause(db);
   return db
     .select({
       id: agentWakeupRequests.id,
@@ -55,9 +57,9 @@ export async function findExistingWorkflowResumeWake(
           sql`${agentWakeupRequests.payload} ->> 'mutation' = 'workflow_resume'`,
         ),
       ),
-      // liveness guard: runId 가 없거나(아직 run 미생성) 가리키는 run 이 queued/running 일
-      // 때만 "진행 중" 으로 인정. terminal run 은 커버하지 않는다.
-      sql`(${agentWakeupRequests.runId} is null or exists (select 1 from heartbeat_runs where id = ${agentWakeupRequests.runId} and status in ('queued','running')))`,
+      // liveness guard: runId 가 없거나(아직 run 미생성) 가리키는 run 이 lifecycle in-flight
+      // (queued/running + v1 미정산 terminal)일 때만 "진행 중" 으로 인정. 정산된 terminal run 은 커버하지 않는다.
+      sql`(${agentWakeupRequests.runId} is null or exists (select 1 from heartbeat_runs where id = ${agentWakeupRequests.runId} and ${runLiveness}))`,
     ))
     .limit(1)
     .then((rows) => rows[0] ?? null);
@@ -103,12 +105,13 @@ export async function findAcceptedWorkflowResumeWakeForStep(
   if (direct.length > 0) return direct;
   const coalesced = rows.filter((row) => row.runId);
   if (coalesced.length === 0) return [];
+  const coalescedRunLiveness = await lifecycleInFlightClause(db);
   const liveRuns = await db
     .select({ id: heartbeatRuns.id })
     .from(heartbeatRuns)
     .where(and(
       inArray(heartbeatRuns.id, coalesced.map((row) => row.runId!)),
-      inArray(heartbeatRuns.status, ["queued", "running"]),
+      coalescedRunLiveness,
     ));
   const liveRunIds = new Set(liveRuns.map((row) => row.id));
   return coalesced.filter((row) => row.runId && liveRunIds.has(row.runId));

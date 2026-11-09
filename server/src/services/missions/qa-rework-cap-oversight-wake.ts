@@ -13,6 +13,7 @@
 
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns, workflowTransitionEvents } from "@paperclipai/db";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { and, eq, inArray } from "drizzle-orm";
 import type { MissionRow } from "../missions.js";
 import type { MissionServiceDeps } from "../missions.js";
@@ -22,9 +23,6 @@ import type { IssueRow } from "./shared-types.js";
 const DIRECT_LIVE_STATUSES = ["queued", "claimed", "deferred_issue_execution"] as const;
 
 export type CapWakeOutcome = "dispatched" | "covered" | "failed";
-
-/** Accepted heartbeat run statuses. */
-const ACCEPTED_RUN_STATUSES = ["queued", "running"] as const;
 
 
 /**
@@ -57,7 +55,7 @@ export async function hasLiveWakeCoverage(
       .from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, companyId),
         inArray(heartbeatRuns.id, coalescedRunIds),
-        inArray(heartbeatRuns.status, [...ACCEPTED_RUN_STATUSES]),
+        await lifecycleInFlightClause(db),
       )).limit(1);
     if (liveCoalescedRun.length > 0) return true;
   }
@@ -67,7 +65,7 @@ export async function hasLiveWakeCoverage(
     .from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.issueId, issueId),
-      inArray(heartbeatRuns.status, [...ACCEPTED_RUN_STATUSES]),
+      await lifecycleInFlightClause(db),
     )).limit(1);
   return liveRun.length > 0;
 }
