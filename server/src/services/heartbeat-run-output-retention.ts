@@ -14,30 +14,38 @@
  * - 갱신: result_json 만. status·updated_at 등 다른 컬럼은 변경하지 않는다.
  *   UPDATE 는 조건부: 선별 시점의 result_json 해시(md5(result_json::text))와
  *   같을 때만 갱신해, 선별→갱신 사이에 재기록된 행은 건너뛴다(덮어쓰지 않음).
- * - 절단 표식: capHeartbeatRunResultJsonForStorage 와 동일(단일 소스 재사용).
+ * - 절단 표식: capHeartbeatRunResultJsonForStorage 와 같은 계약의 SQL 재현
+ *   (…-retention-write.ts — 큰 본문을 Node 로 가져오지 않고 DB 안에서 절단).
  * - 주기: 하루 1회 이하(24h 간격, 기동 5분 후 첫 회). 프로세스 재시작이 같은 날
  *   스캔을 한 번 더 유발할 수 있으나 후보가 없으면 즉시 끝나는 멱등 스캔이다.
  * - 백업 보호: 패스 시작 시뿐 아니라 **배치마다** pg_dump(pg_stat_activity)·
  *   인앱 백업 flight 을 다시 확인해 도중 시작된 백업과 UPDATE 가 겹치지 않는다
  *   (계획 §3-3). 확인 자체가 실패하면 그 패스를 중단한다(fail-closed + 경고).
- * - 배치: 한 번에 200행씩 짧은 행 단위 UPDATE 로 처리한다(긴 트랜잭션 없음).
+ * - 배치: 한 UPDATE 문당 최대 200행·256MiB(어느 쪽이든 먼저)의 짧은 갱신으로
+ *   처리한다(긴 트랜잭션 없음). 패스당 500배치·8GiB·15분 상한으로 한 사이클이
+ *   프로세스를 독점하지 않는다 — 나머지 행은 다음 사이클이 잇는다.
+ * - 메모리: 선별 SELECT 는 result_json 본문을 반환하지 않는다(id·md5·octet
+ *   길이만). Node 힙에는 배치의 작은 행 메타데이터만 살아남는다.
  */
 
-import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { heartbeatRuns } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
-import { capHeartbeatRunResultJsonForStorage } from "./heartbeat-run-summary.js";
 import {
   defaultIsBackupActive,
   resolveRunOutputRetentionDays,
-  resultJsonByteSize,
   selectRetentionCandidates,
+  type RetentionCandidate,
 } from "./heartbeat-run-output-retention-shared.js";
+import { truncateRetentionBatch } from "./heartbeat-run-output-retention-write.js";
 
 const RETENTION_BATCH_ROWS = 200;
-// 사이클당 안전 밸브(200행 × 500배치 = 100,000행). 정상 운영은 훨씬 먼저 소진된다.
+// UPDATE 한 문이 스캔·절단하는 후보 바이트 합 상한(문장당 WAL·작업량 제한).
+const RETENTION_BATCH_BYTES = 256 * 1024 * 1024;
+// 사이클당 안전 밸브(행 수·스캔 바이트·경과 시간). 정상 운영은 훨씬 먼저 소진되고,
+// 첫 도입 백로그 같은 대량 정리는 상한까지 처리 후 다음 사이클이 잇는다.
 const RETENTION_MAX_BATCHES_PER_CYCLE = 500;
+const RETENTION_MAX_CYCLE_BYTES = 8 * 1024 * 1024 * 1024;
+const RETENTION_MAX_CYCLE_MS = 15 * 60 * 1000;
 
 export const RUN_OUTPUT_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RUN_OUTPUT_RETENTION_INITIAL_DELAY_MS = 5 * 60 * 1000;
@@ -58,8 +66,16 @@ export type RunOutputRetentionOptions = {
   retentionDays: number;
   now?: () => Date;
   isBackupActive?: (db: Db) => Promise<boolean>;
-  /** 배치당 행 수(기본 200). 시험용 튜닝 — 운영 경로는 기본값을 쓴다. */
+  /** 선별 1회당 후보 행 수(기본 200). 시험용 튜닝 — 운영 경로는 기본값을 쓴다. */
   batchRows?: number;
+  /** UPDATE 한 문당 후보 바이트 합 상한(기본 256MiB). */
+  batchBytes?: number;
+  /** 사이클당 UPDATE 문 상한(기본 500). */
+  maxBatchesPerCycle?: number;
+  /** 사이클당 시도 바이트 상한(기본 8GiB) — 넘으면 나머지는 다음 사이클로. */
+  maxCycleBytes?: number;
+  /** 사이클당 경과 시간 상한(기본 15분) — 넘으면 나머지는 다음 사이클로. */
+  maxCycleMs?: number;
 };
 
 /**
@@ -75,15 +91,27 @@ export async function runHeartbeatRunOutputRetention(
     now = () => new Date(),
     isBackupActive = defaultIsBackupActive,
     batchRows = RETENTION_BATCH_ROWS,
+    batchBytes = RETENTION_BATCH_BYTES,
+    maxBatchesPerCycle = RETENTION_MAX_BATCHES_PER_CYCLE,
+    maxCycleBytes = RETENTION_MAX_CYCLE_BYTES,
+    maxCycleMs = RETENTION_MAX_CYCLE_MS,
   } = opts;
   if (retentionDays < 1) {
     return { skipped: "disabled", rowsTruncated: 0, bytesSaved: 0, batches: 0 };
   }
   const cutoff = new Date(now().getTime() - retentionDays * 24 * 60 * 60 * 1000);
+  const startedAt = Date.now();
   let rowsTruncated = 0;
   let bytesSaved = 0;
   let batches = 0;
+  let cycleBytes = 0;
+  // 선별 1회분의 잔여 후보 — UPDATE 문 안에서만 소진된다. CAS 불일치로 건너뛴
+  // 행은 다음 선별에서 제외해 재선택 정체를 막는다.
+  let pending: RetentionCandidate[] = [];
+  let lastPage = false;
+  const skippedIds: string[] = [];
   for (;;) {
+    if (pending.length === 0 && lastPage) break;
     // 배치마다 백업 실행 여부를 다시 확인한다. 확인 자체가 실패하면 확인 불가
     // 상태로 UPDATE 하지 않도록 그 패스를 중단한다(fail-closed).
     let backupActive: boolean;
@@ -110,42 +138,53 @@ export async function runHeartbeatRunOutputRetention(
       }
       return { skipped: "backup", rowsTruncated, bytesSaved, batches };
     }
-    const candidates = await selectRetentionCandidates(db, cutoff, batchRows);
-    if (candidates.length === 0) break;
-    for (const candidate of candidates) {
-      const capped = capHeartbeatRunResultJsonForStorage(candidate.resultJson);
-      // cap 함수는 미대상이면 동일 참조를 반환한다(방어 재확인).
-      if (capped === candidate.resultJson) continue;
-      const before = resultJsonByteSize(candidate.resultJson);
-      const after = resultJsonByteSize(capped);
-      // 조건부 UPDATE: 선별 시점 result_json 해시와 같을 때만 갱신한다.
-      // 사이에 재기록된 행은 해시가 달라 0행이 갱신되고 건너뛴다.
-      const applied = await db.update(heartbeatRuns)
-        .set({ resultJson: capped })
-        .where(and(
-          eq(heartbeatRuns.id, candidate.id),
-          sql`md5(${heartbeatRuns.resultJson}::text) = ${candidate.resultHash}`,
-        ))
-        .returning({ id: heartbeatRuns.id });
-      if (applied.length === 0) {
+    if (
+      batches >= maxBatchesPerCycle
+      || cycleBytes >= maxCycleBytes
+      || Date.now() - startedAt >= maxCycleMs
+    ) {
+      logger.warn(
+        { batches, rowsTruncated, cycleBytes, elapsedMs: Date.now() - startedAt },
+        "Heartbeat run output retention: hit per-cycle cap; remaining rows continue next cycle",
+      );
+      break;
+    }
+    if (pending.length === 0) {
+      if (lastPage) break;
+      pending = await selectRetentionCandidates(db, cutoff, batchRows, skippedIds);
+      if (pending.length === 0) break;
+      lastPage = pending.length < batchRows;
+    }
+    // 배치 바이트 상한 — 한 UPDATE 문이 담는 후보 바이트 합을 제한한다
+    // (행 하나가 상한을 넘어도 최소 1행은 처리해 정체하지 않는다).
+    let batchByteCount = 0;
+    let batchSize = 0;
+    while (
+      batchSize < pending.length
+      && (batchSize === 0 || batchByteCount + pending[batchSize].resultBytes <= batchBytes)
+    ) {
+      batchByteCount += pending[batchSize].resultBytes;
+      batchSize += 1;
+    }
+    const batch = pending.splice(0, batchSize);
+    const applied = await truncateRetentionBatch(db, batch);
+    const appliedIds = new Set(applied.map((row) => row.id));
+    const beforeBytes = new Map(batch.map((row) => [row.id, row.resultBytes]));
+    for (const candidate of batch) {
+      if (!appliedIds.has(candidate.id)) {
+        skippedIds.push(candidate.id);
         logger.info(
           { runId: candidate.id },
           "Heartbeat run output retention: row rewritten after selection; skipped",
         );
-        continue;
       }
+    }
+    for (const row of applied) {
       rowsTruncated += 1;
-      bytesSaved += Math.max(before - after, 0);
+      bytesSaved += Math.max((beforeBytes.get(row.id) ?? 0) - row.resultBytes, 0);
     }
     batches += 1;
-    if (candidates.length < batchRows) break;
-    if (batches >= RETENTION_MAX_BATCHES_PER_CYCLE) {
-      logger.warn(
-        { batches, rowsTruncated },
-        "Heartbeat run output retention: hit per-cycle batch cap; remaining rows continue next cycle",
-      );
-      break;
-    }
+    cycleBytes += batchByteCount;
   }
   logger.info(
     { rowsTruncated, bytesSaved, batches, retentionDays },
