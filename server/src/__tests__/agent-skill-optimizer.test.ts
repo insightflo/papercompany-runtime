@@ -130,4 +130,47 @@ describe("createAgentWikiEvolutionLoop (reconciler mechanics)", () => {
     loop.stop();
     expect(loop.getState().running).toBe(false);
   });
+
+  // [G2 drain 필수화] shutdown owner 계약: drain 은 진행 중 tick 의 완료를 기다린다
+  // (createNativeWorkflowReconciler 계약 미러). 새 tick 을 스케줄하지 않는 건 stop() 역할.
+  it("drain() waits for an in-flight tick and completes once it settles", async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const pass = async (): Promise<WikiEvolutionPassResult> => {
+      started = true;
+      await released;
+      return zero;
+    };
+    const loop = createAgentWikiEvolutionLoop({
+      db: null as unknown as Db,
+      runEvolutionPass: pass,
+      intervalMs: 60_000,
+    });
+    loop.start(); // 즉시 1회 evolve 시작
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toBe(true);
+
+    let drained = false;
+    const draining = loop.drain().then(() => {
+      drained = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(drained).toBe(false); // 진행 중 tick 이 drain 를 붙잡는다
+
+    release();
+    await draining;
+    expect(drained).toBe(true);
+    expect(loop.getState().tickCount).toBe(1);
+    loop.stop();
+  });
+
+  it("drain() resolves immediately when no tick is in flight", async () => {
+    const pass = async (): Promise<WikiEvolutionPassResult> => zero;
+    const loop = createAgentWikiEvolutionLoop({ db: null as unknown as Db, runEvolutionPass: pass });
+    await expect(loop.drain()).resolves.toBeUndefined();
+    loop.stop();
+  });
 });
