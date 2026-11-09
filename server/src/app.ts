@@ -85,6 +85,7 @@ import { createScheduler } from "./services/scheduler/index.js";
 import { createDeliveryRetryWorker } from "./services/srb/delivery-retry-worker.js";
 import { createNonceCleanupJob } from "./services/srb/nonce-cleanup.js";
 import { createAuditLogCleanupJob } from "./services/audit-log-cleanup.js";
+import { createHeartbeatRunOutputRetentionJob } from "./services/heartbeat-run-output-retention.js";
 import { createMissionOwnerSupervisionMonitor } from "./services/mission-owner-supervision-monitor.js";
 import { findExistingWorkflowResumeWake } from "./services/workflow-resume-wake.js";
 import { dispatchSourceIssueNativeResume } from "./services/workflow/source-issue-native-resume.js";
@@ -930,6 +931,13 @@ export async function createApp(
   const auditCleanup = createAuditLogCleanupJob(db);
   registerOwner("audit-log-cleanup", auditCleanup);
   if (!stopping) auditCleanup.start();
+
+  // [보존 절단 2026-11-09 승인] 오래된 종결 실행의 result_json stdout/stderr 를
+  // 신규 행 저장 계약과 같은 형식으로 절단하는 하루 1회 정리 작업(기본 7일,
+  // PAPERCLIP_RUN_OUTPUT_RETENTION_DAYS 로 조정·0/off 비활성화).
+  const runOutputRetention = createHeartbeatRunOutputRetentionJob(db);
+  registerOwner("heartbeat-run-output-retention", runOutputRetention);
+  if (!stopping) runOutputRetention.start();
 
   const missionOwnerMonitor = createMissionOwnerSupervisionMonitor(db, {
     onOwnerActionCreated: ({ mission, issue, sourceIssue, reason }) => {

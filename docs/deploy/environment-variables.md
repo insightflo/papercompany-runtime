@@ -88,6 +88,14 @@ All environment variables that papercompany uses for server configuration.
 | `PAPERCLIP_DB_BACKUP_RETENTION_DAYS` | `3` | Backup retention window |
 | `PAPERCLIP_DB_BACKUP_DIR` | — | Backup output directory |
 
+## Heartbeat Run Output Retention
+
+Truncates the `result_json` stdout/stderr of terminal heartbeat runs older than the retention window down to the stored-output contract (32KB head/tail with the same truncation marker written for new runs). Active runs (queued/running/unsettled) are never touched, and a pass is skipped while a database backup is running. Truncation is irreversible — full outputs remain only in the run-log files.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PAPERCLIP_RUN_OUTPUT_RETENTION_DAYS` | `7` | Age (days) after which terminal run outputs are truncated. `0` or `off` disables the job. Non-numeric or below 1 (other than 0) falls back to the default with a warning. |
+
 ## Heartbeat Scheduler
 
 | Variable | Default | Description |
