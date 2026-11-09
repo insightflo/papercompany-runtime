@@ -13,10 +13,22 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/server/index.ts",
-    "./ui": "./src/ui/index.ts",
-    "./cli": "./src/cli/index.ts"
+    ".": {
+      "paperclip-dist": "./dist/index.js",
+      "default": "./src/index.ts"
+    },
+    "./server": {
+      "paperclip-dist": "./dist/server/index.js",
+      "default": "./src/server/index.ts"
+    },
+    "./ui": {
+      "paperclip-dist": "./dist/ui/index.js",
+      "default": "./src/ui/index.ts"
+    },
+    "./cli": {
+      "paperclip-dist": "./dist/cli/index.js",
+      "default": "./src/cli/index.ts"
+    }
   },
   "publishConfig": {
     "access": "public",

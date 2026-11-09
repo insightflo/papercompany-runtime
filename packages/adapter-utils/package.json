@@ -13,8 +13,14 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./*": "./src/*.ts"
+    ".": {
+      "paperclip-dist": "./dist/index.js",
+      "default": "./src/index.ts"
+    },
+    "./*": {
+      "paperclip-dist": "./dist/*.js",
+      "default": "./src/*.ts"
+    }
   },
   "publishConfig": {
     "access": "public",
