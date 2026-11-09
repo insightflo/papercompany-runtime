@@ -60,46 +60,25 @@ describeRetentionDb("runHeartbeatRunOutputRetention hardening (embedded postgres
     });
     const rewritten = { stdout: "fresh output written after selection" };
     // 선별 후 갱신 직전에 다른 경로가 같은 행의 result_json 을 덮어쓴 상황을
-    // 재현한다: 첫 .update() 빌더가 await 될 때 재기록을 먼저 확정한 뒤 원래
-    // UPDATE 를 진행시킨다(drizzle 빌더는 await 시점에 실행된다).
+    // 재현한다: execute 호출 순서가 선별 SELECT → 배치 UPDATE 이므로 두 번째
+    // execute 직전에 재기록을 먼저 확정한 뒤 원래 UPDATE 를 진행시킨다.
+    let calls = 0;
     let intercepted = false;
     const racing = new Proxy(fx.db, {
       get(target, prop, receiver) {
-        if (prop !== "update") return Reflect.get(target, prop, receiver);
-        return (...args: unknown[]) => {
-          const builder = Reflect.get(target, prop).apply(target, args);
-          if (intercepted) return builder;
-          intercepted = true;
-          // 체인 메서드가 자기 자신이든 새 빌더 객체든 thenable 이면 프록시를
-          // 다시 씌워, await 시점의 then 이 반드시 재기록 다음에 오도록 한다.
-          const wrap = (obj: object): object => {
-            const handler: ProxyHandler<object> = {
-              get(bTarget, bProp) {
-                if (bProp === "then") {
-                  return (onFulfilled?: unknown, onRejected?: unknown) =>
-                    target
-                      .execute(sql`UPDATE heartbeat_runs SET result_json = ${JSON.stringify(rewritten)}::jsonb WHERE id = ${id}`)
-                      .then(() => (bTarget as PromiseLike<unknown>).then(
-                        onFulfilled as never,
-                        onRejected as never,
-                      ));
-                }
-                const value = Reflect.get(bTarget, bProp);
-                if (typeof value !== "function") return value;
-                return (...mArgs: unknown[]) => {
-                  const out = value.apply(bTarget, mArgs);
-                  if (out === bTarget) return proxied;
-                  if (out && typeof out === "object" && typeof (out as { then?: unknown }).then === "function") {
-                    return wrap(out as object);
-                  }
-                  return out;
-                };
-              },
-            };
-            const proxied = new Proxy(obj, handler);
-            return proxied;
-          };
-          return wrap(builder as object);
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== "execute") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args: unknown[]) => {
+          calls += 1;
+          if (!intercepted && calls === 2) {
+            intercepted = true;
+            await (target.execute as (q: ReturnType<typeof sql>) => Promise<unknown>)(
+              sql`UPDATE heartbeat_runs SET result_json = ${JSON.stringify(rewritten)}::jsonb WHERE id = ${id}`,
+            );
+          }
+          return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         };
       },
     }) as Db;

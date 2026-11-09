@@ -98,8 +98,8 @@ const WRITE_ALLOWLIST = new Map([
   ],
   // --- DATA: 상태 전이가 아닌 데이터 보존 정리 쓰기(신규 카테고리 2026-11-09) ----
   [
-    "server/src/services/heartbeat-run-output-retention.ts",
-    "DATA|보존 절단 정리 작업(2026-11-09 승인). result_json stdout/stderr 절단 전용 — 상태 전이 아님, status·updated_at 미갱신, 종결+보존일 초과 행만 대상. 기존 capHeartbeatRunResultJsonForStorage 계약 재사용.",
+    "server/src/services/heartbeat-run-output-retention-write.ts",
+    "DATA|보존 절단 정리 작업(2026-11-09 승인). result_json stdout/stderr 절단 전용 — 상태 전이 아님, status·updated_at 미갱신, 종결+보존일 초과 행만 대상. DB 내 절단 UPDATE(2026-11-09 OOM 수리 — 큰 본문을 Node 로 가져오지 않음), capHeartbeatRunResultJsonForStorage 계약의 SQL 재현.",
   ],
   // --- LEGACY: 현재 main 의 합법 사이트(신규 추가 금지, 단계적 수렴 대상) ----
   [

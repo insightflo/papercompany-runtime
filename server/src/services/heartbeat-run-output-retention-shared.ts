@@ -2,8 +2,8 @@
  * Heartbeat run 출력 보존 절단 — 설정 해석·후보 선별·백업 탐지 계층
  *
  * heartbeat-run-output-retention.ts 의 절단 사이클/스케줄이 이 파일의 순수
- * 조회 함수들을 사용한다(쓰기는 사이클 파일에만 있다 — write-chokepoint 가드의
- * DATA 허용 목록도 그 파일 하나).
+ * 조회 함수들을 사용한다(쓰기는 …-retention-write.ts 의 UPDATE 뿐 —
+ * write-chokepoint 가드의 DATA 허용 목록에도 그 파일만 등록한다).
  */
 
 import { sql } from "drizzle-orm";
@@ -51,7 +51,7 @@ export function resolveRunOutputRetentionDays(
   return { enabled: true, days: Math.trunc(parsed) };
 }
 
-function extractRows(result: unknown): Record<string, unknown>[] {
+export function extractRows(result: unknown): Record<string, unknown>[] {
   const rows = (result as unknown as { rows?: Record<string, unknown>[] }).rows
     ?? (result as unknown as Record<string, unknown>[] | undefined);
   return Array.isArray(rows) ? rows : [];
@@ -92,18 +92,36 @@ export async function defaultIsBackupActive(db: Db): Promise<boolean> {
 
 export type RetentionCandidate = {
   id: string;
-  resultJson: Record<string, unknown>;
   /** 선별 시점 result_json::text 의 md5 — 조건부 UPDATE 의 CAS 조건으로 사용. */
   resultHash: string;
+  /** 선별 시점 result_json::text 의 octet_length — 배치 바이트 상한·bytesSaved 계산용. */
+  resultBytes: number;
 };
 
-export async function selectRetentionCandidates(db: Db, cutoff: Date, limit: number): Promise<RetentionCandidate[]> {
+/**
+ * 후보 선별 — [OOM 수리] result_json 본문은 가져오지 않고 id·md5·바이트 길이만
+ * 반환한다(행당 수 MB × 배치 수백 행이 Node 힙에 파싱·보유되던 경로 차단).
+ * 절단은 …-retention-write.ts 의 UPDATE 가 DB 안에서 수행한다.
+ * excludedIds 는 같은 사이클 안에서 CAS 불일치로 건너뛴 행 — 다음 선별에서
+ * 제외해 가장 오래된 행이 계속 재선택되는 정체를 막는다.
+ */
+export async function selectRetentionCandidates(
+  db: Db,
+  cutoff: Date,
+  limit: number,
+  excludedIds: readonly string[] = [],
+): Promise<RetentionCandidate[]> {
   const statuses = sql.join(
     TERMINAL_HEARTBEAT_RUN_STATUS_VALUES.map((status) => sql`${status}`),
     sql`, `,
   );
+  const exclusion = excludedIds.length === 0
+    ? sql``
+    : sql`AND NOT (h.id = ANY(ARRAY[${sql.join(excludedIds.map((id) => sql`${id}`), sql`, `)}]::uuid[]))`;
   const result = await db.execute(sql`
-    SELECT h.id AS id, h.result_json AS "resultJson", md5(h.result_json::text) AS "resultHash"
+    SELECT h.id AS id,
+      md5(h.result_json::text) AS "resultHash",
+      octet_length(h.result_json::text) AS "resultBytes"
     FROM heartbeat_runs h
     WHERE h.created_at < ${cutoff.toISOString()}::timestamptz
       AND h.status IN (${statuses})
@@ -111,16 +129,13 @@ export async function selectRetentionCandidates(db: Db, cutoff: Date, limit: num
       AND jsonb_typeof(h.result_json) = 'object'
       AND (length(h.result_json->>'stdout') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD}
         OR length(h.result_json->>'stderr') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD})
+      ${exclusion}
     ORDER BY h.created_at
     LIMIT ${limit}
   `);
   return extractRows(result).map((row) => ({
     id: String(row.id),
-    resultJson: (row.resultJson ?? {}) as Record<string, unknown>,
     resultHash: String(row.resultHash ?? ""),
+    resultBytes: Number(row.resultBytes ?? 0),
   }));
-}
-
-export function resultJsonByteSize(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
 }
