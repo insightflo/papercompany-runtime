@@ -35,6 +35,7 @@ import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { runningProcesses } from "./adapters/index.js";
 import { runtimeExecutionLifecycle } from "./services/runtime-execution-lifecycle.js";
+import { beginDatabaseBackupFlight, endDatabaseBackupFlight } from "./services/database-backup-flight-state.js";
 import { loadEmbeddedPostgres, type EmbeddedPostgresInstance } from "./runtime/embedded-postgres-loader.js";
 
 type BetterAuthSessionUser = {
@@ -734,6 +735,9 @@ async function startServerWithRuntime(context: ServerShutdownContext): Promise<S
       }
       if (runtimeExecutionLifecycle.shutdownState()) return;
       const flight = (async () => {
+        // 인앱 백업 flight 를 공유 마커로 알린다(주기 정리 작업의 동시 UPDATE 자제,
+        // a1-opt-plan.md §3-3). 실패 여부와 무관하게 finally 에서 해제한다.
+        beginDatabaseBackupFlight();
         try {
           const result = await runDatabaseBackup({
             connectionString: activeDatabaseConnectionString,
@@ -753,6 +757,8 @@ async function startServerWithRuntime(context: ServerShutdownContext): Promise<S
           );
         } catch (err) {
           logger.error({ err, backupDir: config.databaseBackupDir }, "Automatic database backup failed");
+        } finally {
+          endDatabaseBackupFlight();
         }
       })();
       context.backupFlight = flight;

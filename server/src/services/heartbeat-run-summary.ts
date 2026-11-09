@@ -40,6 +40,9 @@ export function summarizeHeartbeatRunResultJson(
 //   임계값(70,000)은 절삭 본문(65,536+마커)보다 커서 재절삭되지 않는다.
 const STORED_OUTPUT_CAP_CHARS_PER_SIDE = 32 * 1024;
 const STORED_OUTPUT_TRUNCATE_THRESHOLD_CHARS = 70_000;
+// 보존 절단 정리(heartbeat-run-output-retention.ts)가 후보 선별 SQL 의 length 조건을
+// 이 계약과 단일 소스로 유지하기 위해 공개한다.
+export const STORED_OUTPUT_TRUNCATE_THRESHOLD = STORED_OUTPUT_TRUNCATE_THRESHOLD_CHARS;
 const STORED_OUTPUT_TEXT_KEYS = ["stdout", "stderr"] as const;
 
 // [경계 안전 2026-10-20] JS slice 는 UTF-16 코드 유닛 단위라 서로게이트 페어(이모지)를

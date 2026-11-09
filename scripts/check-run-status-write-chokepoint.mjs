@@ -96,6 +96,11 @@ const WRITE_ALLOWLIST = new Map([
     "server/src/services/heartbeat-finalization/owner-capability.ts",
     "CHOKEPOINT|§4.3 지정. executor owner capability release/claim 칼럼 기록",
   ],
+  // --- DATA: 상태 전이가 아닌 데이터 보존 정리 쓰기(신규 카테고리 2026-11-09) ----
+  [
+    "server/src/services/heartbeat-run-output-retention.ts",
+    "DATA|보존 절단 정리 작업(2026-11-09 승인). result_json stdout/stderr 절단 전용 — 상태 전이 아님, status·updated_at 미갱신, 종결+보존일 초과 행만 대상. 기존 capHeartbeatRunResultJsonForStorage 계약 재사용.",
+  ],
   // --- LEGACY: 현재 main 의 합법 사이트(신규 추가 금지, 단계적 수렴 대상) ----
   [
     "server/src/services/heartbeat.ts",
