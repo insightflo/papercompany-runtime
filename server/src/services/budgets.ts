@@ -23,6 +23,7 @@ import type {
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { countLifecycleActiveRunsForAgent } from "./agents.js";
 
 type ScopeRecord = {
   companyId: string;
@@ -260,10 +261,15 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
   async function resumeScopeFromBudget(policy: PolicyRow) {
     const now = new Date();
     if (policy.scopeType === "agent") {
+      // [idle-def 2026-11-09 A] 예산 resume 도 표시를 슬롯 계산과 같은 기준(lifecycleActiveClause)
+      // 으로 정한다. 미정산 terminal v1 run 이 아직 점유 중이면 idle 이 아니라 running(시나리오 2).
+      // 점유는 recovery 정산/종료 정리가 회수하며 그때 idle 로 정리된다. 플래그 OFF 에서는
+      // raw running 카운트로 legacy 와 같은 결과를 낸다.
+      const activeCount = await countLifecycleActiveRunsForAgent(db, policy.scopeId);
       await db
         .update(agents)
         .set({
-          status: "idle",
+          status: activeCount > 0 ? "running" : "idle",
           pauseReason: null,
           pausedAt: null,
           updatedAt: now,

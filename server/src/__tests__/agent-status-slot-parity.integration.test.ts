@@ -29,6 +29,12 @@ import {
 import { runMissionTerminalCleanup } from "../services/missions/terminal-cleanup-fence.js";
 import { recoverTerminalUnsettledRuns } from "../services/heartbeat-finalization/recovery.js";
 import { reconcilePersistedAgentStatusOnStartup } from "../services/agents.js";
+import { commitAgentResume } from "../services/heartbeat-agent-resume.js";
+import { budgetService } from "../services/budgets.js";
+import { demoteAgentStuckDetachedAgentStatus } from "../services/heartbeat.js";
+import { resetSafeTerminalAgents } from "../services/missions/terminal-cleanup-resources.js";
+import { agentWikiService } from "../services/agent-wiki.js";
+import { DETACHED_PROCESS_ERROR_CODE } from "../services/heartbeat-process-liveness.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -100,6 +106,36 @@ describeEP("agent status display matches lifecycle slot calculation", () => {
   const agentStatus = async (agentId: string) =>
     (await db.select({ status: agents.status }).from(agents).where(eq(agents.id, agentId)))[0]?.status;
 
+  // [idle-def 2026-11-09] 시나리오 시험용 최소 run fixture. seedMissionRun 과 같은 필수 컬럼만
+  // 채우고 상태/에러코드/정산 상태는 호출부가 지정한다.
+  async function insertRun(
+    target: ReturnType<typeof createDb>,
+    agentCompanyId: string,
+    agentId: string,
+    overrides: {
+      status: "queued" | "running" | "cancelled";
+      errorCode?: string | null;
+      finalizationVersion?: number;
+      finishedAt?: Date | null;
+    },
+  ): Promise<{ id: string; agentId: string; companyId: string }> {
+    const runId = randomUUID();
+    await target.insert(heartbeatRuns).values({
+      id: runId, companyId: agentCompanyId, agentId, issueId: null, invocationSource: "assignment",
+      triggerDetail: "system", status: overrides.status, wakeupRequestId: null,
+      workflowStepRunId: null, workflowExecutionGeneration: null,
+      executionScopeKind: "issue_nonworkflow",
+      errorCode: overrides.errorCode ?? null,
+      finalizationVersion: overrides.finalizationVersion ?? 1, executionEpoch: 0,
+      executionToken: randomUUID(),
+      executorOwnerId: "default", executorOwnerLeaseEpoch: 1, executorOwnerLeaseToken: randomUUID(),
+      executorOwnerLeaseExpiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      finishedAt: overrides.finishedAt ?? (overrides.status === "running" ? null : new Date()),
+      processPid: null,
+    } as never);
+    return { id: runId, agentId, companyId: agentCompanyId };
+  }
+
   it("mission terminal cleanup keeps the agent non-idle while the cancelled v1 run still occupies a slot", async () => {
     const agentId = await seedAgent("Cleanup parity agent");
     const seed = await seedMissionRun(db, companyId, agentId);
@@ -162,5 +198,108 @@ describeEP("agent status display matches lifecycle slot calculation", () => {
     await reconcilePersistedAgentStatusOnStartup(offDb);
     const status = (await offDb.select({ status: agents.status }).from(agents).where(eq(agents.id, offAgentId)))[0]?.status;
     expect(status).toBe("idle");
+  }, 30_000);
+
+  // [idle-def 2026-11-09 W7] 수동 pause → resume 창구: resume 계열이 표시를 무조건 idle 로
+  // 덮지 않고 슬롯 계산(lifecycleActiveClause)과 같은 기준으로 정하는지 검증한다.
+  it("manual resume keeps a running display while an unsettled cancelled v1 run still occupies a slot", async () => {
+    const agentId = await seedAgent("Manual resume parity agent");
+    await db.update(agents).set({ status: "paused", pauseReason: "manual", pausedAt: new Date() })
+      .where(eq(agents.id, agentId));
+    await insertRun(db, companyId, agentId, { status: "cancelled", errorCode: "cancelled" });
+
+    const resumed = await commitAgentResume(db, agentId);
+    // 미정산 terminal v1 run 이 점유 중이면 resume 직후 표시도 running 이어야 한다.
+    expect(resumed?.status).toBe("running");
+
+    // 플래그 OFF 레거시 보존: raw running 이 없으므로 기존대로 idle.
+    const offCompanyId = randomUUID(), offAgentId = randomUUID();
+    await offDb.insert(companies).values({ id: offCompanyId, name: "ResumeLegacyCo", status: "active", issuePrefix: "R" + offCompanyId.slice(0, 8) });
+    await offDb.insert(agents).values({
+      id: offAgentId, companyId: offCompanyId, name: "Resume legacy agent", status: "paused",
+      pauseReason: "manual", pausedAt: new Date(),
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await insertRun(offDb, offCompanyId, offAgentId, { status: "cancelled", errorCode: "cancelled" });
+    const offResumed = await commitAgentResume(offDb, offAgentId);
+    expect(offResumed?.status).toBe("idle");
+  }, 30_000);
+
+  // [idle-def 2026-11-09 W8] 예산 초과 pause → raise 후 자동 resume 창구도 같은 기준을 쓰는지 검증한다.
+  it("budget raise auto-resume keeps a running display while an unsettled cancelled v1 run occupies a slot", async () => {
+    const agentId = await seedAgent("Budget resume parity agent");
+    await db.update(agents).set({ status: "paused", pauseReason: "budget", pausedAt: new Date() })
+      .where(eq(agents.id, agentId));
+    await insertRun(db, companyId, agentId, { status: "cancelled", errorCode: "cancelled" });
+
+    await budgetService(db).upsertPolicy(companyId, { scopeType: "agent", scopeId: agentId, amount: 500_000 }, null);
+    expect(await agentStatus(agentId)).toBe("running");
+
+    // 플래그 OFF 레거시 보존: raw running 이 없으므로 기존대로 idle.
+    const offCompanyId = randomUUID(), offAgentId = randomUUID();
+    await offDb.insert(companies).values({ id: offCompanyId, name: "BudgetLegacyCo", status: "active", issuePrefix: "B" + offCompanyId.slice(0, 8) });
+    await offDb.insert(agents).values({
+      id: offAgentId, companyId: offCompanyId, name: "Budget legacy agent", status: "paused",
+      pauseReason: "budget", pausedAt: new Date(),
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await insertRun(offDb, offCompanyId, offAgentId, { status: "cancelled", errorCode: "cancelled" });
+    await budgetService(offDb).upsertPolicy(offCompanyId, { scopeType: "agent", scopeId: offAgentId, amount: 500_000 }, null);
+    const offStatus = (await offDb.select({ status: agents.status }).from(agents).where(eq(agents.id, offAgentId)))[0]?.status;
+    expect(offStatus).toBe("idle");
+  }, 30_000);
+
+  // [idle-def 2026-11-09 W9] detached 강등 창구: 강등 보류 판정이 raw status='running' 이 아니라
+  // 공용 술어(lifecycleActiveClause)로 형제 점유를 세는지 검증한다.
+  it("detached demotion is suppressed while an unsettled terminal sibling still occupies a slot", async () => {
+    const agentId = await seedAgent("Detached demote parity agent");
+    const stale = new Date(Date.now() - 15 * 60 * 1000);
+    await db.update(agents).set({ updatedAt: stale }).where(eq(agents.id, agentId));
+    const detachedRun = await insertRun(db, companyId, agentId, {
+      status: "running", errorCode: DETACHED_PROCESS_ERROR_CODE,
+    });
+    await insertRun(db, companyId, agentId, { status: "cancelled", errorCode: "cancelled" });
+
+    await demoteAgentStuckDetachedAgentStatus(db, detachedRun, new Date(), agentWikiService(db));
+    // 미정산 terminal 형제 run 이 점유 중이면 error 로 강등하지 않는다.
+    expect(await agentStatus(agentId)).toBe("running");
+
+    // 정상 강등 계약 유지: 점유가 없는 detached 유예 agent 는 여전히 error 로 강등된다.
+    const lonelyId = await seedAgent("Detached demote lonely agent");
+    await db.update(agents).set({ updatedAt: stale }).where(eq(agents.id, lonelyId));
+    const lonelyRun = await insertRun(db, companyId, lonelyId, {
+      status: "running", errorCode: DETACHED_PROCESS_ERROR_CODE,
+    });
+    await demoteAgentStuckDetachedAgentStatus(db, lonelyRun, new Date(), agentWikiService(db));
+    expect(await agentStatus(lonelyId)).toBe("error");
+
+    // 플래그 OFF 레거시 보존: raw running 판정 — 미정산 terminal 형제는 강등을 막지 않는다.
+    const offCompanyId = randomUUID(), offAgentId = randomUUID();
+    await offDb.insert(companies).values({ id: offCompanyId, name: "DemoteLegacyCo", status: "active", issuePrefix: "D" + offCompanyId.slice(0, 8) });
+    await offDb.insert(agents).values({
+      id: offAgentId, companyId: offCompanyId, name: "Demote legacy agent", status: "running",
+      updatedAt: stale,
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const offDetachedRun = await insertRun(offDb, offCompanyId, offAgentId, {
+      status: "running", errorCode: DETACHED_PROCESS_ERROR_CODE,
+    });
+    await insertRun(offDb, offCompanyId, offAgentId, { status: "cancelled", errorCode: "cancelled" });
+    await demoteAgentStuckDetachedAgentStatus(offDb, offDetachedRun, new Date(), agentWikiService(offDb));
+    const offStatus = (await offDb.select({ status: agents.status }).from(agents).where(eq(agents.id, offAgentId)))[0]?.status;
+    expect(offStatus).toBe("error");
+  }, 30_000);
+
+  // [idle-def 2026-11-09 C] queued-only 창구: queued run 은 슬롯(active)은 아니지만 in-flight
+  // 이다(in-flight ⊇ active). 종료 정리는 idle 로 덮지 않고, 시작 스윕은 idle 로 정리한다.
+  it("queued-only window keeps cleanup non-idle while the startup sweep idles (in-flight is a superset of active)", async () => {
+    const agentId = await seedAgent("Queued only parity agent");
+    await insertRun(db, companyId, agentId, { status: "queued" });
+
+    await resetSafeTerminalAgents(db, companyId, [agentId], new Date());
+    expect(await agentStatus(agentId)).toBe("running");
+
+    await reconcilePersistedAgentStatusOnStartup(db);
+    expect(await agentStatus(agentId)).toBe("idle");
   }, 30_000);
 });
