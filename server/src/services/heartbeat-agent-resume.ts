@@ -85,7 +85,10 @@ export async function commitAgentResume(db: Db, agentId: string) {
     const expected = heads[0];
     const resume = async () => {
       const agent = await agentService(t).resume(agentId);
-      if (!agent || agent.status !== "idle") return changed();
+      // [idle-def 2026-11-09 A] resume 은 슬롯 점유(lifecycleActiveClause)에 따라 idle 또는
+      // running 을 반환한다. running 은 미정산 terminal v1 run 이 점유 중인 정상 결과다 —
+      // 여전히 paused/error 등 다른 상태가 섞이면 계약 위반으로 409 처리한다.
+      if (!agent || (agent.status !== "idle" && agent.status !== "running")) return changed();
       return agent;
     };
     if (!expected) {
