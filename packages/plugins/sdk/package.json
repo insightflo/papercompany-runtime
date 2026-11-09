@@ -16,38 +16,47 @@
   "exports": {
     ".": {
       "types": "./src/index.ts",
+      "paperclip-dist": "./dist/index.js",
       "import": "./src/index.ts"
     },
     "./protocol": {
       "types": "./src/protocol.ts",
+      "paperclip-dist": "./dist/protocol.js",
       "import": "./src/protocol.ts"
     },
     "./types": {
       "types": "./src/types.ts",
+      "paperclip-dist": "./dist/types.js",
       "import": "./src/types.ts"
     },
     "./ui": {
       "types": "./src/ui/index.ts",
+      "paperclip-dist": "./dist/ui/index.js",
       "import": "./src/ui/index.ts"
     },
     "./ui/hooks": {
       "types": "./src/ui/hooks.ts",
+      "paperclip-dist": "./dist/ui/hooks.js",
       "import": "./src/ui/hooks.ts"
     },
     "./ui/types": {
       "types": "./src/ui/types.ts",
+      "paperclip-dist": "./dist/ui/types.js",
       "import": "./src/ui/types.ts"
     },
     "./testing": {
       "types": "./src/testing.ts",
+      "paperclip-dist": "./dist/testing.js",
       "import": "./src/testing.ts"
     },
     "./bundlers": {
       "types": "./src/bundlers.ts",
+      "paperclip-dist": "./dist/bundlers.js",
       "import": "./src/bundlers.ts"
     },
     "./dev-server": {
       "types": "./src/dev-server.ts",
+      "paperclip-dist": "./dist/dev-server.js",
       "import": "./src/dev-server.ts"
     }
   },

@@ -25,6 +25,7 @@
     "release:github": "./scripts/create-github-release.sh",
     "release:rollback": "./scripts/rollback-latest.sh",
     "check:tokens": "node scripts/check-forbidden-tokens.mjs",
+    "check:dist-readiness": "node scripts/check-dist-runtime-readiness.mjs",
     "check:write-chokepoint": "node scripts/check-run-status-write-chokepoint.mjs",
     "docs:dev": "cd docs && npx mintlify dev",
     "smoke:openclaw-join": "./scripts/smoke/openclaw-join.sh",

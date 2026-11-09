@@ -4,9 +4,18 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/server/index.ts",
-    "./ui": "./src/ui/index.ts"
+    ".": {
+      "paperclip-dist": "./dist/index.js",
+      "default": "./src/index.ts"
+    },
+    "./server": {
+      "paperclip-dist": "./dist/server/index.js",
+      "default": "./src/server/index.ts"
+    },
+    "./ui": {
+      "paperclip-dist": "./dist/ui/index.js",
+      "default": "./src/ui/index.ts"
+    }
   },
   "publishConfig": {
     "access": "public",
