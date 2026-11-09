@@ -169,10 +169,14 @@ export async function resetSafeTerminalAgents(
   executor: MissionTerminalCleanupDb, companyId: string, affectedAgentIds: string[], now: Date,
 ): Promise<void> {
   if (!affectedAgentIds.length) return;
-  // [C2 2026-11-08] 표시 상태(idle 판정)와 슬롯 계산(countRunningRunsForAgent — lifecycleActiveClause)
-  // 이 같은 기준을 쓴다. 미정산 terminal v1 run 도 점유로 센다 — 그 창구에 idle 로 덮어쓰면
-  // 보드는 idle 인데 슬롯이 점유된 불일치가 생긴다(2026-11-07 A1 관측). 플래그 OFF 시
-  // 기존 queued/running 판정과 바이트 동일하다.
+  // [C2 2026-11-08 → idle-def 2026-11-09 C 정정] 이 창구는 슬롯 계산(lifecycleActiveClause)
+  // 와 '같은' 기준이 아니라 상위집합(lifecycleInFlightClause — queued 도 포함)으로 busy 를
+  // 판정한다. 방향은 보수적이다: queued run 은 슬롯(active)은 아니지만 in-flight 이므로
+  // 종료 정리가 idle 로 덮지 않는다(시나리오: queued-only 창구). 미정산 terminal v1 run 도
+  // in-flight 이므로 같은 이유로 보호된다(2026-11-07 A1 관측: idle 표시 + 슬롯 점유 불일치).
+  // 시작 스윕(reconcilePersistedAgentStatusOnStartup)은 active 기준으로만 idle 로 내리므로
+  // 두 기준은 in-flight ⊇ active 관계로 함께 일관된다. 플래그 OFF 시 기존 queued/running
+  // 판정과 바이트 동일하다.
   const inFlight = await lifecycleInFlightClause(executor);
   const remainingHeartbeats = await executor.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.agentId, affectedAgentIds),

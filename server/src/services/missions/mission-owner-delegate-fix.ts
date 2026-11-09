@@ -21,6 +21,7 @@ import { loadAppliedPayload, projectOwnerActionResult, recordAppliedEvent, stabl
 import { OwnerActionRefusalError, type OwnerExecutionContext } from "./mission-owner-execute.js";
 import { executeOwnerPlanAction, projectOwnerPlanActionResult } from "./mission-owner-plan-action.js";
 import { executeOwnerRecollect, preflightOwnerRecollect } from "./mission-owner-recollect.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 export type OwnerDelegateFixAction = Extract<MissionOwnerAction, { operation: "delegate_fix" }>;
 type StepRunRow = typeof workflowStepRuns.$inferSelect;
@@ -240,7 +241,7 @@ export async function projectOwnerDelegateFixResult(db: Db, companyId: string, m
       inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]))).limit(1);
     const [liveHeartbeat] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, producer.issueId),
-      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+      await lifecycleInFlightClause(db))).limit(1);
     if (liveWake || liveHeartbeat) return { ...base, state: "executing", reasonCode: null, evidence: ev };
   }
   return { ...base, state: producer.status === "running" ? "executing" : "delivery_pending", reasonCode: null, evidence: ev };

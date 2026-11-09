@@ -34,9 +34,9 @@ import { heartbeatService } from "./heartbeat.js";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import { applyIssueCreatedSideEffects } from "./issue-create-side-effects.js";
+import { lifecycleInFlightClause } from "./heartbeat-finalization/lifecycle-active.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
-const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const WEEKDAY_INDEX: Record<string, number> = {
@@ -315,7 +315,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         heartbeatRuns,
         and(
           eq(heartbeatRuns.id, issues.executionRunId),
-          inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+          await lifecycleInFlightClause(db),
         ),
       )
       .where(
@@ -352,7 +352,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           heartbeatRuns,
           and(
             eq(heartbeatRuns.companyId, issues.companyId),
-            inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+            await lifecycleInFlightClause(db),
             or(eq(heartbeatRuns.issueId, issues.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`),
           ),
         )
@@ -426,7 +426,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
         heartbeatRuns,
         and(
           eq(heartbeatRuns.id, issues.executionRunId),
-          inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+          await lifecycleInFlightClause(executor),
         ),
       )
       .where(
@@ -450,7 +450,7 @@ export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeup
           heartbeatRuns,
           and(
             eq(heartbeatRuns.companyId, issues.companyId),
-            inArray(heartbeatRuns.status, LIVE_HEARTBEAT_RUN_STATUSES),
+            await lifecycleInFlightClause(executor),
             or(eq(heartbeatRuns.issueId, issues.id), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = cast(${issues.id} as text)`),
           ),
         )

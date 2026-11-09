@@ -363,6 +363,81 @@ function extractRequestChangesVerdict(run: typeof heartbeatRuns.$inferSelect): R
   };
 }
 
+// [A2 → 모듈 스코프 추출, idle-def 2026-11-09] detached child 유예 창 동안 agents.status 가
+// `running`에 갇힌(phantom running) 상태를 직접 교정한다. finalizeAgentStatus 경로를 타지 않는
+// detached defer 분기(reapOrphanedRuns)에서 호출되며, agent 가 HEARTBEAT_AGENT_DETACHED_DEMOTE_MS
+// 이상 stale 하고 해당 agent 의 running run 이 모두 detached 상태일 때만 `error` 로 강등한다.
+// 진행 중인(non-detached) sibling run 이 하나라도 있으면 절대 강등하지 않는다.
+export async function demoteAgentStuckDetachedAgentStatus(
+  db: Db,
+  run: typeof heartbeatRuns.$inferSelect,
+  now: Date,
+  wikiSvc: ReturnType<typeof agentWikiService>,
+): Promise<void> {
+  const [agent] = await db
+    .select({ id: agents.id, status: agents.status, updatedAt: agents.updatedAt, companyId: agents.companyId })
+    .from(agents)
+    .where(eq(agents.id, run.agentId))
+    .limit(1);
+  if (!agent || agent.status !== "running") return;
+
+  const agentStaleMs = agent.updatedAt ? now.getTime() - new Date(agent.updatedAt).getTime() : Number.POSITIVE_INFINITY;
+  if (agentStaleMs < HEARTBEAT_AGENT_DETACHED_DEMOTE_MS) return;
+
+  // [idle-def 2026-11-09 B] 강등 보류 판정에서 raw status='running' 대신 슬롯 계산과 같은 공용
+  // 술어(lifecycleActiveClause)를 쓴다. 미정산 terminal v1 run 도 점유로 세므로 형제 run 이
+  // 정산 대기 중이면 agent 를 error 로 강등하지 않는다(error + 점유 불일치 방지, 시나리오 3).
+  // 이 run 자신의 제외는 아래 errorCode 조건이 담당하고(detached run 은 카운트에서 빠짐),
+  // 플래그 OFF 에서는 clause 가 status='running' 그대로라 기존 판정과 바이트 동일하다.
+  const nonDetachedActive = await db
+    .select({ id: heartbeatRuns.id })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.agentId, run.agentId),
+        await lifecycleActiveClause(db),
+        // IS DISTINCT FROM treats NULL as non-detached (a run that never entered the
+        // detached state is genuinely progressing). Plain `!=` would drop NULL rows.
+        sql`${heartbeatRuns.errorCode} is distinct from ${DETACHED_PROCESS_ERROR_CODE}`,
+      ),
+    )
+    .limit(1);
+  if (nonDetachedActive.length > 0) return;
+
+  const updated = await db
+    .update(agents)
+    .set({ status: "error", lastHeartbeatAt: now, updatedAt: now })
+    .where(and(eq(agents.id, run.agentId), eq(agents.status, "running")))
+    .returning()
+    .then((rows) => rows[0] ?? null);
+  if (updated) {
+    publishLiveEvent({
+      companyId: updated.companyId,
+      type: "agent.status",
+      payload: {
+        agentId: updated.id,
+        status: updated.status,
+        lastHeartbeatAt: updated.lastHeartbeatAt ? new Date(updated.lastHeartbeatAt).toISOString() : null,
+        outcome: "failed",
+        reasonCode: "detached_agent_demoted",
+      },
+    });
+    logger.warn(
+      { agentId: run.agentId, runId: run.id, agentStaleMs },
+      "demoted phantom-running agent to error while detached child deferred",
+    );
+    fireWikiRecord(wikiSvc, {
+      companyId: run.companyId,
+      agentId: run.agentId,
+      missionId: null,
+      pattern: "phantom running (detached 유예 창)",
+      cause: "in-memory handle 은 상실했지만 child pid 가 살아있어 reapOrphanedRuns 가 detached 로 유예하는 동안 agents.status 가 running 에 갇힘. 서버 재시작/handle 상실 후 finalizeAgentStatus 가 호출되지 않아 발생.",
+      solution: "detached 유예 창에서도 agent.updatedAt staleness 를 별도 검사해 error 로 강등. run 자체는 DETACHED_REAP_AFTER_MS cap 으로 회수되므로 가시성만 교정.",
+      errorCode: "detached_agent_demoted",
+    }, run.id);
+  }
+}
+
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const c5OwnerRuntime = bindHeartbeatC5OwnerRuntime(db, options.qaCorrectionExecution?.ownerRuntime);
   // [instant-advance v1.2] fire-and-forget 진행 모듈에 db 주입(미주입 요청은 no-op).
@@ -1881,68 +1956,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   // [A2] detached child 유예 창 동안 agents.status 가 `running`에 갇힌(phantom running) 상태를
-  // 직접 교정한다. finalizeAgentStatus 경로를 타지 않는 detached defer 분기에서 호출되며, agent 가
-  // HEARTBEAT_AGENT_DETACHED_DEMOTE_MS 이상 stale 하고 해당 agent 의 running run 이 모두 detached 상태일
-  // 때만 `error` 로 강등한다. 진행 중인(non-detached) sibling run 이 하나라도 있으면 절대 강등하지 않는다.
+  // 직접 교정한다. 본문은 모듈 스코프 demoteAgentStuckDetachedAgentStatus 로 추출했다(동작 무변경,
+  // [idle-def 2026-11-09] 회귀 시험 경로). reaper deps 는 이 래퍼를 그대로 받는다.
   async function demoteAgentStuckDetached(run: typeof heartbeatRuns.$inferSelect, now: Date) {
-    const [agent] = await db
-      .select({ id: agents.id, status: agents.status, updatedAt: agents.updatedAt, companyId: agents.companyId })
-      .from(agents)
-      .where(eq(agents.id, run.agentId))
-      .limit(1);
-    if (!agent || agent.status !== "running") return;
-
-    const agentStaleMs = agent.updatedAt ? now.getTime() - new Date(agent.updatedAt).getTime() : Number.POSITIVE_INFINITY;
-    if (agentStaleMs < HEARTBEAT_AGENT_DETACHED_DEMOTE_MS) return;
-
-    // sibling 이라도 진짜로 실행 중인(non-detached) run 이 있으면 agent 는 여전히 running 이어야 한다.
-    const nonDetachedRunning = await db
-      .select({ id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.agentId, run.agentId),
-          eq(heartbeatRuns.status, "running"),
-          // IS DISTINCT FROM treats NULL as non-detached (a run that never entered the
-          // detached state is genuinely progressing). Plain `!=` would drop NULL rows.
-          sql`${heartbeatRuns.errorCode} is distinct from ${DETACHED_PROCESS_ERROR_CODE}`,
-        ),
-      )
-      .limit(1);
-    if (nonDetachedRunning.length > 0) return;
-
-    const updated = await db
-      .update(agents)
-      .set({ status: "error", lastHeartbeatAt: now, updatedAt: now })
-      .where(and(eq(agents.id, run.agentId), eq(agents.status, "running")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    if (updated) {
-      publishLiveEvent({
-        companyId: updated.companyId,
-        type: "agent.status",
-        payload: {
-          agentId: updated.id,
-          status: updated.status,
-          lastHeartbeatAt: updated.lastHeartbeatAt ? new Date(updated.lastHeartbeatAt).toISOString() : null,
-          outcome: "failed",
-          reasonCode: "detached_agent_demoted",
-        },
-      });
-      logger.warn(
-        { agentId: run.agentId, runId: run.id, agentStaleMs },
-        "demoted phantom-running agent to error while detached child deferred",
-      );
-      fireWikiRecord(wikiSvc, {
-        companyId: run.companyId,
-        agentId: run.agentId,
-        missionId: null,
-        pattern: "phantom running (detached 유예 창)",
-        cause: "in-memory handle 은 상실했지만 child pid 가 살아있어 reapOrphanedRuns 가 detached 로 유예하는 동안 agents.status 가 running 에 갇힘. 서버 재시작/handle 상실 후 finalizeAgentStatus 가 호출되지 않아 발생.",
-        solution: "detached 유예 창에서도 agent.updatedAt staleness 를 별도 검사해 error 로 강등. run 자체는 DETACHED_REAP_AFTER_MS cap 으로 회수되므로 가시성만 교정.",
-        errorCode: "detached_agent_demoted",
-      }, run.id);
-    }
+    await demoteAgentStuckDetachedAgentStatus(db, run, now, wikiSvc);
   }
 
   async function resolveRunActiveExecutionTimeoutMs(
@@ -2283,7 +2300,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }> {
     const limit = opts?.limit ?? 100;
     const terminalFailureStatuses = ["failed", "timed_out", "cancelled"];
-    const liveStatuses = ["queued", "running"];
+    // [predicate-unify] 후계/이슈 run 생존은 lifecycleInFlightClause(queued/running + v1 미정산
+    //   terminal)로 판정한다 — 미정산 run 이 점유를 유지하는 동안 lock 회수를 미룬다.
+    const liveRunLiveness = await lifecycleInFlightClause(db);
     let reaped = 0;
     let skippedLiveLock = 0;
     let skippedLiveSuccessor = 0;
@@ -2334,7 +2353,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               inArray(heartbeatRuns.retryOfRunId, lockRunIds),
-              inArray(heartbeatRuns.status, liveStatuses),
+              liveRunLiveness,
             ),
           )
           .limit(1);
@@ -2349,7 +2368,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               eq(heartbeatRuns.issueId, issue.id),
-              inArray(heartbeatRuns.status, liveStatuses),
+              liveRunLiveness,
             ),
           )
           .limit(1);
@@ -8064,7 +8083,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
 
-        // [수정시 영향] 이 에이전트가 이미 queued/running run 을 가지고 있으면
+        // [수정시 영향] 이 에이전트가 이미 in-flight run 을 가지고 있으면
         // timer wake 를 skip 한다. run 이 finalize 되지 않아 lastHeartbeatAt 가
         // 갱신되지 않더라도, active run 이 존재하면 매 tick 새 wake 를 만들지
         // 않는다(매 tick 재발사 + queued run 적체 방지).
@@ -8074,7 +8093,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               eq(heartbeatRuns.agentId, agent.id),
-              sql`${heartbeatRuns.status} in ('queued','running')`,
+              await lifecycleInFlightClause(db),
             ),
           )
           .limit(1);
