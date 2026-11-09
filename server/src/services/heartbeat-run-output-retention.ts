@@ -111,6 +111,7 @@ export async function runHeartbeatRunOutputRetention(
   let lastPage = false;
   const skippedIds: string[] = [];
   for (;;) {
+    if (pending.length === 0 && lastPage) break;
     // 배치마다 백업 실행 여부를 다시 확인한다. 확인 자체가 실패하면 확인 불가
     // 상태로 UPDATE 하지 않도록 그 패스를 중단한다(fail-closed).
     let backupActive: boolean;

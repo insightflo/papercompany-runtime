@@ -127,8 +127,10 @@ export async function selectRetentionCandidates(
       AND h.status IN (${statuses})
       AND NOT (h.finalization_version > 0 AND h.settled_at IS NULL)
       AND jsonb_typeof(h.result_json) = 'object'
-      AND (length(h.result_json->>'stdout') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD}
-        OR length(h.result_json->>'stderr') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD})
+      AND ((jsonb_typeof(h.result_json -> 'stdout') = 'string'
+          AND length(h.result_json ->> 'stdout') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD})
+        OR (jsonb_typeof(h.result_json -> 'stderr') = 'string'
+          AND length(h.result_json ->> 'stderr') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD}))
       ${exclusion}
     ORDER BY h.created_at
     LIMIT ${limit}

@@ -1,4 +1,5 @@
 import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { Db } from "@paperclipai/db";
 import { runHeartbeatRunOutputRetention } from "../services/heartbeat-run-output-retention.js";
@@ -20,7 +21,9 @@ import {
 const HEAP_GROWTH_LIMIT_BYTES = 100 * 1024 * 1024;
 
 setFlagsFromString("--expose-gc");
-const gc = (globalThis as { gc?: () => void }).gc;
+// Node v24 ESM 에서 --expose-gc 는 새 V8 컨텍스트에만 gc 를 바인딩한다 —
+// globalThis.gc 는 undefined 라 runInNewContext 로 실제 함수를 얻는다.
+const gc = runInNewContext("gc") as (() => void) | undefined;
 
 function heapUsed(): number {
   return process.memoryUsage().heapUsed;

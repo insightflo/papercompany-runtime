@@ -7,7 +7,7 @@
  *   길이 같은 작은 행만 오간다.
  *
  * write-chokepoint 가드(scripts/check-run-status-write-chokepoint.mjs)의 DATA
- * 허용 목록 파일 — heartbeat_runs UPDATE 는 이 파일과 …-retention.ts 에만 둔다.
+ * 허용 목록 단일 파일 — heartbeat_runs UPDATE 는 이 파일에만 둔다.
  *
  * 절단 형식은 capHeartbeatRunResultJsonForStorage(heartbeat-run-summary.ts)와
  * 같은 계약의 SQL 재현이다. 차이(문서화된 한계): PostgreSQL length()/left()/
@@ -81,6 +81,10 @@ export async function truncateRetentionBatch(
     FROM (VALUES ${values}) AS v(id, hash)
     WHERE h.id = v.id::uuid
       AND md5(h.result_json::text) = v.hash
+      AND ((jsonb_typeof(h.result_json -> 'stdout') = 'string'
+          AND length(h.result_json ->> 'stdout') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD})
+        OR (jsonb_typeof(h.result_json -> 'stderr') = 'string'
+          AND length(h.result_json ->> 'stderr') > ${STORED_OUTPUT_TRUNCATE_THRESHOLD}))
     RETURNING h.id AS id, octet_length(h.result_json::text) AS "resultBytes"
   `);
   return extractRows(result).map((row) => ({

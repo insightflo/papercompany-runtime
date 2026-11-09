@@ -90,4 +90,47 @@ describeRetentionDb("runHeartbeatRunOutputRetention hardening (embedded postgres
     // 캡된 구스냅샷으로 덮어쓰지 않고 재기록된 값이 보존된다(조건부 UPDATE).
     expect(row.resultJson).toEqual(rewritten);
   });
+
+  it("never selects non-string oversized stdout/stderr (no-op write starvation regression)", async () => {
+    // ->> 는 JSON 객체/배열도 직렬화 문자열로 반환하므로, jsonb_typeof='string'
+    // 조건 없는 길이 술어는 비문자열 대형 필드를 후보로 잘못 고른다. cap 계약은
+    // 문자열 키만 절단하므로 그런 행은 매번 물리 UPDATE 만 하고(비멱등) 선별
+    // 순서가 가장 오래된 행부터라 batchRows 만큼의 후속 정상 행을 기아시킨다.
+    const bulkyObject = { data: "y".repeat(STORED_OUTPUT_TRUNCATE_THRESHOLD + 5_000) };
+    const base = Date.now() - 8 * DAY_MS;
+    const nonStringId = await fx.seedRun({
+      createdAt: new Date(base),
+      resultJson: { stdout: bulkyObject },
+    });
+    const normalId = await fx.seedRun({
+      createdAt: new Date(base + 1_000),
+      resultJson: { stdout: "z".repeat(STORED_OUTPUT_TRUNCATE_THRESHOLD + 1) },
+    });
+
+    const first = await runHeartbeatRunOutputRetention(fx.db, {
+      retentionDays: 7,
+      batchRows: 1,
+      maxBatchesPerCycle: 5,
+      isBackupActive: noBackup,
+    });
+
+    // 비문자열 행은 후보가 아니다 — 갱신 0건·건너뜀 기록도 아니며 후행 정상
+    // 행이 같은 사이클에 절단된다(기아 없음).
+    expect(first.skipped).toBeNull();
+    expect(first.batches).toBe(1);
+    expect(first.rowsTruncated).toBe(1);
+    expect((await fx.fetchRun(nonStringId)).resultJson).toEqual({ stdout: bulkyObject });
+    const truncated = await fx.fetchRun(normalId);
+    expect(String(truncated.resultJson?.stdout)).toContain("truncated");
+
+    // 멱등: 두 번째 패스는 아무것도 하지 않는다.
+    const second = await runHeartbeatRunOutputRetention(fx.db, {
+      retentionDays: 7,
+      batchRows: 1,
+      maxBatchesPerCycle: 5,
+      isBackupActive: noBackup,
+    });
+    expect(second.rowsTruncated).toBe(0);
+    expect(second.batches).toBe(0);
+  });
 });
