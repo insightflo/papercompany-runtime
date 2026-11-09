@@ -17,6 +17,7 @@ import { loadExecutionDefinition } from "./execution-definition.js";
 import { buildPredFactsMap, buildStepRunMap } from "./reconciler-edge-helpers.js";
 import type { ReconciliationResult } from "./reconciler.js";
 import { hasActiveWorkflowReworkIteration } from "./rework-liveness.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 export async function reconcileRunnableWorkflowStepWakeups(
   db: Db,
@@ -108,7 +109,7 @@ async function hasActiveHeartbeat(db: Db, issueId: string) {
   return db
     .select({ id: heartbeatRuns.id })
     .from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.issueId, issueId), inArray(heartbeatRuns.status, ["queued", "running"])))
+    .where(and(eq(heartbeatRuns.issueId, issueId), await lifecycleInFlightClause(db)))
     .limit(1)
     .then((rows) => Boolean(rows[0]));
 }

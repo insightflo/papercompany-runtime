@@ -17,6 +17,7 @@ import {
 import { sha256Text } from "../issue-execution-cards/hash.js";
 import { truncateHandoffText } from "./handoff-text-cap.js";
 import { applyMissionDecisionEvidenceStaleness } from "./mission-decision-evidence-staleness.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import type { SessionHandoffDecisionLogPointer } from "../session-handoff-artifact.js";
 
 export { MISSION_RUNTIME_WORK_BLOCKING_STATUSES, buildMissionRuntimeKey, assertMissionRuntimeAcceptsWork, ensureMissionAgentRuntime } from "./mission-runtime-admission.js";
@@ -706,7 +707,7 @@ export async function hasBackingHeartbeatRun(db: Db, runtime: {
     .from(heartbeatRuns)
     .where(and(
       eq(heartbeatRuns.agentId, runtime.agentId),
-      inArray(heartbeatRuns.status, ["queued", "running"]),
+      await lifecycleInFlightClause(db),
     ))
     .limit(20);
 
@@ -759,7 +760,7 @@ export async function findBackingHeartbeatRunDetail(db: Db, runtime: {
     .from(heartbeatRuns)
     .where(and(
       eq(heartbeatRuns.agentId, runtime.agentId),
-      inArray(heartbeatRuns.status, ["queued", "running"]),
+      await lifecycleInFlightClause(db),
     ))
     .orderBy(desc(heartbeatRuns.updatedAt))
     .limit(20);

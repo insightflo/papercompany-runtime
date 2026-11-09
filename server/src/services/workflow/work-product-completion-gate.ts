@@ -1,6 +1,7 @@
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, issueWorkProducts, issues, workflowStepRuns } from "@paperclipai/db";
+import { ACTIVE_WORKFLOW_STEP_STATUS_CONDITION } from "./workflow-step-active-clause.js";
 import { unprocessable } from "../../errors.js";
 import { resolveWorkProductRequirement } from "../issue-execution-cards/gate-contract.js";
 import { cardDescriptionDrift, getIssueExecutionCard } from "../issue-execution-cards/store.js";
@@ -11,7 +12,7 @@ type WorkflowIssueWorkProductDb = Pick<Db, "select" | "update" | "insert" | "tra
 type IssueRow = typeof issues.$inferSelect;
 type StepRunRow = Pick<typeof workflowStepRuns.$inferSelect, "id" | "stepId" | "metadata">;
 
-const ACTIVE_STEP_STATUS_CONDITION = sql`${workflowStepRuns.status} not in ('completed', 'failed', 'skipped', 'cancelled', 'canceled')`;
+const ACTIVE_STEP_STATUS_CONDITION = ACTIVE_WORKFLOW_STEP_STATUS_CONDITION;
 
 async function getActiveLinkedStepRuns(
   db: WorkflowIssueWorkProductDb,

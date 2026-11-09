@@ -25,6 +25,7 @@ import { OwnerActionRefusalError, type OwnerExecutionContext } from "./mission-o
 import { executeOwnerPlanAction, projectOwnerPlanActionResult } from "./mission-owner-plan-action.js";
 import { applyAutomaticReassignSourceIssue } from "./mission-owner-reassign-source.js";
 import { dispatchSourceIssueNativeResume, type AutomaticSourceResumeInput } from "../workflow/source-issue-native-resume.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 
 export type OwnerReassignAction = Extract<MissionOwnerAction, { operation: "reassign" }>;
 const record = (value: unknown): Record<string, unknown> =>
@@ -115,7 +116,7 @@ export async function projectOwnerReassignResult(db: Db, companyId: string, miss
         inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]))).limit(1);
       const [liveHeartbeat] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, issueId),
-        inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+        await lifecycleInFlightClause(db))).limit(1);
       if (live || liveHeartbeat) return { ...base, state: "blocked", reasonCode: "reassign_target_in_flight",
         evidence: [evidence("heartbeat", actionId, workflowRunId, stepRunId, null, null)],
         requiredAction: { kind: "wait_active_execution", targetId: issueId, reasonCode: "reassign_target_in_flight" } };
@@ -152,7 +153,7 @@ export async function projectOwnerReassignResult(db: Db, companyId: string, miss
   if (step.status === "running") {
     const [live] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.issueId, issueId),
-      inArray(heartbeatRuns.status, ["queued", "running"]))).limit(1);
+      await lifecycleInFlightClause(db))).limit(1);
     if (live || acceptedWake) return { ...base, state: "executing", reasonCode: null, evidence: ev };
     return { ...base, state: "delivery_pending", reasonCode: null, evidence: ev };
   }

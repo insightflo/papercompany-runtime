@@ -2300,7 +2300,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }> {
     const limit = opts?.limit ?? 100;
     const terminalFailureStatuses = ["failed", "timed_out", "cancelled"];
-    const liveStatuses = ["queued", "running"];
+    // [predicate-unify] 후계/이슈 run 생존은 lifecycleInFlightClause(queued/running + v1 미정산
+    //   terminal)로 판정한다 — 미정산 run 이 점유를 유지하는 동안 lock 회수를 미룬다.
+    const liveRunLiveness = await lifecycleInFlightClause(db);
     let reaped = 0;
     let skippedLiveLock = 0;
     let skippedLiveSuccessor = 0;
@@ -2351,7 +2353,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               inArray(heartbeatRuns.retryOfRunId, lockRunIds),
-              inArray(heartbeatRuns.status, liveStatuses),
+              liveRunLiveness,
             ),
           )
           .limit(1);
@@ -2366,7 +2368,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               eq(heartbeatRuns.issueId, issue.id),
-              inArray(heartbeatRuns.status, liveStatuses),
+              liveRunLiveness,
             ),
           )
           .limit(1);
@@ -8081,7 +8083,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const elapsedMs = now.getTime() - baseline;
         if (elapsedMs < policy.intervalSec * 1000) continue;
 
-        // [수정시 영향] 이 에이전트가 이미 queued/running run 을 가지고 있으면
+        // [수정시 영향] 이 에이전트가 이미 in-flight run 을 가지고 있으면
         // timer wake 를 skip 한다. run 이 finalize 되지 않아 lastHeartbeatAt 가
         // 갱신되지 않더라도, active run 이 존재하면 매 tick 새 wake 를 만들지
         // 않는다(매 tick 재발사 + queued run 적체 방지).
@@ -8091,7 +8093,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .where(
             and(
               eq(heartbeatRuns.agentId, agent.id),
-              sql`${heartbeatRuns.status} in ('queued','running')`,
+              await lifecycleInFlightClause(db),
             ),
           )
           .limit(1);

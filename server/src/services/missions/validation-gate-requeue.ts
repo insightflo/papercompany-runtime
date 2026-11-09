@@ -7,6 +7,7 @@ import { buildMissionOwnerDecisionWakeupIdempotencyKey } from "./mission-owner-r
 import { loadLatestMissionOwnerDecision } from "./mission-owner-recovery-ledger.js";
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { buildRetrySourceIssueWakeupResultComment } from "./mission-owner-recovery-comments.js";
+import { lifecycleInFlightClause } from "../heartbeat-finalization/lifecycle-active.js";
 import { findValidationGateNeedingFreshPass } from "./validation-gate-assessment.js";
 import { normalizeMissionOwnerDecisionWakeupDispatchResult, type MissionOwnerDecisionWakeupDispatchStatus, type MissionOwnerSupervisionAppliedAction } from "./supervision-types.js";
 import type { MissionSupervisionIssue, MissionSupervisionWorkflowStepRow } from "./mission-supervision-context.js";
@@ -61,7 +62,7 @@ async function activeHeartbeatRunId(db: Db, issueId: string): Promise<string | n
   return db
     .select({ id: heartbeatRuns.id })
     .from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.issueId, issueId), inArray(heartbeatRuns.status, ["queued", "running"])))
+    .where(and(eq(heartbeatRuns.issueId, issueId), await lifecycleInFlightClause(db)))
     .limit(1)
     .then((rows: Array<{ id: string }>) => rows[0]?.id ?? null);
 }
