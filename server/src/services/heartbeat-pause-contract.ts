@@ -45,7 +45,7 @@ const receipt = common.extend({
     heartbeatRunId: id, executionEpoch: counter.nullable(), executionToken: optionalId,
   }).strict().nullable(),
   invalidated: z.object({
-    cause: z.enum(["user_cancel", "terminate", "budget", "authority_revoked", "stale_generation"]),
+    cause: z.enum(["user_cancel", "terminate", "budget", "authority_revoked", "stale_generation", "mission_terminal"]),
     at: z.string().datetime(),
   }).strict().nullable(),
   delivery: z.object({ wakeupRequestId: id, heartbeatRunId: optionalId }).strict().nullable(),
