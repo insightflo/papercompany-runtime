@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import { agentWakeupRequests, heartbeatRuns, type Db } from "@paperclipai/db";
+import { HEARTBEAT_RUN_STATUSES } from "@paperclipai/shared";
 import { expect } from "vitest";
 import { readResumeMissionLinkedHistory } from "../../services/workflow/resume/read-model-links.js";
 import type { HttpError } from "../../errors.js";
@@ -114,6 +116,10 @@ export async function seedRetryHeartbeat(
     executorOwnerReleasedAt?: Date;
   },
 ): Promise<string> {
+  // 제약 이전 레거시 행 재현용 — 도메인 밖 status 만 이 시험 DB 의 CHECK 를 내려 심는다 (legal seeds keep it).
+  if (input.status !== undefined && !(HEARTBEAT_RUN_STATUSES as readonly string[]).includes(input.status)) {
+    await db.execute(sql`ALTER TABLE heartbeat_runs DROP CONSTRAINT IF EXISTS heartbeat_runs_status_check`);
+  }
   const [row] = await db.insert(heartbeatRuns).values({
     ...(input.id ? { id: input.id } : {}),
     companyId: input.companyId,
