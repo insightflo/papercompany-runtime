@@ -81,7 +81,7 @@ if (submitted.status !== 201) throw Error('decision submit status ' + submitted.
       command: process.execPath, cwd: root,
       args: ["-e", `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'resumed\\n')`],
     } }).where(eq(agents.id, ownerId));
-    await db.update(heartbeatRuns).set({ status: "completed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
     const resolved = await request(app("board")).post(`/api/operator-decisions/${card.id}/resolve`)
       .send({ actionId: "approve", selectedOptionIds: ["approve"], comment: "Proceed" });
     expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);

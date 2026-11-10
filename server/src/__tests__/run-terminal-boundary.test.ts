@@ -255,7 +255,7 @@ describeEP("run-terminal-boundary", () => {
     const result = await finalizeRunTerminal(db, cancelledInput(w));
     if (result.kind !== "finalized") throw new Error("expected finalized");
     // 실행기 실패 시뮬레이션: 대상 heartbeat 가 캡처 후 정산되어 버렸다.
-    await db.update(heartbeatRuns).set({ status: "completed", terminalOutcome: "completed" })
+    await db.update(heartbeatRuns).set({ status: "succeeded", terminalOutcome: "succeeded" })
       .where(eq(heartbeatRuns.id, heartbeatId));
     expect(await executeTerminalEffectIntents(db, result.decisionId)).toEqual({ executed: 0, failed: 1 });
     let [intent] = await db.select().from(workflowTerminalEffectIntents)

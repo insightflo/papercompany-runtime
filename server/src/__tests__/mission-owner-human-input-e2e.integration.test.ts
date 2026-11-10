@@ -173,10 +173,10 @@ describeDb("mission owner human-input decision card contract E2E", () => {
   }
   async function completeOwnerRun() {
     // run 종료 후 resolve → 즉시 웨이크가 새 queued 행으로 전달되는 표준 모드를 만든다.
-    // "completed" 는 legacy(v1 플래그 무관) in-flight 절(queued/running + terminal-but-unsettled
-    // succeeded/failed/cancelled/timed_out) 어느 쪽에도 걸리지 않는 값이라 플래그와 무관하게
+    // 'succeeded' + 기본 finalization_version=0(settled_at NULL)은 in-flight 절
+    // (queued/running + terminal-unsettled v1) 어느 쪽에도 걸리지 않아 플래그와 무관하게
     // 섹션 [B] mission-run dedup(queued 강제)을 피한다.
-    await db.update(heartbeatRuns).set({ status: "completed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
   }
   async function deliverContinuation(cardId: string) {
     expect(await operatorDecisionContinuationWorker(db, { wakeup: heartbeatService(db).wakeup,
