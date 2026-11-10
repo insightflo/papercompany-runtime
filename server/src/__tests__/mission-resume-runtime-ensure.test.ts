@@ -187,7 +187,7 @@ describeEP("mission resume runtime ensure (contracts C/D/E)", () => {
       updatedAt: oldUpdatedAt,
     }).where(eq(missionAgentRuntimes.id, graph.ownerRuntimeId));
     // 런 종료: busy 뒷받침 run 없음.
-    await rawSql`UPDATE heartbeat_runs SET status = 'completed' WHERE id = ${graph.heartbeatRunId}`;
+    await rawSql`UPDATE heartbeat_runs SET status = 'succeeded' WHERE id = ${graph.heartbeatRunId}`;
 
     const result = await reapStaleBusyMissionRuntimes(db, { now: NOW, graceMs: 60_000 });
 
@@ -206,7 +206,7 @@ describeEP("mission resume runtime ensure (contracts C/D/E)", () => {
       stateJson: { bootstrapContextInjected: true },
       updatedAt: oldUpdatedAt,
     }).where(eq(missionAgentRuntimes.id, graph.ownerRuntimeId));
-    await rawSql`UPDATE heartbeat_runs SET status = 'completed' WHERE id = ${graph.heartbeatRunId}`;
+    await rawSql`UPDATE heartbeat_runs SET status = 'succeeded' WHERE id = ${graph.heartbeatRunId}`;
 
     await reapStaleBusyMissionRuntimes(db, { now: NOW, graceMs: 60_000 });
 

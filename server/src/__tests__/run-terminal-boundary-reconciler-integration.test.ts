@@ -279,7 +279,7 @@ describeEP("run-terminal-boundary reconciler wiring", () => {
     if (boundary.kind !== "finalized") throw new Error(`expected finalized, got ${boundary.kind}`);
     // 실행 전에 대상을 선점 정산 — cancel 효과는 "already settled" 로 실패해 pending 이 유지된다.
     await db.update(heartbeatRuns).set({
-      status: "completed", terminalOutcome: "succeeded", finishedAt: new Date(),
+      status: "succeeded", terminalOutcome: "succeeded", finishedAt: new Date(),
     }).where(eq(heartbeatRuns.id, heartbeatId));
     const immediate = await executeTerminalEffectIntents(db, boundary.decisionId);
     expect(immediate).toMatchObject({ executed: 0, failed: 1 });
