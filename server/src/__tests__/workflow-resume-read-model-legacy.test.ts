@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 import { agentWakeupRequests, createDb, heartbeatRuns, type Db } from "@paperclipai/db";
+import { HEARTBEAT_RUN_STATUSES } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
 import { readResumeExecutionHistory } from "../services/workflow/resume/read-model.js";
 import {
@@ -82,6 +84,10 @@ describeEP("readResumeExecutionHistory — legacy JSON-only associations", () =>
     typedIssueId?: string;
     typedWakeupRequestId?: string;
   }): Promise<string> {
+    // 제약 이전 레거시 행 재현용 — 도메인 밖 status 만 이 시험 DB 의 CHECK 를 내려 심는다 (legal seeds keep it).
+    if (input.status !== undefined && !(HEARTBEAT_RUN_STATUSES as readonly string[]).includes(input.status)) {
+      await db.execute(sql`ALTER TABLE heartbeat_runs DROP CONSTRAINT IF EXISTS heartbeat_runs_status_check`);
+    }
     const [row] = await db.insert(heartbeatRuns).values({
       companyId: input.companyId,
       agentId: input.agentId,
