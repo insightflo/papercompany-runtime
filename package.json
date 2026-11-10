@@ -13,6 +13,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:contract": "vitest run engine-contract",
+    "typecheck:contract": "tsc -p server/tsconfig.engine-contract-tests.json",
     "test:shorts-external": "vitest run --config vitest.external.config.ts",
     "db:generate": "pnpm --filter @paperclipai/db generate",
     "db:migrate": "pnpm --filter @paperclipai/db migrate",
