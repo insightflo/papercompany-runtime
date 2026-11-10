@@ -38,7 +38,7 @@ export async function startRuntimeReadinessRestoreFixture() {
       triggeredBy: "test", startedAt: new Date("2026-10-28T00:00:00.000Z"), completedAt: new Date("2026-10-28T00:01:00.000Z") });
     await sourceDb.insert(issues).values({ id: issueId, companyId, missionId, title: "Produced", originKind: "workflow_execution",
       status: "done", assigneeAgentId: agentId, completedAt: new Date("2026-10-28T00:01:00.000Z") });
-    await sourceDb.insert(heartbeatRuns).values({ id: heartbeatRunId, companyId, agentId, issueId, status: "completed",
+    await sourceDb.insert(heartbeatRuns).values({ id: heartbeatRunId, companyId, agentId, issueId, status: "succeeded",
       finishedAt: new Date("2026-10-28T00:01:00.000Z") });
     const artifactPath = path.join(liveRoot, "missions", missionId, "report.json");
     const bytes = Buffer.from('{"status":"complete","version":1}');

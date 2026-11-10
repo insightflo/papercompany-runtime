@@ -118,7 +118,7 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
     const deadRun = await db.insert(heartbeatRuns).values({
       companyId,
       agentId,
-      status: "completed",
+      status: "succeeded",
       invocationSource: "automation",
     }).returning().then((rows) => rows[0]!);
     await insertWake({ status: "queued", runId: deadRun.id });
@@ -242,7 +242,7 @@ describeEmbeddedPostgres("findExistingWorkflowResumeWake (RES-476 narrowing)", (
 
   it("does not treat terminal lock residue as live issue ownership", async () => {
     const run = await db.insert(heartbeatRuns).values({
-      companyId, agentId, issueId, status: "completed", invocationSource: "automation",
+      companyId, agentId, issueId, status: "succeeded", invocationSource: "automation",
     }).returning().then(rows => rows[0]!);
     await db.update(issues).set({ executionRunId: run.id, checkoutRunId: run.id }).where(eq(issues.id, issueId));
     try {
