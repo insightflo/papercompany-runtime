@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex, integer, bigint, boolean } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, check, pgTable, uuid, text, timestamp, jsonb, index, uniqueIndex, integer, bigint, boolean } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { agentWakeupRequests } from "./agent_wakeup_requests.js";
@@ -61,6 +61,15 @@ export const heartbeatRuns = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    // [TS하드닝 #1 DB CHECK 2차 2026-11-10] heartbeat_runs_status_check — 도메인은
+    //   코드 상수 HEARTBEAT_RUN_STATUSES(packages/shared/src/constants.ts)와 동일한
+    //   6값(queued/running/succeeded/failed/cancelled/timed_out)으로 운영 실측 대조
+    //   확정. 마이그레이션 0131 이 고아 'done' 1행을 succeeded 로 정정한 뒤
+    //   NOT VALID → VALIDATE 로 도입한다. 'done' 은 코드·API·UI 어디에서도
+    //   종단으로 인식되지 않는 유령값이다(hbdone-report §3-2). 새 상태값 추가 시
+    //   반드시 마이그레이션과 함께 이 목록을 갱신한다.
+    statusCheck: check("heartbeat_runs_status_check", sql`${table.status} in
+    ('queued','running','succeeded','failed','cancelled','timed_out')`),
     qualityCompanyIdUq: uniqueIndex("heartbeat_runs_quality_company_id_uq").on(table.companyId, table.id),
     companyAgentStartedIdx: index("heartbeat_runs_company_agent_started_idx").on(
       table.companyId,
