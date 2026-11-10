@@ -14,6 +14,9 @@
     "src/__tests__/engine-contract/07-queue-writer.test.ts",
     "src/__tests__/engine-contract/08-guards-drain.test.ts",
     "src/__tests__/engine-contract/09-resume-contract.test.ts",
-    "src/__tests__/engine-contract/10-claim-unit.test.ts"
+    "src/__tests__/engine-contract/10-claim-unit.test.ts",
+    "src/__tests__/engine-contract/11-qa-verdict-gates.test.ts",
+    "src/__tests__/engine-contract/12-plan-qa-gate.test.ts",
+    "src/__tests__/engine-contract/13-runtime-fences.test.ts"
   ]
 }
