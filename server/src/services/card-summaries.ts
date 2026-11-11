@@ -28,7 +28,18 @@ import { logger } from "../middleware/logger.js";
 /** 한 줄 계약: 개행 제거·1줄 클립(모델이 줄바꿈을 넣어도 저장값은 항상 1줄). */
 const singleLine = z.string().transform((s) => s.replace(/\s*\r?\n\s*/g, " ").trim()).pipe(z.string().min(1));
 
-const SUMMARY_JSON_SCHEMA = z.object({
+/** 1문장 클립: 개행으로 나뉜 비어 있지 않은 첫 줄을 우선 취한 뒤, 문장 종결 부호(`.!?`·`。`) 뒤에
+ *  공백 또는 끝이 오는 첫 경계까지 자른다(닫는 따옴표·괄호는 경계에 포함). 종결 부호 뒤가 공백/끝이
+ *  아니면 문장 경계가 아니므로 소수점·버전 표기(v1.2, 3.14)는 잘리지 않고, 문장부호가 없는 입력은
+ *  클립 결과가 빈 문자열이 되지 않도록 정규화된 첫 줄 전체로 fallback 한다(UI clipOneSentence와 동일 로직). */
+export function clipOneSentence(raw: string): string {
+  const firstLine = raw.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const boundary = firstLine.match(/^[\s\S]*?[.!?。]+["')\]}]*(?=\s|$)/);
+  const clipped = boundary ? boundary[0].trim() : "";
+  return clipped.length > 0 ? clipped : firstLine;
+}
+
+export const SUMMARY_JSON_SCHEMA = z.object({
   /** 증상 ≤2줄: 문자열 배열(최대 2항목) 또는 개행 포함 문자열 모두 허용 — 후처리로 항상 2줄 이하로 클립. */
   symptom: z
     .union([z.array(z.string()), z.string()])
@@ -39,7 +50,8 @@ const SUMMARY_JSON_SCHEMA = z.object({
         .slice(0, 2))
     .pipe(z.array(z.string().min(1)).min(1).max(2)),
   optionsLine: singleLine,
-  interpretation: singleLine,
+  /** 쉬운 해석은 저장 시점에도 1문장으로 클립 — 모델이 복수 문장을 내놉아도 첫 문장만 저장한다. */
+  interpretation: z.string().transform(clipOneSentence).pipe(z.string().min(1)),
 });
 
 export type CardSummaryJson = z.infer<typeof SUMMARY_JSON_SCHEMA>;

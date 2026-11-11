@@ -89,10 +89,71 @@ describe("CardHumanSummary", () => {
         <CardHumanSummary approvalId="a1" companyId="c1" summary={malformed} />
       </CompanyLanguageProvider>,
     );
-    // 블록은 살아 있되(렌더 크래시 없음) 신형 본문은 나오지 않아야 한다. 라벨만 남은 빈 레거시 폴백은 허용.
+    // 블록은 살아 있되(렌더 크래시 없음) 신형 본문·값 없는 "결정 필요:" 라벨은 나오지 않고 안내 문구만 표시된다.
     expect(html).toContain("쉬운 해석");
     expect(html).not.toContain("선택지:");
     expect(html).not.toContain("에이전트 고용 승인 대기");
+    expect(html).not.toContain("결정 필요:");
+    expect(html).toContain("지원하지 않는 해석 형식");
+  });
+
+  it("filters non-string symptom elements instead of rendering null/[object Object]", () => {
+    const dirtySymptom: HumanSummaryView = {
+      ...compactDone,
+      summary: {
+        symptom: ["에이전트 고용 승인 대기", null, {}, "새 요청이 결정을 기다립니다"],
+        optionsLine: "승인(고용 진행) / 거절(중단)",
+        interpretation: "사람이 고용을 허락해야 진행되기 때문에 확인이 필요합니다.",
+      } as unknown as HumanSummaryView["summary"],
+    };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="ko">
+        <CardHumanSummary approvalId="a1" companyId="c1" summary={dirtySymptom} />
+      </CompanyLanguageProvider>,
+    );
+    expect(html).toContain("에이전트 고용 승인 대기");
+    expect(html).toContain("새 요청이 결정을 기다립니다");
+    expect(html).not.toContain(">null<");
+    expect(html).not.toContain("[object Object]");
+  });
+
+  it("does not crash when legacy options/cautions are non-array strings", () => {
+    const badArrays: HumanSummaryView = {
+      ...legacyDone,
+      summary: {
+        ...legacyDone.summary,
+        options: "invalid-options-string",
+        cautions: "invalid-cautions-string",
+      } as unknown as HumanSummaryView["summary"],
+    };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="ko">
+        <CardHumanSummary approvalId="a1" companyId="c1" summary={badArrays} />
+      </CompanyLanguageProvider>,
+    );
+    expect(html).toContain("결정 필요:");
+    expect(html).toContain("고용을 승인할지 결정하세요.");
+    expect(html).not.toContain("invalid-options-string");
+    expect(html).not.toContain("invalid-cautions-string");
+  });
+
+  it("clips a multi-sentence interpretation to the first sentence at render time", () => {
+    const multiSentence: HumanSummaryView = {
+      ...compactDone,
+      summary: {
+        symptom: ["에이전트 고용 승인 대기", "새 에이전트 고용 요청이 결정을 기다립니다"],
+        optionsLine: "승인(고용 진행) / 거절(중단)",
+        interpretation: "사람이 고용을 허락해야 진행되기 때문에 확인이 필요합니다. 두 번째 문장은 남지 않습니다! 세 번째도요?",
+      } as unknown as HumanSummaryView["summary"],
+    };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="ko">
+        <CardHumanSummary approvalId="a1" companyId="c1" summary={multiSentence} />
+      </CompanyLanguageProvider>,
+    );
+    expect(html).toContain("사람이 고용을 허락해야 진행되기 때문에 확인이 필요합니다.");
+    expect(html).not.toContain("두 번째 문장은 남지 않습니다");
+    expect(html).not.toContain("세 번째도요");
   });
 
   it("shows a failure hint without dumping raw card content", () => {

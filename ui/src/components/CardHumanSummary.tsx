@@ -24,17 +24,61 @@ type CompactSummary = { symptom: string[]; optionsLine: string; interpretation: 
 function asCompactSummary(value: unknown): CompactSummary | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
+  // 배열 원소는 문자열만 취급 — null/객체 등 비문자열이 "null"/"[object Object]" 문자열로 둔갑해 화면에 노출되지 않게 차단.
   const symptom = (Array.isArray(v.symptom)
-    ? v.symptom.flatMap((item) => String(item).split(/\r?\n/))
+    ? v.symptom.flatMap((item) => (typeof item === "string" ? item.split(/\r?\n/) : []))
     : typeof v.symptom === "string" ? v.symptom.split(/\r?\n/) : [])
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, 2);
   const single = (x: unknown) => (typeof x === "string" ? x.replace(/\s*\r?\n\s*/g, " ").trim() : "");
   const optionsLine = single(v.optionsLine);
-  const interpretation = single(v.interpretation);
+  // 서버 SUMMARY_JSON_SCHEMA.interpretation 과 동일한 1문장 클립 — 저장값이 복수 문장이어도 표시는 1문장만.
+  const interpretation = typeof v.interpretation === "string" ? clipOneSentence(v.interpretation) : "";
   if (symptom.length === 0 || !optionsLine || !interpretation) return null;
   return { symptom, optionsLine, interpretation };
+}
+
+/** 1문장 클립: 개행으로 나뉜 비어 있지 않은 첫 줄을 우선 취한 뒤, 문장 종결 부호(`.!?`·`。`) 뒤에
+ *  공백 또는 끝이 오는 첫 경계까지 자른다. 소수점·버전 표기(v1.2, 3.14)는 종결 부호 뒤가 공백/끝이
+ *  아니므로 잘리지 않고, 문장부호 없는 입력은 빈 문자열이 되지 않도록 첫 줄 전체로 fallback 한다.
+ *  서버 card-summaries.clipOneSentence 와 같은 로직(UI는 서버 모듈을 직접 import하지 않으므로 여기에 둔다). */
+function clipOneSentence(raw: string): string {
+  const firstLine = raw.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const boundary = firstLine.match(/^[\s\S]*?[.!?。]+["')\]}]*(?=\s|$)/);
+  const clipped = boundary ? boundary[0].trim() : "";
+  return clipped.length > 0 ? clipped : firstLine;
+}
+
+/** 구 5섹션 행 — 레거시 렌더 폴백용(유효한 값이 하나라도 있을 때만 사용). */
+type LegacySummary = {
+  oneLine: string;
+  whatHappening: string;
+  decisionNeeded: string;
+  options: Array<{ label: string; meaning: string }>;
+  cautions: string[];
+};
+
+/** 구형 행 판별·정규화: options/cautions 는 배열 + 원소 형식까지만 통과 — 문자열("none" 등)이 들어와도
+ *  .map 크래시 없이 제외되고, 신형도 구형도 아닌 비정상 행은 null(안내 문구 폴백)로 판정한다. */
+function asLegacySummary(value: unknown): LegacySummary | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  const text = (x: unknown) => (typeof x === "string" ? x.trim() : "");
+  const options = Array.isArray(v.options)
+    ? v.options.filter((o): o is { label: string; meaning: string } =>
+        !!o && typeof o === "object"
+        && typeof (o as Record<string, unknown>).label === "string"
+        && typeof (o as Record<string, unknown>).meaning === "string")
+    : [];
+  const cautions = Array.isArray(v.cautions)
+    ? v.cautions.filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    : [];
+  const oneLine = text(v.oneLine);
+  const whatHappening = text(v.whatHappening);
+  const decisionNeeded = text(v.decisionNeeded);
+  if (!oneLine && !whatHappening && !decisionNeeded && options.length === 0 && cautions.length === 0) return null;
+  return { oneLine, whatHappening, decisionNeeded, options, cautions };
 }
 
 export function CardHumanSummary({
@@ -98,6 +142,7 @@ export function CardHumanSummary({
 
   const s = summary.summary;
   const compact = asCompactSummary(s); // 신형 3항목 행 판별(구 행은 null → 레거시 렌더)
+  const legacy = compact ? null : asLegacySummary(s); // 구 5섹션 행 판별(둘 다 아니면 안내 문구 폴백)
   return (
     <div className="mt-3 rounded-md border border-blue-200 dark:border-blue-900 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-sm">
       <div className="flex items-center justify-between gap-2">
@@ -140,27 +185,37 @@ export function CardHumanSummary({
                 })}
               </p>
             </>
-          ) : (
+          ) : legacy ? (
             <>
-              <p className="font-medium">{s.oneLine}</p>
-              <p className="text-[13px] leading-relaxed">{s.whatHappening}</p>
-              <p className="text-[13px] leading-relaxed">
-                <span className="font-medium">{L(lang, { en: "Decision needed: ", ko: "결정 필요: " })}</span>
-                {s.decisionNeeded}
-              </p>
-              {s.options?.length ? (
+              {legacy.oneLine ? <p className="font-medium">{legacy.oneLine}</p> : null}
+              {legacy.whatHappening ? <p className="text-[13px] leading-relaxed">{legacy.whatHappening}</p> : null}
+              {legacy.decisionNeeded ? (
+                <p className="text-[13px] leading-relaxed">
+                  <span className="font-medium">{L(lang, { en: "Decision needed: ", ko: "결정 필요: " })}</span>
+                  {legacy.decisionNeeded}
+                </p>
+              ) : null}
+              {legacy.options.length > 0 ? (
                 <ul className="text-[13px] leading-relaxed list-disc pl-4">
-                  {s.options.map((o, i) => (
+                  {legacy.options.map((o, i) => (
                     <li key={i}><span className="font-medium">{o.label}</span> — {o.meaning}</li>
                   ))}
                 </ul>
               ) : null}
-              {s.cautions?.length ? (
+              {legacy.cautions.length > 0 ? (
                 <ul className="text-[12px] text-amber-800 dark:text-amber-300 list-disc pl-4">
-                  {s.cautions.map((c, i) => <li key={i}>{c}</li>)}
+                  {legacy.cautions.map((c, i) => <li key={i}>{c}</li>)}
                 </ul>
               ) : null}
             </>
+          ) : (
+            // 신형도 구형도 아닌 비정상 행 — 값 없는 "결정 필요:" 라벨 대신 안내 문구만 표시(원문은 카드 본문에 있다).
+            <p className="text-[13px] leading-relaxed">
+              {L(lang, {
+                en: "Unsupported summary format — please judge from the original card above.",
+                ko: "지원하지 않는 해석 형식입니다. 위 원문 카드로 판단하세요.",
+              })}
+            </p>
           ))}
           {summary.status === "failed" && summary.error && (
             <p className="text-[11px] text-muted-foreground break-all">{summary.error}</p>
