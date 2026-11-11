@@ -5,13 +5,13 @@
 <p align="center">
   <a href="#%ED%80%B5%EC%8A%A4%ED%83%80%ED%8A%B8"><strong>퀵스타트</strong></a> &middot;
   <a href="doc/DEVELOPING.md"><strong>문서</strong></a> &middot;
-  <a href="https://github.com/insightflo/papercompany-runtime"><strong>GitHub</strong></a> &middot;
+  <a href="https://github.com/insightflo/paperwork-runtime"><strong>GitHub</strong></a> &middot;
   <a href="https://discord.gg/m4HZY7xNG3"><strong>Discord</strong></a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
-  <a href="https://github.com/insightflo/papercompany-runtime"><img src="https://img.shields.io/badge/repo-papercompany--runtime-18181b" alt="papercompany-runtime" /></a>
+  <a href="https://github.com/insightflo/paperwork-runtime"><img src="https://img.shields.io/badge/repo-paperwork--runtime-18181b" alt="paperwork-runtime" /></a>
   <a href="https://discord.gg/m4HZY7xNG3"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
 </p>
 
@@ -210,8 +210,8 @@ npx paperclipai onboard --yes
 또는 수동으로:
 
 ```bash
-git clone https://github.com/insightflo/papercompany-runtime.git
-cd papercompany-runtime
+git clone https://github.com/insightflo/paperwork-runtime.git
+cd paperwork-runtime
 pnpm install
 pnpm dev
 ```
@@ -283,8 +283,8 @@ pnpm db:migrate       # 마이그레이션 적용
 ## 커뮤니티
 
 - [Discord](https://discord.gg/m4HZY7xNG3) — 커뮤니티 참여
-- [GitHub Issues](https://github.com/insightflo/papercompany-runtime/issues) — 버그 및 기능 요청
-- [GitHub](https://github.com/insightflo/papercompany-runtime) — 소스 및 프로젝트 이력
+- [GitHub Issues](https://github.com/insightflo/paperwork-runtime/issues) — 버그 및 기능 요청
+- [GitHub](https://github.com/insightflo/paperwork-runtime) — 소스 및 프로젝트 이력
 
 <br/>
 
