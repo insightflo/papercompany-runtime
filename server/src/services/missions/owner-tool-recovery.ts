@@ -31,6 +31,17 @@ export async function applyOwnerToolRecovery(input: {
 }): Promise<{ outcome: OwnerToolRecoveryOutcome; appliedAction?: MissionOwnerSupervisionAppliedAction } | null> {
   const { db, mission, issue } = input;
   const decision = await loadLatestMissionOwnerDecision({ db, companyId: mission.companyId, ownerActionIssueId: issue.id });
+  // replan_mission 은 미션 단계 회복 결정으로 도구 단계 동작(retry/artifact)을 전혀 갖지 않는다.
+  // 라이브 결함(A1 5207d3bf / RES-10929): 이 결정을 no_op(retry_not_requested) 로 소비하면
+  // supervision 루프가 continue 하며 일반 결정 레인(applyOwnerReplanDecision → [PLAN] 이슈 실체화
+  // + 오너 웨이크)에 영원히 도달하지 못했다. 스코프 조건(mission·owner agent)은 supervision-main
+  // 일반 레인의 수용 게이트와 동일하게 맞췄다 — 이 지점에서 null 을 돌려주면 그 레인이 반드시 이
+  // 결정을 적용하므로, grace-default 일반 재시도로 빠지는 경로는 열리지 않는다(fail-closed 유지).
+  if (decision?.decision.decision === "replan_mission"
+    && decision.missionId === mission.id
+    && decision.authorAgentId === mission.ownerAgentId) {
+    return null;
+  }
   const target = decision?.decision.recoveryTarget ?? null;
   const base = { schemaVersion: 1 as const, ownerActionIssueId: issue.id, decisionEventId: decision?.eventId ?? null, target };
   const noOp = (reason: string, outcome: OwnerToolRecoveryOutcome["outcome"] = "blocked") => ({
