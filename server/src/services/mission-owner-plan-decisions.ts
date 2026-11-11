@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
+import { agents, companies, issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missionPlanQaVerdicts, missions, pluginEntities, workflowDefinitions } from "@paperclipai/db";
 import { logActivity } from "./activity-log.js";
 import { qualityService } from "./quality.js";
 import { missionPlanArtifactService, type MissionPlanArtifact } from "./mission-plan-artifacts.js";
 import { readPlanQaVerdict } from "./missions/mission-plan-qa-completion-gate.js";
 import { readPlanQaRef, updatePlanQaRef, closePlanQaIssue, requireOwnerPlanQaPass } from "./missions/owner-plan-qa-consumers.js";
+import { MISSION_RUNTIME_WORK_BLOCKING_STATUSES } from "./missions/mission-runtime-admission.js";
 import { renderRevisionContextLines } from "./missions/mission-planning-description.js";
 import { missionDelegationService } from "./mission-delegations.js";
 import { findOrCreateImmutablePaqoWorkflowDefinition } from "./workflow/paqo-definition-identity.js";
@@ -146,7 +147,7 @@ export type MissionOwnerPlanDecisionAuthor =
 
 export type MissionOwnerPlanDecisionCollectorDiagnostic = {
   commentId?: string | null;
-  code: "unauthorized_author" | "invalid_decision" | "no_decision_block" | "rejected_submission";
+  code: "unauthorized_author" | "invalid_decision" | "no_decision_block" | "rejected_submission" | "pinned_submission_unbound" | "pinned_plan_qa_hash_fallback";
   message: string;
 };
 
@@ -321,6 +322,91 @@ export async function findLatestAuthorizedMissionOwnerPlanDecision({
       author,
       diagnostics,
     };
+  }
+
+  // [PLAN-QA pass across planning issues] 제출 원장은 결정이 실제로 제출된 [PLAN] 이슈에
+  // 바인딩된다. 최신 [PLAN] 이슈에는 유효 제출이 없어도, 활성 계획의 refs.planQa 게이트가
+  // 아직 pending 이고 decisionHash 가 고정(pin)되어 있다면 그 해시와 정확히 일치하는 제출이
+  // 곧 해당 게이트의 권위 있는 결정이다. 폴백은 해시가 일치하는 제출만 선택하므로, 게이트가
+  // 없거나 이미 완료(pass/request_changes)되었거나 해시가 다른 낡은 결정은 절대 재생되지
+  // 않는다(no_authorized_decision 계약 보존).
+  const [fallbackActivePlan] = await db
+    .select({ refs: missionPlanArtifacts.refs })
+    .from(missionPlanArtifacts)
+    .where(and(
+      eq(missionPlanArtifacts.companyId, companyId),
+      eq(missionPlanArtifacts.missionId, missionId),
+      eq(missionPlanArtifacts.status, "active"),
+    ))
+    .orderBy(desc(missionPlanArtifacts.revision))
+    .limit(1);
+  const fallbackPlanQa = readPlanQaRef(fallbackActivePlan?.refs);
+  if (fallbackActivePlan && fallbackPlanQa?.status === "pending") {
+    const pinnedSubmissions = await db
+      .select({
+        id: missionPlanDecisionSubmissions.id,
+        planningIssueId: missionPlanDecisionSubmissions.planningIssueId,
+        authorAgentId: missionPlanDecisionSubmissions.authorAgentId,
+        authorUserId: missionPlanDecisionSubmissions.authorUserId,
+        sourceCommentId: missionPlanDecisionSubmissions.sourceCommentId,
+        decision: missionPlanDecisionSubmissions.decision,
+        status: missionPlanDecisionSubmissions.status,
+        createdAt: missionPlanDecisionSubmissions.createdAt,
+      })
+      .from(missionPlanDecisionSubmissions)
+      .where(and(
+        eq(missionPlanDecisionSubmissions.companyId, companyId),
+        eq(missionPlanDecisionSubmissions.missionId, missionId),
+        eq(missionPlanDecisionSubmissions.decisionHash, fallbackPlanQa.decisionHash),
+        isNull(missionPlanDecisionSubmissions.sourceCommentId),
+      ))
+      .orderBy(desc(missionPlanDecisionSubmissions.createdAt), desc(missionPlanDecisionSubmissions.id));
+
+    for (const submission of pinnedSubmissions) {
+      if (isRejectedMissionPlanDecisionSubmissionStatus(submission.status)) {
+        pushDiagnostic({
+          code: "rejected_submission",
+          message: "Mission owner plan decision submission was ignored because it was rejected",
+        });
+        continue;
+      }
+      // 폴백 결정은 반드시 실제 [PLAN] 이슈에 바인딩되어 있어야 한다(감사 정합성).
+      if (!submission.planningIssueId) {
+        pushDiagnostic({
+          code: "pinned_submission_unbound",
+          message: "Mission owner plan decision submission pinned by refs.planQa has no planning issue binding",
+        });
+        continue;
+      }
+      const author = getAuthorizedDecisionAuthor({
+        authorAgentId: submission.authorAgentId,
+        authorUserId: submission.authorUserId,
+        ownerAgentId: mission.ownerAgentId,
+      });
+      if (!author) {
+        pushDiagnostic({
+          code: "unauthorized_author",
+          message: "Mission owner plan decision submission was ignored because the author is not authorized",
+        });
+        continue;
+      }
+      pushDiagnostic({
+        code: "pinned_plan_qa_hash_fallback",
+        message: `Mission owner plan decision fell back to the submission pinned by refs.planQa.decisionHash on planning issue ${submission.planningIssueId}`,
+      });
+      return {
+        ok: true,
+        decision: submission.decision as MissionOwnerPlanDecisionPayload,
+        planningIssueId: submission.planningIssueId,
+        decisionIssueId: submission.planningIssueId,
+        decisionIssueOriginKind: "mission_main_executor_plan",
+        commentId: submission.sourceCommentId ?? null,
+        submissionId: submission.id,
+        commentCreatedAt: submission.createdAt ?? null,
+        author,
+        diagnostics,
+      };
+    }
   }
 
   return {
@@ -2400,6 +2486,76 @@ function readOwnerPlanDecisionRef(refs: unknown): { commentId?: string; decision
 
 export function hashOwnerPlanDecision(decision: MissionOwnerPlanDecisionPayload): string {
   return createHash("sha256").update(stableStringify(decision)).digest("hex");
+}
+
+export type SweepStalledPlanQaPassRecordsResult = {
+  /** 발견된 스톨 미션 수(중복 제거 후). */
+  stalled: number;
+  /** 이번 스윕에서 branch (b) 재완수로 'recorded' 전환에 성공한 미션 수. */
+  recovered: number;
+  /** 미션별 격리된 실패(전체 감독 루프는 계속된다). */
+  failures: Array<{ missionId: string; error: string }>;
+};
+
+/**
+ * [스톨 회복 스윕] PLAN-QA verdict 'pass' 원장은 기록됐지만 소비자가 no_authorized_decision
+ * 등으로 noop 에 멈춰 refs.planQa 가 pending 으로 남고 workflow_run 이 없는 미션을 찾아
+ * recordLatestAuthorizedMissionOwnerPlanDecision 의 멱등 branch (b) 경로로 재완수한다.
+ * 실행 차단 상태(completed/cancelled/paused) 미션은 스킵하고, 한 미션의 실패가 다른
+ * 미션의 회복을 막지 않도록 미션별로 격리한다.
+ */
+export async function sweepStalledPlanQaPassRecords(db: Db): Promise<SweepStalledPlanQaPassRecordsResult> {
+  const stalledRows = await db
+    .select({
+      companyId: missionPlanArtifacts.companyId,
+      missionId: missionPlanArtifacts.missionId,
+    })
+    .from(missionPlanArtifacts)
+    .innerJoin(
+      missions,
+      and(
+        eq(missions.companyId, missionPlanArtifacts.companyId),
+        eq(missions.id, missionPlanArtifacts.missionId),
+        notInArray(missions.status, [...MISSION_RUNTIME_WORK_BLOCKING_STATUSES]),
+      ),
+    )
+    .innerJoin(
+      missionPlanQaVerdicts,
+      and(
+        eq(missionPlanQaVerdicts.companyId, missionPlanArtifacts.companyId),
+        eq(missionPlanQaVerdicts.missionId, missionPlanArtifacts.missionId),
+        eq(missionPlanQaVerdicts.missionPlanArtifactId, missionPlanArtifacts.id),
+        eq(missionPlanQaVerdicts.verdict, "pass"),
+        sql`${missionPlanQaVerdicts.planQaIssueId} = (${missionPlanArtifacts.refs}->'planQa'->>'issueId')::uuid`,
+        sql`${missionPlanQaVerdicts.decisionHash} = ${missionPlanArtifacts.refs}->'planQa'->>'decisionHash'`,
+      ),
+    )
+    .where(and(
+      eq(missionPlanArtifacts.status, "active"),
+      sql`${missionPlanArtifacts.refs}->'planQa'->>'status' = 'pending'`,
+      sql`coalesce(${missionPlanArtifacts.refs}->'paqoWorkflow'->>'workflowRunId', '') = ''`,
+    ))
+    .orderBy(asc(missionPlanArtifacts.createdAt), asc(missionPlanArtifacts.id));
+
+  // 미션당 1회만 재완수한다(활성 artifact 조회가 여러 row 로 이어져도 동일 미션이다).
+  const stalledByMission = new Map<string, string>();
+  for (const row of stalledRows) {
+    if (!stalledByMission.has(row.missionId)) {
+      stalledByMission.set(row.missionId, row.companyId);
+    }
+  }
+
+  let recovered = 0;
+  const failures: Array<{ missionId: string; error: string }> = [];
+  for (const [missionId, companyId] of stalledByMission) {
+    try {
+      const result = await recordLatestAuthorizedMissionOwnerPlanDecision({ db, companyId, missionId });
+      if (result.status === "recorded") recovered += 1;
+    } catch (error) {
+      failures.push({ missionId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { stalled: stalledByMission.size, recovered, failures };
 }
 
 function stableStringify(value: unknown): string {

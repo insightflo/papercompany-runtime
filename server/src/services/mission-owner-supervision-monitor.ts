@@ -2,7 +2,8 @@ import { missions, type Db } from "@paperclipai/db";
 import { asc, inArray } from "drizzle-orm";
 import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
-import type { PlanQaWakeupHandler } from "./mission-owner-plan-decisions.js";
+import type { PlanQaWakeupHandler, SweepStalledPlanQaPassRecordsResult } from "./mission-owner-plan-decisions.js";
+import { sweepStalledPlanQaPassRecords } from "./mission-owner-plan-decisions.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
 import { sweepApprovedRevisionStarts } from "./workflow/approved-revision-start.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
@@ -152,6 +153,16 @@ export function createMissionOwnerSupervisionMonitor(
       await sweepApprovedRevisionStarts(db);
     } catch (err) {
       logger.warn({ err }, "approved revision start sweep failed");
+    }
+    // [승인=시작 2026-11-11] PLAN-QA PASS 원장은 기록됐지만 소비 noop 으로 멈춘 미션을 회복한다.
+    //   기존 sweep 이후·가드 밖에서 실행하며, 실패가 감독 주기를 막지 않는다.
+    try {
+      const swept: SweepStalledPlanQaPassRecordsResult = await sweepStalledPlanQaPassRecords(db);
+      if (swept.recovered > 0 || swept.failures.length > 0) {
+        logger.warn({ ...swept }, "stalled PLAN-QA pass sweep completed");
+      }
+    } catch (err) {
+      logger.warn({ err }, "stalled PLAN-QA pass sweep failed");
     }
   }
 
