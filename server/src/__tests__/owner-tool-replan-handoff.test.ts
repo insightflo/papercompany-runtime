@@ -195,6 +195,73 @@ describeEmbeddedPostgres("tool-bound owner action replan_mission materializes th
     expect(new Set(wakesForMission.map((wake) => wake.idempotencyKey)).size).toBe(1);
   }, 120_000);
 
+  // [재작업 2-c 회귀] 종결(done) [Owner Action] 카드는 미션 종료 전까지 매 스윕 missionIssues 에
+  // 남아 과거 replan_mission 결정이 계속 latest 로 조회된다. [PLAN] 이 done 으로 닫힌 뒤에도
+  // 새 [PLAN]·웨이크·허위 request_replan 이 반복 생성되지 않아야 한다(RES-10929 재발 방지).
+  it("stays silent after the materialized [PLAN] is done (consumed decision never re-materializes)", async () => {
+    const scenario = await seedFailedToolCard("done");
+    await decide(scenario, "replan_mission", await currentTarget(scenario));
+    await sweep(scenario.companyId);
+    const firstPlans = await planningIssues(scenario.missionId);
+    expect(firstPlans).toHaveLength(1);
+    const plan1 = firstPlans[0]!;
+    expect(planningWakes.filter((wake) => wake.missionId === scenario.missionId)).toHaveLength(1);
+
+    // 오너가 플랜 작업을 마쳐 [PLAN] 이 done 으로 종결된 뒤 3차 감시 스윕.
+    await db!.update(issues).set({ status: "done" }).where(eq(issues.id, plan1.id));
+    const third = await sweep(scenario.companyId);
+    const missionResult = third.missions[0]!;
+
+    const plans = await planningIssues(scenario.missionId);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.id).toBe(plan1.id);
+    expect(missionResult.appliedActions.some((action) => action.type === "owner_decision_replan_mission")).toBe(false);
+    // 결정 레인(case "replan_mission")이 소모된 과거 결정에 대해 내는 허위 request_replan 부재.
+    // (post-loop 의 tool_step_failed_requires_recovery 진단 추천은 별도 기존 동작이다.)
+    expect(missionResult.recommendations.some((rec) => rec.type === "request_replan"
+      && rec.issueId === scenario.recoveryIssueId
+      && rec.reason.includes("mission plan revision is required"))).toBe(false);
+    expect(planningWakes.filter((wake) => wake.missionId === scenario.missionId)).toHaveLength(1);
+  }, 120_000);
+
+  it("materializes a fresh [PLAN] when a new replan_mission decision is recorded afterwards", async () => {
+    const scenario = await seedFailedToolCard("done");
+    await decide(scenario, "replan_mission", await currentTarget(scenario));
+    await sweep(scenario.companyId);
+    const [plan1] = await planningIssues(scenario.missionId);
+    expect(plan1).toBeDefined();
+    await db!.update(issues).set({ status: "done" }).where(eq(issues.id, plan1!.id));
+    await sweep(scenario.companyId);
+    expect(await planningIssues(scenario.missionId)).toHaveLength(1);
+
+    // 이후 새 실패로 새 replan_mission 결정(새 하트비트 → 새 eventId)이 기록되면
+    // 다음 스윕은 두 번째 [PLAN] 을 정상 생성하고 오너를 깨운다.
+    await decide(scenario, "replan_mission", await currentTarget(scenario));
+    const result = await sweep(scenario.companyId);
+    const missionResult = result.missions[0]!;
+    const plans = await planningIssues(scenario.missionId);
+    expect(plans).toHaveLength(2);
+    const plan2 = plans.find((plan) => plan.id !== plan1!.id);
+    expect(plan2).toMatchObject({
+      originKind: "mission_main_executor_plan",
+      assigneeAgentId: scenario.ownerAgentId,
+      status: "todo",
+    });
+    expect(missionResult.appliedActions).toContainEqual(expect.objectContaining({
+      type: "owner_decision_replan_mission",
+      missionId: scenario.missionId,
+      planningIssueId: plan2!.id,
+      resultStatus: "todo",
+    }));
+    const wakes = planningWakes.filter((wake) => wake.missionId === scenario.missionId);
+    expect(wakes).toHaveLength(2);
+    expect(wakes[1]).toMatchObject({
+      issueId: plan2!.id,
+      targetAgentId: scenario.ownerAgentId,
+      idempotencyKey: `mission-owner-replan-wakeup:${scenario.missionId}:${plan2!.id}`,
+    });
+  }, 120_000);
+
   it("still holds a non-replan decision on a tool card closed (no generic retry, no planning issue)", async () => {
     const scenario = await seedFailedToolCard("done");
     await decide(scenario, "no_action_waiting", await currentTarget(scenario));

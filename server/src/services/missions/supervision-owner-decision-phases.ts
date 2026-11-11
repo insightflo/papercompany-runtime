@@ -44,7 +44,7 @@ import { normalizeMissionOwnerDecisionWakeupDispatchResult,
 import { activePlanRecoveryGateReason, resolveProducerStepIdFromDag, type DagStepLike } from "./supervision-helpers.js";
 import { requeueStaleValidationGateBeforeOwnerRetry } from "./validation-gate-requeue.js";
 import { applyReassignSourceIssueDecision } from "./mission-owner-reassign-source.js";
-import { applyOwnerReplanDecision } from "./owner-replan-application.js";
+import { applyOwnerReplanDecision, isOwnerReplanDecisionAlreadySatisfied } from "./owner-replan-application.js";
 import { resolveRecoveryOwnership, isQaRecoveryLive } from "./recovery-ownership-guard.js";
 import { authorizeProducerRework } from "./producer-rework-authorization.js";
 import { extractQaCapQaStepId, isQaReworkCapOversightIssue } from "./qa-rework-cap-oversight.js";
@@ -891,7 +891,24 @@ export async function runMissionOwnerDecisionPhases({
                 if (result.appliedAction) appliedActions.push(result.appliedAction);
               }
               break;
-            case "replan_mission":
+            case "replan_mission": {
+              // [결정 소모 가드] 이미 소모된 과거 replan 결정(적용 마커 + [PLAN] 종결, 또는 ①종결
+              // [PLAN] ②신규 plan artifact ③plan 제출 충족 증거)은 recommendation·적용·웨이크 전부
+              // 생략한다. 종결된 [Owner Action] 카드가 매 스윕 missionIssues 에 남아 과거 결정이
+              // 계속 latest 로 조회되는 구조(RES-10929)에서 중복 [PLAN]·중복 웨이크·허위
+              // request_replan 이 반복되는 것을 여기서 차단한다.
+              const replanAlreadySatisfied = decisionRecord
+                ? await isOwnerReplanDecisionAlreadySatisfied({
+                  db,
+                  companyId: mission.companyId,
+                  missionId: mission.id,
+                  ownerAgentId: mission.ownerAgentId,
+                  ownerActionIssueId: issue.id,
+                  decisionEventId: decisionRecord.eventId,
+                  decisionCreatedAt: decisionRecord.createdAt,
+                })
+                : false;
+              if (replanAlreadySatisfied) break;
               addRecommendation({
                 type: "request_replan",
                 missionId: mission.id,
@@ -928,6 +945,7 @@ export async function runMissionOwnerDecisionPhases({
                 });
               }
               break;
+            }
             case "recover_artifact":
               addRecommendation({
                 type: "materialize_artifact_from_comment",
