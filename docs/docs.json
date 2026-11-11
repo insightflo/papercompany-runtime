@@ -16,7 +16,7 @@
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/insightflo/papercompany-runtime"
+      "url": "https://github.com/insightflo/paperwork-runtime"
     }
   ],
   "redirects": [
@@ -350,6 +350,6 @@
     ]
   },
   "footerSocials": {
-    "github": "https://github.com/insightflo/papercompany-runtime"
+    "github": "https://github.com/insightflo/paperwork-runtime"
   }
 }

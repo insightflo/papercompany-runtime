@@ -5,13 +5,13 @@
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
   <a href="doc/DEVELOPING.md"><strong>Docs</strong></a> &middot;
-  <a href="https://github.com/insightflo/papercompany-runtime"><strong>GitHub</strong></a> &middot;
+  <a href="https://github.com/insightflo/paperwork-runtime"><strong>GitHub</strong></a> &middot;
   <a href="https://discord.gg/m4HZY7xNG3"><strong>Discord</strong></a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
-  <a href="https://github.com/insightflo/papercompany-runtime"><img src="https://img.shields.io/badge/repo-papercompany--runtime-18181b" alt="papercompany-runtime" /></a>
+  <a href="https://github.com/insightflo/paperwork-runtime"><img src="https://img.shields.io/badge/repo-paperwork--runtime-18181b" alt="paperwork-runtime" /></a>
   <a href="https://discord.gg/m4HZY7xNG3"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
   <a href="README.ko.md"><img src="https://img.shields.io/badge/lang-한국어-important" alt="한국어" /></a>
 </p>
@@ -221,8 +221,8 @@ The public CLI package is still named `paperclipai` for compatibility with the u
 Or manually:
 
 ```bash
-git clone https://github.com/insightflo/papercompany-runtime.git
-cd papercompany-runtime
+git clone https://github.com/insightflo/paperwork-runtime.git
+cd paperwork-runtime
 pnpm install
 pnpm dev
 ```
@@ -294,8 +294,8 @@ We welcome contributions. See [doc/DEVELOPING.md](doc/DEVELOPING.md) for local s
 ## Community
 
 - [Discord](https://discord.gg/m4HZY7xNG3) — Join the community
-- [GitHub Issues](https://github.com/insightflo/papercompany-runtime/issues) — bugs and feature requests
-- [GitHub](https://github.com/insightflo/papercompany-runtime) — source and project history
+- [GitHub Issues](https://github.com/insightflo/paperwork-runtime/issues) — bugs and feature requests
+- [GitHub](https://github.com/insightflo/paperwork-runtime) — source and project history
 
 <br/>
 

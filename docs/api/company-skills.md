@@ -78,7 +78,7 @@ Installs the skill or applies pending updates to agent workspaces.
 ```
 POST /api/companies/{companyId}/skills/import
 {
-  "source": "insightflo/papercompany-operations/company-skills/html-for-beginners"
+  "source": "insightflo/paperwork-operations/company-skills/html-for-beginners"
 }
 ```
 
