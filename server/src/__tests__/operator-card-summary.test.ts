@@ -114,6 +114,50 @@ describe("formatOperatorDecisionSummary", () => {
     expect(evidenceLine).not.toContain("evidence/5"); // at most 5 links kept
   });
 
+  it("extracts full UUID, 8-char hex, and issue-identifier refs without mid-path truncation", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      evidence:
+        "blocked /issues/8473c940-f6db-4342-8a52-00c14907a169 and /issues/c70bc2a9-b34a-4ee5-960d-2dbc1605e01f plus /issues/8473c940 /issues/2cd204a3 /issues/RES-10926",
+    });
+
+    // 원본 evidence 에서 통째로 추출: full UUID 가 shortenUuids 8자리로 깎이지 않는다.
+    const tokens = summary.split("\n").at(-1)!.replace(/^근거: /, "").split(" · ");
+    expect(tokens).toEqual([
+      "/issues/8473c940-f6db-4342-8a52-00c14907a169",
+      "/issues/c70bc2a9-b34a-4ee5-960d-2dbc1605e01f",
+      "/issues/8473c940",
+      "/issues/2cd204a3",
+      "/issues/RES-10926",
+    ]);
+  });
+
+  it("strips adjacent sentence punctuation from extracted issue refs and URLs", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      evidence:
+        "see /issues/RES-10926, then https://example.com/run/123 and https://example.com/a; end",
+    });
+
+    const tokens = summary.split("\n").at(-1)!.replace(/^근거: /, "").split(" · ");
+    expect(tokens).toEqual([
+      "https://example.com/run/123",
+      "https://example.com/a",
+      "/issues/RES-10926",
+    ]);
+  });
+
+  it("does not split a /issues/ path segment out of a full URL", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      evidence: "diagnosis at https://example.com/issues/RES-10926 only",
+    });
+
+    expect(summary.split("\n").at(-1)!.replace(/^근거: /, "")).toBe(
+      "https://example.com/issues/RES-10926",
+    );
+  });
+
   it("truncates long symptom prose at a sentence boundary, never mid-word", () => {
     const sentence = "This sentence is deliberately long so that several of them exceed the budget. ";
     const summary = formatOperatorDecisionSummary({

@@ -6,7 +6,14 @@ import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-ev
 
 const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const URL_PATTERN = /https?:\/\/[^\s)<>"']+/g;
-const ISSUE_REF_PATTERN = /(?:^|(?<=[\s(]))\/issues\/\d+/g;
+// /issues/<id> 의 <id> 는 숫자뿐 아니라 UUID(8473c940-f6db-...)·8자리 hex(2cd204a3)·
+//   이슈 식별자(RES-10926)·슬러그가 온다. [A-Za-z0-9][A-Za-z0-9._-]* 로 통째로 매칭해
+//   중간 절단(/issues/8473)과 a-f 시작 누락을 막는다. 전체 URL(https://host/issues/...)
+//   내부의 /issues/ 는 선행 문자가 '/'라 lookbehind 가 배제하므로 URL에서 경로만
+//   중복 분리되지 않는다.
+const ISSUE_REF_PATTERN = /(?:^|(?<=[\s(\[<"']))\/issues\/[A-Za-z0-9][A-Za-z0-9._-]*/g;
+// 링크 추출 토큰 끝에 붙은 문장부호(.,;:!?)는 링크의 일부가 아니므로 제거한다.
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
 const MAX_EVIDENCE_LINKS = 5;
 
 const SYMPTOM_BUDGET = 200;
@@ -101,11 +108,18 @@ function symptomContextLine(input: OperatorCardSummaryInput): string {
 }
 
 // evidence 에 링크가 있으면 링크만 남긴다. 링크는 절대 중간에서 잘지 않고,
-//   예산 초과 시 링크 단위로 뒤에서부터 버린다.
+//   예산 초과 시 링크 단위로 뒤에서부터 버린다. 추출은 shortenUuids 적용 전 원본
+//   evidence 에서 수행해 /issues/<full-uuid> · /issues/RES-10926 · 전체 URL 무결성을
+//   100% 보존하고, shortenUuids 는 링크가 없는 산문 폴백 경로에서만 쓴다.
+//   토큰은 후행 문장부호를 제거한 뒤 순서 보존 중복 제거한다.
 function extractEvidenceLinks(evidence: string): string[] {
   const links = new Set<string>();
-  for (const match of evidence.matchAll(URL_PATTERN)) links.add(match[0]);
-  for (const match of evidence.matchAll(ISSUE_REF_PATTERN)) links.add(match[0]);
+  const add = (raw: string) => {
+    const link = raw.replace(TRAILING_PUNCTUATION, "");
+    if (link) links.add(link);
+  };
+  for (const match of evidence.matchAll(URL_PATTERN)) add(match[0]);
+  for (const match of evidence.matchAll(ISSUE_REF_PATTERN)) add(match[0]);
   return [...links].slice(0, MAX_EVIDENCE_LINKS);
 }
 
