@@ -1,9 +1,13 @@
 import { issues, missionPlanArtifacts, missionPlanDecisionSubmissions, missions, workflowTransitionEvents } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
-import { and, desc, eq, gte, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, notInArray } from "drizzle-orm";
+import { logActivity } from "../activity-log.js";
 import { createIssueRecord } from "../issue-create-records.js";
 import type { MissionRow } from "../missions.js";
 import { listCompanyExecutionCandidates, formatCandidateRosterLines } from "./mission-execution-candidates.js";
+import { RECOVERY_UNBLOCK_ORIGIN_KIND } from "./recovery-ownership-guard.js";
+import { MISSION_RUNTIME_WORK_BLOCKING_STATUSES } from "./mission-runtime-admission.js";
+import { TERMINAL_ISSUE_STATUSES } from "../workflow/run-terminal-boundary-cause.js";
 import { buildRevisionMissionPlanningDescription } from "./mission-revision-planning.js";
 import { missionPlanTemplateService } from "./mission-plan-templates.js";
 import { loadLatestMissionOwnerDecision, MISSION_OWNER_RECOVERY_LAYER } from "./mission-owner-recovery-ledger.js";
@@ -87,7 +91,8 @@ async function findOpenOwnerPlanningIssue(
 
 // 결정 시점 이후 이미 [PLAN] 실체화·리비전 제출이 이뤄졌는지: ① 종결된(비-runnable) 오너 [PLAN]
 // 이슈, ② 신규 plan artifact 리비전, ③ plan 결정 제출. 하나라도 있으면 결정은 이미 소멸/충족되었다.
-async function hasReplanEvidenceSinceDecision(db: Db, input: {
+// [충족 스윕 재사용] closeSatisfiedReplanUnblockIssues 도 같은 증거 원천으로 판정한다.
+export async function hasReplanEvidenceSinceDecision(db: Db, input: {
   companyId: string;
   missionId: string;
   ownerAgentId: string | null;
@@ -292,4 +297,114 @@ export async function applyOwnerReplanDecision(input: {
     });
     return { planningIssue, resultStatus: "created" };
   });
+}
+
+export type CloseSatisfiedReplanUnblockIssuesResult = {
+  /** 이번 스윕이 검사한 미종결 mission_main_executor_unblock 이슈 수(실행 허용 미션 소속만). */
+  candidates: number;
+  /** 충족 판정으로 done 전이에 성공한 이슈 수. */
+  closed: number;
+  /** 이슈별 격리된 실패(전체 감독 루프는 계속된다). */
+  failures: Array<{ issueId: string; error: string }>;
+};
+
+// [5207d3bf 수리] 충족된 replan_mission 결정의 미종결 언블록 이슈(done/cancelled 외 — 특히
+// blocked)를 done 으로 종결한다. run-terminal-recovery-gate 채널 (a)는 미종결 언블록을 열린
+// 회복 채널로 보아 런 종결을 유예하는데, 오너의 replan 결정이 ①·②·③ 증거로 이미 충족됐다면
+// 그 유예는 회복이 아니라 고착이다(A1 5207d3bf: RES-11034 → RES-11032 → run 3169cbc6 running
+// 영구 유예). 마커만 있고 ①·②·③ 증거가 없는(플랜 수립 진행 중) 상태는 절대 닫지 않는다 —
+// 플랜 완성 전 조기 failed 종결 방지. 실행 차단 상태(paused/completed/cancelled) 미션은
+// 어드미션 계약(MISSION_RUNTIME_WORK_BLOCKING_STATUSES)에 따라 조회 단계부터 스킵한다.
+export async function closeSatisfiedReplanUnblockIssues(db: Db): Promise<CloseSatisfiedReplanUnblockIssuesResult> {
+  const candidates = await db
+    .select({
+      id: issues.id,
+      companyId: issues.companyId,
+      missionId: issues.missionId,
+      status: issues.status,
+      identifier: issues.identifier,
+      ownerAgentId: missions.ownerAgentId,
+    })
+    .from(issues)
+    .innerJoin(
+      missions,
+      and(
+        eq(missions.companyId, issues.companyId),
+        eq(missions.id, issues.missionId),
+        notInArray(missions.status, [...MISSION_RUNTIME_WORK_BLOCKING_STATUSES]),
+      ),
+    )
+    .where(and(
+      eq(issues.originKind, RECOVERY_UNBLOCK_ORIGIN_KIND),
+      isNull(issues.hiddenAt),
+      notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
+    ))
+    .orderBy(asc(issues.createdAt), asc(issues.id));
+
+  let closed = 0;
+  const failures: Array<{ issueId: string; error: string }> = [];
+  for (const unblock of candidates) {
+    if (!unblock.missionId) continue;
+    try {
+      const decision = await loadLatestMissionOwnerDecision({
+        db,
+        companyId: unblock.companyId,
+        ownerActionIssueId: unblock.id,
+      });
+      // 결정 레인(applyOwnerReplanDecision)과 동일 권위 계약: 구조화 최신 결정이 replan_mission
+      // 이고 오너 저자여야 한다. 다른 결정(retry_source_issue 등)·비오너 저자·미션 불일치는 스킵.
+      if (
+        !decision
+        || decision.missionId !== unblock.missionId
+        || decision.decision.decision !== "replan_mission"
+        || decision.authorAgentId !== unblock.ownerAgentId
+      ) continue;
+
+      // [충족 판정] isOwnerReplanDecisionAlreadySatisfied 는 열린 runnable [PLAN](RES-11035 형
+      // 잔존)을 '진행 중'으로 보고 false 를 조기 반환하지만, 스윕이 필요로 하는 질문은 “결정
+      // 이후 ① 종결 [PLAN] · ② artifact · ③ 제출 증거가 있느냐”다. 같은 증거 헬퍼로 판정한다.
+      const satisfied = await hasReplanEvidenceSinceDecision(db, {
+        companyId: unblock.companyId,
+        missionId: unblock.missionId,
+        ownerAgentId: unblock.ownerAgentId,
+        decisionCreatedAt: decision.createdAt,
+      });
+      if (!satisfied) continue;
+
+      const now = new Date();
+      const [updated] = await db.update(issues).set({
+        status: "done",
+        completedAt: now,
+        updatedAt: now,
+      }).where(and(
+        eq(issues.companyId, unblock.companyId),
+        eq(issues.id, unblock.id),
+        notInArray(issues.status, [...TERMINAL_ISSUE_STATUSES]),
+      )).returning({ id: issues.id });
+      // CAS 가드: 종결 상태로 동시 전이됐으면 이미 done/cancelled — 멱등하게 스킵.
+      if (!updated) continue;
+
+      await logActivity(db, {
+        companyId: unblock.companyId,
+        actorType: "system",
+        actorId: "mission-owner-replan-closeout",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: unblock.id,
+        details: {
+          status: "done",
+          identifier: unblock.identifier,
+          source: "replan_satisfied_closeout",
+          missionId: unblock.missionId,
+          decisionEventId: decision.eventId,
+          decisionAt: decision.createdAt.toISOString(),
+          _previous: { status: unblock.status },
+        },
+      });
+      closed += 1;
+    } catch (error) {
+      failures.push({ issueId: unblock.id, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { candidates: candidates.length, closed, failures };
 }
