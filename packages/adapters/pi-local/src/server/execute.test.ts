@@ -27,6 +27,10 @@ const holdMs = Number(process.env.PI_TEST_HOLD_MS || "25");
 let input = "";
 let proceedTimer = null;
 const proceed = () => {
+  let sessionContentAtStart = null;
+  if (process.env.PI_TEST_SESSION_FILE) {
+    try { sessionContentAtStart = fs.readFileSync(process.env.PI_TEST_SESSION_FILE, "utf8"); } catch {}
+  }
   if (capturePath) {
     fs.writeFileSync(capturePath, JSON.stringify({
       argv,
@@ -36,6 +40,7 @@ const proceed = () => {
       runId: process.env.PAPERCLIP_RUN_ID,
       providerKey: process.env.ANTHROPIC_API_KEY,
       home: process.env.HOME,
+      sessionContentAtStart,
     }, null, 2));
   }
   let attempt = 1;
@@ -49,6 +54,10 @@ const proceed = () => {
   }
   const rateLimitAttemptEquals = Number(process.env.PI_TEST_RATE_LIMIT_ATTEMPT_EQUALS || "0");
   if (rateLimitAttemptEquals > 0 && attempt === rateLimitAttemptEquals) {
+    if (process.env.PI_TEST_SESSION_FILE && process.env.PI_TEST_APPEND_429_TURN === "1") {
+      fs.appendFileSync(process.env.PI_TEST_SESSION_FILE, JSON.stringify({ type: "auto_retry_end", success: false, finalError: "429: broken rate-limit turn" }) + "\\n");
+      fs.writeFileSync(process.env.PI_TEST_SESSION_FILE + ".429-appended", "1");
+    }
     process.stdout.write(JSON.stringify({
       type: "auto_retry_end",
       success: false,
@@ -117,6 +126,8 @@ function buildContext(input: {
   structuredError?: boolean;
   rateLimitAttemptEquals?: number;
   rateLimitAfterToolCall?: boolean;
+  sessionFile?: string;
+  append429Turn?: boolean;
   timeoutSec?: number;
   logs?: string[];
   runtime?: AdapterExecutionContext["runtime"];
@@ -150,6 +161,8 @@ function buildContext(input: {
         ...(input.structuredError ? { PI_TEST_STRUCTURED_ERROR: "1" } : {}),
         ...(input.rateLimitAttemptEquals ? { PI_TEST_RATE_LIMIT_ATTEMPT_EQUALS: String(input.rateLimitAttemptEquals) } : {}),
         ...(input.rateLimitAfterToolCall ? { PI_TEST_RATE_LIMIT_AFTER_TOOLCALL: "1" } : {}),
+        ...(input.sessionFile ? { PI_TEST_SESSION_FILE: input.sessionFile } : {}),
+        ...(input.append429Turn ? { PI_TEST_APPEND_429_TURN: "1" } : {}),
         ...(input.explicitApiKey ? { PAPERCLIP_API_KEY: input.explicitApiKey } : {}),
         ...(input.providerApiKey ? { ANTHROPIC_API_KEY: input.providerApiKey } : {}),
         ...(input.holdMs ? { PI_TEST_HOLD_MS: String(input.holdMs) } : {}),
@@ -542,6 +555,67 @@ describe("pi_local 429-1302 rate-limit backoff", () => {
     }
   });
 
+  it("retries a 429-1302 on the same existing session restored to its pre-attempt snapshot", async () => {
+    const { root, cwd, home, command, capture, attempts } = await prepareRateLimitFixture();
+    const logs: string[] = [];
+    try {
+      const existingSessionFile = path.join(root, "existing-session.jsonl");
+      const previousTurn = `${JSON.stringify({
+        type: "turn_end",
+        message: { role: "user", content: "earlier mission turn" },
+      })}\n`;
+      await fs.writeFile(existingSessionFile, previousTurn, "utf8");
+
+      const result = await execute(
+        buildContext({
+          command,
+          cwd,
+          home,
+          capturePath: capture,
+          attemptPath: attempts,
+          rateLimitAttemptEquals: 1,
+          sessionFile: existingSessionFile,
+          append429Turn: true,
+          logs,
+          runtime: {
+            sessionId: existingSessionFile,
+            sessionParams: { sessionId: existingSessionFile, cwd },
+            sessionDisplayId: existingSessionFile,
+            taskKey: null,
+          },
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      // Attempt 1 hit 429-1302 (appending a broken error turn to the session
+      // file); attempt 2 succeeded on the SAME session file.
+      expect(Number(await fs.readFile(attempts, "utf8"))).toBe(2);
+
+      // (a) The retry received the existing session file via --session.
+      const captured = JSON.parse(await fs.readFile(capture, "utf8")) as {
+        argv: string[];
+        sessionContentAtStart: string | null;
+      };
+      expect(captured.argv[captured.argv.indexOf("--session") + 1]).toBe(existingSessionFile);
+
+      // The broken 429 turn really was appended during attempt 1, so the
+      // snapshot restoration below is actually exercised.
+      expect(await fs.readFile(`${existingSessionFile}.429-appended`, "utf8")).toBe("1");
+
+      // (b) The retry started from the restored pre-attempt snapshot: the
+      // previous turn is preserved and the broken 429 error turn is gone.
+      expect(captured.sessionContentAtStart).toBe(previousTurn);
+      expect(await fs.readFile(existingSessionFile, "utf8")).toBe(previousTurn);
+
+      // (c) The final result keeps the existing session linkage.
+      expect(result.sessionId).toBe(existingSessionFile);
+      expect(result.sessionParams).toEqual({ sessionId: existingSessionFile, cwd });
+      expect(result.sessionDisplayId).toBe(existingSessionFile);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not re-run after tool calls and arms the shared cooldown for the next run", async () => {
     process.env.PAPERCLIP_PI_429_BASE_DELAY_MS = "500";
     const { root, cwd, home, command, capture, attempts } = await prepareRateLimitFixture();
@@ -666,8 +740,17 @@ describe("pi_local 429-1302 rate-limit backoff", () => {
       );
 
       expect(early.exitCode).toBe(1);
-      expect(early.errorCode).toBe("provider_rate_limited");
+      // R1/heartbeat-compatible code (not an unregistered pseudo-code); the
+      // diagnostic identifier survives inside the message.
+      expect(early.errorCode).toBe("adapter_failed");
       expect(early.errorMessage).toContain("cooldown");
+      expect(early.errorMessage).toContain("[provider_rate_limited]");
+      // Session linkage survives the early return.
+      expect(early.sessionId).toBeTruthy();
+      expect(early.sessionParams).toEqual({ sessionId: early.sessionId, cwd });
+      expect(early.sessionDisplayId).toBe(early.sessionId);
+      expect(early.clearSession).toBe(false);
+      expect(early.billingType).toBe("unknown");
       expect(earlyLogs.join("")).toContain("failing fast instead of hitting the provider");
       // No additional pi run started for the second execute.
       expect(Number(await fs.readFile(attempts, "utf8"))).toBe(1);

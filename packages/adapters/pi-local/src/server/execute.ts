@@ -807,15 +807,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Pi rate-limit cooldown active on ${rateLimitGateKey}: ${entrySlot.waitMs}ms wait exceeds the ${timeoutSec}s timeout budget; failing fast instead of hitting the provider.\n`,
       );
+      // `adapter_failed` (not an unregistered pseudo-code) keeps the
+      // heartbeat-level adapter_failed retry and the R1 auto-recoverable
+      // human-card gate working; `[provider_rate_limited]` stays in the
+      // message as the diagnostic identifier. The session fields stay
+      // populated so the task's session linkage survives the early return.
       const earlyResult: AdapterExecutionResult = {
         exitCode: 1,
         signal: null,
         timedOut: false,
-        errorMessage: `Pi provider rate limit cooldown active: needs ${entrySlot.waitMs}ms but the timeout budget is ${timeoutSec}s`,
-        errorCode: "provider_rate_limited",
+        errorMessage: `Pi provider rate limit cooldown active: needs ${entrySlot.waitMs}ms but the timeout budget is ${timeoutSec}s [provider_rate_limited]`,
+        errorCode: "adapter_failed",
+        sessionId: sessionPath,
+        sessionParams: { sessionId: sessionPath, cwd },
+        sessionDisplayId: sessionPath,
         provider,
         biller: piBiller,
         model,
+        billingType: "unknown",
+        clearSession: false,
       };
       await emitTimingLog();
       return earlyResult;
@@ -829,8 +839,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     timing.rateLimitWaitMs = rateLimitWaitMsTotal;
   }
 
+  // Snapshot the session file's bytes right before the first attempt. A
+  // 429-1302 retry restores this state (rolling back only the broken error
+  // turn the failed attempt appended) so the existing context, injected
+  // instructions, and compact directives survive on the SAME session path;
+  // a heartbeat-level retry after exhausted adapter retries inherits the
+  // same clean snapshot.
+  const initialSessionSnapshot = await fs.readFile(sessionPath).catch(() => null);
   let current = await runAttempt(sessionPath);
-  let currentSessionPath = sessionPath;
 
   // 429 (code 1302) backoff retry loop. Detection always arms the shared
   // cooldown gate first — even when this run will not retry (side effects
@@ -864,6 +880,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Pi rate limit 429 (code 1302) persists after ${rateLimitRetries} backoff retries; returning failure (shared cooldown set for ${backoffMs}ms).\n`,
       );
+      // No side effects ran and no output was produced: roll the session back
+      // to its pre-attempt bytes so a heartbeat-level retry resumes the clean
+      // existing session instead of the broken 429 error turn.
+      if (initialSessionSnapshot !== null) {
+        await fs.writeFile(sessionPath, initialSessionSnapshot);
+      }
       break;
     }
     if (rateLimitWaitMsTotal + backoffMs > rateLimitBudgetMs) {
@@ -871,40 +893,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         "stdout",
         `[paperclip] Pi rate limit 429 (code 1302) detected; ${backoffMs}ms backoff exceeds the remaining timeout budget; returning failure (shared cooldown set).\n`,
       );
+      if (initialSessionSnapshot !== null) {
+        await fs.writeFile(sessionPath, initialSessionSnapshot);
+      }
       break;
     }
     rateLimitRetries += 1;
     timing.rateLimitRetries = rateLimitRetries;
     await onLog(
       "stdout",
-      `[paperclip] Pi rate limit 429 (code 1302) detected; backing off ${backoffMs}ms${retryAfterMs != null ? ` (Retry-After ${retryAfterMs}ms)` : ""} before retry ${rateLimitRetries}/${rateLimitConfig.maxRetries} on a fresh session.\n`,
+      `[paperclip] Pi rate limit 429 (code 1302) detected; backing off ${backoffMs}ms${retryAfterMs != null ? ` (Retry-After ${retryAfterMs}ms)` : ""} before retry ${rateLimitRetries}/${rateLimitConfig.maxRetries} on the same session restored to its pre-attempt state.\n`,
     );
     await sleepForMs(backoffMs);
     rateLimitWaitMsTotal += backoffMs;
     timing.rateLimitWaitMs = rateLimitWaitMsTotal;
-    // The failed attempt produced no assistant/tool output, so retry on a
-    // clean session file instead of accumulating broken error turns in the
-    // resumed session history.
-    const retrySessionPath = buildSessionPath(sessionsDir, agent.id, new Date().toISOString());
-    try {
-      await fs.writeFile(retrySessionPath, "", { flag: "wx" });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw err;
-      }
-    }
-    const retry = await runPiRetryAttempt(current, () => runAttempt(retrySessionPath));
+    // The failed attempt produced no assistant/tool output. Restore the
+    // session file to its pre-attempt bytes (rolling back only the broken
+    // 429 error turn) and retry on the SAME path so the existing context
+    // and injected instructions are preserved instead of starting empty.
+    await fs.writeFile(sessionPath, initialSessionSnapshot ?? "");
+    const retry = await runPiRetryAttempt(current, () => runAttempt(sessionPath));
     if (retry.startBlocked) {
       // Mode A shutdown blocked the retry's start: keep the last real
       // attempt's result instead of throwing.
       break;
     }
     current = retry.attempt;
-    currentSessionPath = retrySessionPath;
   }
 
   const initial = current;
-  const initialSessionPath = currentSessionPath;
   const initialFailed =
     !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || initial.parsed.errors.length > 0);
   
@@ -914,7 +931,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     isPiUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
     if (instructionInjectionRequiresSameSession(context)) {
-      const result = toResult(initial, initialSessionPath, true);
+      const result = toResult(initial, sessionPath, true);
       await emitTimingLog();
       return result;
     }
@@ -938,7 +955,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return result;
   }
 
-  const result = toResult(initial, initialSessionPath);
+  const result = toResult(initial, sessionPath);
   await emitTimingLog();
   return result;
 }

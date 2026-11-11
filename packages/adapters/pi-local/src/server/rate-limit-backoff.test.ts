@@ -77,6 +77,9 @@ describe("parseRetryAfterMs", () => {
     expect(
       parseRetryAfterMs({ errors: ['{"retryAfterMs": 2500}'], stdout: "", stderr: "" }),
     ).toBe(2_500);
+    expect(
+      parseRetryAfterMs({ errors: ['{"retry_after_ms": 2500}'], stdout: "", stderr: "" }),
+    ).toBe(2_500);
   });
 
   it("reads Retry-After header seconds and HTTP-date values from stderr", () => {
@@ -84,24 +87,46 @@ describe("parseRetryAfterMs", () => {
     expect(
       parseRetryAfterMs({ errors: [], stdout: "", stderr: "Retry-After: 60\n", exitCode: 1 }, nowMs),
     ).toBe(60_000);
+    // `Retry-After: 600` is 600 seconds (10 minutes): clamped to the ceiling.
+    expect(
+      parseRetryAfterMs({ errors: [], stdout: "", stderr: "Retry-After: 600\n", exitCode: 1 }, nowMs),
+    ).toBe(300_000);
     const dateValue = new Date(nowMs + 90_000).toUTCString();
     expect(
       parseRetryAfterMs({ errors: [], stdout: "", stderr: `Retry-After: ${dateValue}\n` }, nowMs),
     ).toBe(90_000);
+    // An HTTP-date 10 minutes out also clamps instead of being dropped.
+    const tenMinuteDate = new Date(nowMs + 600_000).toUTCString();
+    expect(
+      parseRetryAfterMs({ errors: [], stdout: "", stderr: `Retry-After: ${tenMinuteDate}\n` }, nowMs),
+    ).toBe(300_000);
   });
 
-  it("reads english 'try again in Xs' hints", () => {
+  it("reads english 'try again in Xs' hints and keeps explicit ms suffixes in milliseconds", () => {
     expect(
       parseRetryAfterMs({ errors: ["429 rate limit, please try again in 12s"], stdout: "", stderr: "" }),
     ).toBe(12_000);
+    expect(
+      parseRetryAfterMs({ errors: ["429 rate limit, please try again in 600s"], stdout: "", stderr: "" }),
+    ).toBe(300_000);
+    expect(
+      parseRetryAfterMs({ errors: ["429 rate limit, please try again in 2500ms"], stdout: "", stderr: "" }),
+    ).toBe(2_500);
   });
 
-  it("treats numeric values above 300 as already-milliseconds", () => {
-    expect(parseRetryAfterMs({ errors: ['{"retry_after": 45000}'], stdout: "", stderr: "" })).toBe(45_000);
+  it("treats retry_after seconds fields as seconds even when the value looks like milliseconds", () => {
+    // `retry_after` is always seconds: oversized values clamp to the 5-minute
+    // ceiling instead of being reinterpreted as raw milliseconds or dropped.
+    expect(parseRetryAfterMs({ errors: ['{"retry_after": 600}'], stdout: "", stderr: "" })).toBe(300_000);
+    expect(parseRetryAfterMs({ errors: ['{"retry_after": 45000}'], stdout: "", stderr: "" })).toBe(300_000);
+    expect(parseRetryAfterMs({ errors: ['{"retry_after": 999999}'], stdout: "", stderr: "" })).toBe(300_000);
+    // Explicit ms fields keep their raw millisecond value — clamped at the ceiling.
+    expect(parseRetryAfterMs({ errors: ['{"retry_after_ms": 450000}'], stdout: "", stderr: "" })).toBe(
+      300_000,
+    );
   });
 
   it("clamps unusable values to null", () => {
-    expect(parseRetryAfterMs({ errors: ['{"retry_after": 999999}'], stdout: "", stderr: "" })).toBeNull();
     expect(parseRetryAfterMs({ errors: ['{"retry_after": -5}'], stdout: "", stderr: "" })).toBeNull();
     expect(parseRetryAfterMs({ errors: ["plain failure"], stdout: "", stderr: "" })).toBeNull();
     const nowMs = Date.parse("2026-11-11T12:00:00.000Z");

@@ -92,16 +92,11 @@ export function detectPiRateLimit1302(evidence: PiRateLimitEvidence): boolean {
 function clampRetryAfterMs(ms: number): number | null {
   if (!Number.isFinite(ms)) return null;
   const rounded = Math.round(ms);
-  return rounded > 0 && rounded <= RETRY_AFTER_MAX_MS ? rounded : null;
-}
-
-/**
- * Numeric provider hints are seconds per HTTP semantics, but payloads that
- * already carry milliseconds (e.g. `retry_after: 45000`) exceed any sane
- * second value — treat anything above 300s-worth as an already-ms value.
- */
-function secondsAwareMs(seconds: number): number {
-  return seconds > 300 ? seconds : seconds * 1000;
+  if (rounded <= 0) return null;
+  // Never discard a positive, finite hint: oversized provider values (e.g.
+  // `Retry-After: 600` seconds) are clamped to the 5-minute ceiling so they
+  // still arm a usable cooldown instead of silently meaning "no hint".
+  return Math.min(RETRY_AFTER_MAX_MS, rounded);
 }
 
 function parseRetryAfterMsFromText(text: string, nowMs: number): number | null {
@@ -115,24 +110,32 @@ function parseRetryAfterMsFromText(text: string, nowMs: number): number | null {
     const value = header[1].trim();
     const asNumber = Number(value);
     if (value.length > 0 && /^-?\d+(\.\d+)?$/.test(value)) {
-      return clampRetryAfterMs(secondsAwareMs(asNumber));
+      // HTTP `Retry-After: <number>` is always seconds.
+      return clampRetryAfterMs(asNumber * 1000);
     }
     const parsedDate = Date.parse(value);
     if (Number.isFinite(parsedDate)) return clampRetryAfterMs(parsedDate - nowMs);
   }
 
+  // `retry_after` / `retryAfter` fields are seconds, unlike the explicit
+  // `_ms` fields handled above.
   const secondsField = text.match(/"(?:retry_after|retryAfter)"\s*:\s*"?(\d+(?:\.\d+)?)"?/i);
-  if (secondsField) return clampRetryAfterMs(secondsAwareMs(Number(secondsField[1])));
+  if (secondsField) return clampRetryAfterMs(Number(secondsField[1]) * 1000);
+
+  // Explicit `ms` suffix carries milliseconds; a bare `s` suffix is seconds.
+  const msHint = text.match(/\b(?:try again in|retry after|retrying in)\s+(\d+(?:\.\d+)?)\s*ms\b/i);
+  if (msHint) return clampRetryAfterMs(Number(msHint[1]));
 
   const humanHint = text.match(/\b(?:try again in|retry after|retrying in)\s+(\d+(?:\.\d+)?)\s*s\b/i);
-  if (humanHint) return clampRetryAfterMs(secondsAwareMs(Number(humanHint[1])));
+  if (humanHint) return clampRetryAfterMs(Number(humanHint[1]) * 1000);
 
   return null;
 }
 
 /**
  * Extract a provider `Retry-After` hint, preferring structured errors, then
- * stderr, then stdout. Clamped to (0, 300_000] ms; null when no usable hint.
+ * stderr, then stdout. Positive finite hints are clamped into (0, 300_000] ms;
+ * null only when no usable hint exists.
  */
 export function parseRetryAfterMs(
   evidence: PiRateLimitEvidence,
