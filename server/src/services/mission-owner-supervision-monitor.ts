@@ -4,6 +4,10 @@ import { logger } from "../middleware/logger.js";
 import { missionService, type MissionOwnerActionCreatedHandler, type MissionOwnerDecisionRetrySourceIssueAppliedHandler, type MissionOwnerDecisionDispatchStalledWakeRequestedHandler, type MissionOwnerPeriodicReviewWakeRequestedHandler, type MissionPlanRevisionRequestedHandler, type MissionPlanSubmissionMissingHandler, type MissionStaleSourceIssueWakeupRequestedHandler, type MissionTerminalRunCloseoutWakeRequestedHandler, type MissionWorkProductReuseWakeRequestedHandler } from "./missions.js";
 import type { PlanQaWakeupHandler, SweepStalledPlanQaPassRecordsResult } from "./mission-owner-plan-decisions.js";
 import { sweepStalledPlanQaPassRecords } from "./mission-owner-plan-decisions.js";
+import {
+  closeSatisfiedReplanUnblockIssues,
+  type CloseSatisfiedReplanUnblockIssuesResult,
+} from "./missions/owner-replan-application.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
 import { sweepApprovedRevisionStarts } from "./workflow/approved-revision-start.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
@@ -163,6 +167,18 @@ export function createMissionOwnerSupervisionMonitor(
       }
     } catch (err) {
       logger.warn({ err }, "stalled PLAN-QA pass sweep failed");
+    }
+
+    // [5207d3bf 수리] 충족된 replan_mission 결정의 미종결 언블록 이슈를 done 종결해
+    //   run-terminal-recovery-gate 채널 (a)의 런 종결 유예 고착(회복 채널이 닫히지 않아
+    //   running 잔존)을 해소한다. 실패가 감독 주기를 막지 않는다.
+    try {
+      const closeout: CloseSatisfiedReplanUnblockIssuesResult = await closeSatisfiedReplanUnblockIssues(db);
+      if (closeout.closed > 0 || closeout.failures.length > 0) {
+        logger.warn({ ...closeout }, "satisfied replan unblock closeout sweep completed");
+      }
+    } catch (err) {
+      logger.warn({ err }, "satisfied replan unblock closeout sweep failed");
     }
   }
 
