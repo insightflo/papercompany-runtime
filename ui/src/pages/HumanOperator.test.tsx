@@ -301,6 +301,26 @@ describe("HumanOperator", () => {
     expect(row.closest("section")?.textContent).toContain("방향을 선택해도 미션이 자동으로 재개되지는 않습니다");
   });
 
+  it("folds the historical evidence block of a pending request into a closed details element", async () => {
+    const pausedState = exactState(EVENT_PENDING, { decisionId: PENDING_CARD_ID });
+    mockState.missions = [activeMission, pausedMission];
+    mockState.requests = [makeRequest("paused-fold", pausedState, { missionId: pausedMissionId, missionStatus: "paused" })];
+    mockState.pendingCards = [nonOwnerCard, ownerPendingCard(EVENT_PENDING, PENDING_CARD_ID, `moi1:${EVENT_PENDING}`, pausedMissionId)];
+    await act(async () => root.render(<CompanyLanguageProvider language="ko"><HumanOperator /></CompanyLanguageProvider>));
+    const row = host.querySelector('li[data-human-operator-lifecycle="paused"]')!;
+    // [사람 카드 목록 소음 정리 08:17] 대기 중 요청은 선택 카드 1장만 펼쳐 노출하고 과거 요청 증거는 기본 접힘 details 로 보존한다.
+    const fold = row.querySelector<HTMLDetailsElement>("details[data-human-operator-evidence-fold]")!;
+    expect(fold).not.toBeNull();
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector("summary")?.textContent).toContain("과거 요청 증거 보기");
+    expect(fold.querySelector("a[href]")?.getAttribute("href")).toBe(`/missions/${pausedMissionId}?issue=${SOURCE_ISSUE}`);
+    // 감사 데이터(이슈 ID·원문 요약)는 details 안에 그대로 보존된다(데이터·감사 기록 무삭제).
+    expect(fold.querySelector("[data-owner-action-issue-id]")?.textContent).toBe(OWNER_ISSUE);
+    expect(fold.querySelector("[data-source-issue-id]")?.textContent).toBe(SOURCE_ISSUE);
+    expect(fold.textContent).toContain("과거 요청 증거 · 현재 지시가 아닙니다");
+    expect(row.querySelector("[data-operator-decision-heading]")).not.toBeNull();
+  });
+
   it("shows resolved selected results and deferred continuation separately from source navigation", () => {
     const state = exactState(EVENT_RESOLVED, {
       decisionId: RESOLVED_CARD_ID, status: "resolved",
@@ -325,6 +345,23 @@ describe("HumanOperator", () => {
     expect(requestRow.querySelector("a[href]")?.getAttribute("href")).toBe(`/missions/${missionId}?issue=${SOURCE_ISSUE}`);
     expect(requestRow.querySelector("textarea")).toBeNull();
     expect([...requestRow.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["미션 열기"]);
+  });
+
+  it("folds a resolved request into a one-line history summary with a closed details element", () => {
+    const state = exactState(EVENT_RESOLVED, { decisionId: RESOLVED_CARD_ID, status: "resolved" });
+    mockState.requests = [makeRequest("resolved-history", state)];
+    act(() => root.render(<CompanyLanguageProvider language="ko"><HumanOperator /></CompanyLanguageProvider>));
+    const row = host.querySelector('li[data-human-operator-lifecycle="active"]')!;
+    // [사람 카드 목록 소음 정리 08:17] 해소된 요청은 summary 1줄(배지·제목·선택결과·시각) 이력으로 접는다.
+    const fold = row.querySelector<HTMLDetailsElement>("details[data-human-operator-history-fold]")!;
+    expect(fold).not.toBeNull();
+    expect(fold.open).toBe(false);
+    expect(fold.querySelector("summary")?.textContent).toContain("Mission request resolved-history");
+    expect(fold.querySelector("summary")?.textContent).toContain("approve · approve");
+    // 본문 상세(선택 결과·증거)는 details 안에 접혀 있고 감사 필드는 그대로 보존된다.
+    expect(fold.querySelector("[data-human-operator-decision-result]")).not.toBeNull();
+    expect(fold.querySelector("[data-owner-action-issue-id]")?.textContent).toBe(OWNER_ISSUE);
+    expect(fold.querySelector("[data-human-operator-continuation]")).not.toBeNull();
   });
 
   it("keeps exhausted 3/3 continuation visible on a paused mission without a retry control", () => {
@@ -353,6 +390,35 @@ describe("HumanOperator", () => {
     const html = renderKo(<HumanOperator />);
     expect(html).toContain("후속 실행 증거 확인 필요");
     expect(html).toContain("자동 후속 실행 대상이 아닙니다");
+  });
+
+  it("hides the AI easy-summary panel on compact operator summaries and keeps it for legacy ones", () => {
+    const compact = makeRequest("compactai", undefined);
+    compact.summary = "증상: 미션 대기 중\n미션이 오너 방향 결정을 기다립니다\n선택지: 승인 또는 보류\n쉬운 해석: 운영자가 방향을 정해야 합니다.";
+    compact.humanSummary = {
+      status: "done", adapterType: "pi_local", model: "m1",
+      summary: {
+        oneLine: "신형 요약 해석 한 줄", whatHappening: "미션이 진행을 멈추고 운영자 방향을 기다리고 있습니다.",
+        decisionNeeded: "운영자가 방향을 선택해야 합니다.", options: [], cautions: ["선택만으로 실행되지 않습니다."],
+      },
+      error: null, updatedAt: timestamp,
+    };
+    const legacySummarized = makeRequest("legacyai", undefined);
+    legacySummarized.humanSummary = {
+      status: "done", adapterType: "pi_local", model: "m1",
+      summary: {
+        oneLine: "구형 요약 해석 한 줄", whatHappening: "미션이 진행을 멈추고 운영자 방향을 기다리고 있습니다.",
+        decisionNeeded: "운영자가 방향을 선택해야 합니다.", options: [], cautions: ["선택만으로 실행되지 않습니다."],
+      },
+      error: null, updatedAt: timestamp,
+    };
+    mockState.requests = [compact, legacySummarized];
+    const html = renderKo(<HumanOperator />);
+    // 신형 축소 요약 행은 본문에 이미 '쉬운 해석:'이 있으므로 '쉬운 해석 (AI)' 패널을 이중 노출하지 않는다.
+    expect(html).toContain("쉬운 해석: 운영자가 방향을 정해야 합니다.");
+    expect(html).not.toContain("신형 요약 해석 한 줄");
+    expect(html.split("쉬운 해석 (AI)").length - 1).toBe(1); // 구형 요약 행의 패널만 유지
+    expect(html).toContain("구형 요약 해석 한 줄");
   });
 
   it("keeps legacy, malformed-version, missing, ambiguous, and unsupported rows unknown without borrowing a card", () => {
