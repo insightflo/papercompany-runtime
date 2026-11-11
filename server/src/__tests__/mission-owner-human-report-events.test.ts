@@ -29,16 +29,16 @@ describe("missionOwnerHumanReportEvents summary formatting", () => {
     expect(events).toHaveLength(1);
     const summary = events[0]!.summary;
     const lines = summary.split("\n");
-    expect(lines[0]).toMatch(/^무엇이: /);
+    expect(lines[0]).toMatch(/^증상: /);
     expect(lines[0]).toContain("이슈 (c70bc2a9)");
-    expect(lines[1]).toMatch(/^왜 막힘: /);
     expect(lines[1]).toContain("did not materialize.");
     expect(lines[1]).toContain("423304dd");
     expect(lines[1]).not.toContain("423304dd-9f5b-4c88-b4c5-7c17d67865ab");
-    expect(lines[2]).toMatch(/^운영자 할 일: /);
+    expect(lines[2]).toMatch(/^선택지: /);
     expect(lines[2]).toContain("Assign the source issue");
-    expect(lines[3]).toMatch(/^근거: /);
-    expect(lines[3]).toContain("source=RES-3637");
+    expect(lines[3]).toMatch(/^쉬운 해석: /);
+    expect(lines[4]).toMatch(/^근거: /);
+    expect(lines[4]).toContain("source=RES-3637");
     // title(영문 라벨)은 유지되되 summary 가 이를 반복하지 않는다(이중 제목 방지).
     expect(events[0]!.title).toBe("Mission blocker escalated");
     expect(summary).not.toContain("Mission blocker escalated:");
@@ -59,7 +59,7 @@ describe("missionOwnerHumanReportEvents summary formatting", () => {
 
     expect(events[0]!.title).toBe("Human/operator input requested");
     expect(events[0]!.severity).toBe("attention");
-    expect(events[0]!.summary).toContain("왜 막힘: Operator guidance is required before continuing.");
+    expect(events[0]!.summary).toContain("Operator guidance is required before continuing.");
   });
 
   it("falls back to a Korean default when no fields are present", () => {
@@ -73,8 +73,8 @@ describe("missionOwnerHumanReportEvents summary formatting", () => {
     });
 
     const lines = events[0]!.summary.split("\n");
-    expect(lines[1]).toBe("왜 막힘: (사유 기록 없음)");
+    expect(lines[1]).toBe("(사유 기록 없음)");
     expect(lines[2]).toContain("재시도");
-    expect(lines).toHaveLength(3);
+    expect(lines).toHaveLength(4);
   });
 });

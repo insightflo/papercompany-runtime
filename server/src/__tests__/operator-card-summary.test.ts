@@ -16,21 +16,56 @@ const AGENT_PAYLOAD = {
 };
 
 describe("formatOperatorDecisionSummary", () => {
-  it("formats an agent decision payload into a Korean structured operator card", () => {
+  it("formats a decision payload into the fixed compact card (symptom/options/interpretation/evidence)", () => {
     const summary = formatOperatorDecisionSummary(AGENT_PAYLOAD);
 
     const lines = summary.split("\n");
-    expect(lines).toHaveLength(4);
-    expect(lines[0]).toMatch(/^무엇이: /);
-    expect(lines[1]).toMatch(/^왜 막힘: /);
-    expect(lines[2]).toMatch(/^운영자 할 일: /);
-    expect(lines[3]).toMatch(/^근거: /);
-
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toMatch(/^증상: /);
     expect(lines[0]).toContain("미션 2026-08-25 tech-ai-news daily report");
     expect(lines[0]).toContain("이슈 RES-3638 — [Unblock] RES-3637: Synthesize multi-source AI news report draft");
     expect(lines[1]).toContain("The accepted reassign_source_issue event");
+    expect(lines[1]).not.toMatch(/^[가-힣]+: /); // symptom block = 2 lines, second has no label
+    expect(lines[2]).toMatch(/^선택지: /);
     expect(lines[2]).toContain("Assign RES-3637 to the idle Technology Research Agent");
-    expect(lines[3]).toContain("RES-3637 status=blocked");
+    expect(lines[3]).toMatch(/^쉬운 해석: /);
+    expect(lines[3]).toContain(".");
+    expect(lines[4]).toMatch(/^근거: /);
+    expect(lines[4]).toContain("RES-3637 status=blocked"); // legacy prose evidence falls back safely
+  });
+
+  it("keeps the symptom block within 2 lines and every labeled line within its budget", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      reason: `${"Blocked hard again. ".repeat(30)}\n\nsecond paragraph ${"detail ".repeat(80)}`,
+      nextAction: `step one\nstep two ${"word ".repeat(90)}`,
+      evidence: `log ${"x".repeat(400)}`,
+    });
+
+    const lines = summary.split("\n");
+    expect(lines[0].startsWith("증상: ")).toBe(true);
+    expect(lines[1].length).toBeLessThanOrEqual(200); // symptom ≤ 200 chars, single line
+    expect(lines[2].startsWith("선택지: ")).toBe(true);
+    expect(lines[2].length).toBeLessThanOrEqual(140 + "선택지: ".length);
+    expect(lines[3].startsWith("쉬운 해석: ")).toBe(true);
+    expect(lines[3].length).toBeLessThanOrEqual(120 + "쉬운 해석: ".length);
+    expect(lines[4].startsWith("근거: ")).toBe(true);
+    expect(lines[4].length).toBeLessThanOrEqual(160 + "근거: ".length);
+  });
+
+  it("collapses multi-line reason and nextAction into the fixed line structure", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      reason: "line one of the symptom\nline two of the symptom",
+      nextAction: "Option A: approve the retry.\nOption B: reassign the issue.\nOption C: cancel.",
+    });
+
+    const lines = summary.split("\n");
+    expect(lines).toHaveLength(5);
+    expect(lines[1]).toContain("line one of the symptom");
+    expect(lines[1]).toContain("line two of the symptom"); // newlines folded, still one physical line
+    expect(lines[2]).toContain("Option A");
+    expect(lines[2]).toContain("Option C"); // options on a single line
   });
 
   it("does not repeat the card title when the reason already starts with it", () => {
@@ -52,7 +87,34 @@ describe("formatOperatorDecisionSummary", () => {
     expect(summary).not.toContain("751281f0-c613-4e7d-a5e9-63124da338ea");
   });
 
-  it("truncates long prose at a sentence boundary, never mid-word", () => {
+  it("reduces evidence to extracted links only, never truncating a link", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      evidence:
+        "detailed diagnosis in https://github.com/insightflo/paperwork-runtime/issues/703 and /issues/42; run-count=9; raw uuid 423304dd-9f5b-4c88-b4c5-7c17d67865ab",
+    });
+
+    const evidenceLine = summary.split("\n").at(-1)!;
+    expect(evidenceLine).toMatch(/^근거: /);
+    expect(evidenceLine).toContain("https://github.com/insightflo/paperwork-runtime/issues/703");
+    expect(evidenceLine).toContain("/issues/42");
+    expect(evidenceLine).not.toContain("run-count=9"); // prose dropped when links exist
+    expect(evidenceLine).not.toContain("detailed diagnosis");
+  });
+
+  it("caps the number of evidence links within the budget by dropping whole links", () => {
+    const summary = formatOperatorDecisionSummary({
+      ...AGENT_PAYLOAD,
+      evidence: Array.from({ length: 8 }, (_, i) => `https://example.com/evidence/${i}`).join(" and "),
+    });
+
+    const evidenceLine = summary.split("\n").at(-1)!;
+    expect(evidenceLine.length).toBeLessThanOrEqual(240 + "근거: ".length);
+    expect(evidenceLine).toContain("https://example.com/evidence/0");
+    expect(evidenceLine).not.toContain("evidence/5"); // at most 5 links kept
+  });
+
+  it("truncates long symptom prose at a sentence boundary, never mid-word", () => {
     const sentence = "This sentence is deliberately long so that several of them exceed the budget. ";
     const summary = formatOperatorDecisionSummary({
       ...AGENT_PAYLOAD,
@@ -61,10 +123,10 @@ describe("formatOperatorDecisionSummary", () => {
       evidence: undefined,
     });
 
-    const whyLine = summary.split("\n")[1]!;
-    expect(whyLine.length).toBeLessThanOrEqual(361);
-    expect(whyLine.endsWith(".")).toBe(true);
-    expect(whyLine).not.toMatch(/\bThis\b[^.]*$/); // no partial trailing sentence fragment
+    const symptomLine = summary.split("\n")[1]!;
+    expect(symptomLine.length).toBeLessThanOrEqual(200);
+    expect(symptomLine.endsWith(".")).toBe(true);
+    expect(symptomLine).not.toMatch(/\bThis\b[^.]*$/); // no partial trailing sentence fragment
   });
 
   it("falls back to a word boundary with an ellipsis when no sentence end fits", () => {
@@ -75,10 +137,10 @@ describe("formatOperatorDecisionSummary", () => {
       evidence: undefined,
     });
 
-    const whyLine = summary.split("\n")[1]!;
-    expect(whyLine.length).toBeLessThanOrEqual(362);
-    expect(whyLine.endsWith("…")).toBe(true);
-    expect(whyLine).not.toMatch(/\w…$/); // ellipsis never glued to a partial word
+    const symptomLine = summary.split("\n")[1]!;
+    expect(symptomLine.length).toBeLessThanOrEqual(201);
+    expect(symptomLine.endsWith("…")).toBe(true);
+    expect(symptomLine).not.toMatch(/\w…$/); // ellipsis never glued to a partial word
   });
 
   it("unpacks a system terminal-report markdown reason into labeled fields", () => {
@@ -101,7 +163,25 @@ describe("formatOperatorDecisionSummary", () => {
     expect(summary).not.toContain("Decision: escalate");
     expect(summary.split("\n")[1]).toContain("Mission cannot continue automatically.");
     expect(summary.split("\n")[2]).toContain("Human operator must choose a recovery path");
-    expect(summary.split("\n")[3]).toContain("mission=2026-08-25 gazua-evening");
+    expect(summary.split("\n")[4]).toContain("mission=2026-08-25 gazua-evening");
+  });
+
+  it("glosses escalate and request_input with one plain-language sentence", () => {
+    const escalate = formatOperatorDecisionSummary({
+      decision: "escalate",
+      missionTitle: "Some mission",
+      reason: "terminal failure",
+    });
+    const requestInput = formatOperatorDecisionSummary({
+      decision: "request_input",
+      missionTitle: "Some mission",
+      reason: "needs approval",
+    });
+
+    expect(escalate.split("\n")[3]).toMatch(/^쉬운 해석: .+[..]$/);
+    expect(escalate).toContain("복구");
+    expect(requestInput.split("\n")[3]).toMatch(/^쉬운 해석: .+[..]$/);
+    expect(requestInput.split("\n")[3]).toContain("입력");
   });
 
   it("falls back to Korean defaults when reason and nextAction are missing", () => {
@@ -112,10 +192,10 @@ describe("formatOperatorDecisionSummary", () => {
     });
 
     const lines = summary.split("\n");
-    expect(lines[1]).toBe("왜 막힘: (사유 기록 없음)");
-    expect(lines[2]).toContain("운영자");
+    expect(lines[1]).toBe("(사유 기록 없음)");
+    expect(lines[2]).toContain("선택지");
     expect(lines[2]).toContain("재시도");
-    expect(lines).toHaveLength(3);
+    expect(lines).toHaveLength(4); // no evidence line
   });
 
   it("names the issue by shortened id when title and identifier are missing", () => {

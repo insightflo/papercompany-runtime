@@ -119,6 +119,35 @@ describeEP("main executor oversight human-input instructions", () => {
     expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
   });
 
+  it("instructs the owner to submit compact cards with external evidence links only", async () => {
+    const fixture = await seedMission();
+    const issue = await createOwnerActions({ db, deps: {} })
+      .ensureMainExecutorOversightIssue(fixture.mission, "Current workflow");
+
+    // 신규 축소 작성 규칙: 증상 ≤2줄, 선택지 1줄, 쉬운 해석 1문장, 상세 근거는 외부 링크로 분리.
+    for (const phrase of [
+      "at most 2 lines",
+      "at most one newline",
+      "one line per requested action or option",
+      "plain-language sentence",
+      "/issues/<id>",
+      "URL link in evidence",
+    ]) {
+      expect(MISSION_OWNER_HUMAN_INPUT_INSTRUCTIONS).toContain(phrase);
+      expect(issue.description).toContain(phrase);
+    }
+    // 기존 필수 제출 규칙은 그대로 보존된다.
+    for (const preserved of [
+      "Use humanRequest only with request_input or escalate",
+      "Never include recoveryTarget on oversight submissions",
+      "POST the exact returned resubmit body unchanged",
+      "Do not put credentials in comments or evidence",
+    ]) {
+      expect(MISSION_OWNER_HUMAN_INPUT_INSTRUCTIONS).toContain(preserved);
+    }
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+  });
+
   it("refreshes an existing non-terminal issue once and preserves every byte outside the marker block", async () => {
     const fixture = await seedMission();
     const prefix = "Existing instructions preserve CRLF\r\n\nHuman-edited context before.\n";
