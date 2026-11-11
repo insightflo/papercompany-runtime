@@ -12,6 +12,7 @@ import { readOwnerHumanCurrent, type OwnerHumanCurrentRecord } from "./owner-hum
 import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, sameOwnerHumanValue,
   type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { buildMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
+import { buildPreCompactMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card-precompact.js";
 import { buildHistoricalDefaultOwnerHumanInputVariant } from "./mission-owner-human-default-definition.js";
 import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
 import { stripOperatorDecisionServerContext } from "../operator-decision-server-context.js";
@@ -32,8 +33,15 @@ async function readCardAndDelivery(tx: OwnerHumanTx, current: OwnerHumanCurrentR
     ...lifetime.cardInput, ...(keyed ? { lifetimeId: lifetime.lifetimeId } : {}),
   }));
   const historicalInput = buildHistoricalDefaultOwnerHumanInputVariant(expected.input);
-  const expectedVariants = [expected, ...(historicalInput
-    ? [validateAndHashOperatorDecisionCreate(historicalInput)] : [])];
+  // [레거시 호환 2026-11-12] PR #703 이전 발행 구조화 카드 재구성 후보 — 자세한 사유는
+  // owner-human-request-card.ts 의 동일 주석 참조.
+  const preCompactInput = buildPreCompactMissionOwnerHumanInputDecisionCard({
+    ...lifetime.cardInput, ...(keyed ? { lifetimeId: lifetime.lifetimeId } : {}),
+  });
+  const expectedVariants = [expected,
+    ...(preCompactInput ? [validateAndHashOperatorDecisionCreate(preCompactInput)] : []),
+    ...(historicalInput
+      ? [validateAndHashOperatorDecisionCreate(historicalInput)] : [])];
   const [link] = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, lifetime.scope.companyId),
     eq(workflowTransitionEvents.idempotencyKey, `owner-human-card:v1:${lifetime.lifetimeId}`)));
