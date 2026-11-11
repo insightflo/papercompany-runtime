@@ -35,6 +35,15 @@ import {
   startOperatorInterruptPolling,
 } from "./operator-interrupt.js";
 import { runPiRetryAttempt } from "./retry-start-result.js";
+import {
+  buildRateLimitGateKey,
+  computeRateLimitBackoffMs,
+  detectPiRateLimit1302,
+  parseRetryAfterMs,
+  recordProviderRateLimitCooldown,
+  reserveProviderRateLimitSlot,
+  resolvePiRateLimitBackoffConfig,
+} from "./rate-limit-backoff.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -164,6 +173,11 @@ function resolvePiBiller(env: Record<string, string>, provider: string | null): 
   return inferOpenAiCompatibleBiller(env, null) ?? provider ?? "unknown";
 }
 
+const sleepForMs = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 async function ensureSessionsDir(sessionsDir: string): Promise<string> {
   await fs.mkdir(sessionsDir, { recursive: true });
   return sessionsDir;
@@ -185,6 +199,8 @@ type PiLocalTiming = {
   exitMs?: number;
   parseMs?: number;
   totalMs?: number;
+  rateLimitRetries?: number;
+  rateLimitWaitMs?: number;
 };
 
 function hrElapsedMs(start: bigint): number {
@@ -745,7 +761,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionParams: resolvedSessionParams,
       sessionDisplayId: resolvedSessionId,
       provider: provider,
-      biller: resolvePiBiller(runtimeEnv, provider),
+      biller: piBiller,
       model: model,
       billingType: "unknown",
       costUsd: attempt.parsed.usage.costUsd,
@@ -773,7 +789,122 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   };
 
-  const initial = await runAttempt(sessionPath);
+  // Shared in-process 429 (code 1302) cooldown gate: any run that observes a
+  // provider rate limit arms the gate for its provider/biller bucket, and
+  // every entering run (including heartbeat transient requeues) waits out the
+  // window — staggered, so concurrent waiters restart sequentially.
+  const rateLimitConfig = resolvePiRateLimitBackoffConfig();
+  const piBiller = resolvePiBiller(runtimeEnv, provider);
+  const rateLimitGateKey = buildRateLimitGateKey(piBiller, provider);
+  const rateLimitBudgetMs = timeoutSec > 0 ? timeoutSec * 1000 : Number.POSITIVE_INFINITY;
+  let rateLimitRetries = 0;
+  let rateLimitWaitMsTotal = 0;
+
+  const entrySlot = reserveProviderRateLimitSlot(rateLimitGateKey);
+  if (entrySlot.waitMs > 0) {
+    if (entrySlot.waitMs > rateLimitBudgetMs) {
+      await onLog(
+        "stdout",
+        `[paperclip] Pi rate-limit cooldown active on ${rateLimitGateKey}: ${entrySlot.waitMs}ms wait exceeds the ${timeoutSec}s timeout budget; failing fast instead of hitting the provider.\n`,
+      );
+      const earlyResult: AdapterExecutionResult = {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Pi provider rate limit cooldown active: needs ${entrySlot.waitMs}ms but the timeout budget is ${timeoutSec}s`,
+        errorCode: "provider_rate_limited",
+        provider,
+        biller: piBiller,
+        model,
+      };
+      await emitTimingLog();
+      return earlyResult;
+    }
+    await onLog(
+      "stdout",
+      `[paperclip] Pi rate-limit cooldown active on ${rateLimitGateKey}: waiting ${entrySlot.waitMs}ms before starting.\n`,
+    );
+    await sleepForMs(entrySlot.waitMs);
+    rateLimitWaitMsTotal += entrySlot.waitMs;
+    timing.rateLimitWaitMs = rateLimitWaitMsTotal;
+  }
+
+  let current = await runAttempt(sessionPath);
+  let currentSessionPath = sessionPath;
+
+  // 429 (code 1302) backoff retry loop. Detection always arms the shared
+  // cooldown gate first — even when this run will not retry (side effects
+  // already started, retries exhausted, or budget too small) — so the next
+  // queued run waits out the rate-limit window before touching the provider.
+  for (;;) {
+    const failed =
+      !current.proc.timedOut &&
+      !current.proc.signal &&
+      ((current.proc.exitCode ?? 0) !== 0 || current.parsed.errors.length > 0);
+    if (!failed) break;
+    const evidence = {
+      errors: current.parsed.errors,
+      stdout: current.proc.stdout,
+      stderr: current.rawStderr,
+      exitCode: current.proc.exitCode,
+    };
+    if (!detectPiRateLimit1302(evidence)) break;
+    const retryAfterMs = parseRetryAfterMs(evidence);
+    const backoffMs = computeRateLimitBackoffMs(rateLimitRetries, retryAfterMs, rateLimitConfig);
+    recordProviderRateLimitCooldown(rateLimitGateKey, backoffMs);
+    if (current.parsed.toolCalls.length > 0) {
+      await onLog(
+        "stdout",
+        `[paperclip] Pi rate limit 429 (code 1302) hit after tool calls already ran; not re-running automatically to avoid duplicated side effects (shared cooldown set for ${backoffMs}ms).\n`,
+      );
+      break;
+    }
+    if (rateLimitRetries >= rateLimitConfig.maxRetries) {
+      await onLog(
+        "stdout",
+        `[paperclip] Pi rate limit 429 (code 1302) persists after ${rateLimitRetries} backoff retries; returning failure (shared cooldown set for ${backoffMs}ms).\n`,
+      );
+      break;
+    }
+    if (rateLimitWaitMsTotal + backoffMs > rateLimitBudgetMs) {
+      await onLog(
+        "stdout",
+        `[paperclip] Pi rate limit 429 (code 1302) detected; ${backoffMs}ms backoff exceeds the remaining timeout budget; returning failure (shared cooldown set).\n`,
+      );
+      break;
+    }
+    rateLimitRetries += 1;
+    timing.rateLimitRetries = rateLimitRetries;
+    await onLog(
+      "stdout",
+      `[paperclip] Pi rate limit 429 (code 1302) detected; backing off ${backoffMs}ms${retryAfterMs != null ? ` (Retry-After ${retryAfterMs}ms)` : ""} before retry ${rateLimitRetries}/${rateLimitConfig.maxRetries} on a fresh session.\n`,
+    );
+    await sleepForMs(backoffMs);
+    rateLimitWaitMsTotal += backoffMs;
+    timing.rateLimitWaitMs = rateLimitWaitMsTotal;
+    // The failed attempt produced no assistant/tool output, so retry on a
+    // clean session file instead of accumulating broken error turns in the
+    // resumed session history.
+    const retrySessionPath = buildSessionPath(sessionsDir, agent.id, new Date().toISOString());
+    try {
+      await fs.writeFile(retrySessionPath, "", { flag: "wx" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw err;
+      }
+    }
+    const retry = await runPiRetryAttempt(current, () => runAttempt(retrySessionPath));
+    if (retry.startBlocked) {
+      // Mode A shutdown blocked the retry's start: keep the last real
+      // attempt's result instead of throwing.
+      break;
+    }
+    current = retry.attempt;
+    currentSessionPath = retrySessionPath;
+  }
+
+  const initial = current;
+  const initialSessionPath = currentSessionPath;
   const initialFailed =
     !initial.proc.timedOut && ((initial.proc.exitCode ?? 0) !== 0 || initial.parsed.errors.length > 0);
   
@@ -783,7 +914,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     isPiUnknownSessionError(initial.proc.stdout, initial.rawStderr)
   ) {
     if (instructionInjectionRequiresSameSession(context)) {
-      const result = toResult(initial, sessionPath, true);
+      const result = toResult(initial, initialSessionPath, true);
       await emitTimingLog();
       return result;
     }
@@ -807,7 +938,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return result;
   }
 
-  const result = toResult(initial, sessionPath);
+  const result = toResult(initial, initialSessionPath);
   await emitTimingLog();
   return result;
 }
