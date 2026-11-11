@@ -10,6 +10,7 @@ import type { OperatorDecisionActor } from "../operator-decision-create.js";
 import { validateAndHashOperatorDecisionCreate } from "../operator-decision-result.js";
 import { stripOperatorDecisionServerContext } from "../operator-decision-server-context.js";
 import { buildMissionOwnerHumanInputDecisionCard, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "./mission-owner-human-input-card.js";
+import { buildPreCompactMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card-precompact.js";
 import { buildHistoricalDefaultOwnerHumanInputVariant } from "./mission-owner-human-default-definition.js";
 import { lockOwnerHumanRequestAuthority, type OwnerHumanAuthority } from "./owner-human-request-authority.js";
 import { readOwnerHumanCurrent, type OwnerHumanCurrentRecord } from "./owner-human-request-state.js";
@@ -117,6 +118,12 @@ export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
     ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
   })).input;
   const historical = buildHistoricalDefaultOwnerHumanInputVariant(expected);
+  // [레거시 호환 2026-11-12] PR #703(e0116f92) 직전까지 발행된 구조화 카드는 축소 빌더 출력과
+  // 다르다. 저장된 원본 cardInput 으로 당시 형식을 그대로 재구성해 대조 후보에 추가한다 —
+  // 변조된 카드는 여전히 어떤 후보와도 일치하지 않아 409 로 거부된다.
+  const preCompact = buildPreCompactMissionOwnerHumanInputDecisionCard({
+    ...current.lifetime.cardInput, lifetimeId: current.lifetime.lifetimeId,
+  });
   const [link] = await tx.select().from(workflowTransitionEvents).where(and(
     eq(workflowTransitionEvents.companyId, companyId),
     eq(workflowTransitionEvents.idempotencyKey, linkKey(lifetime.lifetimeId)))).for("update");
@@ -138,7 +145,7 @@ export async function lockOwnerHumanCurrentCard(auth: OwnerHumanAuthority,
     return fail();
   }
   const storedInput = card
-    ? [expected, historical].find((candidate) => candidate !== null
+    ? [expected, preCompact, historical].find((candidate) => candidate !== null
       && cardMatchesInput(card, candidate, lifetime.authorAgentId))
     : null;
   if (card && !storedInput) return fail();
