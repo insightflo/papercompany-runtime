@@ -17,14 +17,41 @@ import { logger } from "../middleware/logger.js";
  * 해석 실행 형태: 업무 에이전트(하트비트·작업공간 결합)와 다른, CLI 일회 호출.
  * 현재 지원 어댑터: pi_local (pi -p). 다른 어댑터는 Stage 3에서 확장한다.
  * 재시도 없음 1회성 — 표시 전용이므로 실패는 원문 폴백으로 충분하다.
+ *
+ * 출력 형식(2026-11-11 Stage 3, 고정 축소 3항목): symptom(증상 ≤2줄) / optionsLine(선택지 1줄) /
+ * interpretation(쉬운 해석 1문장). 상세 근거는 요약에 넣지 않고 카드에 연결된 이슈·링크에서 확인하게 한다.
+ * 하위호환: 기존 DB의 구 5섹션(oneLine/whatHappening/decisionNeeded/options/cautions) summary_json 행은
+ * 읽기에서 재검증하지 않고 그대로 반환한다(라우트 통과 전달 + UI 구형 렌더 폴백).
+ * 재해석(retranslate)하면 신형 스키마로 다시 생성된다.
  */
 
-const SUMMARY_JSON_SCHEMA = z.object({
-  oneLine: z.string().min(1),
-  whatHappening: z.string().min(1),
-  decisionNeeded: z.string().min(1),
-  options: z.array(z.object({ label: z.string().min(1), meaning: z.string().min(1) })).default([]),
-  cautions: z.array(z.string().min(1)).default([]),
+/** 한 줄 계약: 개행 제거·1줄 클립(모델이 줄바꿈을 넣어도 저장값은 항상 1줄). */
+const singleLine = z.string().transform((s) => s.replace(/\s*\r?\n\s*/g, " ").trim()).pipe(z.string().min(1));
+
+/** 1문장 클립: 개행으로 나뉜 비어 있지 않은 첫 줄을 우선 취한 뒤, 문장 종결 부호(`.!?`·`。`) 뒤에
+ *  공백 또는 끝이 오는 첫 경계까지 자른다(닫는 따옴표·괄호는 경계에 포함). 종결 부호 뒤가 공백/끝이
+ *  아니면 문장 경계가 아니므로 소수점·버전 표기(v1.2, 3.14)는 잘리지 않고, 문장부호가 없는 입력은
+ *  클립 결과가 빈 문자열이 되지 않도록 정규화된 첫 줄 전체로 fallback 한다(UI clipOneSentence와 동일 로직). */
+export function clipOneSentence(raw: string): string {
+  const firstLine = raw.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const boundary = firstLine.match(/^[\s\S]*?[.!?。]+["')\]}]*(?=\s|$)/);
+  const clipped = boundary ? boundary[0].trim() : "";
+  return clipped.length > 0 ? clipped : firstLine;
+}
+
+export const SUMMARY_JSON_SCHEMA = z.object({
+  /** 증상 ≤2줄: 문자열 배열(최대 2항목) 또는 개행 포함 문자열 모두 허용 — 후처리로 항상 2줄 이하로 클립. */
+  symptom: z
+    .union([z.array(z.string()), z.string()])
+    .transform((v) =>
+      (Array.isArray(v) ? v.flatMap((item) => item.split(/\r?\n/)) : v.split(/\r?\n/))
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(0, 2))
+    .pipe(z.array(z.string().min(1)).min(1).max(2)),
+  optionsLine: singleLine,
+  /** 쉬운 해석은 저장 시점에도 1문장으로 클립 — 모델이 복수 문장을 내놉아도 첫 문장만 저장한다. */
+  interpretation: z.string().transform(clipOneSentence).pipe(z.string().min(1)),
 });
 
 export type CardSummaryJson = z.infer<typeof SUMMARY_JSON_SCHEMA>;
@@ -81,14 +108,13 @@ function buildPrompt(view: CardSourceView): string {
     "- 내부 ID(UUID, 실행 번호, 이슈 번호, 해시 등)는 사람이 알 수 있는 이름표 뒤에 원문을 괄호로 붙입니다. 예: '새 실행을 시작했습니다(내부 실행 번호 f8e9e55d)'. ID만 나열하는 문장은 쓰지 않습니다.",
     "- 전문 용어는 처음 나올 때 짧은 풀이와 일상 비유를 붙입니다. 예: 'run ID: 이번 실행을 찾기 위한 내부 번호. 택배 송장번호 같은 역할.'",
     "",
-    "## 출력 형식",
+    "## 출력 형식 (고정 축소 3항목)",
     "- 반드시 아래 JSON 스키마에 맞는 JSON 하나만 출력하세요. 코드블록이나 설명문 금지.",
-    '- 스키마: {"oneLine": string, "whatHappening": string, "decisionNeeded": string, "options": [{"label": string, "meaning": string}], "cautions": string[]}',
-    "- oneLine: 이 카드가 무슨 뜻인지 한 줄 결론(결론 먼저).",
-    "- whatHappening: 무슨 일이 벌어지고 있는지 2~4문장. 확인된 사실만 쓰고, 안 되는 건 '확인할 수 없습니다'로 명시합니다.",
-    "- decisionNeeded: 운영자가 지금 결정/행동해야 할 것. 원문에 근거가 없으면 '지금 내리실 결정은 없습니다'처럼 명확히 씁니다.",
-    "- options: 카드가 제시하는 선택지(승인/거절 등) 각각이 무엇을 의미하는지. 선택지가 없으면 빈 배열.",
-    "- cautions: 오해하기 쉬운 점(예: '승인만으로 실행되지 않음') 최소 필수만. 없으면 빈 배열.",
+    '- 스키마: {"symptom": string[], "optionsLine": string, "interpretation": string}',
+    "- symptom: 지금 무슨 일인지(증상)를 줄마다 한 짧은 문장으로 최대 2줄. 배열 항목은 1~2개, 항목 안에 줄바꿈 금지. 확인된 사실만 쓰고 확인 안 되는 건 '확인할 수 없습니다'라고 명시합니다.",
+    "- optionsLine: 카드가 제시하는 선택지를 한 줄로 요약. 예: '승인(실행 진행) / 거절(중단)'. 원문에 선택지가 없으면 '선택지 없음 — 지금 내리실 결정은 없습니다'처럼 한 줄로 씁니다.",
+    "- interpretation: 왜 사람(운영자) 확인이 필요한지 전문 용어 없이 딱 1문장.",
+    "- 상세 근거·진단·증거 나열은 이 해석에 쓰지 않습니다. 운영자는 카드에 연결된 이슈·링크에서 상세 근거를 확인합니다. 원본에 없는 링크를 새로 만들지 않습니다.",
     "- 원본이 승인 절차·복구 요청의 '내용'일 뿐, 실제 실행 권한은 이 해석에 없습니다.",
   ].join("\n");
 }

@@ -90,7 +90,8 @@ const doneSummaryRow = {
   status: "done",
   adapterType: "pi_local",
   model: "some-model",
-  summaryJson: { oneLine: "요약", whatHappening: "설명", decisionNeeded: "결정", options: [], cautions: [] },
+  // 신형(Stage 3) 고정 축소 3항목: symptom(≤2줄) / optionsLine(1줄) / interpretation(1문장)
+  summaryJson: { symptom: ["대기 중 승인 카드 증상"], optionsLine: "승인(진행) / 거절(중단)", interpretation: "사람이 방향을 정해야 진행되기 때문에 확인이 필요합니다." },
   error: null,
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -189,11 +190,43 @@ describe("approval human summary display hook", () => {
       status: "pending",
       payload: {},
     });
-    mockCardSummaryService.getRows.mockResolvedValue(new Map([["approval-1", doneSummaryRow]]));
+    mockCardSummaryService.getRows.mockResolvedValue(new Map([[
+      "approval-1",
+      doneSummaryRow,
+    ]]));
     const res = await request(createApp(boardActor)).get("/api/approvals/approval-1");
     expect(res.status).toBe(200);
     expect(res.body.humanSummary.status).toBe("done");
-    expect(res.body.humanSummary.summary.oneLine).toBe("요약");
+    expect(res.body.humanSummary.summary.symptom).toEqual(["대기 중 승인 카드 증상"]);
+    expect(res.body.humanSummary.summary.optionsLine).toBe("승인(진행) / 거절(중단)");
+    expect(res.body.humanSummary.summary.interpretation).toContain("확인이 필요");
+    expect(mockCardSummaryService.ensureSummary).not.toHaveBeenCalled();
+  });
+
+  it("attaches a legacy 5-section summary row unchanged (pre-Stage-3 DB rows)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "pending",
+      payload: {},
+    });
+    // 기존 DB에 저장된 구 5섹션 행 — 읽기 경로는 재검증 없이 통과 전달해야 한다(빈 화면/파싱 실패 금지).
+    const legacySummaryJson = {
+      oneLine: "구 요약",
+      whatHappening: "구 설명",
+      decisionNeeded: "구 결정",
+      options: [{ label: "승인", meaning: "진행됩니다" }],
+      cautions: ["승인만으로 실행되지 않을 수 있습니다"],
+    };
+    mockCardSummaryService.getRows.mockResolvedValue(new Map([[
+      "approval-1",
+      { ...doneSummaryRow, summaryJson: legacySummaryJson },
+    ]]));
+    const res = await request(createApp(boardActor)).get("/api/approvals/approval-1");
+    expect(res.status).toBe(200);
+    expect(res.body.humanSummary.status).toBe("done");
+    expect(res.body.humanSummary.summary).toEqual(legacySummaryJson);
     expect(mockCardSummaryService.ensureSummary).not.toHaveBeenCalled();
   });
 
@@ -244,5 +277,49 @@ describe("approval human summary display hook", () => {
       "approval-1",
       expect.objectContaining({ adapterType: "pi_local", model: "new-model" }),
     );
+  });
+});
+
+describe("SUMMARY_JSON_SCHEMA post-processing (real card-summaries module)", () => {
+  // 위 라우트 계약 테스트는 card-summaries 를 통째로 모킹하므로, 실제 스키마 후처리(symptom ≤2줄 클립·
+  // optionsLine 1줄 정규화·interpretation 1문장 클립)는 importActual 로 실모듈을 직접 검증한다.
+  it("clips symptom to at most 2 trimmed non-empty lines (array / newline string / blank lines)", async () => {
+    const actual = await vi.importActual<typeof import("../services/card-summaries.js")>("../services/card-summaries.js");
+    const fromArray = actual.SUMMARY_JSON_SCHEMA.parse({
+      symptom: ["  첫 줄 ", "두 번째 줄", "세 번째 줄은 잘린다"],
+      optionsLine: "승인 / 거절",
+      interpretation: "확인이 필요합니다.",
+    });
+    expect(fromArray.symptom).toEqual(["첫 줄", "두 번째 줄"]);
+    const fromString = actual.SUMMARY_JSON_SCHEMA.parse({
+      symptom: "첫 줄\n\n  두 번째 줄  \n세 번째 줄은 잘린다",
+      optionsLine: "승인 / 거절",
+      interpretation: "확인이 필요합니다.",
+    });
+    expect(fromString.symptom).toEqual(["첫 줄", "두 번째 줄"]);
+  });
+
+  it("normalizes optionsLine newlines into one line", async () => {
+    const actual = await vi.importActual<typeof import("../services/card-summaries.js")>("../services/card-summaries.js");
+    const parsed = actual.SUMMARY_JSON_SCHEMA.parse({
+      symptom: ["증상 한 줄"],
+      optionsLine: "승인(고용 진행)\n거절(중단)",
+      interpretation: "확인이 필요합니다.",
+    });
+    expect(parsed.optionsLine).toBe("승인(고용 진행) 거절(중단)");
+  });
+
+  it("clips interpretation to the first sentence without breaking decimals/versions and never yields empty", async () => {
+    const actual = await vi.importActual<typeof import("../services/card-summaries.js")>("../services/card-summaries.js");
+    const clip = (interpretation: string) =>
+      actual.SUMMARY_JSON_SCHEMA.parse({ symptom: ["증상"], optionsLine: "선택", interpretation }).interpretation;
+    expect(clip("승인 대기 중입니다. 두 번째 문장입니다.")).toBe("승인 대기 중입니다.");
+    expect(clip("확인이 필요합니다! 다음 문장.")).toBe("확인이 필요합니다!");
+    expect(clip("진행할까요? 추가 설명.")).toBe("진행할까요?");
+    expect(clip("첫 문장입니다\n두 번째 문장입니다")).toBe("첫 문장입니다");
+    expect(clip("첫 문장입니다.\n두 번째 문장입니다.")).toBe("첫 문장입니다.");
+    expect(clip("문장부호 없는 단일 문장입니다")).toBe("문장부호 없는 단일 문장입니다");
+    expect(clip("v1.2 배포 전 확인이 필요합니다. 추가 문장입니다.")).toBe("v1.2 배포 전 확인이 필요합니다.");
+    expect(clip("3.14 배포 전 확인이 필요합니다. 추가 문장입니다.")).toBe("3.14 배포 전 확인이 필요합니다.");
   });
 });
