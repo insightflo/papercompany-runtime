@@ -14,6 +14,8 @@ export const humanReviewEvidenceRefSchema = z.object({
 
 export const humanReviewPacketSchema = z.object({
   schemaVersion: z.literal("human-review-v1"),
+  // [사람 카드 축소 Stage 1] 증상 2줄 이내(≤240). 구 저장 패킷에는 없는 선택 필드 — 하위호환.
+  symptom: readable(240).optional(),
   decisionSubject: readable(300),
   evidence: z.array(humanReviewEvidenceRefSchema).min(1).max(20),
   interpretation: readable(4_000),

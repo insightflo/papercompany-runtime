@@ -84,6 +84,36 @@ const present = (value: string | null | undefined) => {
   return trimmed ? trimmed : undefined;
 };
 
+// [사람 카드 축소 Stage 1 2026-11-11] 고정 축소 형식 헬퍼 — 문장/절 경계 우선 클립.
+// 경계 없으면 하드 클립하며, 결과는 언제나 비지 않은 1자 이상이다.
+const SENTENCE_BOUNDARY = /[.!?]/;
+const CLAUSE_BOUNDARY = /[,;:·—]/;
+
+function clipAtBoundary(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const window = value.slice(0, max);
+  const floor = Math.floor(max / 2);
+  const lastBoundary = (pattern: RegExp): number => {
+    for (let index = window.length - 1; index >= floor; index -= 1) {
+      if (pattern.test(window[index]!)) return index + 1;
+    }
+    return -1;
+  };
+  const cut = Math.max(lastBoundary(SENTENCE_BOUNDARY), lastBoundary(CLAUSE_BOUNDARY));
+  return (cut > 0 ? window.slice(0, cut) : window).trim() || value.slice(0, max);
+}
+
+/** 1줄 정규화 — 개행을 공백으로 치환하고 공백 연속을 정리한 뒤 경계 클립. */
+const toOneLine = (value: string, max: number) =>
+  clipAtBoundary(value.replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim(), max);
+
+/** 증상 최대 2줄 — 빈 줄 제거·줄별 trim, 개행 최대 1개, 전체 ≤220자 경계 클립. 미제출이면 undefined. */
+function formatSymptom(reason: string | undefined): string | undefined {
+  const lines = (reason ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 2);
+  if (lines.length === 0) return undefined;
+  return clipAtBoundary(lines.join("\n"), 220) || undefined;
+}
+
 function extractEvidenceUrl(evidence: string | undefined): string | null {
   const text = present(evidence);
   if (!text) return null;
@@ -104,7 +134,8 @@ function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefin
   const options = parsed.data!.map((option) => ({
     id: option.id,
     label: option.label,
-    description: option.description ?? null,
+    // [사람 카드 축소 Stage 1] 선택지 설명은 항상 1줄 — 개행을 공백으로 치환한다.
+    description: option.description != null ? (toOneLine(option.description, 1_000) || null) : null,
     facts: [],
     evidenceRefs: [],
   }));
@@ -141,7 +172,8 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       label: "오너 결정 요청(owner-action 이슈)",
       href: `/issues/${input.ownerActionIssueId}`,
       location: issueLocation,
-      description: clip(present(input.reason) ?? "결정 요청 사유는 이슈 본문에서 확인해 주세요", 1_000),
+      // [사람 카드 축소 Stage 1] 근거 원문 전체를 덤프하지 않고 1줄 참조 안내만 남긴다.
+      description: "상세 진단·근거 원문은 이 이슈 본문에서 확인해 주세요",
     },
   ];
   if (input.sourceIssueId) {
@@ -165,7 +197,8 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       label: "오너 제출 근거 링크",
       href: evidenceUrl,
       location: "결정 제출 evidence 본문",
-      description: clip(present(input.evidence) ?? "", 1_000),
+      // [사람 카드 축소 Stage 1] 제출 evidence 전문 대신 1줄 링크 참조 안내.
+      description: "오너가 제출한 외부 근거 원문 링크입니다",
     });
   }
   const evidenceOptionRefs = evidence.map((ref) => ({ label: ref.label, href: ref.href }));
@@ -186,11 +219,12 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       : { ...option, recommended: undefined, recommendationReason: undefined })
     : definition.options;
   const recommendedDefinition = { ...definition, options };
-  const summaryLines = [
-    `요청 사유: ${present(input.reason) ?? "(미제출)"}`,
-    `요청된 다음 단계: ${present(input.nextAction) ?? "(미제출)"}`,
-    `오너 제출 근거: ${present(input.evidence) ?? "(미제출 — 이슈 본문과 원천 이슈에서 확인)"}`,
-  ];
+  // [사람 카드 축소 Stage 1] 고정 축소 형식 — 증상 2줄(symptom), 해석 1문장. 상세 원문은 링크로만 참조.
+  const symptom = formatSymptom(input.reason);
+  const requestedNextAction = present(input.nextAction);
+  const interpretation = toOneLine(requestedNextAction
+    ? `사람 결정(${decisionLabel}) 요청 — 다음 단계로 "${requestedNextAction}"의 승인 여부를 판단해 주세요.`
+    : `사람 결정(${decisionLabel}) 요청 — 연결된 이슈의 근거로 승인·보류·반려를 판단해 주세요.`, 200);
   return {
     schemaVersion: 1,
     requestKey: input.lifetimeId !== undefined
@@ -199,10 +233,12 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
     priority: "high",
     interactionType: "single_select",
     title: clip(`사람 결정 승인 요청 — ${decisionLabel}`, 200),
+    // [사람 카드 축소 Stage 1] 장문 원문 본붙을 제거한 최소 고정 문구 — 필수 보드 제출 계약과
+    // 상세 근거 링크 안내만 남긴다(원문은 이슈·근거 링크에서 확인).
     description: clip([
       `## 미션 오너의 사람 결정 요청(${decisionLabel})`,
       "",
-      ...summaryLines,
+      "증상·선택지·쉬운 해석은 카드 패킷을 그대로 표시하며, 상세 진단과 근거 원문은 연결된 이슈·근거 링크에서 확인해 주세요.",
       "",
       "선택은 운영자의 방향 지시입니다(boardSubmission: agent_required). 사람이 오너의 결정 레코드를 대신 제출하지 않으며,",
       "resolve 결과가 웨이크로 미션 오너 에이전트에게 전달되고 오너가 자기 권한 경로(기존 실행 API)로 실행합니다.",
@@ -224,12 +260,10 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
       ...recommendedDefinition,
       humanReview: {
         schemaVersion: "human-review-v1",
+        ...(symptom ? { symptom } : {}),
         decisionSubject: clip(`미션 오너의 사람 결정 요청 — ${decisionLabel} 승인 여부`, 300),
         evidence,
-        interpretation: clip([
-          `미션 오너 에이전트가 사람 결정(${decisionLabel})을 요청했습니다.`,
-          ...summaryLines,
-        ].join("\n"), 4_000),
+        interpretation,
         impact: {
           ifApproved: "선택한 방향이 미션 오너 에이전트에 전달되고, 오너가 자기 권한 경로(기존 실행 API)로 다음 단계를 진행합니다.",
           ifRejected: "요청이 반려됩니다. 반려 사유가 오너에게 전달되고 오너는 대기·보고 상태를 유지하거나 다시 에스컬레이션합니다.",

@@ -13,6 +13,8 @@ export interface HumanReviewImpact {
 
 export interface HumanReviewPacket {
   schemaVersion: "human-review-v1";
+  /** [사람 카드 축소 Stage 1] 증상 요약 — 최대 2줄(개행 ≤1, ≤220자). 구 패킷에는 없는 선택 필드다. */
+  symptom?: string | null;
   decisionSubject: string;
   evidence: HumanReviewEvidenceRef[];
   interpretation: string;

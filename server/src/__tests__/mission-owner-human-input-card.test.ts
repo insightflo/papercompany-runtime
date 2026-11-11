@@ -101,8 +101,23 @@ describe("mission owner human input decision card builder", () => {
     expect(review.recommendedNextStep).toBe(input.nextAction);
     // The free-text evidence URL becomes a resolvable evidence ref.
     expect(review.evidence.some((ref) => ref.href === "https://example.com/evidence/1")).toBe(true);
-    expect(review.interpretation).toContain(input.reason!);
+    // [사람 카드 축소 Stage 1] 증상은 symptom 패킷(≤2줄)으로, 해석은 1문장(개행 없음, ≤200자)으로 정형화된다.
+    expect(review.symptom).toContain(input.reason!);
+    expect(review.symptom!.split("\n")).toHaveLength(1);
+    expect(review.symptom!.length).toBeLessThanOrEqual(220);
+    expect(review.interpretation).not.toContain("\n");
+    expect(review.interpretation.length).toBeLessThanOrEqual(200);
+    expect(review.interpretation).toContain(input.nextAction!);
+    expect(review.interpretation).not.toContain(input.reason!);
+    // 근거 설명은 1줄 참조 안내 — 원문 전체를 덤프하지 않는다.
+    expect(review.evidence[0]!.description!.length).toBeLessThanOrEqual(100);
+    expect(review.evidence[0]!.description).not.toContain(input.reason!);
+    const urlRef = review.evidence.find((ref) => ref.href === "https://example.com/evidence/1")!;
+    expect(urlRef.description!.length).toBeLessThanOrEqual(100);
+    expect(urlRef.description).not.toContain(input.evidence!);
     expect(card.description).toContain("agent_required");
+    expect(card.description).not.toContain(input.reason!);
+    expect(card.description).not.toContain(input.evidence!);
   });
 
   it("uses structured payload options first and keeps the submit action optional-comment", () => {
@@ -117,6 +132,46 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.actions).toHaveLength(1);
     expect(card.definition.actions[0]).toMatchObject({ id: "submit", outcome: "submit", requiresSelection: true });
     expect(card.definition.comment.mode).toBe("optional");
+    // [사람 카드 축소 Stage 1] 선택지 설명은 개행 여부와 무관하게 항상 1줄로 클립된다.
+    expect(card.definition.options[0]!.description).toBe("알파로 진행");
+    expect(card.definition.options[1]!.description).toBeNull();
+  });
+
+  it("clips structured option descriptions to one line", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      structuredOptions: [
+        { id: "alpha", label: "옵션 알파", description: "첫 줄 설명입니다.\n둘째 줄 설명입니다." },
+      ],
+    }));
+    expect(card.definition.options[0]!.description).toBe("첫 줄 설명입니다. 둘째 줄 설명입니다.");
+  });
+
+  it("keeps the compact fixed format even for long multiline owner submissions", () => {
+    const longReason = [
+      "첫 줄 증상 설명입니다. 문장이 길게 이어져서 전체가 220자를 넘습니다. 계속 이어지는 문장입니다.",
+      "둘째 줄 증상 설명입니다. 이 줄까지 허용됩니다.",
+      "셋째 줄 증상은 카드에 남지 않습니다.",
+    ].join("\n");
+    const longEvidence = `근거 초록 원문이 길게 이어집니다. https://example.com/evidence/long\n둘째 줄 근거 원문입니다.`;
+    const longNextAction = "운영자 승인 후 진행할 다음 단계 지시가 길게 이어집니다.".repeat(20);
+    const input = spec({ reason: longReason, evidence: longEvidence, nextAction: longNextAction });
+    const card = buildMissionOwnerHumanInputDecisionCard(input);
+    expect(() => createOperatorDecisionSchema.parse(card)).not.toThrow();
+    const review = card.definition.humanReview!;
+    // 증상은 최대 2줄(개행 ≤1) · ≤220자, 세째 줄은 버린다.
+    expect(review.symptom!.split("\n").length).toBeLessThanOrEqual(2);
+    expect(review.symptom!.length).toBeLessThanOrEqual(220);
+    expect(review.symptom).not.toContain("셋째 줄 증상은");
+    // 해석은 1문장 — 개행 없음 · ≤200자.
+    expect(review.interpretation).not.toContain("\n");
+    expect(review.interpretation.length).toBeLessThanOrEqual(200);
+    // 장문 원문은 카드 본문 어디에도 통문으로 복붙되지 않고 링크만 남는다.
+    expect(JSON.stringify(card.definition)).not.toContain(longReason);
+    expect(JSON.stringify(card.definition)).not.toContain(longEvidence);
+    expect(card.description).not.toContain(longReason);
+    expect(card.description).not.toContain(longEvidence);
+    // 다음 단계 원문은 권위가 없는 표시 문구로 권고 필드에만 그대로 남는다(기존 계약).
+    expect(review.recommendedNextStep).toBe(longNextAction);
   });
 
   it("fails closed with 422 when structured options are malformed", () => {
