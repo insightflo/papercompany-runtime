@@ -9,6 +9,55 @@ function SourceLink({ href, children }: { href: string; children: React.ReactNod
     : <a href={href} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium">{children}<ArrowUpRight className="h-3 w-3" /></a>;
 }
 
+/**
+ * [사람 카드 축소 Stage 4] symptom 이 있는 신형 패킷 판별. 신형 패킷은 고정 축소 레이아웃
+ * (증상 ≤2줄 / 쉬운 해석 1문장 / 상세 근거 링크 칩)으로만 표시하고, symptom 이 없는 구형
+ * 저장 카드·승인 카드는 기존 렌더링을 그대로 유지한다(하위호환 게이트).
+ */
+export function hasCompactSymptom(packet: HumanReviewPacketValue | null | undefined): boolean {
+  return typeof packet?.symptom === "string" && packet.symptom.trim().length > 0;
+}
+
+/** 증상 블록 — 개행은 보존하되 최대 2줄만 표시한다(서버가 ≤2줄로 자르고, UI 는 line-clamp-2 로 방어). */
+export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketValue }) {
+  const lang = useCompanyLanguage();
+  return (
+    <div data-testid="human-review-symptom">
+      <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Symptom", ko: "증상" })}</p>
+      <p className="mt-1 line-clamp-2 whitespace-pre-line text-sm">{packet.symptom}</p>
+    </div>
+  );
+}
+
+/** 쉬운 해석 블록 — 1문장 강조. 상세 진단은 카드 밖 근거 링크에서만 확인한다. */
+export function HumanReviewInterpretationBlock({ packet }: { packet: HumanReviewPacketValue }) {
+  const lang = useCompanyLanguage();
+  return (
+    <div data-testid="human-review-interpretation" className="border-l-2 border-primary bg-primary/5 p-2">
+      <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Plain-language read", ko: "쉬운 해석" })}</p>
+      <p className="mt-1 text-sm font-medium">{packet.interpretation}</p>
+    </div>
+  );
+}
+
+/** 상세 근거 칩 — 라벨 링크만 표시하고 장문 location/description 은 펼치지 않는다. */
+export function HumanReviewEvidenceChips({ packet }: { packet: HumanReviewPacketValue }) {
+  const lang = useCompanyLanguage();
+  if (packet.evidence.length === 0) return null;
+  return (
+    <div data-testid="human-review-evidence-chips">
+      <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Detailed evidence", ko: "상세 근거" })}</p>
+      <ul className="mt-1.5 flex flex-wrap gap-2">
+        {packet.evidence.map((item) => (
+          <li key={`${item.href}:${item.location}`} className="inline-flex items-center gap-1 rounded-sm border border-border bg-background px-2 py-1 text-xs" data-testid="human-review-evidence-chip">
+            <SourceLink href={item.href}>{item.label}</SourceLink>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function HumanReviewPacket({ packet, variant = "full" }: { packet: HumanReviewPacketValue | null; variant?: "full" | "compact" }) {
   const lang = useCompanyLanguage();
   if (!packet) return (
@@ -19,6 +68,16 @@ export function HumanReviewPacket({ packet, variant = "full" }: { packet: HumanR
       </div></div>
     </section>
   );
+  // [사람 카드 축소 Stage 4] 신형(symptom 있는) 패킷은 고정 축소 레이아웃만 표시한다.
+  if (hasCompactSymptom(packet)) {
+    return (
+      <section className="mt-3 space-y-3 border border-border bg-background p-4" data-testid="human-review-packet" data-packet-layout="compact-symptom">
+        <HumanReviewSymptomBlock packet={packet} />
+        <HumanReviewInterpretationBlock packet={packet} />
+        <HumanReviewEvidenceChips packet={packet} />
+      </section>
+    );
+  }
   return (
     <section className="mt-3 space-y-4 border border-border bg-background p-4" data-testid="human-review-packet">
       <div><p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "What is being decided?", ko: "무엇을 판단하나요?" })}</p><h3 className="mt-1 text-base font-semibold">{packet.decisionSubject}</h3></div>
