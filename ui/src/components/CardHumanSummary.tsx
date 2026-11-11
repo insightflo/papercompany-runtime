@@ -17,6 +17,26 @@ const SUPPORTED_ADAPTERS: Array<{ id: string; label: string; supported: boolean 
   { id: "codex_local", label: "Codex (local)", supported: false },
 ];
 
+/** 신형(Stage 3) 고정 축소 형식: 증상 ≤2줄 / 선택지 1줄 / 쉬운 해석 1문장. */
+type CompactSummary = { symptom: string[]; optionsLine: string; interpretation: string };
+
+/** summary_json 신형 판별 — 세 필드가 온전한 경우만 신형 렌더. 구 5섹션 행은 레거시 렌더 폴백. */
+function asCompactSummary(value: unknown): CompactSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  const symptom = (Array.isArray(v.symptom)
+    ? v.symptom.flatMap((item) => String(item).split(/\r?\n/))
+    : typeof v.symptom === "string" ? v.symptom.split(/\r?\n/) : [])
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  const single = (x: unknown) => (typeof x === "string" ? x.replace(/\s*\r?\n\s*/g, " ").trim() : "");
+  const optionsLine = single(v.optionsLine);
+  const interpretation = single(v.interpretation);
+  if (symptom.length === 0 || !optionsLine || !interpretation) return null;
+  return { symptom, optionsLine, interpretation };
+}
+
 export function CardHumanSummary({
   approvalId,
   companyId,
@@ -77,6 +97,7 @@ export function CardHumanSummary({
   if (!summary) return null; // 원문 폴백: 해석 없으면 아무것도 그리지 않는다
 
   const s = summary.summary;
+  const compact = asCompactSummary(s); // 신형 3항목 행 판별(구 행은 null → 레거시 렌더)
   return (
     <div className="mt-3 rounded-md border border-blue-200 dark:border-blue-900 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-sm">
       <div className="flex items-center justify-between gap-2">
@@ -100,7 +121,26 @@ export function CardHumanSummary({
 
       {open && (
         <div className="mt-2 space-y-1.5 text-blue-950 dark:text-blue-100">
-          {summary.status === "done" && s && (
+          {summary.status === "done" && s && (compact ? (
+            <>
+              <div className="space-y-0.5">
+                {compact.symptom.map((line, i) => (
+                  <p key={i} className={i === 0 ? "font-medium" : "text-[13px] leading-relaxed"}>{line}</p>
+                ))}
+              </div>
+              <p className="text-[13px] leading-relaxed">
+                <span className="font-medium">{L(lang, { en: "Options: ", ko: "선택지: " })}</span>
+                {compact.optionsLine}
+              </p>
+              <p className="text-[13px] leading-relaxed">{compact.interpretation}</p>
+              <p className="text-[12px] text-muted-foreground">
+                {L(lang, {
+                  en: "Detailed evidence is in the issue linked to this card.",
+                  ko: "상세 근거는 이 카드에 연결된 이슈 링크에서 확인하세요.",
+                })}
+              </p>
+            </>
+          ) : (
             <>
               <p className="font-medium">{s.oneLine}</p>
               <p className="text-[13px] leading-relaxed">{s.whatHappening}</p>
@@ -108,20 +148,20 @@ export function CardHumanSummary({
                 <span className="font-medium">{L(lang, { en: "Decision needed: ", ko: "결정 필요: " })}</span>
                 {s.decisionNeeded}
               </p>
-              {s.options.length > 0 && (
+              {s.options?.length ? (
                 <ul className="text-[13px] leading-relaxed list-disc pl-4">
                   {s.options.map((o, i) => (
                     <li key={i}><span className="font-medium">{o.label}</span> — {o.meaning}</li>
                   ))}
                 </ul>
-              )}
-              {s.cautions.length > 0 && (
+              ) : null}
+              {s.cautions?.length ? (
                 <ul className="text-[12px] text-amber-800 dark:text-amber-300 list-disc pl-4">
                   {s.cautions.map((c, i) => <li key={i}>{c}</li>)}
                 </ul>
-              )}
+              ) : null}
             </>
-          )}
+          ))}
           {summary.status === "failed" && summary.error && (
             <p className="text-[11px] text-muted-foreground break-all">{summary.error}</p>
           )}

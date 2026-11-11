@@ -98,7 +98,8 @@ const doneSummaryRow = {
   status: "done",
   adapterType: "pi_local",
   model: "some-model",
-  summaryJson: { oneLine: "요약", whatHappening: "설명", decisionNeeded: "결정", options: [], cautions: [] },
+  // 신형(Stage 3) 고정 축소 3항목: symptom(≤2줄) / optionsLine(1줄) / interpretation(1문장)
+  summaryJson: { symptom: ["미션이 사람 확인 대기 중"], optionsLine: "재개 / 중단 중 선택", interpretation: "사람이 진행 방향을 정해야 해서 확인이 필요합니다." },
   error: null,
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -143,7 +144,9 @@ describe("human operator request human summary display hook", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body[0].humanSummary.status).toBe("done");
-    expect(res.body[0].humanSummary.summary.oneLine).toBe("요약");
+    expect(res.body[0].humanSummary.summary.symptom).toEqual(["미션이 사람 확인 대기 중"]);
+    expect(res.body[0].humanSummary.summary.optionsLine).toBe("재개 / 중단 중 선택");
+    expect(res.body[0].humanSummary.summary.interpretation).toContain("확인이 필요");
     expect(mockCardSummaryService.ensureSummary).not.toHaveBeenCalled();
   });
 
