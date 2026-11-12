@@ -26,6 +26,7 @@ import { recordMissionOwnerDecision } from "../services/missions/mission-owner-r
 import {
   buildMissionOwnerHumanInputDecisionCard,
   createMissionOwnerHumanInputDecisionCard,
+  MISSION_OWNER_HUMAN_INPUT_INSUFFICIENT_OPTIONS,
   MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE,
   type MissionOwnerHumanInputCardSpec,
 } from "../services/missions/mission-owner-human-input-card.js";
@@ -107,7 +108,9 @@ describe("mission owner human input decision card builder", () => {
     expect(review.symptom!.length).toBeLessThanOrEqual(220);
     expect(review.interpretation).not.toContain("\n");
     expect(review.interpretation.length).toBeLessThanOrEqual(200);
-    expect(review.interpretation).toContain(input.nextAction!);
+    // [C4a] 쉬운 해석은 요청 산문(nextAction)을 인용하지 않고 '승인 여부' 템플릿도 쓰지 않는다.
+    expect(review.interpretation).not.toContain(input.nextAction!);
+    expect(review.interpretation).not.toContain("승인 여부");
     expect(review.interpretation).not.toContain(input.reason!);
     // 근거 설명은 1줄 참조 안내 — 원문 전체를 덤프하지 않는다.
     expect(review.evidence[0]!.description!.length).toBeLessThanOrEqual(100);
@@ -203,6 +206,85 @@ describe("mission owner human input decision card builder", () => {
     expect(card.definition.options.map((option) => option.id)).toEqual(["approve", "hold", "reject"]);
     expect(card.definition.comment.mode).toBe("required");
     expect(card.definition.humanReview!.recommendedNextStep).toBe(SYSTEM_ESCALATE_NEXT_ACTION_EN);
+  });
+
+  // ---------- [C4a] 전제·안내 문구 분리 + 실옵션 <2 발행 거부 + 해석·증상 형식 ----------
+
+  it("shows a submitted prerequisiteNotice on the card notice line, never as an option", () => {
+    const notice = "복구 대상을 먼저 지정해야 합니다.";
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      prerequisiteNotice: notice,
+      structuredOptions: [
+        { id: "retry-revised-input", label: "입력 수정 후 재시도" },
+        { id: "replan-mission", label: "재계획" },
+      ],
+    }));
+    expect(card.definition.options.map((option) => option.id)).toEqual(["retry-revised-input", "replan-mission"]);
+    expect(card.definition.humanReview!.unresolvedFacts).toContain(notice);
+  });
+
+  it("moves prerequisite notice phrases mixed into structuredOptions onto the notice line", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      structuredOptions: [
+        { id: "missing-recovery-target", label: "복구 대상 지정 필요" },
+        { id: "retry-revised-input", label: "입력 수정 후 재시도" },
+        { id: "replan-mission", label: "재계획" },
+      ],
+    }));
+    expect(card.definition.options.map((option) => option.id)).toEqual(["retry-revised-input", "replan-mission"]);
+    expect(card.definition.humanReview!.unresolvedFacts).toContain("복구 대상 지정 필요");
+  });
+
+  it("rejects card issuance with 422 when fewer than two real action options would remain", () => {
+    const insufficient = expect.objectContaining({
+      status: 422,
+      details: { code: MISSION_OWNER_HUMAN_INPUT_INSUFFICIENT_OPTIONS },
+    });
+    // 시스템 발신 + 실옵션 1개 → 발행 거부.
+    expect(() => buildMissionOwnerHumanInputDecisionCard(spec({
+      actorType: "system",
+      structuredOptions: [{ id: "retry-revised-input", label: "입력 수정 후 재시도" }],
+    }))).toThrow(insufficient);
+    // 전제 문구만 남는 선택지(실옵션 0개) → 발행 거부.
+    expect(() => buildMissionOwnerHumanInputDecisionCard(spec({
+      structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요" }],
+    }))).toThrow(insufficient);
+  });
+
+  it("unpacks a structured decision block so the markdown heading never leaks into the symptom", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      reason: [
+        "### Mission owner decision",
+        "Decision: escalate",
+        "Reason: 자동으로 계속할 수 없습니다. 사람 확인이 필요합니다.",
+      ].join("\n"),
+    }));
+    const review = card.definition.humanReview!;
+    expect(review.symptom).toBeDefined();
+    expect(review.symptom).not.toContain("###");
+    expect(review.symptom).not.toContain("Mission owner decision");
+    expect(review.symptom).toContain("자동으로 계속할 수 없습니다");
+  });
+
+  it("derives a one-sentence plain interpretation from the option set, never from operator meta prose", () => {
+    const card = buildMissionOwnerHumanInputDecisionCard(spec({
+      decision: "escalate",
+      nextAction: "운영자가 복구 경로를 선택해야 합니다(입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 하나).",
+      structuredOptions: [
+        { id: "retry-revised-input", label: "입력 수정 후 재시도" },
+        { id: "replan-mission", label: "재계획" },
+        { id: "reassign-owner", label: "담당 재배정" },
+        { id: "cancel-mission", label: "취소" },
+      ],
+    }));
+    const interpretation = card.definition.humanReview!.interpretation;
+    expect(interpretation).not.toContain("승인 여부");
+    expect(interpretation).not.toContain("판단해 주세요");
+    expect(interpretation).not.toContain("운영자가 복구 경로를 선택해야 합니다");
+    expect(interpretation).not.toContain("입력 수정 후 재시도");
+    expect(interpretation.split("\n")).toHaveLength(1);
+    expect(interpretation).toBe(
+      "자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.");
   });
 
   // ---------- 요청자 추천(recommended) 주입 — 선택지와 함께 추천+사유 제시 ----------

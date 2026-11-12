@@ -72,7 +72,7 @@ describe("plugin runtime resource drains", () => {
     if (scheduler) await bounded(scheduler.drain()); if (manager) await bounded(manager.stopAll());
     vi.restoreAllMocks();
   });
-  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb.cleanup(); });
+  afterAll(async () => { await db.$client.end({ timeout: 5 }); await tempDb.cleanup(); }, 60_000);
   async function realRuntime(timeout = 40, skipPlugin = false) {
     const store = pluginJobStore(db); manager = createPluginWorkerManager();
     scheduler = createPluginJobScheduler({ db, jobStore: store, workerManager: manager,

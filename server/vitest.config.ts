@@ -26,6 +26,10 @@ export default defineConfig({
     //   defense-in-depth로 유지.)
     pool: "forks",
     testTimeout: 10_000,
+    // [hook-budget] embedded-PG teardown($client.end + tempDb.cleanup)는 shard 부하에서
+    //   10s 기본 hook 예산을 넘는다(run 43170498991 plugin-runtime-drain "Hook timed out
+    //   in 10000ms"). 테스트 본문 예산은 10s로 유지하고 정리 훅만 60s 헤드룸을 준다.
+    hookTimeout: 60_000,
     exclude: [...configDefaults.exclude, ...serialOnlySuites],
   },
 });
