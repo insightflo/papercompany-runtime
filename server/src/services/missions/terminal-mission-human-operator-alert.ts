@@ -33,10 +33,16 @@ import {
 import { resumableRunSignalForRun, resumePreviewEligibleForRun } from "./resume-signals.js";
 export { reviewedResumePolicyFullyResolves } from "./resume-signals.js";
 import {
+  hasEnoughActionableOptions,
   terminalCardStructuredOptions,
   terminalRestartPathAvailable,
 } from "./terminal-recovery-card-options.js";
-export { terminalCardStructuredOptions } from "./terminal-recovery-card-options.js";
+import { deriveResumeStartStep } from "./terminal-resume-from-decision.js";
+export {
+  hasEnoughActionableOptions,
+  isPrerequisiteNoticeOption,
+  terminalCardStructuredOptions,
+} from "./terminal-recovery-card-options.js";
 export { summarizeWorkflowRetryExhaustion } from "./terminal-mission-retry-summary.js";
 
 export const TERMINAL_FAILURE_RUN_STATUSES = new Set(["failed", "timed_out"]);
@@ -269,6 +275,8 @@ type TerminalHumanInputCardContext = {
   resumeAvailable: boolean;
   /** 실패 실행에서 중복 없는 새 최상위 실행을 만들 수 있을 때만 restart 옵션을 추가한다. */
   restartAvailable: boolean;
+  /** [재개 대상 명시 C1] 재개 시작 단계 — 있으면 재개 옵션 라벨·설명에 대상 단계를 표시한다. */
+  readonly resumeStartStepId?: string | null;
 };
 
 // [fail-loud] 시스템 경로는 제출 응답이 없으므로 카드 매핑/생성 실패를 activity+로그 로 남긴다.
@@ -321,6 +329,14 @@ export async function ensureTerminalHumanInputDecisionCard(
     .where(and(eq(operatorDecisions.companyId, context.companyId), eq(operatorDecisions.requestKey, requestKey)))
     .limit(1);
   if (existing.length > 0) return { ensured: true, reason: "card-exists" };
+  const cardOptions = terminalCardStructuredOptions(
+    context.resumeAvailable,
+    context.restartAvailable,
+    context.resumeStartStepId,
+  );
+  if (!hasEnoughActionableOptions(cardOptions.structuredOptions)) {
+    return { ensured: false, reason: "insufficient-actionable-options" };
+  }
   try {
     await createMissionOwnerHumanInputDecisionCard(db, {
       companyId: context.companyId,
@@ -339,7 +355,7 @@ export async function ensureTerminalHumanInputDecisionCard(
       workflowRunId: context.workflowRunId,
       actorType: "system",
       // [승인=재개 2026-10-23] 재개가 실제로 작동할 때만 “이 실행 이어서 진행(재개)” 선택지를 추가한다.
-      ...terminalCardStructuredOptions(context.resumeAvailable, context.restartAvailable),
+      ...cardOptions,
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {
@@ -380,6 +396,9 @@ export async function emitTerminalMissionHumanOperatorReport(
   const restartPathAvailable = await terminalRestartPathAvailable(
     db, input.expectedCompanyId, input.expectedMissionId, input.workflowRunId,
   );
+  const resumeStartStepId = resumePathAvailable && resumeCandidateRunId
+    ? await deriveResumeStartStep(db, resumeCandidateRunId)
+    : null;
   const body = buildTerminalMissionHumanOperatorComment({
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,
@@ -459,6 +478,7 @@ export async function emitTerminalMissionHumanOperatorReport(
       workflowRunId: verifiedRunId,
       resumeAvailable: resumePathAvailable,
       restartAvailable: restartPathAvailable,
+      resumeStartStepId,
     };
 
     // atomic claim: 동시/재시도 중 정확히 한 번만 통과(design section 9 unique-index 패턴).

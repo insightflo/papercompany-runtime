@@ -7,6 +7,8 @@ import {
   buildTerminalMissionSnapshotKey,
   classifyTerminalMissionContinuation,
   emitTerminalMissionHumanOperatorReport,
+  hasEnoughActionableOptions,
+  isPrerequisiteNoticeOption,
   reviewedResumePolicyFullyResolves,
   terminalResumeGuidanceText,
   terminalCardStructuredOptions,
@@ -245,22 +247,69 @@ describe("terminalCardStructuredOptions (resume option on the terminal card)", (
     expect(terminalResumeCandidateRunId(null, failedRuns)).toBeNull();
   });
 
-  it.each([false, true])("holds when resume is unavailable, even if weak restart availability is %s", (restartAvailable) => {
+  it.each([false, true])("holds four actionable recovery options when resume is unavailable, even if weak restart availability is %s", (restartAvailable) => {
     const options = terminalCardStructuredOptions(false, restartAvailable);
-    expect(options).toEqual({
-      structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요",
-        description: "현재 실행에는 검증된 재개 또는 재시작 대상이 없습니다. 새 구조화 복구 대상을 지정해야 합니다." }],
-      recommendedOptionId: "missing-recovery-target",
-      recommendationReason: "실행 권한이 없는 자연어 복구 경로를 선택하지 않고 유효한 대상을 먼저 지정해야 합니다.",
-    });
+    expect(options.structuredOptions.map((option) => option.id)).toEqual([
+      "retry-revised-input", "replan-mission", "reassign-owner", "cancel-mission",
+    ]);
+    expect(options.structuredOptions.some((option) => option.id === "missing-recovery-target")).toBe(false);
+    expect(options.structuredOptions.some((option) => option.label.includes("지정 필요"))).toBe(false);
+    expect(options.recommendedOptionId).toBeNull();
+    expect(options.recommendationReason).toBeNull();
+    expect(options.prerequisiteNotice)
+      .toBe("현재 실행에는 검증된 자동 재개 대상이 없어 아래 복구 방법 중 하나를 선택해야 합니다.");
     expect(JSON.stringify(options)).not.toContain("중복 없이");
     expect(JSON.stringify(options)).not.toContain("처음부터");
   });
-  it.each([false, true])("offers only the exact-run resume option when weak restart availability is %s", (restartAvailable) => {
+
+  it.each([false, true])("offers the resume option first plus the recovery actions when weak restart availability is %s", (restartAvailable) => {
     const options = terminalCardStructuredOptions(true, restartAvailable);
-    expect(options.structuredOptions).toHaveLength(1);
-    expect(options.structuredOptions[0]).toMatchObject({ id: "resume-this-run" });
-    expect(options.structuredOptions[0]!.label).toContain("이 실행 이어서 진행");
+    expect(options.structuredOptions.map((option) => option.id)).toEqual([
+      "resume-this-run", "retry-revised-input", "replan-mission", "reassign-owner", "cancel-mission",
+    ]);
+    expect(options.structuredOptions[0]!.label).toBe("이 실행 이어서 진행(재개)");
     expect(options.recommendedOptionId).toBe("resume-this-run");
+    expect(options.recommendationReason).toBe("실패한 단계만 이어서 실행하는 가장 저렴하고 정확한 경로입니다.");
+    expect(options.prerequisiteNotice).toBeNull();
+  });
+
+  it("names the resume start step in the resume option label and description when provided", () => {
+    const options = terminalCardStructuredOptions(true, false, "synthesize-draft");
+    expect(options.structuredOptions[0]).toMatchObject({
+      id: "resume-this-run",
+      label: "이 실행 이어서 진행(재개 · synthesize-draft)",
+    });
+    expect(options.structuredOptions[0]!.description).toContain("synthesize-draft 단계부터");
+    expect(options.recommendedOptionId).toBe("resume-this-run");
+  });
+
+  it.each([null, "   "])("falls back to the plain resume label when the start step is %s", (startStepId) => {
+    const options = terminalCardStructuredOptions(true, false, startStepId);
+    expect(options.structuredOptions[0]!.label).toBe("이 실행 이어서 진행(재개)");
+  });
+});
+
+// [사람 카드 선택지 C1] 전제/안내 문구는 선택지가 아니다 — 실제 행동 옵션 2개 미만이면 카드 발행을 보류한다.
+describe("terminal card actionable-option gate (hasEnoughActionableOptions)", () => {
+  it("classifies prerequisite/notice entries regardless of which id they carry", () => {
+    expect(isPrerequisiteNoticeOption({ id: "missing-recovery-target", label: "복구 대상 지정 필요" })).toBe(true);
+    expect(isPrerequisiteNoticeOption({ id: "other-id", label: "복구 대상 지정 필요" })).toBe(true);
+    expect(isPrerequisiteNoticeOption({ id: "other-id", label: "재개 대상 없음" })).toBe(true);
+    expect(isPrerequisiteNoticeOption({ id: "cancel-mission", label: "취소" })).toBe(false);
+    expect(isPrerequisiteNoticeOption({ id: "resume-this-run", label: "이 실행 이어서 진행(재개 · build-draft)" })).toBe(false);
+  });
+
+  it("requires at least two actionable options", () => {
+    expect(hasEnoughActionableOptions([])).toBe(false);
+    expect(hasEnoughActionableOptions([{ id: "missing-recovery-target", label: "복구 대상 지정 필요" }])).toBe(false);
+    expect(hasEnoughActionableOptions([{ id: "cancel-mission", label: "취소" }])).toBe(false);
+    expect(hasEnoughActionableOptions([
+      { id: "missing-recovery-target", label: "복구 대상 지정 필요" },
+      { id: "cancel-mission", label: "취소" },
+    ])).toBe(false);
+    expect(hasEnoughActionableOptions([
+      { id: "cancel-mission", label: "취소" },
+      { id: "replan-mission", label: "재계획" },
+    ])).toBe(true);
   });
 });
