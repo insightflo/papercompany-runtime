@@ -183,7 +183,51 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tests (shard ${{ matrix.shard }}/3)
+        # [ci-serial-split] 중량 통합 스위트 3종은 전용 직렬 잡(verify-tests-serial)이 독점 실행한다.
+        #   샤드에서 제외해 중복 실행·경합(4-fork 동시 embedded-PG + Python 락)을 원천 차단한다.
+        env:
+          PAPERCLIP_CI_EXCLUDE_SERIAL_SUITES: "1"
         run: pnpm test:run --shard=${{ matrix.shard }}/3
+
+  # [ci-serial-split] 중량 통합 스위트 3종 전용 직렬 잡 — 파일별 1개 프로세스씩 독점 실행하여
+  #   4-fork 동시 embedded-PG + Python 락 경합을 원천 제거한다. 잡 이름을 verify-tests 접두사로
+  #   유지해 pi-serial-merge.sh 의 startswith("verify-tests") 병합 가드(L149–152)가 코드 수정
+  #   없이 이 잡을 자동 감시하게 한다. 루트 pnpm test:run 으로 실행해 Vitest 멀티프로젝트 출력
+  #   형식(FAIL @paperclipai/server src/__tests__/... [ server/src/__tests__/... ])을 기존 샤드와
+  #   동일하게 유지한다(--filter exec vitest 사용 금지 — 브래킷 경로가 달라짐).
+  verify-tests-serial:
+    needs: [policy]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
+      - name: Install dependencies from the CI-refreshed lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Run heavy integration tests serially
+        run: |
+          pnpm test:run --no-file-parallelism \
+            server/src/__tests__/heartbeat-c5-public-activation.test.ts \
+            server/src/__tests__/qa-remediation-admission-root.test.ts \
+            server/src/__tests__/mission-owner-authority-flow.integration.test.ts
 
   e2e:
     needs: [policy]
@@ -218,7 +262,16 @@ jobs:
         run: pnpm build
 
       - name: Install Playwright
-        run: npx playwright install --with-deps chromium
+        # [ci-s1] ubuntu-24.04 apt 미러/목록 일시 오류(exit 100)에 대한 3회 재시도 + apt update 재시도 래퍼.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=3 && npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "Playwright install attempt ${attempt} failed; retrying in 10s..." >&2
+            sleep 10
+          done
+          exit 1
 
       - name: Generate Paperclip config
         run: |

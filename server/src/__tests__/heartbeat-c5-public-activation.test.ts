@@ -852,9 +852,15 @@ it("S3: bare exact-Db defaults carry public recovery through same-mission comple
     await phase("manual_and_timer_progress", async () => {
       const manual = await lifecycle!.startSeparateAgentU(service);
       expect(await within(lifecycle!.separateAgentUEntered, "S3 public manual invoke actual")).toBe(manual.id);
+      // [ci-s1] status='succeeded' 관측 직후에는 C5 비동기 후처리(finalizationVersion 확정/정산)가
+      //   아직 끝나지 않아 lifecycleInFlightClause 가 manual run 을 in-flight 로 본다. finalizationVersion=1
+      //   확정까지 기다리고 실행 트래커까지 drain 한 뒤 lastHeartbeatAt 설정/.tickTimers 를 해야
+      //   skipped 없이 enqueued:1 이 관측된다.
       await vi.waitFor(async () => expect((await lifecycle!.readIdentity(manual.id)).heartbeat).toMatchObject({
-        id: manual.id, status: "succeeded", resultJson: { stdout: "c5-public-separate-agent-u", stderr: "" },
+        id: manual.id, status: "succeeded", finalizationVersion: 1,
+        resultJson: { stdout: "c5-public-separate-agent-u", stderr: "" },
       }), { timeout: 30_000, interval: 20 });
+      await lifecycle!.drain();
       const tickNow = new Date();
       await publicFixture!.peer.update(agents).set({
         runtimeConfig: { heartbeat: { enabled: true, intervalSec: 1, wakeOnDemand: true, maxConcurrentRuns: 1 } },

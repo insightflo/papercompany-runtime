@@ -14,6 +14,7 @@ import { setRunRecoveryFlags } from "./helpers/run-reopen-guard-fixture.js";
 import { drainHeartbeatRuns } from "./helpers/cap-override-fixtures.js";
 import { installAuthorityToolExecutor, runOwnerAuthorityScenario } from "./helpers/mission-owner-authority-integration-fixture.js";
 import { setWorkflowToolStepExecutor } from "../services/workflow/dag-engine.js";
+import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 
 // 어댑터만 recording stub(나머지 전부 운영 경로) — issue-backed native resume/claim 이 에이전트 실행을 마칠 수 있게.
 const { executeSpy } = vi.hoisted(() => ({ executeSpy: vi.fn() }));
@@ -32,8 +33,12 @@ beforeAll(async () => {
   installAuthorityToolExecutor(db); // app.ts 운영 executor 결합(큐 claim → 코어 도구 → 실제 완료 기록)
 }, 60000);
 afterAll(async () => {
+  // [ci-s1] 7개 시나리오의 백그라운드 executeRun 후처리가 afterAll 시점에도 남아 있을 수 있다.
+  //   executor 를 먼저 해제하면 진행 중 도구 스텝 정산이 영향받으므로 드레인(30s/45s)을 먼저 마친 뒤
+  //   executor 해제 → DB 종결 → 임시 정리 순서로 안전하게 마감한다(훅 예산 60s 안에 들어오도록 정합화).
+  await waitForHeartbeatExecutionsToDrain(db, 30_000);
+  await drainHeartbeatRuns(db, 45_000);
   setWorkflowToolStepExecutor(null);
-  await drainHeartbeatRuns(db);
   await db.$client.end({ timeout: 5 });
   await temp?.cleanup();
 }, 60000);
