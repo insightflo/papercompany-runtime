@@ -108,9 +108,14 @@ describe("dead-target card structured restart binding", () => {
     expect(card.sourceContext.workflowRunId).toBe(workflowRunId);
     expect(card.definition.options.map((option) => option.id)).toEqual([
       WORKFLOW_RESTART_FROM_START_OPTION_ID,
+      "replan-mission",
+      "reassign-owner",
+      "cancel-mission",
     ]);
     expect(card.definition.approvedScope).toContain("workflow_run.restart_from_start");
     expect(card.definition.options.some((option) => option.id === "retry-a-different-live-source"))
+      .toBe(false);
+    expect(card.definition.options.some((option) => option.id === "missing-recovery-target"))
       .toBe(false);
 
     const before = await snapshotDeadTargetState(db, companyId, card.id);
