@@ -36,6 +36,7 @@ vi.mock("../adapters/index.js", () => ({
   runningProcesses: new Map(),
 }));
 
+import { HttpError } from "../errors.js";
 import { waitForHeartbeatExecutionsToDrain } from "../services/heartbeat-execution-tracker.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { syncWorkflowRunState } from "../services/workflow/dag-engine.js";
@@ -59,12 +60,19 @@ describeEP("workflow step retry recovery guard", () => {
 
 
   afterAll(async () => {
+    await waitForHeartbeatExecutionsToDrain(db, 30_000);
     const heartbeat = heartbeatService(db);
     const testAgents = await db.select({ id: agents.id }).from(agents).where(eq(agents.companyId, companyId));
     for (const agent of testAgents) {
-      await heartbeat.cancelActiveForAgent(agent.id);
+      try {
+        await heartbeat.cancelActiveForAgent(agent.id);
+      } catch (error) {
+        const alreadySettled = error instanceof HttpError && error.status === 409
+          && error.message === "heartbeat_pause_invalidation_scope_changed";
+        if (!alreadySettled) throw error;
+      }
     }
-    await waitForHeartbeatExecutionsToDrain(db);
+    await waitForHeartbeatExecutionsToDrain(db, 30_000);
     await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   }, 60_000);
