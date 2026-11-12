@@ -70,6 +70,10 @@ export const instanceExperimentalSettingsSchema = z.object({
   broadSearchAllowedCompanyIdsV1: z.array(z.string().uuid()).default([]),
   broadSearchAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
   broadSearchAllowedAgentIdsV1: z.array(z.string().uuid()).default([]),
+  // [stale-source wakeup v1] 주기 감독의 stale in_progress+종결 실패 런 자동 깨움 — 기본 off(진단만).
+  //   미션 목록은 부분 롤아웃용. 플래그와 무관하게 같은 진단 임계 반복+구조화 판정이면 자동 허용된다.
+  enableStaleSourceIssueWakeupV1: z.boolean().default(false),
+  staleSourceIssueWakeupAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

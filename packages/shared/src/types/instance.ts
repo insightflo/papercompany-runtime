@@ -38,6 +38,10 @@ export interface InstanceExperimentalSettings {
   broadSearchAllowedCompanyIdsV1: string[];
   broadSearchAllowedMissionIdsV1: string[];
   broadSearchAllowedAgentIdsV1: string[];
+  /** [stale-source wakeup v1] 주기 감독의 stale-source 자동 깨움(전체). 기본 off. */
+  enableStaleSourceIssueWakeupV1: boolean;
+  /** [stale-source wakeup v1] 미션 단위 허용 목록. 기본 빈 목록. */
+  staleSourceIssueWakeupAllowedMissionIdsV1: string[];
 }
 
 export interface InstanceSettings {

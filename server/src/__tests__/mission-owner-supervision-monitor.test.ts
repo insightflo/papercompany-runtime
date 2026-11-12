@@ -1,12 +1,21 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-const runActiveMissionOwnerSupervision = vi.fn(async () => ({
-  missionIds: [],
-  missions: [],
-}));
-const missionServiceMock = vi.fn(() => ({
-  runActiveMissionOwnerSupervision,
-}));
+// vi.hoisted: mock fns must exist before the static imports below evaluate the
+// monitor module (vi.mock factories run lazily at import time). Importing at top
+// level also loads the module graph once at collection, so tests don't pay a
+// lazy dynamic-import cost inside the 10s test timeout under fake timers.
+const { runActiveMissionOwnerSupervision, missionServiceMock } = vi.hoisted(() => {
+  const runActiveMissionOwnerSupervision = vi.fn(async () => ({
+    missionIds: [],
+    missions: [],
+  }));
+  return {
+    runActiveMissionOwnerSupervision,
+    missionServiceMock: vi.fn(() => ({
+      runActiveMissionOwnerSupervision,
+    })),
+  };
+});
 
 vi.mock("../services/missions.js", () => ({
   missionService: missionServiceMock,
@@ -18,11 +27,16 @@ vi.mock("../middleware/logger.js", () => ({
   },
 }));
 
+import { createMissionOwnerSupervisionMonitor } from "../services/mission-owner-supervision-monitor.js";
+import { logger } from "../middleware/logger.js";
+
 function dbWithMissionIds(...ids: string[]) {
   return {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
-        where: vi.fn(() => ({
+        // Thenable + orderBy in one: awaited where() chains (flag gate, post-sweep
+        // helpers) resolve to [], while the missions fallback query uses orderBy.
+        where: vi.fn(() => Object.assign(Promise.resolve([] as Array<{ id: string }>), {
           orderBy: vi.fn(async () => ids.map((id) => ({ id }))),
         })),
       })),
@@ -42,7 +56,6 @@ describe("createMissionOwnerSupervisionMonitor", () => {
   });
 
   it("passes owner-action and source wakeup dependencies into active supervision sweeps", async () => {
-    const { createMissionOwnerSupervisionMonitor } = await import("../services/mission-owner-supervision-monitor.js");
     const onOwnerActionCreated = vi.fn();
     const onOwnerDecisionRetrySourceIssueApplied = vi.fn();
     const onStaleSourceIssueWakeupRequested = vi.fn();
@@ -72,8 +85,6 @@ describe("createMissionOwnerSupervisionMonitor", () => {
   });
 
   it("isolates a failed mission and continues supervising later missions", async () => {
-    const { createMissionOwnerSupervisionMonitor } = await import("../services/mission-owner-supervision-monitor.js");
-    const { logger } = await import("../middleware/logger.js");
     const conflict = Object.assign(new Error("Owner unblock anchor conflict"), {
       status: 409,
       details: { reason: "owner_unblock_anchor_changed" },
@@ -124,7 +135,6 @@ describe("createMissionOwnerSupervisionMonitor", () => {
   });
 
   it("runs sweeps on a 5-minute default interval (not the previous 10 minutes)", async () => {
-    const { createMissionOwnerSupervisionMonitor } = await import("../services/mission-owner-supervision-monitor.js");
     const db = dbWithMissionIds("mission-interval");
 
     const monitor = createMissionOwnerSupervisionMonitor(db, { runImmediately: false });

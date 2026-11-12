@@ -40,6 +40,13 @@ import {
   claimSupervisionMarkerOnce,
   ACTIVE_SUPERVISION_EXECUTION_STATUSES_FOR_REVIEW,
 } from "./supervision-support.js";
+import {
+  STALE_SOURCE_WAKEUP_AUTO_THRESHOLD,
+  countStaleSourceWakeupDiagnoses,
+  hasAcceptedHumanApprovalForSource,
+  isStaleSourceWakeupEnabled,
+  recordStaleSourceWakeupDiagnosis,
+} from "./stale-source-wakeup-gate.js";
 
 export function createRunMainExecutorSupervision({
   db,
@@ -222,6 +229,10 @@ export function createRunMainExecutorSupervision({
     const missionPendingHumanDecisionIds = Array.from(approvalWaitByIssueId.values())
       .flatMap((marker) => marker.operatorDecisionIds);
     const missionHasPendingHumanCard = missionPendingHumanDecisionIds.length > 0;
+    // [stale-source wakeup gate 2026-11-13] 주기 감독의 하드코딩 off 를 인스턴스/미션 설정으로 교체:
+    //   enableStaleSourceIssueWakeupV1(전역) 또는 staleSourceIssueWakeupAllowedMissionIdsV1(미션 목록).
+    //   미션 단위로 1회 읽어 이슈 루프의 유효 게이트 계산에 쓴다.
+    const staleSourceWakeupSettingEnabled = await isStaleSourceWakeupEnabled(db, mission.id);
 
     for (const issue of missionIssues) {
       if (issue.id === oversightIssue.id) continue;
@@ -293,19 +304,44 @@ export function createRunMainExecutorSupervision({
         if (latestFailedRun && !issueLive) {
           const idempotencyKey = `mission-stale-source-wakeup:${mission.id}:${issue.id}:${latestFailedRun.id}`;
           const alreadyDispatched = await hasRecoveryIdempotency(db, mission.companyId, idempotencyKey);
-          let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = input.dispatchStaleSourceIssueWakeups ? "skipped_no_assignee" : "not_requested";
+          // [stale-source 판정 확장 2026-11-13] 구조화 오너 결정 외에, 이 실패 이후 resolve+accepted 된
+          //   사람 결정 카드(request_input 계열)도 복구 판정으로 인정한다 — 이 클래스에는 앵커 생성
+          //   경로가 없어 판정이 영구 불충분했다(netdata 사고). 둘 다 구조 필드만 읽는다.
+          const hasSourceDiagnosis = await hasStructuredSourceRecoveryDecision({ db, companyId: mission.companyId, sourceIssueId: issue.id })
+            || await hasAcceptedHumanApprovalForSource(db, {
+              companyId: mission.companyId,
+              sourceIssueId: issue.id,
+              since: latestFailedRun.finishedAt ?? latestFailedRun.createdAt ?? null,
+            });
+          // [stale-source auto gate] 미발사 진단을 틱별 구조화 마커로 누적하고, 같은 진단이 임계
+          //   횟수 반복 + 구조화 판정 존재 시 설정 게이트 없이도 자동 깨움을 허용한다.
+          if (!alreadyDispatched) {
+            await recordStaleSourceWakeupDiagnosis(db, {
+              companyId: mission.companyId, missionId: mission.id,
+              sourceIssueId: issue.id, failedRunId: latestFailedRun.id, occurredAt: now,
+            });
+          }
+          const diagnosisCount = alreadyDispatched
+            ? 0
+            : await countStaleSourceWakeupDiagnoses(db, {
+              companyId: mission.companyId, sourceIssueId: issue.id, failedRunId: latestFailedRun.id,
+            });
+          const staleSourceWakeupAutoEnabled = diagnosisCount >= STALE_SOURCE_WAKEUP_AUTO_THRESHOLD && hasSourceDiagnosis;
+          const dispatchStaleSourceWakeups = input.dispatchStaleSourceIssueWakeups === true
+            || staleSourceWakeupSettingEnabled
+            || staleSourceWakeupAutoEnabled;
+          let wakeupDispatchStatus: MissionOwnerDecisionWakeupDispatchStatus = dispatchStaleSourceWakeups ? "skipped_no_assignee" : "not_requested";
           let wakeCommentId: string | undefined;
-          const hasSourceDiagnosis = await hasStructuredSourceRecoveryDecision({ db, companyId: mission.companyId, sourceIssueId: issue.id });
           // [P3 주의] stale-source 경로의 issue.originId 는 보통 workflow run id(QA issue id 아님)라
           //   resolveQaGateIssueId 가 no-op. 정확한 QA gate derive 가 필요하므로 이 삽입점은 제거
           //   (잘못된 차단 방지). QA recovery ownership 차단은 retry case(unblock issue, originId=source)에서 처리.
           if (missionHasPendingHumanCard) {
             findings.push(`stale_source_wakeup_deferred_human_card_pending: ${label} stale but mission holds ${missionPendingHumanDecisionIds.length} pending human decision card(s) — owner auto-recovery deferred until the card resolves (single-path rule)`);
             wakeupDispatchStatus = "not_requested";
-          } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
+          } else if (dispatchStaleSourceWakeups && !alreadyDispatched && !hasSourceDiagnosis) {
             findings.push(`stale_source_wakeup_requires_diagnosis: ${label} terminal heartbeat run=${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; diagnose root cause before choosing same-issue wakeup or recovery issue`);
             wakeupDispatchStatus = "not_requested";
-          } else if (input.dispatchStaleSourceIssueWakeups && !alreadyDispatched) {
+          } else if (dispatchStaleSourceWakeups && !alreadyDispatched) {
             if (!issue.assigneeAgentId) {
               findings.push(`stale_source_wakeup_skipped: ${label} in_progress source has terminal heartbeat run=${latestFailedRun.id} but no assignee; wakeup dispatch skipped`);
               wakeupDispatchStatus = "skipped_no_assignee";
@@ -363,6 +399,18 @@ export function createRunMainExecutorSupervision({
               : `Source issue ${label} is still in_progress after terminal heartbeat ${latestFailedRun.status}; diagnose root cause before choosing same-issue wakeup or a recovery issue`,
             safeToAutoApply: false,
           });
+          // [stale-source 앵커 보장 2026-11-13] 이 클래스에도 mission_main_executor_unblock 앵커를
+          //   보장해 오너 구조화 회복 경로(앵커→오너 결정→재시도)를 연다. 앵커 부재가 netdata 사고의
+          //   사전조건 영구 불충분 원인이었다. 형제 분기(stale_todo, dead-target)와 같은 보장 방식.
+          if (!issue.hiddenAt && !isTerminalIssueStatus(issue.status)) {
+            await ownerActions.ensureMainExecutorUnblockIssue(mission, issue, {
+              renewAfterNoActionWaiting: true,
+              governanceEvidence: [
+                `stale_in_progress_after_failed_run: ${label} is in_progress after terminal heartbeat run ${latestFailedRun.id} status=${latestFailedRun.status}${latestFailedRun.errorCode ? ` errorCode=${latestFailedRun.errorCode}` : ""}; no mission issue has queued/running execution.`,
+                "Recovery boundary: Unblock must report evidence to Oversight; only the native workflow layer may resume a proven workflow step.",
+              ],
+            });
+          }
         }
       }
 

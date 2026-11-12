@@ -124,7 +124,8 @@ describe("mission supervision owner drains", () => {
     await flushPromises();
     expect(mocks.sweep).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10);
-    expect(select).toHaveBeenCalledTimes(2);
+    // 2 lane reads + 1 stale-source wakeup settings-gate read per parent sweep.
+    expect(select).toHaveBeenCalledTimes(3);
     failureEventsReleased = true;
     failureEvents.resolve([{
       id: "failure-event-1",

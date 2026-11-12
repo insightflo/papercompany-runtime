@@ -9,6 +9,7 @@ import {
   type CloseSatisfiedReplanUnblockIssuesResult,
 } from "./missions/owner-replan-application.js";
 import { recordActiveMissionCadenceShadow } from "./mission-oversight-shadow.js";
+import { isStaleSourceWakeupEnabled } from "./missions/stale-source-wakeup-gate.js";
 import { sweepApprovedRevisionStarts } from "./workflow/approved-revision-start.js";
 import { createMissionOversightFailureLane, type MissionOversightFailureWakeRequestedHandler } from "./mission-oversight-failure-lane.js";
 import { createMissionOversightLivenessLane, type MissionOversightLivenessGhostWakeRequestedHandler } from "./mission-oversight-liveness-lane.js";
@@ -86,12 +87,20 @@ export function createMissionOwnerSupervisionMonitor(
         onMissionOwnerPeriodicReviewWakeRequested: options.onMissionOwnerPeriodicReviewWakeRequested,
       });
 
+      // [stale-source wakeup gate 2026-11-13] 하드코딩 off 대신 인스턴스 설정 게이트 —
+      //   enableStaleSourceIssueWakeupV1 이 켜지면 자동 깨움 경로를 연다. 설정 없이도
+      //   같은 진단 임계 반복 + 구조화 판정이면 감독 내부의 자동 게이트가 열린다.
+      //   설정 읽기 실패는 fail-closed(진단만) — sweep 자체를 죽이지 않는다.
+      const dispatchStaleSourceIssueWakeups = await isStaleSourceWakeupEnabled(db).catch((err) => {
+        logger.warn({ err }, "stale-source wakeup gate read failed; defaulting to diagnose-only");
+        return false;
+      });
       const sweepOptions = {
         staleAfterMinutes,
         applySafeActions,
         applyOwnerDecisionActions: true,
         dispatchOwnerDecisionWakeups: true,
-        dispatchStaleSourceIssueWakeups: false,
+        dispatchStaleSourceIssueWakeups,
       };
       let result: Awaited<ReturnType<typeof service.runActiveMissionOwnerSupervision>>;
       try {
