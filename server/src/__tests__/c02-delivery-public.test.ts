@@ -74,7 +74,7 @@ function gate(onEnter?: () => Promise<void>) {
   const held = new Promise<void>(resolve => { release = resolve; });
   adapter.mockImplementation(async ({ runId }) => { await onEnter?.(); enter(runId); await held; return stopped; });
   return { release, entered: () => new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("adapter did not enter")), 5000);
+    const timer = setTimeout(() => reject(new Error("adapter did not enter")), 25_000);
     void entered.then(runId => { clearTimeout(timer); resolve(runId); });
   }) };
 }

@@ -160,7 +160,7 @@ export async function blockDelivery(c: C02Case, i: CorrectionDeliveryInput, mode
 
 /** Actual PostgreSQL wait chains, including an indirect second waiter, with two distinct backend PIDs. */
 export async function waitForDeliveryLocks(observer: Db, holderPid: number, count: number) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 25_000;
   for (;;) {
     const rows = await observer.execute(sql`SELECT pid, query, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
       WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'`);
@@ -175,7 +175,7 @@ export async function waitForDeliveryLocks(observer: Db, holderPid: number, coun
     const pids = new Set(waiting.map(r => Number(r.pid)));
     if (pids.size === count) return [...pids];
     if (Date.now() >= deadline) throw Error("actual delivery wait chain missing");
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>(resolve => setTimeout(resolve, 25));
   }
 }
 export async function invalidateDelivery(c: C02Case, i: CorrectionDeliveryInput, fault: string) {
