@@ -13,7 +13,7 @@ import {
   toolDefinitions,
   type Db,
 } from "@paperclipai/db";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApp, createAppRuntimeShutdownController } from "../app.js";
 import { HttpHandlerFinalizationHeldError } from "../services/http-handler-lifetime.js";
 import {
@@ -334,8 +334,11 @@ describe("HTTP core execute shutdown", () => {
       const begunResponsePromise = post("/api/plugins/tools/execute", begunBody);
       void begunResponsePromise.then(() => { begunChildResponseSettled = true; }, () => { begunChildResponseSettled = true; });
       await waitForFile(childMarker);
-      const begunPids = await readChildPids(childMarker);
-      expect(begunPids).toHaveLength(1);
+      // [ci-s1] Linux inotify 는 open(O_CREAT) 0바이트 생성 시점에도 이벤트를 낸다. 존재만 보고 즉시
+      //   읽으면 appendFileSync 기록 전 빈 파일("")로 [] 를 얻는다 — PID 1개가 기록될 때까지 폴링한다.
+      await vi.waitFor(async () => {
+        expect(await readChildPids(childMarker)).toHaveLength(1);
+      }, { timeout: 15_000, interval: 20 });
       const begunRows = await rowsFor(begunRun, begunTool);
       expect(begunRows).toHaveLength(1);
       const begunReceipt = begunRows[0]!;
