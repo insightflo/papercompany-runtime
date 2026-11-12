@@ -30,10 +30,15 @@ import type { StepEligibilityBlocker, StepHistory } from "./types.js";
 const RESUMABLE_TERMINAL_STATUSES: ReadonlySet<string> = new Set(["pending", "failed", "skipped"]);
 
 export function checkStepEligibility(history: StepHistory): StepEligibilityBlocker | null {
-  if (history.status === "running") return "active_work";
+  // [stuck 판정] 호출자 확정 stuck 인 running 스텝은 종말 후보처럼 아래 규칙을 탄다.
+  //   stuck 은 오직 running 에만 의미가 있고, stuck 판정 자체가 오너 참조의 종말/부재를
+  //   이미 증명했다 — 남은 hasOwner 잔존 참조는 residue 와 동일하게 과거 흔적으로 통과한다.
+  //   kind/effect·잔존 이력 검증은 변경 없이 그대로 적용된다.
+  const stuck = history.stuck === true && history.status === "running";
+  if (history.status === "running" && !stuck) return "active_work";
   if (history.status === "completed") return "executed_step";
-  if (!RESUMABLE_TERMINAL_STATUSES.has(history.status)) return "unsupported_status";
-  if (history.hasOwner) return "active_work";
+  if (!stuck && !RESUMABLE_TERMINAL_STATUSES.has(history.status)) return "unsupported_status";
+  if (history.hasOwner && !stuck) return "active_work";
 
   if (history.kind === "agent" || history.kind === "tool") {
     const hasRecordedHistory = history.issueId !== null

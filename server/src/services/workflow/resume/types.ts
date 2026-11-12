@@ -29,6 +29,10 @@ export interface StepHistory {
   hasExternalResult: boolean;
   effect: "none" | "read_only" | "external" | "unknown";
   kind: "agent" | "tool" | "control";
+  /** [stuck 판정] 호출자가 durable 이력(종말 하트비트·웨이크업·오너 참조)과 임계 무활동으로
+   *   확정해 넘긴다 — 이 함수는 시간/기록을 추론하지 않는다. true 이면 status==="running" 을
+   *   종말 후보처럼 취급하되 hasOwner 등 나머지 활성-작업 검증은 그대로 적용한다. */
+  stuck?: boolean;
 }
 
 /** checkStepEligibility 가 반환하는 차단 사유. null 은 per-step 적격(resumability 인증 아님). */

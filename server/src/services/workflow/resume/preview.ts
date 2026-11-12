@@ -16,6 +16,7 @@ import {
 import {
   budgetBlockers,
   buildSnapshotState,
+  isStepRunStuck,
   recordedCheckerBlockers,
   stepFactsFor,
   wholeMissionBlockers,
@@ -180,6 +181,14 @@ export async function assembleResumePreview(
   const frozenById = new Map(frozenSteps.map((step) => [step.id, step]));
   const stepRowByStepId = new Map(history.selected.steps.map((row) => [row.stepId, row]));
 
+  // [stuck 판정] 임계 무활동 + 종말 이력이 증명된 running 스텝 집합 — wholeMissionBlockers 의
+  //   run/running 차단, residue 의 비종말/in_progress 차단, per-step eligibility 에 동일하게 적용.
+  const stuckStepRunIds = new Set(
+    history.missionSteps
+      .filter((row) => isStepRunStuck(row, history, { now: signer.now() }))
+      .map((row) => row.id),
+  );
+
   // outside predecessor = affected 바깥에서 affected 로 들어오는 진입(union dependencies).
   const outside = new Set<string>();
   for (const stepId of affected) {
@@ -200,7 +209,7 @@ export async function assembleResumePreview(
   const issueIdsWithProducts = new Set(workProducts.map((row) => row.issueId));
 
   const blockers: ResumePreviewBlocker[] = [
-    ...wholeMissionBlockers(history, requestRows, executionRows),
+    ...wholeMissionBlockers(history, requestRows, executionRows, stuckStepRunIds),
     ...recordedCheckerBlockers(history),
     ...companyBudgetBlockers,
   ];
@@ -224,7 +233,8 @@ export async function assembleResumePreview(
       continue;
     }
     const row = stepRowByStepId.get(stepId)!;
-    const facts = stepFactsFor(row, kind, effectForStep(frozen, policyView), history);
+    const facts = stepFactsFor(row, kind, effectForStep(frozen, policyView), history,
+      { stuck: stuckStepRunIds.has(row.id) });
     if (row.issueId !== null && issueIdsWithProducts.has(row.issueId)) facts.hasExternalResult = true;
     const perStep = checkStepEligibility(facts);
     if (perStep !== null) {

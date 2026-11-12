@@ -146,6 +146,7 @@ import { computeConsecutiveNoProgress, type NoProgressAssessment } from "./heart
 export { computeConsecutiveNoProgress, type NoProgressAssessment } from "./heartbeat-no-progress.js";
 import { evaluateStepInputManifestGuard } from "./step-input-manifest-guard.js";
 import { completeLinkedWorkflowStepRunsForIssue } from "./workflow/issue-step-closeout.js";
+import { settleDispatchBoundTerminalFailure } from "./heartbeat-dispatch-settle.js";
 import {
   configureInstantWorkflowAdvanceDb,
   fireInstantWorkflowAdvanceForTerminalRun,
@@ -2818,6 +2819,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const releaseFinishedRun = async (finished: typeof heartbeatRuns.$inferSelect): Promise<
       { kind: "legacy" | "terminal" | "deferred" | "held"; reason?: string }
     > => {
+      // [dispatch-settle] issue+step 바인딩 디스패치 런의 종말 실패는 hold/early-return 전에
+      //   여기서 스텝 failed + 이슈 blocked 로 정산한다 — 두 write 모두 CAS 라 재호출은 무변화 no-op.
+      await settleDispatchBoundTerminalFailure({ db, run: finished }).catch((error) => {
+        logger.warn({ err: error, runId: finished.id }, "dispatch-bound terminal failure settle failed");
+      });
       const actual = await actualObservation.awaitSettled();
       let current: typeof heartbeatRuns.$inferSelect | null = null;
       try {
