@@ -45,7 +45,7 @@ const compactDecision: OperatorDecisionView = {
         { label: "Owner issue", href: "/issues/owner-1", location: "Issue > body", description: null },
         { label: "External brief", href: "https://example.com/brief", location: "External", description: null },
       ],
-      interpretation: "운영자가 방향을 승인하면 오너가 다음 단계를 진행합니다.",
+      interpretation: "오너의 다음 단계 진행에는 운영자 승인이 필요합니다.",
       impact: { ifApproved: "The owner proceeds.", ifRejected: "The handoff returns.", ifWrong: "The wrong step runs." },
       unresolvedFacts: [], questions: [], recommendedNextStep: "Check the linked issue and decide.", requiredReviewer: "human-operator",
     },
@@ -106,15 +106,15 @@ describe("OperatorDecisionCard compact human card (Stage 4)", () => {
     expect(html).toContain("line-clamp-1");
     // 쉬운 해석 — 강조된 1문장.
     expect(html).toContain("Plain-language read");
-    expect(html).toContain("운영자가 방향을 승인하면 오너가 다음 단계를 진행합니다.");
+    expect(html).toContain("오너의 다음 단계 진행에는 운영자 승인이 필요합니다.");
     // 상세 근거 — 카드 밖 링크 칩만(내부 /issues 링크 + 외부 URL).
     expect(html).toContain("Detailed evidence");
     expect(html).toContain('href="/issues/owner-1"');
     expect(html).toContain('href="https://example.com/brief"');
     // 고정 순서: 증상 → 선택지 → 해석 → 근거 → 결정 액션.
     expect(html.indexOf("미션이 오너 방향 결정을 기다립니다")).toBeLessThan(html.indexOf("Proceed with the requested next step"));
-    expect(html.indexOf("Proceed with the requested next step")).toBeLessThan(html.indexOf("운영자가 방향을 승인하면"));
-    expect(html.indexOf("운영자가 방향을 승인하면")).toBeLessThan(html.indexOf("Detailed evidence"));
+    expect(html.indexOf("Proceed with the requested next step")).toBeLessThan(html.indexOf("오너의 다음 단계 진행에는"));
+    expect(html.indexOf("오너의 다음 단계 진행에는")).toBeLessThan(html.indexOf("Detailed evidence"));
     expect(html.indexOf("Detailed evidence")).toBeLessThan(html.lastIndexOf(">Approve<"));
   });
 
@@ -239,7 +239,7 @@ describe("OperatorDecisionCard compact human card (Stage 4)", () => {
       <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={templated} onResolve={vi.fn()} /></CompanyLanguageProvider>,
     );
     // 쉬운 해석은 방향·이유 1문장만 — 서버 템플릿·선택지 나열을 반복하지 않는다.
-    expect(html).toContain("자동으로 판단할 수 없는 사항이라 운영자가 진행 방향을 정해야 다음 단계로 넘어갈 수 있습니다.");
+    expect(html).toContain("운영자 확인 없이는 다음 단계로 넘어갈 수 없어 대기 중이며, 아래 선택지에서 방향을 고르면 미션 오너가 그에 맞춰 진행합니다.");
     expect(html).not.toContain("사람 결정(입력·승인");
     expect(html).not.toContain("승인 여부를 판단해 주세요");
     // 선택지 나열은 '선택지' 영역(서버 기본 승인 설명의 1줄 다음 단계 요약)에 딱 1회만 나온다.
@@ -267,10 +267,111 @@ describe("OperatorDecisionCard compact human card (Stage 4)", () => {
     const html = renderToStaticMarkup(
       <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={escalated} onResolve={vi.fn()} /></CompanyLanguageProvider>,
     );
-    expect(html).toContain("자동 진행이 막혀 운영자가 복구 방향을 정해야 미션을 계속 진행할 수 있습니다.");
+    expect(html).toContain("자동 진행이 막혀 멈춘 상태이며, 아래 선택지에서 대응 방향을 고르면 미션 오너가 그 결과에 따라 후속 조치를 실행합니다.");
     expect(html).not.toContain("연결된 이슈의 근거로");
     expect(html).not.toContain("승인·보류·반려");
     // recommendedNextStep 가 기본 폴백 문구면 선택지 설명을 바꾸지 않는다(원본 승인 설명 유지).
     expect(html).toContain("요청된 다음 단계를 승인합니다");
+  });
+
+  // [카드 해석 정화 C4b] 터미널 복구 카드 형태 — 구조화 선택지(비-'approve' 첫 옵션)라
+  // recommendedNextStep 메타 문구가 선택지 설명으로 주입되지 않는다.
+  const terminalRecoveryOptions = [
+    { id: "retry-revised-input", label: "입력 수정 후 재시도", description: "실패 원인을 반영해 입력을 수정한 뒤 다시 시도합니다.", facts: [], evidenceRefs: [] },
+    { id: "replan-mission", label: "재계획", description: "미션 계획을 다시 수립합니다.", facts: [], evidenceRefs: [] },
+    { id: "cancel-mission", label: "취소", description: "복구를 중단하고 종료합니다.", facts: [], evidenceRefs: [] },
+  ];
+  const RECOVERY_NEXT_STEP = "운영자가 복구 경로를 선택해야 합니다(입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 하나).";
+  const terminalRecoveryDecision = (interpretation: string): OperatorDecisionView => ({
+    ...compactDecision,
+    definition: {
+      ...compactDecision.definition,
+      options: [...terminalRecoveryOptions],
+      humanReview: {
+        ...compactDecision.definition.humanReview!,
+        decisionSubject: "미션 오너의 사람 결정 요청 — 실행 복구 방향",
+        interpretation,
+        recommendedNextStep: RECOVERY_NEXT_STEP,
+      },
+    },
+  });
+  const renderCompact = (decision: OperatorDecisionView) => renderToStaticMarkup(
+    <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={decision} onResolve={vi.fn()} /></CompanyLanguageProvider>,
+  );
+
+  it("shows the prerequisite notice line between symptom and options when unresolvedFacts carries one", () => {
+    const noticed: OperatorDecisionView = {
+      ...compactDecision,
+      definition: {
+        ...compactDecision.definition,
+        humanReview: {
+          ...compactDecision.definition.humanReview!,
+          unresolvedFacts: ["현재 실행에는 검증된 자동 재개 대상이 없어 아래 복구 방법 중 하나를 선택해야 합니다."],
+        },
+      },
+    };
+    const html = renderCompact(noticed);
+    expect(html).toContain('data-testid="human-review-prerequisite-notice"');
+    expect(html).toContain("현재 실행에는 검증된 자동 재개 대상이 없어 아래 복구 방법 중 하나를 선택해야 합니다.");
+    // 고정 순서: 증상 → 안내줄 → 선택지.
+    expect(html.indexOf("미션이 오너 방향 결정을 기다립니다")).toBeLessThan(html.indexOf("human-review-prerequisite-notice"));
+    expect(html.indexOf("human-review-prerequisite-notice")).toBeLessThan(html.indexOf("data-operator-decision-option"));
+  });
+
+  it("hides the prerequisite notice line for empty or missing-evidence-only unresolvedFacts", () => {
+    const onlyFallback: OperatorDecisionView = {
+      ...compactDecision,
+      definition: {
+        ...compactDecision.definition,
+        humanReview: {
+          ...compactDecision.definition.humanReview!,
+          unresolvedFacts: ["오너가 제출 근거 텍스트를 남기지 않았습니다 — 이슈 본문에서 직접 확인이 필요합니다."],
+        },
+      },
+    };
+    expect(renderCompact(compactDecision)).not.toContain("human-review-prerequisite-notice");
+    const fallbackHtml = renderCompact(onlyFallback);
+    expect(fallbackHtml).not.toContain("human-review-prerequisite-notice");
+    // 기본 폴백 문구 자체도 컴팩트 카드 어디에도 노출하지 않는다.
+    expect(fallbackHtml).not.toContain("오너가 제출 근거 텍스트를 남기지 않았습니다");
+  });
+
+  it("cleanses the legacy escalate interpretation into an option-derived one-sentence read", () => {
+    const legacy = terminalRecoveryDecision(
+      '사람 결정(에스컬레이션(escalate)) 요청 — 다음 단계로 "운영자가 복구 경로를 선택해야 합니다(입력 수정 후 재시도, 계획 변경, 담당자 변경, 취소 중 하나)."의 승인 여부를 판단해 주세요.',
+    );
+    const html = renderCompact(legacy);
+    // 옛 템플릿·운영자 선택 메타 문구는 어디에도 남지 않고 '복구 방법 선택' 1문장 해석만 나온다.
+    expect(html).toContain('data-testid="human-review-interpretation"');
+    expect(html).toContain("자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.");
+    expect(html).not.toContain("승인 여부");
+    expect(html).not.toContain("판단해 주세요");
+    expect(html).not.toContain("운영자가 복구 경로를 선택해야");
+    expect(html).not.toContain("사람 결정(");
+  });
+
+  it("uses the resume-derived sentence when the options include a resume path", () => {
+    const withResume = terminalRecoveryDecision(
+      '사람 결정(에스컬레이션(escalate)) 요청 — 다음 단계로 "운영자가 복구 경로를 선택해야 합니다."의 승인 여부를 판단해 주세요.',
+    );
+    withResume.definition.options.unshift({
+      id: "resume-this-run", label: "이 실행 이어서 진행(재개)", description: "실패한 단계부터 이어서 실행합니다.", facts: [], evidenceRefs: [],
+    });
+    const html = renderCompact(withResume);
+    expect(html).toContain("자동 진행이 중단된 실행이라, 아래 선택지에서 실패 단계 재개 또는 다른 복구 방법을 고르면 미션 오너가 그 경로로 진행합니다.");
+    expect(html).not.toContain("승인 여부");
+    expect(html).not.toContain("판단해 주세요");
+  });
+
+  it("preserves a clean one-sentence interpretation verbatim on terminal recovery cards", () => {
+    const clean = terminalRecoveryDecision(
+      "자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.",
+    );
+    const html = renderCompact(clean);
+    // 깔끔한 1문장 해석은 원문 그대로 — 요청 문구·메타 문구가 끼어들지 않는다.
+    expect(html).toContain("자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.");
+    expect(html).not.toContain("승인 여부");
+    expect(html).not.toContain("판단해 주세요");
+    expect(html).not.toContain("운영자가 복구 경로를 선택해야");
   });
 });

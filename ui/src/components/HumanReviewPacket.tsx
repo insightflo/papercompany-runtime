@@ -58,6 +58,10 @@ function interpretationRepeatsOptions(packet: HumanReviewPacketValue, optionLabe
   if (/\([A-D1-4]\)\s*\S[\s\S]*\([B-E2-5]\)\s*\S/.test(interpretation)) return true;
   if (/승인\s*[·,/]\s*보류\s*[·,/]\s*반려/.test(interpretation)) return true;
   if (/입력 수정 후 재시도,\s*계획 변경/.test(interpretation)) return true;
+  // (4) 레거시 '승인 여부 판단' 틀 — 요청 문구 재서술이므로 1문장 해석으로 정화한다.
+  if (/승인\s*여부를?\s*판단|판단해\s*주세요/.test(interpretation)) return true;
+  // (5) 운영자 선택 메타 문구 — 해석은 상황 설명 + 선택 지시만 남긴다.
+  if (/운영자가\s*(?:복구\s*경로|방향)|복구\s*경로를\s*선택|Select a recovery path|Human operator must/i.test(interpretation)) return true;
   const labels = [...new Set((optionLabels ?? []).map((label) => label.trim()))].filter((label) => label.length >= 2);
   const contained = labels.filter((label) => interpretation.includes(label));
   return contained.length >= 2;
@@ -70,21 +74,53 @@ function interpretationRepeatsOptions(packet: HumanReviewPacketValue, optionLabe
  */
 export function formatCompactInterpretation(packet: HumanReviewPacketValue, optionLabels?: readonly string[]): string {
   if (interpretationRepeatsOptions(packet, optionLabels)) {
-    const mentionsEscalation = /escalate|에스컬레이션/i.test(`${packet.decisionSubject}\n${packet.interpretation}`);
-    return mentionsEscalation
-      ? "자동 진행이 막혀 운영자가 복구 방향을 정해야 미션을 계속 진행할 수 있습니다."
-      : "자동으로 판단할 수 없는 사항이라 운영자가 진행 방향을 정해야 다음 단계로 넘어갈 수 있습니다.";
+    // [카드 해석 정화 C4b] 정화 문장은 '무엇이 막혔는지 + 고르면 어떻게 되는지' 1문장 — 카드의
+    // 구조화 선택지 라벨에서 파생한다(요청 문구 재서술 금지).
+    const labels = optionLabels ?? [];
+    if (labels.some((label) => label.includes("이어서 진행"))) {
+      return "자동 진행이 중단된 실행이라, 아래 선택지에서 실패 단계 재개 또는 다른 복구 방법을 고르면 미션 오너가 그 경로로 진행합니다.";
+    }
+    if (labels.some((label) => label.includes("재계획") || label.includes("입력 수정 후 재시도"))) {
+      return "자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.";
+    }
+    if (/escalate|에스컬레이션/i.test(`${packet.decisionSubject}\n${packet.interpretation}`)) {
+      return "자동 진행이 막혀 멈춘 상태이며, 아래 선택지에서 대응 방향을 고르면 미션 오너가 그 결과에 따라 후속 조치를 실행합니다.";
+    }
+    return "운영자 확인 없이는 다음 단계로 넘어갈 수 없어 대기 중이며, 아래 선택지에서 방향을 고르면 미션 오너가 그에 맞춰 진행합니다.";
   }
   return clipOneSentence(packet.interpretation);
 }
 
-/** 증상 블록 — 개행은 보존하되 최대 2줄만 표시한다(서버가 ≤2줄로 자르고, UI 는 line-clamp-2 로 방어). */
+/** 서버가 근거 미제출 시 unresolvedFacts 에 넣는 기본 폴백 — 전제 안내줄에서는 제외한다
+ *  (확인할 내용 성격이며 '선택 전 필요 조건'이 아니다). */
+const MISSING_EVIDENCE_FACT = "오너가 제출 근거 텍스트를 남기지 않았습니다 — 이슈 본문에서 직접 확인이 필요합니다.";
+
+/** unresolvedFacts 중 '선택지' 위에 띄울 전제 안내 문구 — 기본 폴백·공백 항목은 걸러낸다. */
+function extractPrerequisiteNotices(packet: HumanReviewPacketValue): string[] {
+  return packet.unresolvedFacts
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item !== MISSING_EVIDENCE_FACT);
+}
+
+/** 증상 블록 — 개행은 보존하되 최대 2줄만 표시한다(서버가 ≤2줄로 자르고, UI 는 line-clamp-2 로 방어).
+ *  전제 안내가 있으면 증상 바로 아래 컴팩트 안내줄로 표시한다(컴팩트 카드에서 '선택지' 직전에 배치). */
 export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketValue }) {
   const lang = useCompanyLanguage();
+  const notices = extractPrerequisiteNotices(packet);
   return (
     <div data-testid="human-review-symptom">
       <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Symptom", ko: "증상" })}</p>
       <p className="mt-1 line-clamp-2 whitespace-pre-line text-sm">{packet.symptom}</p>
+      {notices.length > 0 && (
+        <div
+          data-testid="human-review-prerequisite-notice"
+          className="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-xs text-muted-foreground"
+        >
+          {notices.map((notice) => (
+            <p key={notice}>{notice}</p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
