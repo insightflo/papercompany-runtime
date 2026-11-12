@@ -51,6 +51,8 @@ type BoundScenario = {
 async function seedBoundFailure(db: Db, scenario: ResumeApplyScenario, overrides: {
   issueStatus?: string;
   runStatus?: string;
+  runErrorCode?: string;
+  stepStatus?: string;
   unbindRun?: boolean;
 } = {}): Promise<BoundScenario> {
   const [issue] = await db.insert(issues).values({
@@ -69,7 +71,7 @@ async function seedBoundFailure(db: Db, scenario: ResumeApplyScenario, overrides
   }).returning();
   // 재시도 소진 직전 상태 재현: 스텝 running + 오너 참조 살아있음(종말 웨이크업/런을 가리킴).
   await db.update(workflowStepRuns).set({
-    status: "running",
+    status: overrides.stepStatus ?? "running",
     issueId: issue!.id,
     startedAt: new Date("2026-09-07T09:30:00.000Z"),
     dispatchOwnerWakeupRequestId: wakeup!.id,
@@ -79,6 +81,7 @@ async function seedBoundFailure(db: Db, scenario: ResumeApplyScenario, overrides
     companyId: scenario.companyId,
     agentId: scenario.agentId,
     status: overrides.runStatus ?? "failed",
+    errorCode: overrides.runErrorCode ?? null,
     startedAt: new Date("2026-09-07T09:31:00.000Z"),
     finishedAt: new Date("2026-09-07T09:35:00.000Z"),
     error: "HTTP 429: adapter quota exhausted after retries",
@@ -168,6 +171,25 @@ describeEmbeddedPostgres("heartbeat dispatch-bound terminal settle", () => {
     issue = await db.select().from(issues).where(eq(issues.id, review.issue.id)).then((r) => r[0]!);
     expect(issue.status).toBe("in_review");
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(0);
+  });
+
+  it("does not settle adapter-held runs (c5_held_not_invoked): boxed step pending + issue status preserved", async () => {
+    const scenario = await seedResumeApplyScenario(db, sql, "settle-held-");
+    const bound = await seedBoundFailure(db, scenario, {
+      runErrorCode: "c5_held_not_invoked",
+      issueStatus: "todo",
+      stepStatus: "pending",
+    });
+    await settleDispatchBoundTerminalFailure({ db, run: bound.run });
+    const step = await db.select().from(workflowStepRuns)
+      .where(eq(workflowStepRuns.id, scenario.stepRunIds.redo)).then((rows) => rows[0]!);
+    expect(step.status).toBe("pending");
+    const issue = await db.select().from(issues).where(eq(issues.id, bound.issue.id)).then((r) => r[0]!);
+    expect(issue.status).toBe("todo");
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(0);
+    const transitions = await db.select().from(workflowTransitionEvents)
+      .where(eq(workflowTransitionEvents.workflowStepRunId, step.id));
+    expect(transitions.filter((t) => t.toStatus === "failed")).toHaveLength(0);
   });
 
   it("is idempotent: a second settle produces no extra comment or activity row", async () => {

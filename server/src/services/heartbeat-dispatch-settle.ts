@@ -9,7 +9,9 @@
 //   setup 실패, agent-missing 실패)가 통과하는 단일 깔때기. hold/early-return 전에 호출된다.
 // [안전] 두 쓰기 모두 CAS(step: expected running/pending, issue: expected in_progress)라
 //   재호출·경쟁 정산·이미 종결된 상태는 무변화 no-op. 성공한 run(status!=="failed")과
-//   미바인딩 run 은 진입 조건에서 즉시 반환된다.
+//   미바인딩 run 은 진입 조건에서 즉시 반환된다. 어댑터 미호출 홀드
+//   (errorCode="c5_held_not_invoked" — C5 증명으로 시작이 보류된 run)은 실행 실패가 아니므로
+//   boxed 작업 보존 계약(스텝 pending·이슈 상태 유지)에 따라 정산하지 않는다.
 
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -59,6 +61,7 @@ export async function settleDispatchBoundTerminalFailure(input: {
 }): Promise<void> {
   const { db, run } = input;
   if (run.status !== "failed" || !run.issueId || !run.workflowStepRunId) return;
+  if (run.errorCode === "c5_held_not_invoked") return;
 
   const stepRun = await db
     .select()
