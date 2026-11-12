@@ -21,6 +21,10 @@ import {
 } from "@paperclipai/db";
 import { createMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card.js";
 import {
+  DEAD_TARGET_RECOVERY_ACTION_OPTIONS,
+  hasEnoughActionableOptions,
+} from "./terminal-recovery-card-options.js";
+import {
   WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
@@ -116,14 +120,14 @@ const DEAD_TARGET_NEXT_ACTION_EN = "Select a recovery path for the unusable retr
 async function resolveDeadTargetCardBinding(db: Db, input: {
   companyId: string; missionId: string; sourceIssueId: string | null;
 }) {
-  const missing = {
-    workflowRunId: null,
-    structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요",
-      description: "종결된 원천을 다시 실행하지 않습니다. 새 구조화 복구 대상을 지정해야 합니다." }],
-    recommendedOptionId: "missing-recovery-target",
-    recommendationReason: "현재 선택에는 실행 가능한 구조화 대상이 없습니다.",
+  const noRunBinding = {
+    workflowRunId: null as string | null,
+    structuredOptions: DEAD_TARGET_RECOVERY_ACTION_OPTIONS.map((option) => ({ ...option })),
+    recommendedOptionId: null as string | null,
+    recommendationReason: null as string | null,
+    prerequisiteNotice: "종결된 원천은 재실행할 수 없어 아래 복구 방법 중 하나를 선택해야 합니다.",
   };
-  if (!input.sourceIssueId) return missing;
+  if (!input.sourceIssueId) return noRunBinding;
   const [source] = await db.select({ id: workflowRuns.id, workflowId: workflowRuns.workflowId })
     .from(workflowStepRuns)
     .innerJoin(workflowRuns, eq(workflowRuns.id, workflowStepRuns.workflowRunId))
@@ -136,7 +140,7 @@ async function resolveDeadTargetCardBinding(db: Db, input: {
     ))
     .orderBy(desc(workflowRuns.createdAt))
     .limit(1);
-  if (!source) return missing;
+  if (!source) return noRunBinding;
   const [activeReplacement] = await db.select({ id: workflowRuns.id }).from(workflowRuns)
     .where(and(
       eq(workflowRuns.companyId, input.companyId),
@@ -150,15 +154,51 @@ async function resolveDeadTargetCardBinding(db: Db, input: {
       ),
     ))
     .limit(1);
-  if (activeReplacement) return missing;
+  if (activeReplacement) {
+    return {
+      workflowRunId: null as string | null,
+      structuredOptions: [] as { id: string; label: string; description?: string }[],
+      recommendedOptionId: null as string | null,
+      recommendationReason: null as string | null,
+      prerequisiteNotice: null as string | null,
+    };
+  }
   return {
     workflowRunId: source.id,
-    structuredOptions: [{ id: WORKFLOW_RESTART_FROM_START_OPTION_ID,
-      label: WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
-      description: WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION }],
+    structuredOptions: [
+      {
+        id: WORKFLOW_RESTART_FROM_START_OPTION_ID,
+        label: WORKFLOW_RESTART_FROM_START_OPTION_LABEL,
+        description: WORKFLOW_RESTART_FROM_START_OPTION_DESCRIPTION,
+      },
+      ...DEAD_TARGET_RECOVERY_ACTION_OPTIONS.map((option) => ({ ...option })),
+    ],
     recommendedOptionId: WORKFLOW_RESTART_FROM_START_OPTION_ID,
     recommendationReason: "종결된 원천을 다시 열지 않고 같은 미션의 새 최상위 실행을 시작합니다.",
+    prerequisiteNotice: null as string | null,
   };
+}
+
+/** claimKey 로 기존 에스컬레이션 이벤트와 그 requestKey 카드를 찾는다(멱등 재확인 공용). */
+async function findDeadTargetClaimCard(db: Db, companyId: string, claimKey: string) {
+  const [existing] = await db
+    .select({ id: workflowTransitionEvents.id })
+    .from(workflowTransitionEvents)
+    .where(and(
+      eq(workflowTransitionEvents.companyId, companyId),
+      eq(workflowTransitionEvents.idempotencyKey, claimKey),
+    ))
+    .limit(1);
+  if (!existing) return null;
+  const [existingCard] = await db
+    .select({ id: operatorDecisions.id })
+    .from(operatorDecisions)
+    .where(and(
+      eq(operatorDecisions.companyId, companyId),
+      eq(operatorDecisions.requestKey, `moi1:${existing.id}`),
+    ))
+    .limit(1);
+  return { eventId: existing.id, cardId: existingCard?.id ?? null };
 }
 
 /**
@@ -189,6 +229,17 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
     input.loopKey,
     input.sourceIssueId ?? "none",
   ].join(":");
+  // 실행 선택지가 2개 미만(대체 실행 진행 등)이면 새 에스컬레이션 이벤트·카드를 만들지 않는다(기존 카드 멱등 재확인은 유지).
+  const binding = await resolveDeadTargetCardBinding(db, {
+    companyId: input.companyId,
+    missionId: input.missionId,
+    sourceIssueId: input.sourceIssueId,
+  });
+  if (!hasEnoughActionableOptions(binding.structuredOptions)) {
+    const existing = await findDeadTargetClaimCard(db, input.companyId, claimKey);
+    if (existing?.cardId) return { ensured: true, reason: "card-exists" };
+    return { ensured: false, reason: "insufficient-actionable-options" };
+  }
   let claimed = await db
     .insert(workflowTransitionEvents)
     .values({
@@ -217,33 +268,12 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
     // 이미 같은 순환을 에스컬레이션 했다 — 같은 requestKey 카드가 이미 있으면 재생성하지 않는다
     //   (create replay 는 requestHash 까지 동일해야 하므로, 틱마다 달라지는 진단 텍스트로 충돌하지 않게
     //   카드 존재만 확인한다). 카드가 없으면(브리지 없던 배포 등) 기존 eventId 로 다시 만든다.
-    const [existing] = await db
-      .select({ id: workflowTransitionEvents.id })
-      .from(workflowTransitionEvents)
-      .where(and(
-        eq(workflowTransitionEvents.companyId, input.companyId),
-        eq(workflowTransitionEvents.idempotencyKey, claimKey),
-      ))
-      .limit(1);
+    const existing = await findDeadTargetClaimCard(db, input.companyId, claimKey);
     if (!existing) return { ensured: false, reason: "claim-race" };
-    const requestKey = `moi1:${existing.id}`;
-    const [existingCard] = await db
-      .select({ id: operatorDecisions.id })
-      .from(operatorDecisions)
-      .where(and(
-        eq(operatorDecisions.companyId, input.companyId),
-        eq(operatorDecisions.requestKey, requestKey),
-      ))
-      .limit(1);
-    if (existingCard) return { ensured: true, reason: "card-exists" };
-    claimed = [{ id: existing.id }];
+    if (existing.cardId) return { ensured: true, reason: "card-exists" };
+    claimed = [{ id: existing.eventId }];
   }
   try {
-    const binding = await resolveDeadTargetCardBinding(db, {
-      companyId: input.companyId,
-      missionId: input.missionId,
-      sourceIssueId: input.sourceIssueId,
-    });
     await createMissionOwnerHumanInputDecisionCard(db, {
       companyId: input.companyId,
       missionId: input.missionId,
@@ -259,10 +289,7 @@ export async function ensureDeadTargetHumanEscalation(db: Db, input: {
       issueTitle: anchor.title,
       issueIdentifier: anchor.identifier,
       sourceIssueId: input.sourceIssueId,
-      workflowRunId: binding.workflowRunId,
-      structuredOptions: binding.structuredOptions,
-      recommendedOptionId: binding.recommendedOptionId,
-      recommendationReason: binding.recommendationReason,
+      ...binding,
     });
     return { ensured: true, reason: "card-created" };
   } catch (error) {

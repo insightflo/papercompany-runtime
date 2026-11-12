@@ -25,7 +25,9 @@ import {
   issues,
   missions,
   operatorDecisions,
+  workflowDefinitions,
   workflowRuns,
+  workflowStepRuns,
   workflowTransitionEvents,
 } from "@paperclipai/db";
 import {
@@ -36,6 +38,7 @@ import { seedToolRecoveryScenario } from "./helpers/tool-recovery-scenario.js";
 import { missionService } from "../services/missions.js";
 import { issueService } from "../services/issues.js";
 import { recordMissionOwnerDecision } from "../services/missions/mission-owner-recovery-ledger.js";
+import { ensureDeadTargetHumanEscalation } from "../services/missions/mission-owner-dead-target-loop.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeEP = support.supported ? describe : describe.skip;
@@ -96,7 +99,9 @@ describeEP("mission owner dead-target retry loop prevention", () => {
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(missions);
+    await db.delete(workflowStepRuns);
     await db.delete(workflowRuns);
+    await db.delete(workflowDefinitions);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -237,10 +242,12 @@ describeEP("mission owner dead-target retry loop prevention", () => {
       eq(operatorDecisions.sourceType, "mission_owner_human_input"),
     ));
     expect(cards).toHaveLength(1);
-    // 실행 가능한 workflow binding이 없는 fixture는 자연어 replan/retry를 만들지 않고 외부 입력을 요구한다.
+    // 실행 가능한 workflow binding이 없는 fixture는 종결 원천 재실행 없이 오너가 수행 가능한
+    //   3개 실옵션(재계획/담당 재배정/취소)만 노출하고 추천은 두지 않는다.
     const breakerOptions = (cards[0]!.definition as { options: { id: string; recommended?: boolean; recommendationReason?: string | null }[] }).options;
-    expect(breakerOptions).toHaveLength(1);
-    expect(breakerOptions[0]).toMatchObject({ id: "missing-recovery-target", recommended: true });
+    expect(breakerOptions.map((option) => option.id)).toEqual(["replan-mission", "reassign-owner", "cancel-mission"]);
+    expect(breakerOptions.some((option) => option.id === "missing-recovery-target")).toBe(false);
+    expect(breakerOptions.every((option) => option.recommended !== true)).toBe(true);
 
     // 차단 후에도 owner 가 새 결정을 기록하면 새 eventId 로 즉시 다시 평가된다(수동 결정 자유 불변).
     const revived = await recordOwnerRetryDecision(db, base, ownerAction.id, source.id);
@@ -250,6 +257,47 @@ describeEP("mission owner dead-target retry loop prevention", () => {
       applyOwnerDecisionActions: true, dispatchOwnerDecisionWakeups: false,
     });
     expect(fifth.findings.join("\n")).toContain("owner_action_decision_not_applied");
+  });
+
+  it("skips the human card while a replacement run is already recovering the dead source", async () => {
+    const base = await seedBase(db, "Replacement Running Co");
+    const source = await issueService(db).create(base.companyId, {
+      assigneeAgentId: base.workerAgentId, missionId: base.missionId,
+      originKind: "workflow_execution", status: "done", title: "Terminal source with live replacement",
+    });
+    const ownerAction = await issueService(db).create(base.companyId, {
+      assigneeAgentId: base.ownerAgentId, missionId: base.missionId,
+      originKind: "mission_main_executor_unblock", originId: source.id, status: "blocked",
+      title: "Recovery oversight",
+    });
+    const workflowId = randomUUID();
+    const failedRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowId, companyId: base.companyId,
+      name: "Dead target workflow", stepsJson: [{ id: "collect", name: "Collect", dependencies: [] }] });
+    await db.insert(workflowRuns).values([
+      { id: failedRunId, workflowId, companyId: base.companyId, missionId: base.missionId,
+        status: "failed", triggeredBy: "test", completedAt: new Date() },
+      { id: randomUUID(), workflowId, companyId: base.companyId, missionId: base.missionId,
+        status: "running", triggeredBy: "test" },
+    ]);
+    await db.insert(workflowStepRuns).values({ workflowRunId: failedRunId, stepId: "collect",
+      status: "failed", issueId: source.id });
+
+    // 실패 원천의 대체 최상위 실행이 이미 돌고 있으므로 시스템이 복구를 처리 중 — 새 카드를 열지 않는다.
+    const result = await ensureDeadTargetHumanEscalation(db, {
+      companyId: base.companyId, missionId: base.missionId, ownerAgentId: base.ownerAgentId,
+      loopKey: "retry_source_issue",
+      anchors: [{ id: ownerAction.id, status: "blocked", title: ownerAction.title, identifier: null }],
+      ownerActionIssueId: ownerAction.id, sourceIssueId: source.id,
+      reason: "dead target", evidence: "source_terminal",
+    });
+    expect(result).toEqual({ ensured: false, reason: "insufficient-actionable-options" });
+    expect(await db.select({ id: operatorDecisions.id }).from(operatorDecisions)
+      .where(eq(operatorDecisions.companyId, base.companyId))).toHaveLength(0);
+    expect(await db.select({ id: workflowTransitionEvents.id }).from(workflowTransitionEvents).where(and(
+      eq(workflowTransitionEvents.companyId, base.companyId),
+      eq(workflowTransitionEvents.eventType, "mission_owner_dead_target_escalation"),
+    ))).toHaveLength(0);
   });
 
   // [C2 2026-10-30] 이하 2케이스는 실제 스냅샷 기반 실패 tool 소스 + 정상 v1 바인딩 카드로만 새 source proof 를 통과한다.
