@@ -315,17 +315,24 @@ export function createRunMainExecutorSupervision({
             });
           // [stale-source auto gate] 미발사 진단을 틱별 구조화 마커로 누적하고, 같은 진단이 임계
           //   횟수 반복 + 구조화 판정 존재 시 설정 게이트 없이도 자동 깨움을 허용한다.
+          //   마커는 임계까지만 적재 — 영구 미발사 이슈에 행이 무한 누적되지 않게 상한을 둔다.
+          let diagnosisCount = 0;
           if (!alreadyDispatched) {
-            await recordStaleSourceWakeupDiagnosis(db, {
-              companyId: mission.companyId, missionId: mission.id,
-              sourceIssueId: issue.id, failedRunId: latestFailedRun.id, occurredAt: now,
-            });
-          }
-          const diagnosisCount = alreadyDispatched
-            ? 0
-            : await countStaleSourceWakeupDiagnoses(db, {
+            const priorDiagnoses = await countStaleSourceWakeupDiagnoses(db, {
               companyId: mission.companyId, sourceIssueId: issue.id, failedRunId: latestFailedRun.id,
             });
+            if (priorDiagnoses >= STALE_SOURCE_WAKEUP_AUTO_THRESHOLD) {
+              diagnosisCount = priorDiagnoses;
+            } else {
+              await recordStaleSourceWakeupDiagnosis(db, {
+                companyId: mission.companyId, missionId: mission.id,
+                sourceIssueId: issue.id, failedRunId: latestFailedRun.id, occurredAt: now,
+              });
+              diagnosisCount = await countStaleSourceWakeupDiagnoses(db, {
+                companyId: mission.companyId, sourceIssueId: issue.id, failedRunId: latestFailedRun.id,
+              });
+            }
+          }
           const staleSourceWakeupAutoEnabled = diagnosisCount >= STALE_SOURCE_WAKEUP_AUTO_THRESHOLD && hasSourceDiagnosis;
           const dispatchStaleSourceWakeups = input.dispatchStaleSourceIssueWakeups === true
             || staleSourceWakeupSettingEnabled
