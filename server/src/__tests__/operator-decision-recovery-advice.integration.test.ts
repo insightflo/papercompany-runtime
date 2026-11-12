@@ -202,10 +202,10 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
     // [사람 카드 축소 Stage 1] 증상 원문은 symptom 패킷(≤2줄)으로 옮겨졌다.
     expect(originalReview.symptom).toContain(capReason);
     expect(projectedReview.symptom).toBe(originalReview.symptom);
-    expect(projectedReview.interpretation).toContain(capNextAction);
+    expect(projectedReview.interpretation).toContain(originalReview.interpretation);
     expect(projectedReview.interpretation).toContain("과거 카드 생성 규칙");
     expect(projectedReview.interpretation.indexOf("과거 카드 생성 규칙"))
-      .toBeGreaterThan(projectedReview.interpretation.indexOf(capNextAction));
+      .toBeGreaterThan(projectedReview.interpretation.indexOf(originalReview.interpretation));
     expect(projectedReview.recommendedNextStep)
       .toContain("요청자가 제시한 다음 단계(비권위적이며 실행 권한을 부여하지 않습니다):");
     expect(projectedReview.recommendedNextStep).toContain(capNextAction);
