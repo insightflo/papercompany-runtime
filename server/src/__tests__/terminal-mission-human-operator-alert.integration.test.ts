@@ -26,6 +26,13 @@ import { issueService } from "../services/issues.js";
 import { HUMAN_OPERATOR_REQUEST_ACTION } from "../services/missions/human-operator-alert-events.js";
 import { MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "../services/missions/mission-owner-human-input-card.js";
 
+// [사람 카드 선택지 C1] 발행 게이트 경로 검증용 — 기본은 실제 구현에 위임하고,
+//   실옵션 <2 시나리오에서만 mockReturnValueOnce 로 반환값을 바꾼다.
+vi.mock("../services/missions/terminal-recovery-card-options.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/missions/terminal-recovery-card-options.js")>();
+  return { ...actual, terminalCardStructuredOptions: vi.fn(actual.terminalCardStructuredOptions) };
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -405,8 +412,12 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
       comment: { mode: string };
       humanReview?: unknown;
     };
-    // 검증된 run binding이 없는 fixture는 자연어 복구 경로를 만들지 않고 외부 입력을 요구한다.
-    expect(definition.options.map((option) => option.id)).toEqual(["missing-recovery-target"]);
+    // 검증된 run binding이 없는 fixture는 전제 안내 문구 대신 4개 실제 복구 방법만 선택지로 노출한다.
+    expect(definition.options.map((option) => option.id)).toEqual([
+      "retry-revised-input", "replan-mission", "reassign-owner", "cancel-mission",
+    ]);
+    expect(JSON.stringify(definition.options)).not.toContain("missing-recovery-target");
+    expect(JSON.stringify(definition.options)).not.toContain("복구 대상 지정 필요");
     expect(definition.actions.map((action) => action.id)).toEqual(["submit"]);
     expect(definition.comment.mode).toBe("optional");
     expect(definition.humanReview).toBeTruthy();
@@ -423,6 +434,121 @@ describeEmbeddedPostgres("terminal-mission Human Operator report (corrected prod
     const details = inbox?.details as { nextAction?: string; evidence?: string } | undefined;
     expect(details?.nextAction).toContain("recovery path");
     expect(details?.evidence).toContain("failed-runs=");
+  });
+
+  // [사람 카드 선택지 C1] 실제 행동 선택지가 2개 미만이면 카드를 발행하지 않는다 — 카드 행도
+  //   실패 activity 기록도 남기지 않는다(시스템 처리 또는 대기, fail-loud 대상이 아니다).
+  it("withholds the card without a failure record when fewer than two actionable options exist", async () => {
+    const seed = await seedTerminalFixture(db);
+    const optionsModule = await import("../services/missions/terminal-recovery-card-options.js");
+    const optionsSpy = vi.mocked(optionsModule.terminalCardStructuredOptions);
+    optionsSpy.mockReturnValueOnce({
+      structuredOptions: [{ id: "missing-recovery-target", label: "복구 대상 지정 필요" }],
+      recommendedOptionId: null,
+      recommendationReason: null,
+      prerequisiteNotice: "복구 대상을 먼저 지정해야 합니다.",
+    });
+
+    const { ensureTerminalHumanInputDecisionCard } = await import("../services/missions/terminal-mission-human-operator-alert.js");
+    const result = await ensureTerminalHumanInputDecisionCard(db, {
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      decisionEventId: randomUUID(),
+      issue: { id: seed.ownerActionIssueId, status: "blocked", title: "[Unblock] source", identifier: "T1", originId: seed.sourceIssueId },
+      ownerAgentId: seed.ownerAgentId,
+      reason: "terminal failure",
+      nextAction: "choose a recovery path",
+      evidence: "failed-runs=failed",
+    });
+
+    expect(result).toEqual({ ensured: false, reason: "insufficient-actionable-options" });
+    expect(await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId))).toHaveLength(0);
+    const failures = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, seed.companyId),
+      eq(activityLog.action, "mission.owner.human_input_card_failed"),
+    ));
+    expect(failures).toHaveLength(0);
+  });
+
+  // [사람 카드 선택지 C1] 검토된 재개 경로가 있으면 시작 단계명이 붙은 재개 옵션이 첫 번째 +
+  //   추천으로 오고 4개 복구 방법이 뒤따른다(총 5개 실옵션).
+  it("leads with the named resume option when a reviewed resume path exists", async () => {
+    const seed = await seedTerminalFixture(db);
+    const definitionId = randomUUID();
+    const workflowRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({
+      id: definitionId,
+      companyId: seed.companyId,
+      name: "resumable terminal run",
+      stepsJson: [
+        { id: "inspect", name: "Inspect", dependencies: [] },
+        { id: "build-draft", name: "Build draft", dependencies: ["inspect"] },
+      ],
+    });
+    await db.insert(workflowRuns).values({
+      id: workflowRunId,
+      workflowId: definitionId,
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      status: "failed",
+      triggeredBy: "system",
+    });
+    // 발행 tx 의 legacy 락은 moi1 sourceId 가 실제 terminal report 이벤트 행인지 검증한다 —
+    //   emit 경로가 claim 하는 이벤트와 같은 형태로 심는다.
+    const [reportEvent] = await db.insert(workflowTransitionEvents).values({
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      workflowRunId,
+      issueId: seed.ownerActionIssueId,
+      eventType: "terminal_mission_human_operator_report",
+      layer: "workflow_validation",
+      fromStatus: "failed",
+      toStatus: "blocked",
+      decision: "escalate",
+      reason: "terminal_mission_no_continuation",
+      reasonCode: "terminal_mission_human_operator_report",
+      correlationId: seed.ownerActionIssueId,
+      idempotencyKey: `terminal-mission-report:test:${randomUUID()}`,
+      payload: {
+        ownerActionIssueId: seed.ownerActionIssueId,
+        workflowRunId,
+        failedRuns: [{ id: workflowRunId, status: "failed", errorCode: null }],
+        status: "reported",
+      },
+    }).returning({ id: workflowTransitionEvents.id });
+
+    const { ensureTerminalHumanInputDecisionCard } = await import("../services/missions/terminal-mission-human-operator-alert.js");
+    const result = await ensureTerminalHumanInputDecisionCard(db, {
+      companyId: seed.companyId,
+      missionId: seed.missionId,
+      decisionEventId: reportEvent!.id,
+      issue: { id: seed.ownerActionIssueId, status: "blocked", title: "[Unblock] source", identifier: "T1", originId: seed.sourceIssueId },
+      ownerAgentId: seed.ownerAgentId,
+      reason: "terminal failure",
+      nextAction: "choose a recovery path",
+      evidence: "failed-runs=failed",
+      workflowRunId,
+      resumeAvailable: true,
+      restartAvailable: false,
+      resumeStartStepId: "build-draft",
+    });
+    expect(result).toEqual({ ensured: true, reason: "card-created" });
+
+    const [card] = await db.select().from(operatorDecisions).where(eq(operatorDecisions.companyId, seed.companyId));
+    const definition = card!.definition as {
+      options: { id: string; label: string; recommended?: boolean }[];
+    };
+    expect(definition.options).toHaveLength(5);
+    expect(definition.options.map((option) => option.id)).toEqual([
+      "resume-this-run", "retry-revised-input", "replan-mission", "reassign-owner", "cancel-mission",
+    ]);
+    expect(definition.options[0]).toMatchObject({
+      id: "resume-this-run",
+      label: "이 실행 이어서 진행(재개 · build-draft)",
+      recommended: true,
+    });
+    const context = card!.sourceContext as { workflowRunId?: string | null };
+    expect(context.workflowRunId).toBe(workflowRunId);
   });
 
   it("keeps one card across repeated supervision runs and recreates it when missing (self-heal)", async () => {
