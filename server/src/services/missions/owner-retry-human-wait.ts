@@ -10,7 +10,7 @@ import { stripOperatorDecisionServerContext } from "../operator-decision-server-
 import { MISSION_OWNER_DECISION_EVENT_TYPE, MISSION_OWNER_DECISION_SOURCE, MISSION_OWNER_RECOVERY_LAYER, normalizeSubmission } from "./mission-owner-decision-contract.js";
 import { assertOwnerHumanOriginalDecision, readOwnerToolIdentity } from "./owner-human-request-authority.js";
 import { buildMissionOwnerHumanInputDecisionCard, MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE } from "./mission-owner-human-input-card.js";
-import { buildPreCompactMissionOwnerHumanInputDecisionCard } from "./mission-owner-human-input-card-precompact.js";
+import { buildLegacyMissionOwnerHumanInputDecisionCardVariants } from "./mission-owner-human-input-card-precompact.js";
 import { readOwnerHumanCurrentForScope, type OwnerHumanCurrentRecord } from "./owner-human-request-state.js";
 import { OWNER_HUMAN_LAYER, OWNER_HUMAN_SOURCE, ownerHumanLifetimeKey, ownerHumanLifetimeSchema, sameOwnerHumanValue, type OwnerHumanScope, type OwnerHumanTx } from "./owner-human-request-contract.js";
 import { buildHistoricalDefaultOwnerHumanInputVariant } from "./mission-owner-human-default-definition.js";
@@ -210,11 +210,11 @@ async function validatedC08LifetimeCard(tx: OwnerHumanTx, card: typeof operatorD
     interactionType: card.interactionType, title: card.title, description: card.description,
     sourceType: card.sourceType, sourceId: card.sourceId, sourceContext: stripOperatorDecisionServerContext(card.sourceContext), definition: card.definition,
     issueId: card.issueId, continuationMode: card.continuationMode };
-  // [레거시 호환 2026-11-12] PR #703 이전 발행 구조화 카드 재구성 후보 — 자세한 사유는
-  // owner-human-request-card.ts 의 동일 주석 참조.
-  const preCompact = buildPreCompactMissionOwnerHumanInputDecisionCard({ ...lifetime.cardInput, lifetimeId: lifetime.lifetimeId });
+  // [레거시 호환 2026-11-12] 구형 발행 형식(Stage-1 축소·pre-#703 구조화) 재구성 후보 —
+  // 자세한 사유는 owner-human-request-card.ts 의 동일 주석 참조.
+  const legacyVariants = buildLegacyMissionOwnerHumanInputDecisionCardVariants({ ...lifetime.cardInput, lifetimeId: lifetime.lifetimeId });
   const historical = buildHistoricalDefaultOwnerHumanInputVariant(expected.input), candidates = [expected,
-    ...(preCompact ? [validateAndHashOperatorDecisionCreate(preCompact)] : []),
+    ...legacyVariants.map((variant) => validateAndHashOperatorDecisionCreate(variant)),
     ...(historical ? [validateAndHashOperatorDecisionCreate(historical)] : [])];
   if (!candidates.some((candidate) => card.requestHash === candidate.requestHash
     && sameOwnerHumanValue(actual, candidate.input)) || card.requestedByAgentId !== lifetime.authorAgentId
