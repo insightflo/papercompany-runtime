@@ -23,6 +23,11 @@ import { L, useCompanyLanguage } from "../lib/companyLanguage";
 import { humanLabel } from "../lib/humanLabels";
 import { commonDecisionFacts, OperatorDecisionFacts } from "./OperatorDecisionFacts";
 
+/** 서버(mission-owner-human-input-card)가 nextAction 없을 때 채우는 recommendedNextStep 기본 폴백 문구. */
+const NEXT_STEP_FALLBACK = "이슈 본문의 요청 근거를 확인한 뒤 승인·보류·반려 중 하나를 선택해 주세요.";
+/** 서버 기본 승인 옵션의 고정 설명 — 신형 축소 카드에서 다음 단계 1줄 요약으로 표시만 교체한다. */
+const SERVER_APPROVE_DESCRIPTION = "요청된 다음 단계를 승인합니다";
+
 interface OperatorDecisionCardProps {
   decision: OperatorDecisionView;
   onResolve: (decisionId: string, input: ResolveOperatorDecisionInput) => Promise<unknown>;
@@ -61,6 +66,30 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
   useEffect(() => {
     if (error) errorRef.current?.focus();
   }, [error]);
+
+  // [사람 카드 UI 중복 정리] 신형 축소 카드에서 서버 기본 승인 설명을 다음 단계 1줄 요약으로만
+  // 바꿔 표시한다(선택 문구는 '선택지' 영역에 1회). 표시 전용 사본이며 옵션 id·선택 상태·
+  // onResolve 제출 값은 원본 decision 그대로다(영문·커스텀 description 옵션은 건드리지 않는다).
+  const firstOption = decision.definition.options[0] ?? null;
+  const nextStepOneLine = decision.definition.humanReview
+    ? decision.definition.humanReview.recommendedNextStep.replace(/\s+/g, " ").trim()
+    : "";
+  const useNextStepDescription = compactCard
+    && firstOption !== null
+    && firstOption.id === "approve"
+    && firstOption.description === SERVER_APPROVE_DESCRIPTION
+    && nextStepOneLine.length > 0
+    && nextStepOneLine !== NEXT_STEP_FALLBACK;
+  const optionsDecision: OperatorDecisionView = useNextStepDescription
+    ? {
+        ...decision,
+        definition: {
+          ...decision.definition,
+          options: decision.definition.options.map((option) =>
+            option.id === "approve" ? { ...option, description: `요청된 다음 단계: ${nextStepOneLine}` } : option),
+        },
+      }
+    : decision;
 
   function toggleOption(id: string) {
     setError(null);
@@ -196,7 +225,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       {/* [사람 카드 축소 Stage 4] 신형 카드 고정 순서: 증상 → 선택지(라벨+1줄 요약) → 쉬운 해석 → 상세 근거 링크. */}
       {compactCard && (
         <OperatorDecisionOptions
-          decision={decision}
+          decision={optionsDecision}
           selectedOptionIds={selectedOptionIds}
           onToggle={toggleOption}
           disabled={submittingActionId !== null}
@@ -206,13 +235,17 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
           singleLineDescriptions
         />
       )}
+      {/* [사람 카드 UI 중복 정리] 쉬운 해석은 선택지 나열을 반복하지 않는다(선택지 라벨을 판정에 넘긴다).
+          신형 축소 카드는 '쉬운 해석 (AI)' 패널을 숨기고 구형 긴 카드(!compactCard)만 유지한다. */}
       {compactCard && decision.definition.humanReview && (
         <div className="mt-3 space-y-3">
-          <HumanReviewInterpretationBlock packet={decision.definition.humanReview} />
+          <HumanReviewInterpretationBlock
+            packet={decision.definition.humanReview}
+            optionLabels={decision.definition.options.map((option) => option.label)}
+          />
           <HumanReviewEvidenceChips packet={decision.definition.humanReview} />
         </div>
       )}
-      {compactCard && summaryNode}
 
       <div className="mt-3 flex flex-wrap gap-2">
         {decision.issueId && (

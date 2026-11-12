@@ -10,6 +10,7 @@ import { ExternalAutomationApprovals } from "../components/ExternalAutomationApp
 import { EmptyState } from "../components/EmptyState";
 import { OperatorDecisionCard } from "../components/OperatorDecisionCard";
 import { CardHumanSummary } from "../components/CardHumanSummary";
+import { hasCompactOperatorSummary, hasCompactSymptom } from "../components/HumanReviewPacket";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { StatusBadge } from "../components/StatusBadge";
 import { Button } from "../components/ui/button";
@@ -141,6 +142,96 @@ function HumanOperatorRow({
 }) {
   const lang = useCompanyLanguage();
   const cardStatusBadge = requestStateLabel(lang, requestState, requestStateProblem, !!card);
+  // [사람 카드 목록 소음 정리 08:15] 신형 축소 요약(Stage 2) 또는 신형 카드(symptom)가 붙은 행은
+  // 본문에 이미 축소 정보가 있으므로 '쉬운 해석 (AI)' 패널을 이중으로 노출하지 않는다(데이터·감사 기록은 무삭제).
+  const compactRow = hasCompactSymptom(card?.definition.humanReview) || hasCompactOperatorSummary(request.summary);
+  const evidenceHeading = L(lang, { en: "Historical request evidence · not a current instruction", ko: "과거 요청 증거 · 현재 지시가 아닙니다" });
+  // 초보자 해석(표시 전용 — 원문 유지, 실패·부재 시 자동 숨김). 재해석은 board 전용 라우트.
+  const summaryPanel = !compactRow ? (
+    <CardHumanSummary
+      approvalId={request.id}
+      companyId={request.companyId}
+      summary={request.humanSummary ?? null}
+      retranslate={(id, body) => missionsApi.retranslateHumanOperatorRequestSummary(request.companyId, id, body)}
+      fetchCurrent={async (id) => {
+        const rows = await missionsApi.listHumanOperatorRequests(request.companyId);
+        return rows.find((row) => row.id === id)?.humanSummary ?? null;
+      }}
+    />
+  ) : null;
+
+  // 상태 A — 대기 중 요청 + 선택 카드 연결: 선택 카드(OperatorDecisionCard) 1장만 펼쳐 노출하고
+  // '과거 요청 증거' 블록(원문 요약·메타데이터·미션 링크)은 같은 카드 안 기본 접힘 details 로 보존한다.
+  if (card) {
+    return (
+      <li data-human-operator-lifecycle={scope.lifecycle} className="border border-border bg-card p-4">
+        <details data-human-operator-evidence-fold className="mb-2 border-b border-border pb-2 text-xs">
+          <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span data-human-input-card-badge className="inline-flex items-center rounded-full border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">{cardStatusBadge}</span>
+            <span>{L(lang, { en: "Show request evidence", ko: "과거 요청 증거 보기" })}</span>
+            <span>{formatRequestTime(request.timestamp)}</span>
+          </summary>
+          <div className="mt-2 space-y-2">
+            {/* details 안 첫 번째 a[href] 가 missionLink(request)여야 기존 링크 계약이 유지된다. */}
+            <Link to={missionLink(request)} className="inline-flex items-center gap-1 text-xs font-medium underline">
+              {L(lang, { en: "Open mission", ko: "미션 열기" })}<ExternalLink className="h-3 w-3" />
+            </Link>
+            <h2 className="text-sm font-semibold text-foreground">{request.title}</h2>
+            <p className="text-xs font-medium text-muted-foreground">{evidenceHeading}</p>
+            <p className="whitespace-pre-line text-sm text-muted-foreground">{request.summary}</p>
+            {summaryPanel}
+            {requestState && requestState.identity !== "exact" && requestState.reasonCode && (
+              <p data-human-operator-request-reason className="mt-1 text-xs text-muted-foreground">{L(lang, { en: "Reason", ko: "사유 코드" })}: {requestState.reasonCode}</p>
+            )}
+            {requestStateProblem && <p data-human-operator-request-reason className="mt-1 text-xs text-muted-foreground">{L(lang, { en: "Request state is shown as unknown.", ko: "요청 상태를 미확인으로 표시했습니다." })}</p>}
+            {requestState?.identity === "exact" && requestStateProblem === null && <RequestDecisionState state={requestState} />}
+          </div>
+        </details>
+        <OperatorDecisionCard decision={card} onResolve={onResolve} />
+      </li>
+    );
+  }
+
+  // 상태 B — 해소(resolved/cancelled)된 요청: 본문 카드를 펼치지 않고 1줄 이력(summary)로 접고
+  // 상세 증거·후속 실행 상태는 기본 접힘 details 안에 그대로 보존한다(감사 필드·버튼 계약 무변경).
+  const decisionState = requestState?.identity === "exact" ? requestState.decision : null;
+  if (requestState && decisionState && (decisionState.status === "resolved" || decisionState.status === "cancelled")) {
+    const result = decisionState.result;
+    const resultSummary = decisionState.status === "cancelled"
+      ? `· ${L(lang, { en: "cancelled", ko: "취소됨" })}`
+      : result
+        ? `· ${result.actionId} · ${result.outcome}${result.selectedOptionIds.length > 0 && !(result.selectedOptionIds.length === 1 && result.selectedOptionIds[0] === result.actionId) ? ` (${result.selectedOptionIds.join(", ")})` : ""}`
+        : "";
+    return (
+      <li data-human-operator-lifecycle={scope.lifecycle} className="border border-border bg-card px-4 py-2.5">
+        <details data-human-operator-history-fold>
+          <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2 text-sm">
+            <span className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={scope.missionStatus ?? "unknown"} />
+              <span data-human-input-card-badge className="inline-flex items-center rounded-full border border-border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">{cardStatusBadge}</span>
+              <span className="font-medium text-foreground">{request.title}</span>
+              {resultSummary && <span className="text-xs text-muted-foreground">{resultSummary}</span>}
+              {requestState.attention === true && <span data-human-operator-attention="needed" className="text-xs text-amber-700">{L(lang, { en: "Follow-up attention needed", ko: "후속 실행 확인 필요" })}</span>}
+              {requestState.attention === false && <span data-human-operator-attention="none" className="text-xs text-muted-foreground">{L(lang, { en: "No follow-up attention reported", ko: "후속 실행 주의 신호 없음" })}</span>}
+              {requestState.attention === null && <span data-human-operator-attention="unknown" className="text-xs text-amber-700">{L(lang, { en: "Attention unknown", ko: "주의 여부 미확인" })}</span>}
+            </span>
+            <span className="text-xs text-muted-foreground">{formatRequestTime(decisionState.resolvedAt ?? decisionState.cancelledAt ?? request.timestamp)}</span>
+          </summary>
+          <div className="mt-3 space-y-2">
+            <Button asChild variant="outline" size="sm" className="w-full shrink-0 lg:w-auto">
+              <Link to={missionLink(request)}>{L(lang, { en: "Open mission", ko: "미션 열기" })}<ExternalLink className="ml-1.5 h-3.5 w-3.5" /></Link>
+            </Button>
+            <p className="text-xs font-medium text-muted-foreground">{evidenceHeading}</p>
+            <p className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{request.summary}</p>
+            {summaryPanel}
+            <RequestDecisionState state={requestState} />
+          </div>
+        </details>
+      </li>
+    );
+  }
+
+  // 상태 C — 카드 미연결·상태 미확인(legacy/malformed/missing/ambiguous/unsupported) 행은 기존 렌더링 유지.
   return (
     <li data-human-operator-lifecycle={scope.lifecycle} className="border border-border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -157,19 +248,9 @@ function HumanOperatorRow({
           </div>
           <div>
             <h2 className="text-sm font-semibold text-foreground">{request.title}</h2>
-            <p className="mt-1 text-xs font-medium text-muted-foreground">{L(lang, { en: "Historical request evidence · not a current instruction", ko: "과거 요청 증거 · 현재 지시가 아닙니다" })}</p>
+            <p className="mt-1 text-xs font-medium text-muted-foreground">{evidenceHeading}</p>
             <p className="mt-1 whitespace-pre-line text-sm text-muted-foreground">{request.summary}</p>
-            {/* 초보자 해석(표시 전용 — 원문 유지, 실패·부재 시 자동 숨김). 재해석은 board 전용 라우트. */}
-            <CardHumanSummary
-              approvalId={request.id}
-              companyId={request.companyId}
-              summary={request.humanSummary ?? null}
-              retranslate={(id, body) => missionsApi.retranslateHumanOperatorRequestSummary(request.companyId, id, body)}
-              fetchCurrent={async (id) => {
-                const rows = await missionsApi.listHumanOperatorRequests(request.companyId);
-                return rows.find((row) => row.id === id)?.humanSummary ?? null;
-              }}
-            />
+            {summaryPanel}
             {requestState && requestState.identity !== "exact" && requestState.reasonCode && (
               <p data-human-operator-request-reason className="mt-1 text-xs text-muted-foreground">{L(lang, { en: "Reason", ko: "사유 코드" })}: {requestState.reasonCode}</p>
             )}
@@ -181,11 +262,6 @@ function HumanOperatorRow({
         </Button>
       </div>
       {requestState?.identity === "exact" && requestStateProblem === null && <RequestDecisionState state={requestState} />}
-      {card && (
-        <div className="mt-3 border-t border-border pt-3">
-          <OperatorDecisionCard decision={card} onResolve={onResolve} />
-        </div>
-      )}
     </li>
   );
 }

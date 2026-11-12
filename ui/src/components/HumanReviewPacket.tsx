@@ -18,6 +18,66 @@ export function hasCompactSymptom(packet: HumanReviewPacketValue | null | undefi
   return typeof packet?.symptom === "string" && packet.symptom.trim().length > 0;
 }
 
+/**
+ * [사람 카드 UI 중복 정리] 운영자 요청 request.summary 가 Stage 2 신형 축소 형식(증상/선택지/쉬운 해석
+ * 고정 라인)인지 판별한다. 신형 요약 행은 본문에 이미 축소 정보가 있으므로 '쉬운 해석 (AI)' 패널을
+ * 이중으로 노출하지 않고, 구형 요약(예: "운영자 할 일: …")은 기존대로 패널을 유지한다.
+ */
+export function hasCompactOperatorSummary(summary: string | null | undefined): boolean {
+  if (typeof summary !== "string") return false;
+  return /^증상:\s/m.test(summary) && /^선택지:\s/m.test(summary) && /^쉬운 해석:\s/m.test(summary);
+}
+
+/** 1문장 클립: 비어 있지 않은 첫 줄을 우선 취한 뒤 문장 종결 부호(`.!?`·`。`) 뒤에 공백 또는 끝이
+ *  오는 첫 경계까지 자른다. 소수점·버전 표기(v1.2, 3.14)는 종결 부호 뒤가 공백/끝이 아니므로
+ *  잘리지 않고, 문장부호 없는 입력은 첫 줄 전체로 폴백한다(CardHumanSummary.clipOneSentence 와 같은 로직). */
+function clipOneSentence(raw: string): string {
+  const firstLine = raw.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const boundary = firstLine.match(/^[\s\S]*?[.!?。]+["')\]}]*(?=\s|$)/);
+  const clipped = boundary ? boundary[0].trim() : "";
+  return clipped.length > 0 ? clipped : firstLine;
+}
+
+/** 서버가 nextAction 이 없을 때 채우는 recommendedNextStep 기본 폴백 문구 — 해석 중복 판정에서 제외한다. */
+const NEXT_STEP_FALLBACK = "이슈 본문의 요청 근거를 확인한 뒤 승인·보류·반려 중 하나를 선택해 주세요.";
+
+function normalizeOneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/** '쉬운 해석' 원문이 서버 Stage 1 템플릿·선택지 나열을 그대로 반복하는지 판정한다(하나라도 참이면 중복). */
+function interpretationRepeatsOptions(packet: HumanReviewPacketValue, optionLabels?: readonly string[]): boolean {
+  const interpretation = packet.interpretation;
+  // (1) 서버 Stage 1 고정 템플릿 접두사 — "사람 결정(…) 요청 — …"
+  if (/^사람 결정\(.+\)\s*요청\s*—/.test(interpretation.trim())) return true;
+  // (2) 다음 단계 문구(8자 이상·기본 폴백 아님)가 해석 원문에 그대로 포함 — 선택지 영역이 1회만 담당한다.
+  const nextStep = normalizeOneLine(packet.recommendedNextStep);
+  if (nextStep.length >= 8 && nextStep !== NEXT_STEP_FALLBACK && normalizeOneLine(interpretation).includes(nextStep)) return true;
+  // (3) 다중 선택지 나열 패턴 — (A)…(B)… 나열, 승인·보류·반려, 입력 수정 후 재시도/계획 변경,
+  //     옵션 라벨(2자 이상 비공백) 2개 이상이 해석에 동시 포함.
+  if (/\([A-D1-4]\)\s*\S[\s\S]*\([B-E2-5]\)\s*\S/.test(interpretation)) return true;
+  if (/승인\s*[·,/]\s*보류\s*[·,/]\s*반려/.test(interpretation)) return true;
+  if (/입력 수정 후 재시도,\s*계획 변경/.test(interpretation)) return true;
+  const labels = [...new Set((optionLabels ?? []).map((label) => label.trim()))].filter((label) => label.length >= 2);
+  const contained = labels.filter((label) => interpretation.includes(label));
+  return contained.length >= 2;
+}
+
+/**
+ * [사람 카드 UI 중복 정리] '쉬운 해석' 표시 문장. 원문이 서버 Stage 1 템플릿·선택지 나열을 반복하면
+ * 방향·이유만 담은 고정 1문장으로 대체하고(선택지 나열은 '선택지' 영역이 1회만 표시),
+ * 깔끔한 1문장은 원문을 그대로 보존한다.
+ */
+export function formatCompactInterpretation(packet: HumanReviewPacketValue, optionLabels?: readonly string[]): string {
+  if (interpretationRepeatsOptions(packet, optionLabels)) {
+    const mentionsEscalation = /escalate|에스컬레이션/i.test(`${packet.decisionSubject}\n${packet.interpretation}`);
+    return mentionsEscalation
+      ? "자동 진행이 막혀 운영자가 복구 방향을 정해야 미션을 계속 진행할 수 있습니다."
+      : "자동으로 판단할 수 없는 사항이라 운영자가 진행 방향을 정해야 다음 단계로 넘어갈 수 있습니다.";
+  }
+  return clipOneSentence(packet.interpretation);
+}
+
 /** 증상 블록 — 개행은 보존하되 최대 2줄만 표시한다(서버가 ≤2줄로 자르고, UI 는 line-clamp-2 로 방어). */
 export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketValue }) {
   const lang = useCompanyLanguage();
@@ -29,13 +89,14 @@ export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketV
   );
 }
 
-/** 쉬운 해석 블록 — 1문장 강조. 상세 진단은 카드 밖 근거 링크에서만 확인한다. */
-export function HumanReviewInterpretationBlock({ packet }: { packet: HumanReviewPacketValue }) {
+/** 쉬운 해석 블록 — 1문장 강조. 선택지 나열이 원문에 겹치면 방향·이유 문장으로만 대체하고
+ *  선택지는 '선택지' 영역이 1회만 표시한다. 상세 진단은 카드 밖 근거 링크에서만 확인한다. */
+export function HumanReviewInterpretationBlock({ packet, optionLabels }: { packet: HumanReviewPacketValue; optionLabels?: readonly string[] }) {
   const lang = useCompanyLanguage();
   return (
     <div data-testid="human-review-interpretation" className="border-l-2 border-primary bg-primary/5 p-2">
       <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Plain-language read", ko: "쉬운 해석" })}</p>
-      <p className="mt-1 text-sm font-medium">{packet.interpretation}</p>
+      <p className="mt-1 text-sm font-medium">{formatCompactInterpretation(packet, optionLabels)}</p>
     </div>
   );
 }

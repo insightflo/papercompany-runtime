@@ -183,4 +183,94 @@ describe("OperatorDecisionCard compact human card (Stage 4)", () => {
     expect(html).not.toContain("If approved");
     expect(html).not.toContain("Next step");
   });
+
+  // [사람 카드 UI 중복 정리 08:15] 아래 3건 — 신형 축소 카드의 '쉬운 해석 (AI)' 패널 숨김·선택지 문구 1회 노출 회귀 방지.
+  const doneSummary: import("../api/approvals").HumanSummaryView = {
+    status: "done", adapterType: "pi_local", model: "m1",
+    summary: {
+      oneLine: "미션 방향 요청 해석 한 줄",
+      whatHappening: "미션이 진행을 멈추고 운영자 방향을 기다리고 있습니다.",
+      decisionNeeded: "운영자가 방향을 선택해야 합니다.",
+      options: [], cautions: ["선택만으로 실행되지 않습니다."],
+    },
+    error: null, updatedAt: "2026-11-11T10:00:00.000Z",
+  };
+
+  it("hides the AI easy-summary panel on compact cards even when the server attached one", () => {
+    const withSummary = { ...compactDecision, humanSummary: doneSummary } as OperatorDecisionView & { humanSummary: typeof doneSummary };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={withSummary} onResolve={vi.fn()} /></CompanyLanguageProvider>,
+    );
+    // 본문에 이미 축소 '쉬운 해석'이 있으므로 '쉬운 해석 (AI)' 패널은 이중 노출하지 않는다.
+    expect(html).not.toContain("Easy summary (AI)");
+    expect(html).toContain("Plain-language read");
+  });
+
+  it("keeps the AI easy-summary panel on legacy cards without symptom", () => {
+    const legacy = {
+      ...compactDecision,
+      definition: { ...compactDecision.definition, humanReview: { ...compactDecision.definition.humanReview!, symptom: null } },
+      humanSummary: doneSummary,
+    } as OperatorDecisionView & { humanSummary: typeof doneSummary };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={legacy} onResolve={vi.fn()} /></CompanyLanguageProvider>,
+    );
+    expect(html).toContain("Easy summary (AI)");
+    expect(html).toContain("미션 방향 요청 해석 한 줄");
+  });
+
+  it("replaces the request_input stage-1 template interpretation with a direction-only sentence and shows options once", () => {
+    const templated: OperatorDecisionView = {
+      ...compactDecision,
+      definition: {
+        ...compactDecision.definition,
+        options: [
+          { id: "approve", label: "Approve", description: "요청된 다음 단계를 승인합니다", facts: [], evidenceRefs: [] },
+          { id: "hold", label: "Hold", description: null, facts: [], evidenceRefs: [] },
+        ],
+        humanReview: {
+          ...compactDecision.definition.humanReview!,
+          interpretation: '사람 결정(입력·승인 요청(request_input)) 요청 — 다음 단계로 "(A) 즉시 한정 재시도 1회 (B) 모델 교체 (C) 보류"의 승인 여부를 판단해 주세요.',
+          recommendedNextStep: "(A) 즉시 한정 재시도 1회 (B) 모델 교체 (C) 보류",
+        },
+      },
+    };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={templated} onResolve={vi.fn()} /></CompanyLanguageProvider>,
+    );
+    // 쉬운 해석은 방향·이유 1문장만 — 서버 템플릿·선택지 나열을 반복하지 않는다.
+    expect(html).toContain("자동으로 판단할 수 없는 사항이라 운영자가 진행 방향을 정해야 다음 단계로 넘어갈 수 있습니다.");
+    expect(html).not.toContain("사람 결정(입력·승인");
+    expect(html).not.toContain("승인 여부를 판단해 주세요");
+    // 선택지 나열은 '선택지' 영역(서버 기본 승인 설명의 1줄 다음 단계 요약)에 딱 1회만 나온다.
+    expect(html).toContain("요청된 다음 단계: (A) 즉시 한정 재시도 1회 (B) 모델 교체 (C) 보류");
+    expect(html.split("즉시 한정 재시도").length - 1).toBe(1);
+  });
+
+  it("replaces the escalate stage-1 template interpretation with the escalation direction sentence", () => {
+    const escalated: OperatorDecisionView = {
+      ...compactDecision,
+      definition: {
+        ...compactDecision.definition,
+        options: [
+          { id: "approve", label: "Approve", description: "요청된 다음 단계를 승인합니다", facts: [], evidenceRefs: [] },
+          { id: "hold", label: "Hold", description: null, facts: [], evidenceRefs: [] },
+        ],
+        humanReview: {
+          ...compactDecision.definition.humanReview!,
+          decisionSubject: "미션 오너의 사람 결정 요청 — 에스컬레이션(escalate) 승인 여부",
+          interpretation: "사람 결정(에스컬레이션(escalate)) 요청 — 연결된 이슈의 근거로 승인·보류·반려를 판단해 주세요.",
+          recommendedNextStep: "이슈 본문의 요청 근거를 확인한 뒤 승인·보류·반려 중 하나를 선택해 주세요.",
+        },
+      },
+    };
+    const html = renderToStaticMarkup(
+      <CompanyLanguageProvider language="en"><OperatorDecisionCard decision={escalated} onResolve={vi.fn()} /></CompanyLanguageProvider>,
+    );
+    expect(html).toContain("자동 진행이 막혀 운영자가 복구 방향을 정해야 미션을 계속 진행할 수 있습니다.");
+    expect(html).not.toContain("연결된 이슈의 근거로");
+    expect(html).not.toContain("승인·보류·반려");
+    // recommendedNextStep 가 기본 폴백 문구면 선택지 설명을 바꾸지 않는다(원본 승인 설명 유지).
+    expect(html).toContain("요청된 다음 단계를 승인합니다");
+  });
 });
