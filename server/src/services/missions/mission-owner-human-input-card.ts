@@ -22,9 +22,12 @@ import {
   WORKFLOW_RESTART_FROM_START_OPTION_ID,
   WORKFLOW_RESTART_FROM_START_SCOPE,
 } from "./workflow-restart-option.js";
+import { isPrerequisiteNoticeOption } from "./terminal-recovery-card-options.js";
+import { extractMissionOwnerDecisionFromText } from "./mission-owner-recovery-events.js";
 
 export const MISSION_OWNER_HUMAN_INPUT_SOURCE_TYPE = "mission_owner_human_input";
 export const MISSION_OWNER_HUMAN_INPUT_CARD_MAPPING_FAILED = "mission_owner_human_input_card_mapping_failed";
+export const MISSION_OWNER_HUMAN_INPUT_INSUFFICIENT_OPTIONS = "mission_owner_human_input_insufficient_options";
 export const PENDING_MISSION_HUMAN_INPUT_UQ = "operator_decisions_pending_mission_human_input_uq";
 
 /** [C1 2026-11-08] 미션당 pending 카드 1장 부분 고유 인덱스 위반(23505) 판정 — 충돌 시 사유 누적 분기. */
@@ -76,6 +79,9 @@ export type MissionOwnerHumanInputCardSpec = {
   readonly recommendedOptionId?: string | null;
   /** 추천 사유 — recommended 옵션에만 붙는다(스키마 최대 1,000자로 잘린다). */
   readonly recommendationReason?: string | null;
+  /** [C4a] 전제·안내 문구 — 선택지로 노출하지 않고 카드 안내줄(unresolvedFacts)로만 표시한다.
+   *  structuredOptions 안에 전제 문구가 섞여 들어와도 같은 안내줄로 이동한다. */
+  readonly prerequisiteNotice?: string | null;
 };
 
 const clip = (value: string, max: number) => value.length > max ? value.slice(0, max) : value;
@@ -107,9 +113,16 @@ function clipAtBoundary(value: string, max: number): string {
 const toOneLine = (value: string, max: number) =>
   clipAtBoundary(value.replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim(), max);
 
-/** 증상 최대 2줄 — 빈 줄 제거·줄별 trim, 개행 최대 1개, 전체 ≤220자 경계 클립. 미제출이면 undefined. */
+/** 증상 최대 2줄 — 빈 줄 제거·줄별 trim, 개행 최대 1개, 전체 ≤220자 경계 클립. 미제출이면 undefined.
+ *  reason 이 구조화 결정 블록("### Mission owner decision" 등)이면 실제 사유 문장만 꺼내 표시한다. */
 function formatSymptom(reason: string | undefined): string | undefined {
-  const lines = (reason ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 2);
+  const unpacked = reason ? extractMissionOwnerDecisionFromText(reason) : null;
+  const raw = unpacked?.decision ? (unpacked.reason ?? reason) : reason;
+  const lines = (raw ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^#{1,6}\s*Mission owner decision$/i.test(line))
+    .slice(0, 2);
   if (lines.length === 0) return undefined;
   return clipAtBoundary(lines.join("\n"), 220) || undefined;
 }
@@ -128,10 +141,32 @@ function mappingFailure(detail: string): never {
   );
 }
 
-function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefinition {
+function buildStructuredDefinition(
+  optionsInput: unknown,
+  actorType: MissionOwnerHumanInputCardSpec["actorType"],
+): { definition: OperatorDecisionDefinition; prerequisiteNotices: string[] } {
   const parsed = z.array(structuredOptionSchema).min(1).max(50).safeParse(optionsInput);
   if (!parsed.success) mappingFailure("payload 구조화 options 형식 위반");
-  const options = parsed.data!.map((option) => ({
+  // [C4a] 전제·안내 문구가 선택지 배열에 섞여 들어오면 카드 옵션에서 즉시 제거하고
+  //   안내 문구(unresolvedFacts)로 이동한다 — 선택지는 실행 가능한 행동만 담는다.
+  const extractedNotices: string[] = [];
+  const actionableRaw = parsed.data!.filter((option) => {
+    if (!isPrerequisiteNoticeOption(option)) return true;
+    extractedNotices.push(option.description
+      ? toOneLine(option.description, 300)
+      : toOneLine(option.label, 300));
+    return false;
+  });
+  // [C4a] 실옵션 <2 게이트 — 시스템 발신 카드이거나 전제 문구 분리가 일어난 경로에서
+  //   남은 실제 행동 선택지가 2개 미만이면 카드 자체를 발행하지 않는다(fail-loud 422).
+  if (actionableRaw.length === 0
+    || ((extractedNotices.length > 0 || actorType === "system") && actionableRaw.length < 2)) {
+    throw unprocessable(
+      "실제 실행 가능한 행동 선택지가 2개 미만이어서 사람 결정 카드를 발행하지 않습니다(시스템 처리 또는 대기 대상).",
+      { code: MISSION_OWNER_HUMAN_INPUT_INSUFFICIENT_OPTIONS },
+    );
+  }
+  const options = actionableRaw.map((option) => ({
     id: option.id,
     label: option.label,
     // [사람 카드 축소 Stage 1] 선택지 설명은 항상 1줄 — 개행을 공백으로 치환한다.
@@ -140,18 +175,46 @@ function buildStructuredDefinition(optionsInput: unknown): OperatorDecisionDefin
     evidenceRefs: [],
   }));
   return {
-    options,
-    actions: [{ id: "submit", label: "선택 제출", outcome: "submit", tone: "primary", requiresSelection: true }],
-    selection: { min: 1, max: 1 },
-    comment: { mode: "optional", label: "결정 사유", placeholder: "선택 이유나 오너에게 전달할 지시를 남겨 주세요", maxLength: 2_000 },
-    approvedScope: [
-      "operator_decision.resolve",
-      ...(options.some((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID)
-        ? [WORKFLOW_RESTART_FROM_START_SCOPE]
-        : []),
-    ],
-    forbiddenScope: ["agent_substitute_submission", "auto_execution"],
+    definition: {
+      options,
+      actions: [{ id: "submit", label: "선택 제출", outcome: "submit", tone: "primary", requiresSelection: true }],
+      selection: { min: 1, max: 1 },
+      comment: { mode: "optional", label: "결정 사유", placeholder: "선택 이유나 오너에게 전달할 지시를 남겨 주세요", maxLength: 2_000 },
+      approvedScope: [
+        "operator_decision.resolve",
+        ...(options.some((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID)
+          ? [WORKFLOW_RESTART_FROM_START_SCOPE]
+          : []),
+      ],
+      forbiddenScope: ["agent_substitute_submission", "auto_execution"],
+    },
+    prerequisiteNotices: extractedNotices,
   };
+}
+
+/** [C4a] 쉬운 해석 — 구조화 선택지 id 집합과 decision 만으로 '무엇이 막혔는지 +
+ *  고르면 어떻게 되는지' 1문장을 만든다. 요청 산문(nextAction)은 절대 넣지 않고,
+ *  '승인 여부 판단' 템플릿도 쓰지 않으며, 선택지 라벨을 나열하지 않는다(나열은
+ *  카드의 '선택지' 영역이 1회만 담당). */
+function buildOptionDerivedInterpretation(
+  decision: "request_input" | "escalate",
+  options: ReadonlyArray<{ readonly id: string }>,
+): string {
+  const ids = new Set(options.map((option) => option.id));
+  if (ids.has("resume-this-run")) {
+    return "자동 진행이 중단된 실행이라, 아래 선택지에서 실패 단계 재개 또는 다른 복구 방법을 고르면 미션 오너가 그 경로로 진행합니다.";
+  }
+  if (ids.has("replan-mission") || ids.has("retry-revised-input")) {
+    return "자동 복구 경로가 더 이상 남아 있지 않아 멈췄으며, 아래 선택지에서 복구 방법을 고르면 미션 오너가 해당 절차를 실행합니다.";
+  }
+  if (ids.has(WORKFLOW_RESTART_FROM_START_OPTION_ID)) {
+    return decision === "escalate"
+      ? "자동 복구가 멈춘 상태라, 아래 선택지에서 진행 방향을 고르면 미션 오너가 선택한 경로로 복구를 이어갑니다."
+      : "자동으로 결정할 수 없는 진행 사항이 생겨 멈췄으며, 아래 선택지에서 방향을 고르면 미션 오너가 그 지시대로 다음 단계를 실행합니다.";
+  }
+  return decision === "escalate"
+    ? "자동 진행이 막혀 멈춘 상태이며, 아래 선택지에서 대응 방향을 고르면 미션 오너가 그 결과에 따라 후속 조치를 실행합니다."
+    : "운영자 확인 없이는 다음 단계로 넘어갈 수 없어 대기 중이며, 아래 선택지에서 방향을 고르면 미션 오너가 그에 맞춰 진행합니다.";
 }
 
 /** Build a validated card request; natural-language fields never select an operation. */
@@ -204,9 +267,17 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   const evidenceOptionRefs = evidence.map((ref) => ({ label: ref.label, href: ref.href }));
   // 실행 선택지는 생산자가 구조화해 전달한 options만 사용한다. nextAction은 표시·검토 문구이며
   // operation/target 권한으로 파싱하지 않는다.
-  const definition = input.structuredOptions !== undefined
-    ? buildStructuredDefinition(input.structuredOptions)
-    : buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
+  const structuredBuild = input.structuredOptions !== undefined
+    ? buildStructuredDefinition(input.structuredOptions, input.actorType)
+    : null;
+  const definition = structuredBuild?.definition
+    ?? buildDefaultOwnerHumanDefinition(evidenceOptionRefs, input.workflowRunId);
+  // [C4a] 전제·안내 문구 수신 — 스펙 필드 전달분 + structuredOptions 에서 분리한 문구를
+  //   합쳐 중복 제거하고 카드 안내줄(unresolvedFacts)로만 표시한다.
+  const prerequisiteNotices = [...new Set([
+    ...(present(input.prerequisiteNotice) ? [toOneLine(input.prerequisiteNotice!, 300)] : []),
+    ...(structuredBuild?.prerequisiteNotices ?? []),
+  ])];
   // Only an explicitly requested option can receive the nonbinding recommendation marker.
   const recommendedId = present(input.recommendedOptionId);
   const recommendationReason = present(input.recommendationReason);
@@ -221,10 +292,10 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   const recommendedDefinition = { ...definition, options };
   // [사람 카드 축소 Stage 1] 고정 축소 형식 — 증상 2줄(symptom), 해석 1문장. 상세 원문은 링크로만 참조.
   const symptom = formatSymptom(input.reason);
-  const requestedNextAction = present(input.nextAction);
-  const interpretation = toOneLine(requestedNextAction
-    ? `사람 결정(${decisionLabel}) 요청 — 다음 단계로 "${requestedNextAction}"의 승인 여부를 판단해 주세요.`
-    : `사람 결정(${decisionLabel}) 요청 — 연결된 이슈의 근거로 승인·보류·반려를 판단해 주세요.`, 200);
+  // [사람 카드 해석 C4a] 쉬운 해석은 증상·선택지와 같은 구조화 옵션 목록에서 파생한다 —
+  //   요청 산문(nextAction)을 패러프레이즈·인용하지 않고 '승인 여부 판단' 템플릿도 쓰지 않는다.
+  const interpretation = toOneLine(
+    buildOptionDerivedInterpretation(input.decision, recommendedDefinition.options), 200);
   return {
     schemaVersion: 1,
     requestKey: input.lifetimeId !== undefined
@@ -269,7 +340,12 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
           ifRejected: "요청이 반려됩니다. 반려 사유가 오너에게 전달되고 오너는 대기·보고 상태를 유지하거나 다시 에스컬레이션합니다.",
           ifWrong: "잘못된 방향이 전달되면 오너가 잘못된 다음 단계를 진행할 수 있습니다. 반려·보류로 실행을 막고 사유를 남길 수 있습니다.",
         },
-        unresolvedFacts: present(input.evidence) ? [] : ["오너가 제출 근거 텍스트를 남기지 않았습니다 — 이슈 본문에서 직접 확인이 필요합니다."],
+        unresolvedFacts: [
+          ...prerequisiteNotices,
+          ...(present(input.evidence)
+            ? []
+            : ["오너가 제출 근거 텍스트를 남기지 않았습니다 — 이슈 본문에서 직접 확인이 필요합니다."]),
+        ],
         questions: ["이 사람 결정 요청을 승인할까요?"],
         recommendedNextStep: clip(present(input.nextAction) ?? "이슈 본문의 요청 근거를 확인한 뒤 승인·보류·반려 중 하나를 선택해 주세요.", 2_000),
         requiredReviewer: "human-operator",

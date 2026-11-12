@@ -209,9 +209,14 @@ describeDb("pre-#703 structured human card compatibility", () => {
     const stored = await row(created.decision.id);
     expect(stored.description).toBe(compact.description);
     expect(stored.definition).toEqual(compact.definition);
-    // [레거시 호환 2026-11-12] dd563dcf 동결 정확성 — 얼린 Stage-1 빌더 출력이 현행 빌더와
-    // 바이트 단위로 동일해야 한다. Stage C4 가 현행 빌더를 바꾸면 이 등식의 기준을 새 형식으로 갱신한다.
-    expect(buildStage1CompactMissionOwnerHumanInputDecisionCard(spec(saved))).toEqual(compact);
+    // [레거시 호환 2026-11-12] dd563dcf 동결 정확성 — 얼린 Stage-1 빌더는 구 '승인 여부' 해석을
+    // 그대로 유지하고, 현행 빌더는 옵션 파생 1문장 해석을 쓴다. interpretation 외 나머지 필드는 동일해야 한다.
+    const stage1Frozen = buildStage1CompactMissionOwnerHumanInputDecisionCard(spec(saved));
+    expect(stage1Frozen.definition.humanReview!.interpretation).toContain("승인 여부를 판단해 주세요");
+    expect(review.interpretation).not.toContain("승인 여부");
+    expect({ ...stage1Frozen, definition: { ...stage1Frozen.definition,
+      humanReview: { ...stage1Frozen.definition.humanReview!, interpretation: review.interpretation } } })
+      .toEqual(compact);
   });
 
   it("recognizes a stored Stage-1 compact card through every C08 gate (f44d6f91 shape)", async () => {
