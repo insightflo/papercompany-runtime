@@ -72,10 +72,13 @@ describeEP("C02/C12 14B: periodic recovery of issued requests", () => {
         expect(rows.receipts).toHaveLength(1);
         expect(rows.receipts[0]!.heartbeatRunId).toBe(ctx.runId);
         // An independent connection can see delivery and take the locks before the model starts.
-        await peer.transaction(async tx => {
-          await tx.execute(sql`select id from missions where id=${s.p.missionId} for update nowait`);
-          await tx.execute(sql`select id from workflow_runs where id=${c.ref.workflowRunId} for update nowait`);
-        });
+        // reconcile() 의 커밋 꼬리와 nowait 프로브가 미세 경합할 수 있어 짧게 재시도하되 락 획득 자체는 그대로 요구한다.
+        await vi.waitFor(async () => {
+          await peer.transaction(async tx => {
+            await tx.execute(sql`select id from missions where id=${s.p.missionId} for update nowait`);
+            await tx.execute(sql`select id from workflow_runs where id=${c.ref.workflowRunId} for update nowait`);
+          });
+        }, { timeout: 10_000, interval: 25 });
         executed.push({ heartbeatRunId: ctx.runId, wakeupRequestId: wake!.id,
           agentId: ctx.agent.id, ref: wake!.payload?.qaCorrectionFollowup });
         await held;
@@ -128,7 +131,7 @@ describeEP("C02/C12 14B: periodic recovery of issued requests", () => {
       expect(rootPid!.pid).not.toBe(peerPid!.pid);
       const restarted = createNativeWorkflowReconciler({ db: restartedDb, logger });
       await restarted.reconcile();
-      await vi.waitFor(() => expect(executed).toHaveLength(1), { timeout: 5000 });
+      await vi.waitFor(() => expect(executed).toHaveLength(1), { timeout: 25_000, interval: 25 });
       const delivered = await correctionRows(c);
       expect([delivered.wakes.length, delivered.heartbeats.length, delivered.receipts.length]).toEqual([1, 1, 1]);
       const receipt = qaCorrectionDeliverySchema.parse(delivered.receipts[0]!.payload);

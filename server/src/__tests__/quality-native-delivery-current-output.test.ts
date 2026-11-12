@@ -1835,6 +1835,9 @@ runpy.run_path(sys.argv[1], run_name="__main__")
 
     // Restart the bounded reaper from durable state and ensure this exact E manifest remains stable.
     await finalizationHeartbeat.reapOrphanedRuns();
+    // The reaper drains this continuation as a detached tracked execution — settle it fully
+    // so the explicit replays below do not observe terminal_continuation_already_inflight.
+    await waitForHeartbeatExecutionsToDrain(owned.db, 60_000);
     await waitForTerminalObligationAcks(continuationId, continuation.manifest.obligations);
     const replayable = continuation.manifest.obligations.find(item => item.action.kind === "sync_issue");
     expect(replayable).toBeDefined();

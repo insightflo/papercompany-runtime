@@ -283,6 +283,13 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
       if (!heartbeat) throw new Error("original QA heartbeat disappeared after verified finish");
       expect(heartbeat).toMatchObject({ status: expectedStatus, finalizationVersion: 1, settledAt: expect.any(Date) });
     }, { timeout: 30_000, interval: 100 });
+    // 스텝의 실패 최종화는 heartbeat 정산과 별개 쓰기 경로로 반영된다 — 아래 단발 읽기들이
+    // running 과도기를 관측하지 않도록 failed 정착까지 폴링한다.
+    await vi.waitFor(async () => {
+      const [step] = await harness!.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, unit.qa.id));
+      if (!step) throw new Error("original QA step disappeared after verified finish");
+      expect(step.status).toBe("failed");
+    }, { timeout: 15_000, interval: 25 });
     const [heartbeat] = await harness!.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, beforeHeartbeat.id));
     const [wake] = await harness!.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, beforeWake.id));
     const [step] = await harness!.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, unit.qa.id));

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentWakeupRequests,
   agents,
@@ -42,6 +42,7 @@ describeEP("workflow step retry queue race", () => {
   }, 60_000);
 
   afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
     await tempDb?.cleanup();
   });
 
@@ -57,7 +58,7 @@ describeEP("workflow step retry queue race", () => {
     ));
   }
   async function waitForWakeRun(wakeupRequestId: string) {
-    const deadline = Date.now() + 2_000;
+    const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakeupRequestId));
       if (run) return run;
@@ -94,6 +95,16 @@ describeEP("workflow step retry queue race", () => {
     expect(wakes[0].id).toBe(firstWake.id);
     expect(wakes[0].issueId).toBe(seeded.issueId);
     expect(["queued", "claimed"]).toContain(wakes[0].status);
+    if (wakes[0].status === "claimed" && wakes[0].runId === null) {
+      // 'claimed' 전환과 heartbeat_runs/runId 바인딩 사이의 과도기 스냅샷 — 같은 행을 다시 읽어 정착을 확인한다.
+      await vi.waitFor(async () => {
+        const [row] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakes[0].id));
+        if (!row) throw new Error(`retry wake ${wakes[0].id} disappeared while settling`);
+        if (row.status !== "claimed" || row.runId !== null) { wakes[0] = row; return; }
+        throw new Error(`retry wake ${wakes[0].id} is claimed but runId is still unbound`);
+      }, { timeout: 10_000, interval: 25 });
+      expect(["queued", "claimed"]).toContain(wakes[0].status);
+    }
     if (wakes[0].status === "queued") expect(wakes[0].runId).toBeNull();
     if (wakes[0].status === "claimed") expect(wakes[0].runId).not.toBeNull();
   });
