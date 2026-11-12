@@ -215,6 +215,53 @@ describe("checkStepEligibility — failed/skipped with traces (2026-10-22 livene
   });
 });
 
+describe("checkStepEligibility — stuck determination", () => {
+  it("treats running+stuck agent/tool like a resumable terminal candidate when effect is reviewed", () => {
+    for (const kind of ["agent", "tool"] as const) {
+      for (const effect of ["none", "read_only", "external"] as const) {
+        expect(
+          checkStepEligibility(history({ kind, status: "running", stuck: true, effect })),
+        ).toBeNull();
+      }
+    }
+  });
+
+  it("still applies kind/effect and residue rules to stuck steps", () => {
+    expect(
+      checkStepEligibility(history({ kind: "tool", status: "running", stuck: true, effect: "unknown" })),
+    ).toBe("external_effect_unknown");
+    expect(
+      checkStepEligibility(history({ kind: "control", status: "running", stuck: true, issueId: "i-1" })),
+    ).toBe("executed_step");
+    expect(
+      checkStepEligibility(history({ kind: "control", status: "running", stuck: true, effect: "external" })),
+    ).toBe("control_tool_effects_unverified");
+    expect(
+      checkStepEligibility(history({ kind: "control", status: "running", stuck: true, effect: "none" })),
+    ).toBeNull();
+  });
+
+  it("passes stale owner refs on stuck steps (dead refs are residue, not live work)", () => {
+    // isStepRunStuck 이 오너 참조의 종말/부재를 이미 증명했으므로 잔존 참조는 차단하지 않는다.
+    expect(
+      checkStepEligibility(
+        history({ status: "running", stuck: true, hasOwner: true, issueId: "i-1", startedAt: "t", hasAttempt: true }),
+      ),
+    ).toBeNull();
+  });
+
+  it("stuck has no effect on non-running statuses", () => {
+    expect(checkStepEligibility(history({ status: "cancelled", stuck: true }))).toBe("unsupported_status");
+    expect(checkStepEligibility(history({ status: "completed", stuck: true }))).toBe("executed_step");
+    expect(checkStepEligibility(history({ status: "pending", stuck: true, issueId: "i-1" }))).toBe("executed_step");
+  });
+
+  it("running without stuck stays active_work even with dead-looking traces", () => {
+    expect(checkStepEligibility(history({ status: "running", issueId: "i-1", startedAt: "t" }))).toBe("active_work");
+    expect(checkStepEligibility(history({ status: "running", stuck: false }))).toBe("active_work");
+  });
+});
+
 describe("checkStepEligibility — scope", () => {
   it("null is strictly per-step: identical histories judge identically regardless of stepId", () => {
     const a = history({ stepId: "a" });

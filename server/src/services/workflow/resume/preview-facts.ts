@@ -40,6 +40,53 @@ const TERMINAL_STEP_STATUSES: ReadonlySet<string> = new Set(["completed", "faile
 const TERMINAL_HEARTBEAT_STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 const TERMINAL_WAKEUP_STATUSES: ReadonlySet<string> = new Set(["coalesced", "skipped", "completed", "failed", "cancelled", "timed_out"]);
 
+/** [stuck 판정 임계] running 스텝의 마지막 durable 활동(종말 하트비트) 이후 이 시간이
+ *   지나면 "stuck" 후보로 본다. 디스패치/재시도는 분 단위로 진행되므로 30분 무진행은
+ *   살아있는 실행으로는 설명되지 않는다. */
+export const STUCK_INACTIVITY_THRESHOLD_MINUTES = 30;
+
+/**
+ * [stuck 판정] status==="running" 인 스텝이 "살아있는 실행 없이 임계 무활동" 인지 판정한다.
+ *   fail-closed: 바인딩된 하트비트가 하나도 없거나(디스패치 증거 부재), 바인딩/오너 참조 중
+ *   하나라도 비종말이거나, 참조 행이 수집 집합에서 누락돼 종말을 증명할 수 없으면 false.
+ *   시간 비교는 마지막 종말 하트비트의 finishedAt(없으면 updatedAt) 대 now 이다.
+ */
+export function isStepRunStuck(
+  row: {
+    id: string;
+    status: string;
+    dispatchOwnerWakeupRequestId: string | null;
+    dispatchOwnerHeartbeatRunId: string | null;
+  },
+  history: ResumeWorkspaceMissionHistory,
+  opts: { now: Date; thresholdMinutes?: number },
+): boolean {
+  if (row.status !== "running") return false;
+  const wakeupStatusById = new Map(history.history.wakeups.map((wake) => [wake.id, wake.status]));
+  const heartbeatStatusById = new Map(history.history.heartbeats.map((hb) => [hb.id, hb.status]));
+  const wakeupDead = (id: string | null): boolean =>
+    id === null || (wakeupStatusById.has(id) && TERMINAL_WAKEUP_STATUSES.has(wakeupStatusById.get(id)!));
+  const heartbeatDead = (id: string | null): boolean =>
+    id === null || (heartbeatStatusById.has(id) && TERMINAL_HEARTBEAT_STATUSES.has(heartbeatStatusById.get(id)!));
+  // 오너 참조가 가리키는 행이 수집 집합에 없으면 종말 증명 불가 → stuck 아님(fail-closed).
+  if (!wakeupDead(row.dispatchOwnerWakeupRequestId) || !heartbeatDead(row.dispatchOwnerHeartbeatRunId)) {
+    return false;
+  }
+  const boundHeartbeats = history.history.heartbeats.filter((hb) => hb.workflowStepRunId === row.id);
+  if (boundHeartbeats.length === 0) return false;
+  if (boundHeartbeats.some((hb) => !TERMINAL_HEARTBEAT_STATUSES.has(hb.status))) return false;
+  const boundWakeupLive = history.history.wakeups.some(
+    (wake) => wake.workflowStepRunId === row.id && !TERMINAL_WAKEUP_STATUSES.has(wake.status),
+  );
+  if (boundWakeupLive) return false;
+  const lastActivityMs = Math.max(
+    ...boundHeartbeats.map((hb) => (hb.finishedAt ?? hb.updatedAt)?.getTime() ?? 0),
+  );
+  if (!Number.isFinite(lastActivityMs) || lastActivityMs <= 0) return false;
+  const thresholdMs = (opts.thresholdMinutes ?? STUCK_INACTIVITY_THRESHOLD_MINUTES) * 60_000;
+  return opts.now.getTime() - lastActivityMs > thresholdMs;
+}
+
 /** checker reason → 사람 판독용 한국어 메시지(실행 권위 아님 — code 가 권위다). */
 const CHECKER_MESSAGES: Readonly<Record<string, string>> = {
   settlement_scope_mismatch: "하트비트 정산 레코드가 스코프와 일치하지 않습니다",
@@ -101,15 +148,22 @@ function activeWork(message: string, detail: Record<string, unknown>): ResumePre
   return { code: "active_work", message, detail };
 }
 
-/** 계약 1·7 — run/mission status, whole-mission 잔존 작업, delegation 보수 차단, 요청/실행. */
+/** 계약 1·7 — run/mission status, whole-mission 잔존 작업, delegation 보수 차단, 요청/실행.
+ *   stuckStepRunIds 는 호출자가 isStepRunStuck 로 확정한 집합 — run 이 stuck 스텝만으로
+ *   "살아있는" 상태일 때 비종말 run 차단과 running 스텝 차단을 bypass 한다. */
 export function wholeMissionBlockers(
   history: ResumeWorkspaceMissionHistory,
   requests: ResumeRequestRow[],
   executions: ResumeExecutionRow[],
+  stuckStepRunIds?: ReadonlySet<string>,
 ): ResumePreviewBlocker[] {
   const blockers: ResumePreviewBlocker[] = [];
   const selected = history.selected;
-  if (!TERMINAL_RUN_STATUSES.has(selected.run.status)) {
+  const runningSteps = history.missionSteps.filter((step) => step.status === "running");
+  const onlyStuckExecution = (stuckStepRunIds?.size ?? 0) > 0
+    && runningSteps.length > 0
+    && runningSteps.every((step) => stuckStepRunIds!.has(step.id));
+  if (!TERMINAL_RUN_STATUSES.has(selected.run.status) && !onlyStuckExecution) {
     blockers.push({
       code: "unsupported_status",
       message: "선택된 워크플로 런이 재개 가능한 종료 상태가 아닙니다",
@@ -129,7 +183,7 @@ export function wholeMissionBlockers(
     }
   }
   for (const step of history.missionSteps) {
-    if (step.status === "running") {
+    if (step.status === "running" && !stuckStepRunIds?.has(step.id)) {
       blockers.push(activeWork("미션 전체에서 아직 실행 중인 스텝이 있습니다", { stepRunId: step.id }));
     }
   }
@@ -140,6 +194,7 @@ export function wholeMissionBlockers(
     history.history.issues,
     new Map(history.history.wakeups.map((row) => [row.id, row.status])),
     new Map(history.history.heartbeats.map((row) => [row.id, row.status])),
+    { stuckStepRunIds },
   ));
   for (const delegation of history.history.delegations) {
     // [임시 conservative proof gap] status allowlist 를 발명하지 않는다 — delegation 존재 자체가
@@ -163,6 +218,7 @@ export function wholeMissionBlockers(
 export interface StepResidueFacts {
   id: string;
   status: string;
+  issueId?: string | null;
   dispatchOwnerWakeupRequestId: string | null;
   dispatchOwnerHeartbeatRunId: string | null;
   metadata: Record<string, unknown>;
@@ -185,8 +241,13 @@ export function activeResidueBlockers(
   issues: IssueResidueFacts[],
   wakeupStatusById: ReadonlyMap<string, string>,
   heartbeatStatusById: ReadonlyMap<string, string>,
+  opts?: { stuckStepRunIds?: ReadonlySet<string> },
 ): ResumePreviewBlocker[] {
   const blockers: ResumePreviewBlocker[] = [];
+  const stuckStepRunIds = opts?.stuckStepRunIds;
+  const stuckBoundIssueIds = stuckStepRunIds
+    ? new Set(steps.filter((step) => stuckStepRunIds.has(step.id)).map((step) => step.issueId).filter((id): id is string => typeof id === "string"))
+    : undefined;
   const wakeupActive = (id: string | null): boolean => {
     if (id === null) return false;
     const status = wakeupStatusById.get(id);
@@ -200,7 +261,9 @@ export function activeResidueBlockers(
   for (const step of steps) {
     const stepTerminal = TERMINAL_STEP_STATUSES.has(step.status);
     if (step.dispatchOwnerWakeupRequestId !== null || step.dispatchOwnerHeartbeatRunId !== null) {
-      if (!stepTerminal
+      // [stuck] isStepRunStuck 은 오너 참조가 전부 종말임을 증명한 스텝만 통과시킨다 —
+      //   참조가 살아있으면 wakeupActive/heartbeatActive 분기가 여전히 차단한다.
+      if ((!stepTerminal && !stuckStepRunIds?.has(step.id))
         || wakeupActive(step.dispatchOwnerWakeupRequestId)
         || heartbeatActive(step.dispatchOwnerHeartbeatRunId)) {
         blockers.push(activeWork("스텝에 웨이크업/하트비트 소유권이 남아 있습니다", { stepRunId: step.id }));
@@ -211,7 +274,10 @@ export function activeResidueBlockers(
     }
   }
   for (const issue of issues) {
-    if (heartbeatActive(issue.checkoutRunId) || heartbeatActive(issue.executionRunId) || issue.status === "in_progress") {
+    // [stuck] stuck 스텝에 묶인 이슈의 in_progress 는 checkout/execution 참조가 죽었을 때만
+    //   residue 차단을 bypass 한다 — 참조가 활성이면 그대로 active_work.
+    const refsActive = heartbeatActive(issue.checkoutRunId) || heartbeatActive(issue.executionRunId);
+    if (refsActive || (issue.status === "in_progress" && !stuckBoundIssueIds?.has(issue.id))) {
       blockers.push(activeWork("이슈에 활성 실행/체크아웃 흔적이 남아 있습니다", { issueId: issue.id }));
     }
   }
@@ -241,6 +307,7 @@ export function stepFactsFor(
   kind: StepHistory["kind"],
   effect: StepHistory["effect"],
   history: ResumeWorkspaceMissionHistory,
+  opts?: { stuck?: boolean },
 ): StepHistory {
   const stepRunId = row.id;
   const heartbeatMatched = history.history.heartbeats.some((hb) => hb.workflowStepRunId === stepRunId);
@@ -259,6 +326,7 @@ export function stepFactsFor(
     hasExternalResult: row.evidenceReadyAt !== null,
     effect,
     kind,
+    stuck: opts?.stuck === true,
   };
 }
 
