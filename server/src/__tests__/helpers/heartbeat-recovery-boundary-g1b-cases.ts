@@ -272,6 +272,7 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     beforeWake: typeof agentWakeupRequests.$inferSelect,
     beforeAttempt: ReturnType<typeof readWorkflowAttemptProof>,
     adapterResult: AdapterExecutionResult,
+    allowPromotedRefireWakeId: string | null = null,
   ) => {
     if (!beforeAttempt) throw new Error("original QA full attempt was missing before its verified finish");
     const expectedStatus = adapterResult.exitCode === 0 && !adapterResult.timedOut ? "succeeded" : "failed";
@@ -288,7 +289,18 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     await vi.waitFor(async () => {
       const [step] = await harness!.peer.select().from(workflowStepRuns).where(eq(workflowStepRuns.id, unit.qa.id));
       if (!step) throw new Error("original QA step disappeared after verified finish");
-      expect(step.status).toBe("failed");
+      if (!allowPromotedRefireWakeId) {
+        expect(step.status).toBe("failed");
+        return;
+      }
+      const [v2Wake] = await harness!.peer.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, allowPromotedRefireWakeId));
+      if (!v2Wake?.runId) {
+        expect(step.status).toBe("failed");
+      } else {
+        expect(v2Wake.id).toBe(allowPromotedRefireWakeId);
+        expect(["failed", "running"]).toContain(step.status);
+      }
     }, { timeout: 15_000, interval: 25 });
     const [heartbeat] = await harness!.peer.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, beforeHeartbeat.id));
     const [wake] = await harness!.peer.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, beforeWake.id));
@@ -331,7 +343,13 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     expect(readWorkflowAttemptProof(wake)).toEqual(beforeAttempt);
     expect(step).toMatchObject({ id: unit.qa.id, workflowRunId: unit.runId, stepId: unit.qa.stepId,
       issueId: unit.qaIssue.id, executionGeneration: unit.qa.executionGeneration, retryCount: unit.qa.retryCount,
-      iterationIndex: unit.qa.iterationIndex, status: "failed" });
+      iterationIndex: unit.qa.iterationIndex });
+    const [finalV2Wake] = allowPromotedRefireWakeId
+      ? await harness!.peer.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, allowPromotedRefireWakeId))
+      : [];
+    if (!finalV2Wake?.runId) expect(step.status).toBe("failed");
+    else expect(["failed", "running"]).toContain(step.status);
   };
 
   try {
@@ -802,7 +820,7 @@ it("G1-B replacement target claim and adapter start preserve source authority", 
     await assertFinishedQaPreservation(pair.sourceUnit, sourceBefore.qaHeartbeat!, sourceBefore.qaWake!,
       readWorkflowAttemptProof(sourceBefore.qaWake!), sourceQaFinish.adapterResult);
     await assertFinishedQaPreservation(pair.targetUnit, targetOriginalQaHeartbeat!, targetOriginalQaWake!,
-      targetOriginalQaAttempt, targetQaFinish.adapterResult);
+      targetOriginalQaAttempt, targetQaFinish.adapterResult, targetV2ReceiptWake?.id ?? null);
 
     await heartbeatService(harness.db).resumeQueuedRuns(pair.targetUnit.verifierId);
     await waitForHeartbeatExecutionsToDrain(harness.db, 60_000);

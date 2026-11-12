@@ -64,6 +64,36 @@ function formatEmbeddedPostgresError(error: unknown): string {
   return "embedded Postgres startup failed";
 }
 
+// embedded-postgres stop() waits for an 'exit' event that never fires when the child
+// already exited or SIGINT stalls, deadlocking test cleanup; bound it and escalate.
+async function stopEmbeddedPostgresSafely(instance: EmbeddedPostgresInstance): Promise<void> {
+  const proc = (instance as unknown as { process?: import("node:child_process").ChildProcess }).process;
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return;
+  }
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      instance.stop().catch(() => {}),
+      new Promise<void>((resolve) => {
+        forceTimer = setTimeout(() => {
+          try { proc.kill("SIGQUIT"); } catch {}
+          killTimer = setTimeout(() => {
+            try { proc.kill("SIGKILL"); } catch {}
+            resolve();
+          }, 500);
+          killTimer.unref?.();
+        }, 5_000);
+        forceTimer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (forceTimer) clearTimeout(forceTimer);
+    if (killTimer) clearTimeout(killTimer);
+  }
+}
+
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-embedded-postgres-probe-"));
   const port = await getAvailablePort();
@@ -89,7 +119,7 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
       reason: formatEmbeddedPostgresError(error),
     };
   } finally {
-    await instance.stop().catch(() => {});
+    await stopEmbeddedPostgresSafely(instance);
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 }
@@ -130,12 +160,12 @@ export async function startEmbeddedPostgresTestDatabase(
     return {
       connectionString,
       cleanup: async () => {
-        await instance.stop().catch(() => {});
+        await stopEmbeddedPostgresSafely(instance);
         fs.rmSync(dataDir, { recursive: true, force: true });
       },
     };
   } catch (error) {
-    await instance.stop().catch(() => {});
+    await stopEmbeddedPostgresSafely(instance);
     fs.rmSync(dataDir, { recursive: true, force: true });
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,

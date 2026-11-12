@@ -38,14 +38,24 @@ export async function startExecutionDefinitionFixture(
   const tempDb = await startEmbeddedPostgresTestDatabase(testName);
   const db = createDb(tempDb.connectionString);
   const sql = db.$client;
+  const extraClients: RawSql[] = [];
   return {
     supported: true,
     connectionString: tempDb.connectionString,
     db,
     sql,
-    openConnection: () => createDb(tempDb.connectionString),
-    openRawConnection: () => createDb(tempDb.connectionString).$client,
+    openConnection: () => {
+      const extra = createDb(tempDb.connectionString);
+      extraClients.push(extra.$client);
+      return extra;
+    },
+    openRawConnection: () => {
+      const extra = createDb(tempDb.connectionString).$client;
+      extraClients.push(extra);
+      return extra;
+    },
     cleanup: async () => {
+      await Promise.allSettled(extraClients.map((client) => client.end({ timeout: 5 })));
       await db.$client.end({ timeout: 5 }).catch(() => {});
       await sql.end().catch(() => {});
       await tempDb.cleanup();
@@ -86,10 +96,17 @@ export async function seedCompanyWithMission(
 
 export async function seedCompanyOnly(sql: RawSql, issuePrefix: string): Promise<{ companyId: string }> {
   const companyId = randomUUID();
-  await sql`
+  const inserted = await sql`
     INSERT INTO companies (id, name, issue_prefix)
     VALUES (${companyId}, ${"ExecDef Co " + issuePrefix}, ${issuePrefix})
+    ON CONFLICT (issue_prefix) DO NOTHING RETURNING id
   `;
+  if (inserted.length === 0) {
+    await sql`
+      INSERT INTO companies (id, name, issue_prefix)
+      VALUES (${companyId}, ${"ExecDef Co " + issuePrefix}, ${issuePrefix + "-" + companyId})
+    `;
+  }
   return { companyId };
 }
 
