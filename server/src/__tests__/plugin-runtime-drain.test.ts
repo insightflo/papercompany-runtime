@@ -142,6 +142,8 @@ describe("plugin runtime resource drains", () => {
     expect(await f.store.getRunById(runId)).toMatchObject({ status: "succeeded", completionUncertainty: null });
     expect(f.clearPlugin).toHaveBeenCalledWith(KEY); expect(f.unregisterPluginTools).toHaveBeenCalledWith(KEY);
   });
+  // [ci-shard] 실 워커 프로세스 스폰 + 배리어 조합이라 2코어 원격 러너에서 10s 기본 예산을 넘는다
+  //   (run 43170498991 shard2: 본문+훅 10.16s 관측 — 훅 예산은 #719 hookTimeout 60s 로 별도 해결).
   it.each(["loader", "coordinator", "shutdown"] as const)("does not reopen starts from delayed %s registration during teardown", async (source) => {
     const f = await realRuntime(40, true); const lookup = barrier(); const lookupGate = gate();
     const syncEntered = barrier(); const syncGate = gate(); const finalizing = barrier(); const registered = barrier();
@@ -220,7 +222,7 @@ describe("plugin runtime resource drains", () => {
     f.manager.getWorker(PLUGIN)!.notify("fixture.release", { runId: next.runId });
     await bounded(f.scheduler.drain(PLUGIN));
     expect(await f.store.getRunById(next.runId)).toMatchObject({ status: "succeeded" });
-  });
+  }, 30_000);
   it.each(["unregister", "drain", "stop"] as const)("propagates %s errors without cleanup or a lifecycle transition", async (failure) => {
     const f = fakeRuntime(); const error = new Error(`${failure} failed`);
     if (failure === "unregister") f.scheduler.unregisterPlugin.mockRejectedValue(error);
