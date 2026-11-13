@@ -113,18 +113,52 @@ function clipAtBoundary(value: string, max: number): string {
 const toOneLine = (value: string, max: number) =>
   clipAtBoundary(value.replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim(), max);
 
+// [카드 UX 핫픽스 2026-11-13 ②] 증상은 항상 한국어 완결 문장 — 외국어 위주 줄이나 단어 중간에서
+//   잘린 줄은 원문 잘림으로 보고 제외하고, 원문 위치 안내줄로 대체한다. 제외된 원문(영어 포함)은
+//   잘리지 않은 채 카드 '상세 근거'의 오너 결정 요청 이슈 링크 본문에서 확인하게 한다.
+export const SYMPTOM_EVIDENCE_POINTER = "요청 원문(영어 포함)은 아래 '상세 근거'의 이슈 링크 본문에서 확인해 주세요.";
+export const SYMPTOM_STATUS_FALLBACK = "미션 진행이 멈춰 오너가 사람의 방향 결정을 요청했습니다.";
+// [카드 UX 핫픽스 ①] 쉬운 해석이 비면 안 된다 — 파생 결과가 비어 나올 때 쓰는 최소 폴백 문장
+//   ('무엇이 막혔고 무엇을 고르면 어떻게 되는지' 고정 안내).
+export const HUMAN_INPUT_INTERPRETATION_FALLBACK =
+  "자동 진행이 멈춰 사람의 방향 선택이 필요합니다 — 아래 선택지에서 방향을 고르면 미션 오너가 그 지시대로 진행합니다.";
+
+/** 라틴 문자가 있고 한글이 25% 미만인 줄은 외국어 위주로 본다(영어 문장에 한국어 조사 하나 얹힌 경우도 걸러진다). */
+export function isForeignDominantLine(line: string): boolean {
+  const hangul = (line.match(/[가-힯]/g) ?? []).length;
+  const latin = (line.match(/[A-Za-z]/g) ?? []).length;
+  return latin > 0 && hangul * 3 < latin;
+}
+
 /** 증상 최대 2줄 — 빈 줄 제거·줄별 trim, 개행 최대 1개, 전체 ≤220자 경계 클립. 미제출이면 undefined.
- *  reason 이 구조화 결정 블록("### Mission owner decision" 등)이면 실제 사유 문장만 꺼내 표시한다. */
+ *  reason 이 구조화 결정 블록("### Mission owner decision" 등)이면 실제 사유 문장만 꺼내 표시한다.
+ *  [핫픽스 ②] 외국어 위주 줄·단어 중간 잘림 줄은 제외하고 근거 링크 안내로 대체한다(한국어 완결 보장). */
 function formatSymptom(reason: string | undefined): string | undefined {
   const unpacked = reason ? extractMissionOwnerDecisionFromText(reason) : null;
   const raw = unpacked?.decision ? (unpacked.reason ?? reason) : reason;
-  const lines = (raw ?? "")
+  const sourceLines = (raw ?? "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !/^#{1,6}\s*Mission owner decision$/i.test(line))
     .slice(0, 2);
-  if (lines.length === 0) return undefined;
-  return clipAtBoundary(lines.join("\n"), 220) || undefined;
+  if (sourceLines.length === 0) return undefined;
+  const joined = sourceLines.join("\n");
+  const clipped = clipAtBoundary(joined, 220);
+  if (!clipped) return undefined;
+  const clippedLines = clipped.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 2);
+  // 단어 중간 잘림 판정: 경계 부호 없는 하드 클립(마지막 표시 글자와 원문 다음 글자가 같은 단어 조각).
+  const clippedMidToken = clipped.length < joined.length
+    && /[A-Za-z0-9_가-힯-]$/.test(clipped)
+    && /^[A-Za-z0-9_가-힯-]/.test(joined.slice(clipped.length));
+  const kept = clippedLines.filter((line, index) => {
+    if (isForeignDominantLine(line)) return false;
+    if (clippedMidToken && index === clippedLines.length - 1) return false;
+    return true;
+  });
+  if (kept.length === clippedLines.length) return clippedLines.join("\n") || undefined;
+  const lines = kept.length > 0 ? [...kept.slice(0, 1), SYMPTOM_EVIDENCE_POINTER]
+    : [SYMPTOM_STATUS_FALLBACK, SYMPTOM_EVIDENCE_POINTER];
+  return lines.slice(0, 2).join("\n");
 }
 
 function extractEvidenceUrl(evidence: string | undefined): string | null {
@@ -295,7 +329,8 @@ export function buildMissionOwnerHumanInputDecisionCard(input: MissionOwnerHuman
   // [사람 카드 해석 C4a] 쉬운 해석은 증상·선택지와 같은 구조화 옵션 목록에서 파생한다 —
   //   요청 산문(nextAction)을 패러프레이즈·인용하지 않고 '승인 여부 판단' 템플릿도 쓰지 않는다.
   const interpretation = toOneLine(
-    buildOptionDerivedInterpretation(input.decision, recommendedDefinition.options), 200);
+    buildOptionDerivedInterpretation(input.decision, recommendedDefinition.options), 200)
+    || HUMAN_INPUT_INTERPRETATION_FALLBACK;
   return {
     schemaVersion: 1,
     requestKey: input.lifetimeId !== undefined

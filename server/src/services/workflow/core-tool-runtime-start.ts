@@ -44,7 +44,14 @@ export async function resolveCoreToolRuntimeScope(input: CoreToolStartInput): Pr
 export async function createCoreToolRuntimeStart(input: CoreToolStartInput, dispatch?: StartDispatch) {
   const scope = await resolveCoreToolRuntimeScope(input);
   return async <T>(start: () => T): Promise<Awaited<T> | { deferredBeforeStart: DeferredBeforeStart }> => {
-    const initiate = () => scope?.start(start) ?? { kind: "started" as const, value: start(), externalStarted: true as const };
+    const initiate = () => {
+      const decision = scope?.start(start) ?? { kind: "started" as const, value: start(), externalStarted: true as const };
+      // A started external Promise must be observed from birth: if a later gate
+      // (dispatch transaction commit, attempt staleness) throws before `await`,
+      // an already-failed child would otherwise reject unhandled.
+      if (decision.kind === "started") void Promise.resolve(decision.value).catch(() => undefined);
+      return decision;
+    };
     const decision = dispatch ? (await dispatch.launch(initiate)).result : initiate();
     if (decision.kind === "deferred_before_start") return { deferredBeforeStart: decision.deferred };
     if (decision.kind === "additional_start_blocked") throw new Error("runtime_additional_start_blocked");
