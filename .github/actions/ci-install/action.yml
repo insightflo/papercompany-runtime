@@ -1,0 +1,30 @@
+name: CI install (pnpm + Node + frozen install)
+description: >
+  PR CI 전체 스위트 잡(verify·verify-tests·verify-tests-serial·e2e)이 공통으로 쓰는 준비 단계.
+  pnpm·Node 를 설정하고, CI 가 갱신한 lockfile 로 설치한다. 왜 action 인가: pr.yml 이 300줄을 넘는
+  파일이라(저장소 규칙: legacy 초과 파일은 더 키우지 않는다) 같은 18줄 블록을 4개 잡에 반복하던 것을
+  한 곳으로 모았다. 설정값(9.15.4 / .nvmrc / cache: pnpm / lockfile-only → --frozen-lockfile)과
+  스텝 순서는 옮기기 전과 동일하다.
+  수정 시 주의: 여기서 lockfile 을 갱신(--no-frozen-lockfile)한 뒤 --frozen-lockfile 로 설치하는 2단계를
+  유지해야 한다. 한 단계로 합치면 manifests 가 바뀐 PR 이 설치 단계에서 실패한다.
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9.15.4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+        cache: pnpm
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
+
+    - name: Install dependencies from the CI-refreshed lockfile
+      shell: bash
+      run: pnpm install --frozen-lockfile
