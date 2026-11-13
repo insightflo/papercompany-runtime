@@ -34,14 +34,21 @@ beforeAll(async () => {
 }, 60000);
 afterAll(async () => {
   // [ci-s1] 7개 시나리오의 백그라운드 executeRun 후처리가 afterAll 시점에도 남아 있을 수 있다.
-  //   executor 를 먼저 해제하면 진행 중 도구 스텝 정산이 영향받으므로 드레인(30s/45s)을 먼저 마친 뒤
-  //   executor 해제 → DB 종결 → 임시 정리 순서로 안전하게 마감한다(훅 예산 60s 안에 들어오도록 정합화).
-  await waitForHeartbeatExecutionsToDrain(db, 30_000);
-  await drainHeartbeatRuns(db, 45_000);
+  //   executor 를 먼저 해제하면 진행 중 도구 스텝 정산이 영향받으므로 드레인을 먼저 마친 뒤
+  //   executor 해제 → DB 종결 → 임시 정리 순서로 안전하게 마감한다.
+  // [ci-shard] 추적 실행 드레인을 행 드레인보다 먼저 끝내면 추적 집합이 웨이브 사이 빈 순간에 반환되고,
+  //   그 뒤 등록된 후속 실행(입장 홀드·데드락 재시도의 재깨움)이 행 드레인의 0-윈도를 계속 깬다
+  //   (run 43279531666 serial: QaRemediationAdmissionHold 루프 + 40P01 로 45s 초과). 두 조건을
+  //   동시에 감시하고(각 90s 상한) 종결 후 늦게 등록된 straggler 를 한 번 더 기다린다(15s 상한).
+  await Promise.all([
+    waitForHeartbeatExecutionsToDrain(db, 90_000),
+    drainHeartbeatRuns(db, 90_000),
+  ]);
+  await waitForHeartbeatExecutionsToDrain(db, 15_000);
   setWorkflowToolStepExecutor(null);
   await db.$client.end({ timeout: 5 });
   await temp?.cleanup();
-}, 60000);
+}, 150_000);
 
 it.each(["retry_step", "resume_run", "revise_plan", "recollect", "delegate_fix", "reassign"] as const)(
   "%s executes and proves the current result", async (operation) => {

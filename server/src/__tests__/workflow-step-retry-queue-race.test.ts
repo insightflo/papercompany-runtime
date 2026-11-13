@@ -95,16 +95,20 @@ describeEP("workflow step retry queue race", () => {
     expect(wakes[0].id).toBe(firstWake.id);
     expect(wakes[0].issueId).toBe(seeded.issueId);
     expect(["queued", "claimed"]).toContain(wakes[0].status);
-    if (wakes[0].status === "claimed" && wakes[0].runId === null) {
-      // 'claimed' 전환과 heartbeat_runs/runId 바인딩 사이의 과도기 스냅샷 — 같은 행을 다시 읽어 정착을 확인한다.
-      await vi.waitFor(async () => {
-        const [row] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakes[0].id));
-        if (!row) throw new Error(`retry wake ${wakes[0].id} disappeared while settling`);
-        if (row.status !== "claimed" || row.runId !== null) { wakes[0] = row; return; }
-        throw new Error(`retry wake ${wakes[0].id} is claimed but runId is still unbound`);
-      }, { timeout: 10_000, interval: 25 });
-      expect(["queued", "claimed"]).toContain(wakes[0].status);
-    }
+    // 'claimed' 전환과 heartbeat_runs/runId 바인딩은 별도 쓰기라 원격 러너에서는
+    //   (claimed ∧ runId=null) 뿐 아니라 (queued ∧ runId≠null) 과도기 스냅샷도 잡힌다
+    //   (run 43240632853 shard3). (queued∧unbound | claimed∧bound) 일관 쌍이 될 때까지
+    //   같은 행을 다시 읽는다 — 다른 상태로 넘어가면 폴링을 끝내고 아래 단언이 판정한다.
+    await vi.waitFor(async () => {
+      const [row] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakes[0].id));
+      if (!row) throw new Error(`retry wake ${wakes[0].id} disappeared while settling`);
+      if (row.status === "queued" && row.runId !== null)
+        throw new Error(`retry wake ${row.id} is queued but already bound to run ${row.runId}`);
+      if (row.status === "claimed" && row.runId === null)
+        throw new Error(`retry wake ${row.id} is claimed but runId is still unbound`);
+      wakes[0] = row;
+    }, { timeout: 10_000, interval: 25 });
+    expect(["queued", "claimed"]).toContain(wakes[0].status);
     if (wakes[0].status === "queued") expect(wakes[0].runId).toBeNull();
     if (wakes[0].status === "claimed") expect(wakes[0].runId).not.toBeNull();
   });
