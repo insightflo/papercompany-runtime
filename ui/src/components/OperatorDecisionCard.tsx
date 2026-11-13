@@ -14,6 +14,8 @@ import {
   HumanReviewEvidenceChips,
   HumanReviewInterpretationBlock,
   HumanReviewSymptomBlock,
+  COMPACT_INTERPRETATION_FALLBACK,
+  formatCompactInterpretation,
   hasCompactSymptom,
 } from "./HumanReviewPacket";
 import { OperatorDecisionOptions } from "./OperatorDecisionOptions";
@@ -91,6 +93,36 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       }
     : decision;
 
+  // [카드 UX 핫픽스 ③ 2026-11-13] 승인/보류/반려 '형식 옵션'은 아래 액션 버튼과 같은 의미를
+  //   두 번 표시한 것이다 — 실제 행동 옵션(재시작·재시도·재계획 등)과 같은 목록에 섞이면
+  //   선택지가 겹쳐 보인다. 형식 옵션이 2개 이상이고 실제 옵션이 남아 있는 카드에서는
+  //   주 선택지에 실제 옵션만 표시하고, 형식 옵션은 액션 버튼 누를 때 서버 계약이 요구하는
+  //   선택지로 자동 매핑해 제출한다(와이어 result 형태는 구 계약과 동일).
+  const FORMAT_OUTCOMES = new Set(["approve", "hold", "reject"]);
+  const formatOptionIds = new Set(
+    decision.definition.actions
+      .filter((action) => FORMAT_OUTCOMES.has(action.outcome))
+      .map((action) => action.id)
+      .filter((id) => decision.definition.options.some((option) => option.id === id)),
+  );
+  const realOptions = optionsDecision.definition.options.filter((option) => !formatOptionIds.has(option.id));
+  const hideFormatOptions = !optionGroups
+    && decision.interactionType === "single_select"
+    && formatOptionIds.size >= 2
+    && realOptions.length > 0;
+  const visibleOptionsDecision: OperatorDecisionView = hideFormatOptions
+    ? { ...optionsDecision, definition: { ...optionsDecision.definition, options: realOptions } }
+    : optionsDecision;
+
+  /** 주 선택지에서 숨긴 형식 옵션을 액션 제출값으로 복원한다 — 예: 보류 버튼은 ['보류' 옵션]
+   *  을 자동 선택한 것과 동일한 result 를 만든다. 실제 옵션이 선택돼 있으면 그 선택을 유지한다. */
+  function effectiveSelectionFor(action: OperatorDecisionAction): string[] {
+    if (!action.requiresSelection || !hideFormatOptions) return selectedOptionIds;
+    const realSelected = selectedOptionIds.filter((id) => !formatOptionIds.has(id));
+    if (realSelected.length > 0) return realSelected;
+    return formatOptionIds.has(action.id) ? [action.id] : selectedOptionIds;
+  }
+
   function toggleOption(id: string) {
     setError(null);
     const group = groupOf(id);
@@ -132,7 +164,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
           return L(lang, { en: `${group.label ?? group.id}: Select ${want} option(s).`, ko: `${group.label ?? group.id}: ${want}개를 선택하세요.` });
         }
       }
-      if (selectedOptionIds.length < bounds.min || selectedOptionIds.length > bounds.max) {
+      if (effectiveSelectionFor(action).length < bounds.min || effectiveSelectionFor(action).length > bounds.max) {
         return bounds.min === bounds.max
           ? L(lang, { en: `Select ${bounds.min} option${bounds.min === 1 ? "" : "s"}.`, ko: `선택지를 ${bounds.min}개 선택하세요.` })
           : L(lang, { en: `Select between ${bounds.min} and ${bounds.max} options.`, ko: `선택지를 ${bounds.min}~${bounds.max}개 선택하세요.` });
@@ -155,7 +187,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
     const trimmedComment = comment.trim();
     const input: ResolveOperatorDecisionInput = {
       actionId: action.id,
-      selectedOptionIds: action.requiresSelection ? selectedOptionIds : [],
+      selectedOptionIds: action.requiresSelection ? effectiveSelectionFor(action) : [],
       comment: decision.definition.comment.mode === "disabled" || !trimmedComment ? null : trimmedComment,
     };
     setError(null);
@@ -168,6 +200,13 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       setSubmittingActionId(null);
     }
   }
+
+  // [카드 UX 핫픽스 ①] 카드가 실제 해석 문장을 가질 때만 '쉬운 해석 (AI)' 패널을 숨긴다 —
+  //   해석이 없거나 최소 폴백 문장뿐이면 AI 패널을 다시 표시해 해석 경로를 열어 둔다.
+  const interpretationText = compactCard && decision.definition.humanReview
+    ? formatCompactInterpretation(decision.definition.humanReview, decision.definition.options.map((option) => option.label))
+    : "";
+  const cardHasRealInterpretation = interpretationText !== "" && interpretationText !== COMPACT_INTERPRETATION_FALLBACK;
 
   // 초보자 해석(표시 전용 — 원문 유지, 실패 시 자동 숨김). 신형 축소 카드에서는 해석·근거 칩 뒤로 이동한다.
   const summaryNode = (
@@ -222,10 +261,11 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
 
       {!compactCard && summaryNode}
 
-      {/* [사람 카드 축소 Stage 4] 신형 카드 고정 순서: 증상 → 선택지(라벨+1줄 요약) → 쉬운 해석 → 상세 근거 링크. */}
+      {/* [사람 카드 축소 Stage 4] 신형 카드 고정 순서: 증상 → 선택지(라벨+1줄 요약) → 쉬운 해석 → 상세 근거 링크.
+          [핫픽스 ③] 주 선택지에는 실제 행동 옵션만 — 승인/보류/반려 형식 옵션은 액션 버튼이 담당한다. */}
       {compactCard && (
         <OperatorDecisionOptions
-          decision={optionsDecision}
+          decision={visibleOptionsDecision}
           selectedOptionIds={selectedOptionIds}
           onToggle={toggleOption}
           disabled={submittingActionId !== null}
@@ -246,6 +286,8 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
           <HumanReviewEvidenceChips packet={decision.definition.humanReview} />
         </div>
       )}
+      {/* [카드 UX 핫픽스 ①] 카드에 실제 해석이 없으면(폴백 문장뿐) '쉬운 해석 (AI)' 패널을 다시 표시한다. */}
+      {compactCard && !cardHasRealInterpretation && summaryNode}
 
       <div className="mt-3 flex flex-wrap gap-2">
         {decision.issueId && (
@@ -273,7 +315,7 @@ export function OperatorDecisionCard({ decision, onResolve }: OperatorDecisionCa
       {/* 구형 카드는 기존 위치(근거·사실 아래)에 선택지를 표시한다. 신형 축소 카드의 선택지는 위로 올렸다. */}
       {!compactCard && (
         <OperatorDecisionOptions
-          decision={decision}
+          decision={visibleOptionsDecision}
           selectedOptionIds={selectedOptionIds}
           onToggle={toggleOption}
           disabled={submittingActionId !== null}
