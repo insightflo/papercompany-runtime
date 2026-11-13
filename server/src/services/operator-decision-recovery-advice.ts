@@ -268,8 +268,10 @@ export function overlayRecoveryAdvice(
     }),
     ...(definition.humanReview ? { humanReview: {
       ...definition.humanReview,
-      interpretation: `${requesterProvidedLabel}\n${definition.humanReview.interpretation}\n\n${warning}`,
-      recommendedNextStep: `${nextStepLabel}\n${definition.humanReview.recommendedNextStep}\n\n${warning}`,
+      // [카드 UX 핫픽스 ①] 라벨을 별도 줄로 두면 축소 카드가 첫 줄(라벨만)을 해석으로 표시해
+      //   쉬운 해석이 사라져 보인다. 라벨+문장을 한 줄로 두어 첫 문장 클립이 실제 해석 문장을 유지한다.
+      interpretation: `${requesterProvidedLabel} ${definition.humanReview.interpretation}\n\n${warning}`,
+      recommendedNextStep: `${nextStepLabel} ${definition.humanReview.recommendedNextStep}\n\n${warning}`,
     } } : {}),
   };
 }
