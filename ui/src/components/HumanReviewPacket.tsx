@@ -212,9 +212,22 @@ export function HumanReviewPacket({ packet, variant = "full" }: { packet: HumanR
       </section>
     );
   }
+  // [카드 표시 결함 ①②] 검증·정책 한정문(unresolvedFacts 전제 안내)은 해석·다음 단계 문장이 아닌
+  //   별도 '검토 필요' 안내 블록에만 표시한다 — #717 축소 카드의 전제 안내줄과 같은 규칙.
+  const prerequisiteNotices = extractPrerequisiteNotices(packet);
   return (
     <section className="mt-3 space-y-4 border border-border bg-background p-4" data-testid="human-review-packet">
       <div><p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "What is being decided?", ko: "무엇을 판단하나요?" })}</p><h3 className="mt-1 text-base font-semibold">{packet.decisionSubject}</h3></div>
+      {variant === "compact" && prerequisiteNotices.length > 0 && (
+        <div
+          data-testid="human-review-prerequisite-notice"
+          className="rounded-sm border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-xs text-muted-foreground"
+        >
+          {prerequisiteNotices.map((notice) => (
+            <p key={notice}>{notice}</p>
+          ))}
+        </div>
+      )}
       <div><p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Current interpretation", ko: "현재 해석" })}</p><p className="mt-1 whitespace-pre-line text-sm">{packet.interpretation}</p></div>
       <div>
         <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Evidence & source location", ko: "판단 근거와 원본 위치" })}</p>

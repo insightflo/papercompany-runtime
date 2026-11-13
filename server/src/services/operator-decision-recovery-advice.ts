@@ -33,7 +33,7 @@ const cardLinkSchema = z.object({
   lifetimeId: z.string().uuid(), decisionEventId: z.string().uuid(), operatorDecisionId: z.string().uuid(),
 }).strict();
 const restartId = WORKFLOW_RESTART_FROM_START_OPTION_ID;
-const isOwnerHumanRestartCandidate = (card: RecoveryAdviceDecision) => card.sourceType === "mission_owner_human_input"
+export const isOwnerHumanRestartCandidate = (card: RecoveryAdviceDecision) => card.sourceType === "mission_owner_human_input"
   && Array.isArray(card.definition.options) && card.definition.options.some((option) => option.id === restartId);
 const adviceText: Record<RecoveryAdviceDisposition, string> = {
   historical_default_hold: "저장된 재시작 추천은 과거 카드 생성 규칙에서 붙은 안내입니다. 이 카드는 전체 수집이나 처음부터 재시작할 권한을 입증하지 않습니다. 이미 수행한 작업을 보존하고 기존 오너·정책 검토 경로를 사용하세요.",
@@ -250,28 +250,43 @@ export function evaluateRecoveryAdvice(input: RecoveryAdviceFactBundle): Recover
   return evaluateRecoveryAdviceIdentity(input);
 }
 
+/** [카드 표시 결함 ③] 이 카드 계열의 저장 '결정 사유 필수' 계약이 "." 자리채움 입력을 강요했다.
+ *  표시 사본에서만 선택 입력으로 완화한다 — 저장 행·requestHash·계약 검증 원본은 불변. */
+function relaxCommentMode(definition: OperatorDecisionDefinition): OperatorDecisionDefinition {
+  return definition.comment?.mode === "required"
+    ? { ...definition, comment: { ...definition.comment, mode: "optional" } }
+    : definition;
+}
+
+/** Resolve 쓰기 경로의 동일 완화 — pending 재시작 후보 카드에만 적용한다(저장 행은 그대로). */
+export function relaxedRestartCommentDefinition(card: RecoveryAdviceDecision): OperatorDecisionDefinition {
+  const definition = card.definition as OperatorDecisionDefinition;
+  if (card.status !== "pending" || !isOwnerHumanRestartCandidate(card)) return definition;
+  return relaxCommentMode(definition);
+}
+
 /** Return a display copy only; keep requester text visible without treating it as authority. */
 export function overlayRecoveryAdvice(
   definition: OperatorDecisionDefinition,
   advice: RecoveryAdvice,
 ): OperatorDecisionDefinition {
   if (advice.disposition === "outside_default_scope" || !Array.isArray(definition.options)) return definition;
-  const requesterProvidedLabel = "요청자가 제공한 설명(비권위적이며 실행 권한을 부여하지 않습니다):";
-  const nextStepLabel = "요청자가 제시한 다음 단계(비권위적이며 실행 권한을 부여하지 않습니다):";
   const warning = adviceText[advice.disposition];
+  const relaxed = relaxCommentMode(definition);
   return {
-    ...definition,
-    options: definition.options.map((option) => {
+    ...relaxed,
+    options: relaxed.options.map((option) => {
       if (option.id !== restartId) return option;
       const { recommended: _recommended, recommendationReason: _reason, ...neutral } = option;
       return neutral;
     }),
-    ...(definition.humanReview ? { humanReview: {
-      ...definition.humanReview,
-      // [카드 UX 핫픽스 ①] 라벨을 별도 줄로 두면 축소 카드가 첫 줄(라벨만)을 해석으로 표시해
-      //   쉬운 해석이 사라져 보인다. 라벨+문장을 한 줄로 두어 첫 문장 클립이 실제 해석 문장을 유지한다.
-      interpretation: `${requesterProvidedLabel} ${definition.humanReview.interpretation}\n\n${warning}`,
-      recommendedNextStep: `${nextStepLabel} ${definition.humanReview.recommendedNextStep}\n\n${warning}`,
+    ...(relaxed.humanReview ? { humanReview: {
+      ...relaxed.humanReview,
+      // [카드 표시 결함 ①②] 검증·정책 한정문은 해석·다음 단계 문장에 섞지 않고
+      //   전제 안내(unresolvedFacts → #717 prerequisite notice)로만 표시한다.
+      unresolvedFacts: relaxed.humanReview.unresolvedFacts.includes(warning)
+        ? relaxed.humanReview.unresolvedFacts
+        : [...relaxed.humanReview.unresolvedFacts, warning],
     } } : {}),
   };
 }
