@@ -111,7 +111,9 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
       return (await writer.create(companyId, chosen, { type: "agent", id: ownerId })).decision.id;
     }
 
-    const capReason = "The producer reached its two-iteration cap.";
+    // [카드 UX 핫픽스 ②] 증상은 한국어 완결만 허용 — 영어 사유는 근거 안내로 대체되므로
+    //   'symptom 이 원문을 보존한다' 는 검증을 한국어 사유로 유지한다.
+    const capReason = "프로듀서가 두 번째 반복 상한에 도달했습니다.";
     const capNextAction = "Approve one bounded producer iteration after cap two.";
     const historicalId = await createLegacyCard(historicalMissionId, "historical", { reason: capReason, nextAction: capNextAction });
     const customId = await createLegacyCard(customMissionId, "custom");

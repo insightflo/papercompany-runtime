@@ -67,10 +67,16 @@ function interpretationRepeatsOptions(packet: HumanReviewPacketValue, optionLabe
   return contained.length >= 2;
 }
 
+// [카드 UX 핫픽스 ① 2026-11-13] 쉬운 해석 비면 금지 — 정화·클립이 빈 결과를 내면
+//   '무엇이 막혔고 무엇을 고르면 어떻게 되는지' 최소 폴백 문장을 표시한다.
+//   서버 mission-owner-human-input-card.ts 의 HUMAN_INPUT_INTERPRETATION_FALLBACK 와 동일 문구(표시 전용).
+export const COMPACT_INTERPRETATION_FALLBACK =
+  "자동 진행이 멈춰 사람의 방향 선택이 필요합니다 — 아래 선택지에서 방향을 고르면 미션 오너가 그 지시대로 진행합니다.";
+
 /**
  * [사람 카드 UI 중복 정리] '쉬운 해석' 표시 문장. 원문이 서버 Stage 1 템플릿·선택지 나열을 반복하면
  * 방향·이유만 담은 고정 1문장으로 대체하고(선택지 나열은 '선택지' 영역이 1회만 표시),
- * 깔끔한 1문장은 원문을 그대로 보존한다.
+ * 깔끔한 1문장은 원문을 그대로 보존한다. [핫픽스 ①] 결과는 절대 빈 문자열이 아니다.
  */
 export function formatCompactInterpretation(packet: HumanReviewPacketValue, optionLabels?: readonly string[]): string {
   if (interpretationRepeatsOptions(packet, optionLabels)) {
@@ -88,7 +94,7 @@ export function formatCompactInterpretation(packet: HumanReviewPacketValue, opti
     }
     return "운영자 확인 없이는 다음 단계로 넘어갈 수 없어 대기 중이며, 아래 선택지에서 방향을 고르면 미션 오너가 그에 맞춰 진행합니다.";
   }
-  return clipOneSentence(packet.interpretation);
+  return clipOneSentence(packet.interpretation) || COMPACT_INTERPRETATION_FALLBACK;
 }
 
 /** 서버가 근거 미제출 시 unresolvedFacts 에 넣는 기본 폴백 — 전제 안내줄에서는 제외한다
@@ -102,15 +108,42 @@ function extractPrerequisiteNotices(packet: HumanReviewPacketValue): string[] {
     .filter((item) => item.length > 0 && item !== MISSING_EVIDENCE_FACT);
 }
 
+// [카드 UX 핫픽스 ②] 증상 표시줄은 한국어 완결을 보장한다 — 외국어 위주(라틴>0, 한글 비중 25% 미만)
+//   줄이 섞인 구 저장 카드도 같은 규칙으로 근거 링크 안내로 대체한다
+//   (서버 formatSymptom 의 isForeignDominantLine·안내 문구와 동일, 표시 전용 복사본).
+const SYMPTOM_EVIDENCE_POINTER = "요청 원문(영어 포함)은 아래 '상세 근거'의 이슈 링크 본문에서 확인해 주세요.";
+const SYMPTOM_STATUS_FALLBACK = "미션 진행이 멈춰 오너가 사람의 방향 결정을 요청했습니다.";
+function isForeignDominantLine(line: string): boolean {
+  const hangul = (line.match(/[가-힯]/g) ?? []).length;
+  const latin = (line.match(/[A-Za-z]/g) ?? []).length;
+  return latin > 0 && hangul * 3 < latin;
+}
+
+/** 표시용 증상 줄 정규화 — 외국어 위주 줄을 근거 안내로 대체한 최대 2줄을 돌려준다. */
+export function normalizeCompactSymptom(symptom: string): string[] {
+  const lines = symptom.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 2);
+  const kept = lines.filter((line) => !isForeignDominantLine(line));
+  if (kept.length === lines.length) return lines;
+  if (kept.length > 0) return [...kept.slice(0, 1), SYMPTOM_EVIDENCE_POINTER].slice(0, 2);
+  return [SYMPTOM_STATUS_FALLBACK, SYMPTOM_EVIDENCE_POINTER];
+}
+
+/** 해석 원문 뒤에 붙는 복구 권고 경고(빈 줄 이후 단락) — 카드에 보이게 유지하되 해석 문장과 분리해 연하게 표시한다. */
+function extractAdvisoryNotice(interpretation: string): string {
+  const rest = interpretation.split(/\n\s*\n/).slice(1).join(" ").trim();
+  return /입증하지\s*않습니다/.test(rest) ? rest : "";
+}
+
 /** 증상 블록 — 개행은 보존하되 최대 2줄만 표시한다(서버가 ≤2줄로 자르고, UI 는 line-clamp-2 로 방어).
- *  전제 안내가 있으면 증상 바로 아래 컴팩트 안내줄로 표시한다(컴팩트 카드에서 '선택지' 직전에 배치). */
+ *  전제 안내가 있으면 증상 바로 아래 컴팩트 안내줄로 표시한다(컴팩트 카드에서 '선택지' 직전에 배치).
+ *  [핫픽스 ②] 표시 전 외국어 위주 줄을 근거 링크 안내로 정규화한다. */
 export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketValue }) {
   const lang = useCompanyLanguage();
   const notices = extractPrerequisiteNotices(packet);
   return (
     <div data-testid="human-review-symptom">
       <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Symptom", ko: "증상" })}</p>
-      <p className="mt-1 line-clamp-2 whitespace-pre-line text-sm">{packet.symptom}</p>
+      <p className="mt-1 line-clamp-2 whitespace-pre-line text-sm">{normalizeCompactSymptom(packet.symptom ?? "").join("\n")}</p>
       {notices.length > 0 && (
         <div
           data-testid="human-review-prerequisite-notice"
@@ -129,10 +162,14 @@ export function HumanReviewSymptomBlock({ packet }: { packet: HumanReviewPacketV
  *  선택지는 '선택지' 영역이 1회만 표시한다. 상세 진단은 카드 밖 근거 링크에서만 확인한다. */
 export function HumanReviewInterpretationBlock({ packet, optionLabels }: { packet: HumanReviewPacketValue; optionLabels?: readonly string[] }) {
   const lang = useCompanyLanguage();
+  const advisory = extractAdvisoryNotice(packet.interpretation);
   return (
     <div data-testid="human-review-interpretation" className="border-l-2 border-primary bg-primary/5 p-2">
       <p className="text-xs font-semibold text-muted-foreground">{L(lang, { en: "Plain-language read", ko: "쉬운 해석" })}</p>
       <p className="mt-1 text-sm font-medium">{formatCompactInterpretation(packet, optionLabels)}</p>
+      {advisory && (
+        <p data-testid="human-review-interpretation-notice" className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{advisory}</p>
+      )}
     </div>
   );
 }
