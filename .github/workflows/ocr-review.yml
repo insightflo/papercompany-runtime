@@ -1,13 +1,22 @@
 name: OCR Review
 
 on:
-  push:
+  # Review once per merge instead of on every PR update: this repo squash-merges,
+  # so one review of the merged PR covers exactly what landed on main.
+  #
+  # `pull_request: [closed]` rather than `push`: the pinned v1.12.2 action reads
+  # the base ref, the head sha and the PR number from the pull_request payload
+  # only. On `push` all three are empty, so it would review an empty workspace
+  # diff and have no PR to post the summary to — a silent no-op that
+  # `continue-on-error` keeps green.
+  pull_request:
+    types: [closed]
     branches: [main]
 
 concurrency:
-  # Serial per-branch queue: a merged PR's review must not be cancelled by the
-  # next merge, or that merge would never get an advisor review.
-  group: ocr-review-${{ github.ref }}
+  # Per-PR queue, never cancelled: the single run a PR gets is the one at merge
+  # time, and cancelling it would leave that merge without an advisor review.
+  group: ocr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 permissions:
@@ -16,6 +25,9 @@ permissions:
 
 jobs:
   review:
+    # `closed` also fires for PRs abandoned without merging; only merged PRs
+    # reach main.
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
