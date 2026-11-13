@@ -23,7 +23,8 @@ import {
 } from "./workflow/resume/serialization.js";
 import { assertExactBoardWorkflowRestartPolicy, holdUnprovenRestart,
   startWorkflowRestartFromOperatorDecision } from "./missions/approved-workflow-restart.js";
-import { evaluateRecoveryAdviceIdentity, loadRecoveryAdviceIdentityFacts } from "./operator-decision-recovery-advice.js";
+import { evaluateRecoveryAdviceIdentity, isOwnerHumanRestartCandidate, loadRecoveryAdviceIdentityFacts,
+  relaxedRestartCommentDefinition, type RecoveryAdviceDecision } from "./operator-decision-recovery-advice.js";
 import { lockQaRecoveryCollectionAdmission } from "./operator-decision-qa-recovery-admission.js";
 import { withOperatorRestartTransaction } from "./operator-decision-restart-transaction.js";
 import {
@@ -99,7 +100,15 @@ export function operatorDecisionResolutionWriteService(
     if (!before) throw notFound("Operator decision not found");
     // [T5] Quality 연결 결정은 전용 경로로만: 실제 컬럼 연결(qualityActionId) 기준.
     await guardQualityWrite(db, { companyId: before.companyId, subject: "decision", subjectId: id, operation: "resolve" });
-    const result = validateOperatorDecisionResult(before.definition, rawInput);
+    // [카드 표시 결함 ③] 검증메모 대상(pending 재시작 후보) 카드의 '결정 사유 필수' 저장 계약이
+    //   "." 자리채움을 강요했다 — 표시 오버레이와 같은 규칙으로 사유를 선택 입력으로 완화하고,
+    //   제출된 "." 자리채움은 무사유(null)로 정규화한다. 저장 행·requestHash·비대상 카드는 불변.
+    const validateRelaxed = (card: RecoveryAdviceDecision) => {
+      const validated = validateOperatorDecisionResult(relaxedRestartCommentDefinition(card), rawInput);
+      return isOwnerHumanRestartCandidate(card) && validated.comment === "."
+        ? { ...validated, comment: null } : validated;
+    };
+    const result = validateRelaxed(before);
     const directResumeSelected = result.outcome === "submit"
       && result.selectedOptionIds.includes(TERMINAL_RESUME_OPTION_ID);
     const directRestartSelected = (result.outcome === "approve" || result.outcome === "submit")
@@ -137,7 +146,7 @@ export function operatorDecisionResolutionWriteService(
         if (current.requestHash !== before.requestHash) throw conflict("Operator decision changed while it was being resolved", {
           code: "operator_decision_binding_changed", operatorDecisionId: id,
         });
-        const currentResult = validateOperatorDecisionResult(current.definition, rawInput);
+        const currentResult = validateRelaxed(current);
         if (!sameOperatorDecisionResult(currentResult, result)) throw conflict("Operator decision result no longer matches the submitted selection", {
           code: "operator_decision_binding_changed", operatorDecisionId: id,
         });

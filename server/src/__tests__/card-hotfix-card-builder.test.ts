@@ -1,7 +1,7 @@
 // [카드 UX 핫픽스 2026-11-13] 실제 카드 7cf2aaf7 회귀 방지 —
 //   ① 쉬운 해석이 비지 않음(파생 실패 시 최소 폴백 문장)
 //   ② 증상은 항상 한국어 완결 최대 2줄(영어 원문은 근거 링크로 이동)
-//   ③ 읽기 투영 권고 라벨이 해석 첫 문장을 삼키지 않음.
+//   ③ 읽기 투영 권고가 해석·다음 단계를 바꾸지 않음 — 경고는 전제 안내로만.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
@@ -108,20 +108,24 @@ describe("card hotfix — 쉬운 해석 비면 금지", () => {
 });
 
 describe("card hotfix — 권고 오버레이가 해석 문장을 삼키지 않는다", () => {
-  it("읽기 투영 라벨+문장이 한 줄이라 첫 문장 클립이 실제 해석을 유지한다", () => {
+  // [카드 표시 결함 2026-11-13] 계약 갱신 — 검증·정책 한정문은 해석·다음 단계에 섞지 않고
+  //   전제 안내(unresolvedFacts → #717 prerequisite notice)로만 표시한다(RES-11302 실화).
+  it("읽기 투영은 해석·다음 단계를 원문 그대로 두고 경고는 전제 안내에만 둔다", () => {
     const card = buildMissionOwnerHumanInputDecisionCard(spec());
     const projected = overlayRecoveryAdvice(card.definition, {
       disposition: "unproven_restart_hold",
       reason: "stored_input_or_hash_unproven",
     });
-    const interpretation = projected.humanReview!.interpretation;
-    const firstLine = interpretation.split("\n").find((line) => line.trim().length > 0)!;
-    // 라벨만 있는 줄이 아니라 라벨+실제 해석 문장이 첫 줄이다.
-    expect(firstLine).toContain("요청자가 제공한 설명");
-    expect(firstLine).toContain(card.definition.humanReview!.interpretation);
-    expect(firstLine.length).toBeGreaterThan("요청자가 제공한 설명(비권위적이며 실행 권한을 부여하지 않습니다):".length);
-    // 경고 단락은 두 번째 단락으로 보존된다.
-    expect(interpretation.split(/\n\s*\n/)[1]).toContain("입증하지 않습니다");
+    // 해석·다음 단계는 요청자 원문 그대로 — 라벨·경고 문구가 섞이지 않는다.
+    expect(projected.humanReview!.interpretation).toBe(card.definition.humanReview!.interpretation);
+    expect(projected.humanReview!.interpretation).not.toContain("요청자가 제공한 설명");
+    expect(projected.humanReview!.recommendedNextStep).toBe(card.definition.humanReview!.recommendedNextStep);
+    expect(projected.humanReview!.recommendedNextStep).not.toContain("요청자가 제시한 다음 단계");
+    // 경고 문구는 전제 안내 말미에만 보존된다.
+    expect(projected.humanReview!.unresolvedFacts.at(-1)).toContain("입증하지 않습니다");
+    // 표시 사본의 '결정 사유'는 선택 입력으로 완화(저장 정의는 required 유지).
+    expect(projected.comment.mode).toBe("optional");
+    expect(card.definition.comment.mode).toBe("required");
     // 재시작 옵션의 추천 표시는 여전히 제거된다.
     expect(projected.options.find((option) => option.id === WORKFLOW_RESTART_FROM_START_OPTION_ID))
       .not.toHaveProperty("recommended");

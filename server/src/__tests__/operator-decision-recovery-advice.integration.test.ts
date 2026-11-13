@@ -199,29 +199,38 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
       .toBe("미션 오너의 사람 결정 요청 — 입력·승인 요청(request_input) 승인 여부");
     expect(projectedReview.decisionSubject).toBe(originalReview.decisionSubject);
     expect(projectedReview.evidence).toEqual(originalReview.evidence);
-    expect(projectedReview.interpretation)
-      .toContain("요청자가 제공한 설명(비권위적이며 실행 권한을 부여하지 않습니다):");
+    // [카드 표시 결함 ①②] 해석·다음 단계는 요청자 원문 그대로 — 검증·정책 한정문은 전제 안내로만.
+    expect(projectedReview.interpretation).toBe(originalReview.interpretation);
+    expect(projectedReview.interpretation).not.toContain("비권위적이며");
     // [사람 카드 축소 Stage 1] 증상 원문은 symptom 패킷(≤2줄)으로 옮겨졌다.
     expect(originalReview.symptom).toContain(capReason);
     expect(projectedReview.symptom).toBe(originalReview.symptom);
-    expect(projectedReview.interpretation).toContain(originalReview.interpretation);
-    expect(projectedReview.interpretation).toContain("과거 카드 생성 규칙");
-    expect(projectedReview.interpretation.indexOf("과거 카드 생성 규칙"))
-      .toBeGreaterThan(projectedReview.interpretation.indexOf(originalReview.interpretation));
-    expect(projectedReview.recommendedNextStep)
-      .toContain("요청자가 제시한 다음 단계(비권위적이며 실행 권한을 부여하지 않습니다):");
-    expect(projectedReview.recommendedNextStep).toContain(capNextAction);
-    expect(projectedReview.recommendedNextStep).toContain("과거 카드 생성 규칙");
+    expect(projectedReview.interpretation).not.toContain("과거 카드 생성 규칙");
+    expect(projectedReview.recommendedNextStep).toBe(originalReview.recommendedNextStep);
+    expect(projectedReview.recommendedNextStep).not.toContain("과거 카드 생성 규칙");
     expect(projectedReview.impact).toEqual(originalReview.impact);
-    expect(projectedReview.unresolvedFacts).toEqual(originalReview.unresolvedFacts);
+    // 검증 메모는 해석·다음 단계를 건드리지 않고 전제 안내(unresolvedFacts)에만 추가된다.
+    expect(projectedReview.unresolvedFacts).toEqual([...originalReview.unresolvedFacts,
+      "저장된 재시작 추천은 과거 카드 생성 규칙에서 붙은 안내입니다. 이 카드는 전체 수집이나 처음부터 재시작할 권한을 입증하지 않습니다. 이미 수행한 작업을 보존하고 기존 오너·정책 검토 경로를 사용하세요."]);
+    // [카드 표시 결함 ③] 검증메모 대상 카드의 '결정 사유 필수'는 표시 사본에서 선택 입력으로 완화 —
+    //   저장 계약은 그대로다(identity·requestHash 보존).
+    expect(projected.get(historicalId)!.definition.comment.mode).toBe("optional");
+    expect(historicalRow!.definition.comment.mode).toBe("required");
     expect(projected.get(historicalId)!.definition.actions).toEqual(historicalRow!.definition.actions);
     expect(projected.get(historicalId)!.definition.approvedScope).toEqual(historicalRow!.definition.approvedScope);
     expect(projected.get(historicalId)!.definition.options.map((option) => option.id))
       .toEqual(historicalRow!.definition.options.map((option) => option.id));
     expect(projected.get(noReviewId)!.definition.humanReview).toBeUndefined();
-    expect(projected.get(currentId)!.definition.humanReview!.recommendedNextStep)
-      .toContain("현재 확인되지 않았습니다");
-    expect(projected.get(customId)!.definition.humanReview!.interpretation).not.toContain("과거 카드");
+    // [카드 표시 결함 ①②] 현재 카드도 해석·다음 단계는 원문 유지 — 검증 메모는 전제 안내에만.
+    const currentReview = projected.get(currentId)!.definition.humanReview!;
+    expect(currentReview.recommendedNextStep).not.toContain("현재 확인되지 않았습니다");
+    expect(currentReview.unresolvedFacts
+      .some((fact) => fact.includes("재시작 옵션의 범위와 근거가 현재 확인되지 않았습니다"))).toBe(true);
+    const customReview = projected.get(customId)!.definition.humanReview!;
+    expect(customReview.interpretation).not.toContain("과거 카드");
+    expect(customReview.interpretation).not.toContain("입증하지");
+    expect(customReview.unresolvedFacts
+      .some((fact) => fact.includes("재시작 옵션의 범위와 근거가 현재 확인되지 않았습니다"))).toBe(true);
     expect(oneProjection!.view.result).toBeNull();
     const terminalProjections = await loadOperatorDecisionProjections(db, terminalRows);
     for (const item of terminalProjections) projected.set(item.view.id, item.view);
@@ -252,5 +261,40 @@ describeDb("operator decision recovery advice projection (PostgreSQL)", () => {
       wakeups: await db.select().from(agentWakeupRequests),
     };
     expect(after).toEqual(before);
+  });
+
+  // [카드 표시 결함 ③] 검증메모 대상 카드의 '결정 사유'는 빈 값 허용·"." 금지 —
+  //   저장 계약(required)은 바꾸지 않고 resolve 검증에서만 완화한다.
+  it("accepts a blank reason and normalizes a '.' placeholder to null on restart-advice cards", async () => {
+    const blankMissionId = randomUUID(), dotMissionId = randomUUID(), requiredMissionId = randomUUID();
+    await db.insert(missions).values([
+      { id: blankMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (blank reason)", status: "active" },
+      { id: dotMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (dot reason)", status: "active" },
+      { id: requiredMissionId, companyId, ownerAgentId: ownerId, title: "Recovery mission (required kept)", status: "active" },
+    ]);
+    const writer = operatorDecisionWriteService(db);
+    const build = (missionId: string, workflowRunId: string | null = runId) => buildMissionOwnerHumanInputDecisionCard({
+      companyId, missionId, decisionEventId: randomUUID(), decision: "request_input",
+      ownerActionIssueId: issueId, ownerActionIssueStatus: "in_progress", requestedByAgentId: ownerId,
+      reason: "Review retained work", nextAction: "Continue the narrow review", evidence: "Existing run evidence",
+      issueTitle: "Owner oversight", issueIdentifier: null, sourceIssueId: null, workflowRunId });
+    // 저장 계약은 그대로 '결정 사유' 필수 — 표시·검증 경로에서만 완화한다.
+    expect(build(blankMissionId).definition.comment.mode).toBe("required");
+    const blankId = (await writer.create(companyId, build(blankMissionId), { type: "agent", id: ownerId })).decision.id;
+    const dotId = (await writer.create(companyId, build(dotMissionId), { type: "agent", id: ownerId })).decision.id;
+    const requiredId = (await writer.create(companyId, build(requiredMissionId, null), { type: "agent", id: ownerId })).decision.id;
+    // 재시작 후보 카드 — 빈 사유도 "." 자리채움도 무사유로 기록된다.
+    const blankResolved = await writer.resolve(blankId, { actionId: "hold", selectedOptionIds: ["hold"], comment: null }, "board-user");
+    expect(blankResolved.applied).toBe(true);
+    expect(blankResolved.decision.result?.comment).toBeNull();
+    const dotResolved = await writer.resolve(dotId, { actionId: "hold", selectedOptionIds: ["hold"], comment: "." }, "board-user");
+    expect(dotResolved.applied).toBe(true);
+    expect(dotResolved.decision.result?.comment).toBeNull();
+    // 재시작 옵션이 없는 비대상 카드의 필수 사유 계약은 그대로 유지된다(회귀).
+    await expect(writer.resolve(requiredId, { actionId: "hold", selectedOptionIds: ["hold"], comment: null }, "board-user"))
+      .rejects.toThrow("Comment is required");
+    const [stillPending] = await db.select({ status: operatorDecisions.status })
+      .from(operatorDecisions).where(eq(operatorDecisions.id, requiredId));
+    expect(stillPending!.status).toBe("pending");
   });
 });
