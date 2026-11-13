@@ -1,12 +1,14 @@
 name: OCR Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
 
 concurrency:
-  group: ocr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Serial per-branch queue: a merged PR's review must not be cancelled by the
+  # next merge, or that merge would never get an advisor review.
+  group: ocr-review-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
