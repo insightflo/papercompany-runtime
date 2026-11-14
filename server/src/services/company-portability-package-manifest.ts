@@ -68,7 +68,7 @@ export function applySelectedFilesToSource(source: ResolvedSource, selectedFiles
 
 export function buildManifestFromPackageFiles(
   files: Record<string, CompanyPortabilityFileEntry>,
-  opts?: { sourceLabel?: { companyId: string; companyName: string } | null; lenientYaml?: boolean },
+  opts?: { sourceLabel?: { companyId: string; companyName: string } | null },
 ): ResolvedSource {
   const normalizedFiles = normalizeFileMap(files);
   const companyPath = typeof normalizedFiles["COMPANY.md"] === "string"
@@ -226,10 +226,10 @@ export function buildManifestFromPackageFiles(
     try {
       skillDoc = parsePackagedFrontmatter(markdownRaw, skillPath, warnings);
     } catch (error) {
-      // Export re-reads its own bundle with stored SKILL.md content that the
-      // strict parser may reject; lenient mode keeps legacy exports working
-      // while surfacing the problem as a warning instead of failing the export.
-      if (!opts?.lenientYaml) throw error;
+      // Stored SKILL.md content is user-authored and export writes it back
+      // as-is even when the strict parser rejects its frontmatter, so reading
+      // the same package back (export re-read and import alike) must not
+      // hard-fail either: surface the problem as a warning instead.
       warnings.push(error instanceof Error ? error.message : String(error));
       skillDoc = { frontmatter: {}, body: "" };
     }
