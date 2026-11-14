@@ -22,6 +22,11 @@ import { companies } from "./companies.js";
 //   status='draft'(자동 초안, 승인 전) | 'active'(기존 전체 + 승인된 초안).
 // [외부 연결] FK: companies(cascade) / agents(set null, 컴파일한 오너 에이전트).
 //   service: server/src/services/knowledge-patterns.ts. routes: routes/knowledge-patterns.ts.
+// [구조화 결함 결합 메타데이터 — 2026-11-14 mistology 흡수 T1a] 카드에 기계 판독용
+//   엔티티 메타데이터(files/symbols/coupled/error_signatures) 4종을 추가한다.
+//   어떤 소스 파일·심볼·결합 모듈·오류 서명에 관한 패턴인지를 구조화해 남기며,
+//   소비는 T1c의 검색 랭킹이 한다(실행 컨텍스트 주입 아님). 공유 계약은
+//   packages/shared/src/validators/knowledge-pattern.ts.
 // [수정시 주의] 스키마 변경 시 수기 마이그레이션 규약 준수(journal drift — 0096 참조).
 export const companyKnowledgePatterns = pgTable(
   "company_knowledge_patterns",
@@ -37,6 +42,14 @@ export const companyKnowledgePatterns = pgTable(
     rootCause: text("root_cause"),
     whatWorked: text("what_worked"),
     scopeTags: text("scope_tags").array().notNull().default([]),
+    // [구조화 결함 결합 메타데이터 T1a] 카드가 다루는 소스 엔티티(모두 정규화된 값).
+    //   files: 소스 파일 상대경로 / symbols: 함수·클래스·상수 심볼명 /
+    //   coupled: 함께 변경되어야 하는 모듈·파일 결합 엔티티 /
+    //   errorSignatures: 정규화 오류 서명(스택트레이스 첫 프레임, HTTP 상태+엔드포인트 등).
+    files: text("files").array().notNull().default([]),
+    symbols: text("symbols").array().notNull().default([]),
+    coupled: text("coupled").array().notNull().default([]),
+    errorSignatures: text("error_signatures").array().notNull().default([]),
     source: text("source").notNull(), // mission_owner_compile | agent_candidate | operator | auto_rework_draft
     // [P1 자동 초안] 기계적 QA 교정(remediation)이 동일 결함 서명 2회째 감지됐을 때의 서명 해시.
     //   사람이 만든 카드는 null. (company_id, defect_signature) 부분 유일 인덱스로 초안 중복 방지.
