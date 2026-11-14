@@ -35,6 +35,9 @@ export const publicPreviewSchema = z.object({
   schemaVersion: z.literal(1), companyId: z.string().uuid(), missionId: z.string().uuid(),
   workflowRunId: z.string().uuid(), startStepId: z.string(), eligible: z.boolean(),
   blockers: z.array(z.object({ code: z.string(), message: z.string(), stepId: z.string().optional() }).strict()),
+  // [review-relief v1] 완화로 경고로 내려간 차단과 완화 상태 — 서버는 완화 동작 시에만 채운다(구형 응답과 동일하게 생략 가능).
+  warnings: z.array(z.object({ code: z.string(), message: z.string(), stepId: z.string().optional() }).strict()).optional(),
+  relief: z.object({ active: z.boolean(), bases: z.array(z.enum(["human_approval", "stuck"])) }).strict().optional(),
   affected: z.array(z.object({ stepId: z.string(), name: z.string(), action: z.enum(["execute", "reevaluate"]) }).strict()),
   preserved: z.array(z.object({ stepId: z.string(), name: z.string() }).strict()),
   evidence: z.array(z.object({ id: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()),
