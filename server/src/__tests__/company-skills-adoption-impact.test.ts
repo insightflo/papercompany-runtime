@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { activityLog, companies, companySkills, createDb } from "@paperclipai/db";
+import { activityLog, companies, companySkills, createDb, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -50,12 +50,17 @@ describeEP("company skill adoption impact ledger (knowledge pattern provenance)"
       .returning();
     skillId = skill!.id;
 
+    // [근거 실재성 검증] evidence는 실재 workflow_run만 통과 — 픽스처 run을 만들어 참조한다.
+    const fixtureWorkflowDefinitionId = randomUUID();
+    const fixtureWorkflowRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: fixtureWorkflowDefinitionId, companyId, name: "adoption-evidence-fixture", stepsJson: [] });
+    await db.insert(workflowRuns).values({ id: fixtureWorkflowRunId, workflowId: fixtureWorkflowDefinitionId, companyId, status: "completed", triggeredBy: "test" });
     const card = await knowledgePatternsService(db).create({
       companyId,
       kind: "failure_mode",
       title: "구조 게이트 토큰 불일치로 QA 스텝 무발사",
       summary: "이중완료가 게이트 토큰과 영구 불일치를 만든다.",
-      evidence: [{ type: "workflow_run", id: "38fb7ef5" }],
+      evidence: [{ type: "workflow_run", id: fixtureWorkflowRunId }],
       scopeTags: ["workflow"],
       source: "operator",
     });
