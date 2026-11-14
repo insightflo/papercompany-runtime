@@ -10,6 +10,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
+import { knowledgePatternEntitiesSchema } from "@paperclipai/shared/validators/knowledge-pattern";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
@@ -35,16 +36,35 @@ const createKnowledgePatternSchema = z.object({
   rootCause: z.string().trim().max(2000).optional().nullable(),
   whatWorked: z.string().trim().max(2000).optional().nullable(),
   scopeTags: z.array(z.string()).max(8).optional(),
+  // [T1c] 구조화 결합 메타데이터 4종 — 공유 Zod 필드(diff 접두사 제거·중복 제거·상한·빈 배열 기본)를
+  //   그대로 재사용해 라우트와 서비스·DB가 같은 정규화 규칙을 적용한다.
+  files: knowledgePatternEntitiesSchema.shape.files,
+  symbols: knowledgePatternEntitiesSchema.shape.symbols,
+  coupled: knowledgePatternEntitiesSchema.shape.coupled,
+  errorSignatures: knowledgePatternEntitiesSchema.shape.errorSignatures,
   source: z.enum(["mission_owner_compile", "agent_candidate", "operator", "auto_rework_draft"]).optional(),
   supersedeId: z.string().trim().min(1).optional(),
 });
+
+/** [T1c] 검색 질의 파라미터 files/symbols — 쉼표 구분 목록(선택). 엔티티 정규화는 관련도 엔진 내부에서. */
+function readQueryList(value: unknown): string[] | null {
+  if (typeof value === "string" && value.trim()) {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  if (Array.isArray(value)) {
+    const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return items.length > 0 ? items : null;
+  }
+  return null;
+}
 
 export function knowledgePatternsRoutes(db: Db) {
   const router = Router();
   const svc = knowledgePatternsService(db);
 
-  // GET /api/companies/:companyId/knowledge-patterns?kind=&tags=a,b&q=&includeSuperseded=&includeDrafts=
+  // GET /api/companies/:companyId/knowledge-patterns?kind=&tags=a,b&q=&includeSuperseded=&includeDrafts=&files=&symbols=
   //   draft 초안은 보드(승인 주체)에만 기본 노출. 에이전트 키는 active 카드만 본다(승인 전 무측).
+  //   files/symbols 질의 시 관련도 엔진이 결과를 재정렬한다(T1c — 응답 형태는 불변, 신규 필드 포함).
   router.get("/companies/:companyId/knowledge-patterns", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -58,6 +78,8 @@ export function knowledgePatternsRoutes(db: Db) {
       kind: typeof req.query.kind === "string" ? req.query.kind : null,
       tags,
       q: typeof req.query.q === "string" ? req.query.q : null,
+      files: readQueryList(req.query.files),
+      symbols: readQueryList(req.query.symbols),
       includeSuperseded: req.query.includeSuperseded === "true",
       includeDrafts,
     });
@@ -95,6 +117,10 @@ export function knowledgePatternsRoutes(db: Db) {
         rootCause: req.body?.rootCause,
         whatWorked: req.body?.whatWorked,
         scopeTags: req.body?.scopeTags,
+        files: req.body?.files,
+        symbols: req.body?.symbols,
+        coupled: req.body?.coupled,
+        errorSignatures: req.body?.errorSignatures,
         source: bodySource,
         createdByAgentId: actor.type === "agent" ? actor.agentId ?? null : null,
         supersedeId,
@@ -107,6 +133,10 @@ export function knowledgePatternsRoutes(db: Db) {
         return;
       }
       if (message.startsWith("knowledge pattern evidence")) {
+        next(unprocessable(message));
+        return;
+      }
+      if (message.startsWith("knowledge pattern entity")) {
         next(unprocessable(message));
         return;
       }
