@@ -528,7 +528,6 @@ export async function exportBundle(
       companyId: company.id,
       companyName: company.name,
     },
-    lenientYaml: true,
   });
   resolved.manifest.includes = {
     company: resolved.manifest.company !== null,
@@ -563,7 +562,6 @@ export async function exportBundle(
       companyId: company.id,
       companyName: company.name,
     },
-    lenientYaml: true,
   });
   resolved.manifest.includes = {
     company: resolved.manifest.company !== null,
