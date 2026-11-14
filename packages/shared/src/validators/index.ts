@@ -568,3 +568,10 @@ export {
   judgmentEgressFindingSchema,
   judgmentEgressStatusSchema,
 } from "./judgment.js";
+
+export {
+  knowledgePatternEntityRefSchema,
+  knowledgePatternEntitiesSchema,
+  normalizeKnowledgePatternEntityPath,
+  type KnowledgePatternEntities,
+} from "./knowledge-pattern.js";
