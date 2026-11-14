@@ -13,7 +13,16 @@
 
 import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companyKnowledgePatterns, activityLog } from "@paperclipai/db";
+import {
+  activityLog,
+  companyKnowledgePatterns,
+  heartbeatRuns,
+  issues,
+  missions,
+  workflowRuns,
+  workflowTransitionEvents,
+} from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
 import type { AdoptionAssetRegistryEntry } from "./self-improvement-adoption-planner.js";
 import { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern } from "./knowledge-pattern-relevance.js";
 
@@ -83,6 +92,56 @@ function readTags(value: unknown): string[] {
   return value.map((tag) => String(tag).trim().toLowerCase().slice(0, 40)).filter((tag) => tag !== "");
 }
 
+/** [근거 실재성 검증] evidence 참조가 실제 행을 가리키는지 확인한다(2026-11-14 결함 수정 ⓑ).
+ *  검증 가능 타입: mission/workflow_run/issue/transition_event/heartbeat_run — 모두 uuid PK.
+ *  'pr'은 외부 GitHub 참조로 DB 테이블이 없어 형식 검증만 적용(존재 검증은 흡수 Top-2에서 별도 논의).
+ *  위조 근거(존재하지 않는 id)로 즉시 active 카드가 되는 것을 막는다. */
+async function assertEvidenceExists(db: Db, evidence: Array<Record<string, unknown>>): Promise<void> {
+  for (const entry of evidence) {
+    const type = String(entry.type);
+    const id = String(entry.id);
+    if (type === "pr") continue;
+    if (!isUuidLike(id)) {
+      throw new Error(`knowledge pattern evidence ${type} id must be a uuid (got "${id.slice(0, 40)}")`);
+    }
+    const exists = await evidenceRowExists(db, type, id);
+    if (!exists) {
+      throw new Error(`knowledge pattern evidence ${type} ${id} does not exist`);
+    }
+  }
+}
+
+async function evidenceRowExists(db: Db, type: string, id: string): Promise<boolean> {
+  switch (type) {
+    case "mission": {
+      const rows = await db.select({ id: missions.id }).from(missions).where(eq(missions.id, id)).limit(1);
+      return rows.length > 0;
+    }
+    case "workflow_run": {
+      const rows = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.id, id)).limit(1);
+      return rows.length > 0;
+    }
+    case "issue": {
+      const rows = await db.select({ id: issues.id }).from(issues).where(eq(issues.id, id)).limit(1);
+      return rows.length > 0;
+    }
+    case "transition_event": {
+      const rows = await db
+        .select({ id: workflowTransitionEvents.id })
+        .from(workflowTransitionEvents)
+        .where(eq(workflowTransitionEvents.id, id))
+        .limit(1);
+      return rows.length > 0;
+    }
+    case "heartbeat_run": {
+      const rows = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).limit(1);
+      return rows.length > 0;
+    }
+    default:
+      return true;
+  }
+}
+
 export function knowledgePatternsService(db: Db) {
   return {
     /** [중복 힌트 — EvoHarness compaction 교훈] 새 카드와 유사한 기존 카드 상위 3건.
@@ -127,53 +186,65 @@ export function knowledgePatternsService(db: Db) {
       const whatWorked = readTrimmed(input.whatWorked, "whatWorked", TEXT_MAX, false);
       const scopeTags = readTags(input.scopeTags);
 
-      if (input.supersedeId) {
-        const [existing] = await db
-          .select({ id: companyKnowledgePatterns.id, companyId: companyKnowledgePatterns.companyId, supersededById: companyKnowledgePatterns.supersededById })
-          .from(companyKnowledgePatterns)
-          .where(eq(companyKnowledgePatterns.id, input.supersedeId))
-          .limit(1);
-        if (!existing || existing.companyId !== input.companyId) {
-          throw new Error("knowledge pattern supersede target must exist in the same company");
-        }
-        if (existing.supersededById) {
-          throw new Error("knowledge pattern supersede target is already superseded");
-        }
-      }
+      // [근거 실재성 ⓑ] 위조 근거가 즉시 active 카드가 되는 것을 쓰기 시점에 차단한다.
+      await assertEvidenceExists(db, evidence);
 
-      const [card] = await db
-        .insert(companyKnowledgePatterns)
-        .values({
+      // [supersede 원자성 ⓐ] 삽입+체인 연결을 단일 트랜잭션으로 묶고, 가드 UPDATE가
+      // 0행이면(동시 대체 패배) 롤백한다 — 패배 쪽 고아 active 카드 잔존을 원천 차단.
+      const card = await db.transaction(async (tx) => {
+        if (input.supersedeId) {
+          const [existing] = await tx
+            .select({ id: companyKnowledgePatterns.id, companyId: companyKnowledgePatterns.companyId, supersededById: companyKnowledgePatterns.supersededById })
+            .from(companyKnowledgePatterns)
+            .where(eq(companyKnowledgePatterns.id, input.supersedeId))
+            .limit(1);
+          if (!existing || existing.companyId !== input.companyId) {
+            throw new Error("knowledge pattern supersede target must exist in the same company");
+          }
+          if (existing.supersededById) {
+            throw new Error("knowledge pattern supersede target is already superseded");
+          }
+        }
+
+        const [created] = await tx
+          .insert(companyKnowledgePatterns)
+          .values({
+            companyId: input.companyId,
+            kind,
+            title,
+            summary,
+            evidence,
+            ...(symptoms ? { symptoms } : {}),
+            ...(rootCause ? { rootCause } : {}),
+            ...(whatWorked ? { whatWorked } : {}),
+            scopeTags,
+            source,
+            createdByAgentId: input.createdByAgentId ?? null,
+            supersededById: null,
+          })
+          .returning();
+
+        if (input.supersedeId) {
+          const linked = await tx
+            .update(companyKnowledgePatterns)
+            .set({ supersededById: created.id })
+            .where(and(eq(companyKnowledgePatterns.id, input.supersedeId), isNull(companyKnowledgePatterns.supersededById)))
+            .returning({ id: companyKnowledgePatterns.id });
+          if (linked.length === 0) {
+            throw new Error("knowledge pattern supersede target was superseded concurrently");
+          }
+        }
+
+        await tx.insert(activityLog).values({
           companyId: input.companyId,
-          kind,
-          title,
-          summary,
-          evidence,
-          ...(symptoms ? { symptoms } : {}),
-          ...(rootCause ? { rootCause } : {}),
-          ...(whatWorked ? { whatWorked } : {}),
-          scopeTags,
-          source,
-          createdByAgentId: input.createdByAgentId ?? null,
-          supersededById: null,
-        })
-        .returning();
-
-      if (input.supersedeId) {
-        await db
-          .update(companyKnowledgePatterns)
-          .set({ supersededById: card.id })
-          .where(and(eq(companyKnowledgePatterns.id, input.supersedeId), isNull(companyKnowledgePatterns.supersededById)));
-      }
-
-      await db.insert(activityLog).values({
-        companyId: input.companyId,
-        actorType: "system",
-        actorId: input.createdByAgentId ?? "knowledge-patterns",
-        action: "knowledge_pattern.created",
-        entityType: "knowledge_pattern",
-        entityId: card.id,
-        details: { kind, title, source, supersededId: input.supersedeId ?? null },
+          actorType: "system",
+          actorId: input.createdByAgentId ?? "knowledge-patterns",
+          action: "knowledge_pattern.created",
+          entityType: "knowledge_pattern",
+          entityId: created.id,
+          details: { kind, title, source, supersededId: input.supersedeId ?? null },
+        });
+        return created;
       });
       return card;
     },

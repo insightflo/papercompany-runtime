@@ -12,7 +12,7 @@ import { workflowRuns, workflowStepRuns } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { knowledgePatternsService } from "../services/knowledge-patterns.js";
 import { assertBoard, assertCompanyAccess } from "./authz.js";
-import { badRequest, notFound } from "../errors.js";
+import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
 import { validate } from "../middleware/index.js";
 
 // [입력 검증] 라우트 진입 차단 1차 — 형식 오류(비문자열/초과 길이/잘못된 열거값)는
@@ -65,7 +65,7 @@ export function knowledgePatternsRoutes(db: Db) {
   });
 
   // POST /api/companies/:companyId/knowledge-patterns
-  router.post("/companies/:companyId/knowledge-patterns", validate(createKnowledgePatternSchema, 422), async (req, res) => {
+  router.post("/companies/:companyId/knowledge-patterns", validate(createKnowledgePatternSchema, 422), async (req, res, next) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     const actor = req.actor;
@@ -83,20 +83,40 @@ export function knowledgePatternsRoutes(db: Db) {
       scopeTags: Array.isArray(req.body?.scopeTags) ? req.body.scopeTags.filter((tag: unknown): tag is string => typeof tag === "string") : [],
     }).catch(() => []);
 
-    const card = await svc.create({
-      companyId,
-      kind: req.body?.kind,
-      title: req.body?.title,
-      summary: req.body?.summary,
-      evidence: req.body?.evidence,
-      symptoms: req.body?.symptoms,
-      rootCause: req.body?.rootCause,
-      whatWorked: req.body?.whatWorked,
-      scopeTags: req.body?.scopeTags,
-      source: bodySource,
-      createdByAgentId: actor.type === "agent" ? actor.agentId ?? null : null,
-      supersedeId,
-    });
+    let card;
+    try {
+      card = await svc.create({
+        companyId,
+        kind: req.body?.kind,
+        title: req.body?.title,
+        summary: req.body?.summary,
+        evidence: req.body?.evidence,
+        symptoms: req.body?.symptoms,
+        rootCause: req.body?.rootCause,
+        whatWorked: req.body?.whatWorked,
+        scopeTags: req.body?.scopeTags,
+        source: bodySource,
+        createdByAgentId: actor.type === "agent" ? actor.agentId ?? null : null,
+        supersedeId,
+      });
+    } catch (error) {
+      // 서비스 계약 오류를 복구 불가 500이 아니라 재시도 가능한 4xx로 매핑(감독 루프 보호).
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("was superseded concurrently") || message.includes("already superseded")) {
+        next(conflict("Supersede target was replaced by another card; re-read and supersede the new head"));
+        return;
+      }
+      if (message.startsWith("knowledge pattern evidence")) {
+        next(unprocessable(message));
+        return;
+      }
+      if (message.includes("supersede target must exist in the same company")) {
+        next(unprocessable(message));
+        return;
+      }
+      next(error);
+      return;
+    }
     res.status(201).json({ ...card, similarExisting });
   });
 
