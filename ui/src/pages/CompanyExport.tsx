@@ -657,7 +657,7 @@ export function CompanyExport() {
     setExportData(null);
     exportPreviewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCompanyId, exportPreviewMutation.isPending, exportPreviewMutation.mutate]);
+  }, [selectedCompanyId, exportPreviewMutation.mutate]);
 
   const tree = useMemo(
     () => (exportData ? buildFileTree(exportData.files) : []),

@@ -645,4 +645,56 @@ export function registerCompanyPortabilityImportCases(deps: {
       }),
     );
   });
+
+  it("previews import of an exported package whose skill SKILL.md has malformed YAML instead of failing", async () => {
+    const portability = companyPortabilityService({} as any);
+    const malformed = "---\nname: paperclip\nskills: [plan\n---\n\n# Paperclip\n";
+    const previousReadFile = companySkillSvc.readFile.getMockImplementation();
+    companySkillSvc.readFile.mockImplementation(async (companyId: string, skillId: string, relativePath: string) => {
+      const detail = await previousReadFile?.(companyId, skillId, relativePath);
+      if (detail && skillId === "skill-1" && relativePath === "SKILL.md") {
+        return { ...detail, content: malformed };
+      }
+      return detail;
+    });
+
+    try {
+      const exported = await portability.exportBundle("company-1", {
+        include: {
+          company: true,
+          agents: true,
+          projects: false,
+          issues: false,
+        },
+        expandReferencedSkills: true,
+      });
+
+      const preview = await portability.previewImport({
+        source: {
+          type: "inline",
+          rootPath: exported.rootPath,
+          files: exported.files,
+        },
+        include: {
+          company: true,
+          agents: true,
+          projects: false,
+          issues: false,
+        },
+        target: {
+          mode: "new_company",
+          newCompanyName: "Imported Paperclip",
+        },
+        agents: "all",
+        collisionStrategy: "rename",
+      });
+
+      expect(preview.errors).toEqual([]);
+      expect(preview.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining(`Company package file skills/${paperclipKey}/SKILL.md has invalid YAML frontmatter`),
+      ]));
+    } finally {
+      companySkillSvc.readFile.mockImplementation(previousReadFile);
+    }
+  });
 }
