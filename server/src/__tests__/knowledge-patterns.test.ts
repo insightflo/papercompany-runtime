@@ -128,6 +128,97 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     expect(byText[0]?.title).toBe("n8n 거짓 성공");
   });
 
+  // [T1c 구조화 결합 메타데이터] create가 엔티티 4종을 공유 Zod 계약으로 정규화해 저장한다.
+  //   누락 시 빈 배열(기존 카드 호환 — DB notNull default '{}'와 동일 해석).
+  it("stores normalized coupling entities (diff prefix, backslash, dupes) and empty arrays by default", async () => {
+    const svc = knowledgePatternsService(db);
+    const plain = await svc.create(sampleCard({ title: "엔티티 없는 신규 카드" }));
+    expect(plain.files).toEqual([]);
+    expect(plain.symbols).toEqual([]);
+    expect(plain.coupled).toEqual([]);
+    expect(plain.errorSignatures).toEqual([]);
+
+    const card = await svc.create(sampleCard({
+      title: "엔티티 정규화 카드",
+      files: ["a/server/src/services/knowledge-patterns.ts", "b\\ui\\src\\App.tsx", "server/src/services/knowledge-patterns.ts"],
+      symbols: ["selectRelatedKnowledgePatterns", "selectRelatedKnowledgePatterns", "KnowledgePatternGraph"],
+      coupled: ["./packages/shared/src/validators/knowledge-pattern.ts"],
+      errorSignatures: ["TypeError: cannot read properties of undefined (reading 'id')", "TypeError: cannot read properties of undefined (reading 'id')"],
+    }));
+    expect(card.files).toEqual(["server/src/services/knowledge-patterns.ts", "ui/src/App.tsx"]);
+    expect(card.symbols).toEqual(["selectRelatedKnowledgePatterns", "KnowledgePatternGraph"]);
+    expect(card.coupled).toEqual(["packages/shared/src/validators/knowledge-pattern.ts"]);
+    expect(card.errorSignatures).toEqual(["TypeError: cannot read properties of undefined (reading 'id')"]);
+  });
+
+  it("rejects invalid entity metadata without creating a card", async () => {
+    const svc = knowledgePatternsService(db);
+    const before = await db.select({ id: companyKnowledgePatterns.id }).from(companyKnowledgePatterns);
+    await expect(svc.create(sampleCard({ title: "잘못된 엔티티 1", files: "server/src/x.ts" })))
+      .rejects.toThrow(/knowledge pattern entity/);
+    await expect(svc.create(sampleCard({ title: "잘못된 엔티티 2", symbols: Array.from({ length: 13 }, (_, i) => `sym-${i}`) })))
+      .rejects.toThrow(/knowledge pattern entity/);
+    await expect(svc.create(sampleCard({ title: "잘못된 엔티티 3", files: ["   "] })))
+      .rejects.toThrow(/knowledge pattern entity/);
+    const after = await db.select({ id: companyKnowledgePatterns.id }).from(companyKnowledgePatterns);
+    expect(after.length).toBe(before.length);
+  });
+
+  // [T1c 검색 재정렬] q·엔티티 질의 시 관련도 엔진이 서명 일치 카드를 상단으로 올린다.
+  //   DB 필터를 통과한 기존 카드(빈 엔티티)는 점수와 무관하게 버리지 않는다(회귀 0).
+  it("re-ranks signature-matched card to the top and keeps legacy cards (no entity fields) listed", async () => {
+    const svc = knowledgePatternsService(db);
+    const signature = "TypeError: cannot read properties of undefined (reading 'ownerId')";
+    // 생성 순서: 서명 카드 먼저, 레거시 카드 나중 — createdAt desc 라면 레거시가 먼저 온다.
+    const signed = await svc.create(sampleCard({
+      title: "토큰 불일치 서명 카드",
+      files: ["server/src/services/knowledge-patterns.ts"],
+      errorSignatures: [signature],
+    }));
+    const legacy = await svc.create(sampleCard({ title: "토큰 불일치 레거시 카드" }));
+
+    // 1) q(ILIKE 양쪽 모두 통과) + 서명 텍스트 질의 → 서명 카드(10점+)가 상단.
+    const byQuery = await svc.search({ companyId, q: "토큰 불일치", symbols: [signature] });
+    expect(byQuery[0]?.id).toBe(signed.id);
+    expect(byQuery.some((c) => c.id === legacy.id)).toBe(true);
+
+    // 2) files 질의만(q 없음 → ILIKE 없음) — diff 접두사가 있어도 정규화 후 파일 일치 카드가 상단.
+    const byFiles = await svc.search({ companyId, files: ["a/server/src/services/knowledge-patterns.ts"] });
+    expect(byFiles[0]?.id).toBe(signed.id);
+
+    // 3) 질의 없음 → 종전대로 createdAt desc(재정렬 비활성 — 현행 호환 랭킹).
+    const noQuery = await svc.search({ companyId, limit: 10 });
+    expect(noQuery.findIndex((c) => c.id === legacy.id))
+      .toBeLessThan(noQuery.findIndex((c) => c.id === signed.id));
+  });
+
+  // [T1c 라우트 계약] 잘못된 엔티티 메타데이터는 진입 검증에서 422로 차단된다(500 금지).
+  it("routes: POST rejects malformed entity metadata with 422 instead of a 500", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as typeof req & { actor: unknown }).actor = {
+        type: "board", source: "board_key", companyId, companyIds: [companyId], isInstanceAdmin: false,
+        actorId: "board-user", agentId: null,
+      };
+      next();
+    });
+    app.use("/api", knowledgePatternsRoutes(db));
+    app.use(errorHandler);
+
+    const bad = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({
+        kind: "failure_mode",
+        title: "라우트 엔티티 형식 오류 카드",
+        summary: "files가 배열이 아니면 라우트 진입에서 422로 거절된다.",
+        files: "server/src/x.ts",
+        evidence: [],
+        source: "operator",
+      });
+    expect(bad.status).toBe(422);
+  });
+
   it("rejects evidence referencing a nonexistent row and creates no card [defect-b]", async () => {
     const svc = knowledgePatternsService(db);
     const before = await db.select({ id: companyKnowledgePatterns.id }).from(companyKnowledgePatterns);

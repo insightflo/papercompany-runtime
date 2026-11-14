@@ -23,6 +23,11 @@ export interface KnowledgePatternCardDto {
   rootCause: string | null;
   whatWorked: string | null;
   scopeTags: string[];
+  /** [T1c] 구조화 결합 메타데이터(서버 저장 원본 — 정규화된 값). 표시 컴포넌트 연결은 후속 단계. */
+  files?: string[];
+  symbols?: string[];
+  coupled?: string[];
+  errorSignatures?: string[];
   source: string;
   status: string;
   audience: string;

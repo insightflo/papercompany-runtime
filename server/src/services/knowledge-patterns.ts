@@ -1,45 +1,47 @@
 // server/src/services/knowledge-patterns.ts
 //
 // [파일 목적] 사고→패턴 지식 위키 서비스 — company_knowledge_patterns 테이블의
-//   append-only 큐레이션 카드 생성/검색. 설계: artifacts doc/plans/2026-08-28-incident-pattern-knowledge-wiki.md
+//   append-only 큐레이션 카드 생성/승인/큐레이션. 설계: artifacts doc/plans/2026-08-28-incident-pattern-knowledge-wiki.md
+//   읽기 경로(검색·입력 판독기·근거 실재성 검증)는 knowledge-pattern-read.ts로 분리했다(T1c — 300줄 상한).
 // [불변식]
 //   - append-only: 내용(title/summary/evidence 등) 수정 API 없음. 대체는 supersedeId로 새 카드 발행
 //     + 이전 카드 링크 갱신. 유일한 상태 전이는 approve(자동 초안 draft→active)뿐 — 내용 불변.
 //   - 회사 스코프 필수(규칙 1). 검색/대체 대상은 같은 회사로 제한.
 //   - 구조화 레코드만 권위(규칙 8) — evidence는 {type,id,note} 배열, 프로즈 파싱 없음.
 //   - 생성 시 activity log 기록.
+//   - [T1c] files/symbols/coupled/errorSignatures는 공유 Zod 계약으로 정규화해 저장한다.
+// [게이트 보존 — PR #729] create는 (1) assertEvidenceExists(근거 실재 검증) 후
+//   (2) db.transaction으로 삽입+supersede 가드 체인을 원자적으로 묶는다. 이 구조는 변경 금지.
 // [소비] 미션 오너 진단/기획 검색, 자기개선 근거 참조. draft 초안은 검색 기본 제외(승인 전 무측).
 //   실행 프롬프트 주입은 별도 계약(관련도+게이트+측정 롤아웃 — knowledge-pattern-injection)으로만.
 
-import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import {
-  activityLog,
-  companyKnowledgePatterns,
-  heartbeatRuns,
-  issues,
-  missions,
-  workflowRuns,
-  workflowTransitionEvents,
-} from "@paperclipai/db";
-import { isUuidLike } from "@paperclipai/shared";
+import { activityLog, companyKnowledgePatterns } from "@paperclipai/db";
 import type { AdoptionAssetRegistryEntry } from "./self-improvement-adoption-planner.js";
 import { selectRelatedKnowledgePatterns, type RelatedKnowledgePattern } from "./knowledge-pattern-relevance.js";
+import {
+  assertEvidenceExists,
+  KINDS,
+  KNOWLEDGE_PATTERN_STATUS_ACTIVE,
+  KNOWLEDGE_PATTERN_STATUS_DRAFT,
+  readEntities,
+  readEvidence,
+  readTags,
+  readTrimmed,
+  searchKnowledgePatterns,
+  SUMMARY_MAX,
+  TEXT_MAX,
+  TITLE_MAX,
+  type KnowledgePatternSearchInput,
+} from "./knowledge-pattern-read.js";
 
 export type KnowledgePatternKind = "failure_mode" | "success_recipe" | "constraint";
 export type KnowledgePatternSource = "mission_owner_compile" | "agent_candidate" | "operator" | "auto_rework_draft";
-export const KNOWLEDGE_PATTERN_STATUS_DRAFT = "draft";
-export const KNOWLEDGE_PATTERN_STATUS_ACTIVE = "active";
+// 하위 호환 재수출 — 상수 정의는 read.ts(검색이 소유)로 이동했다.
+export { KNOWLEDGE_PATTERN_STATUS_DRAFT, KNOWLEDGE_PATTERN_STATUS_ACTIVE } from "./knowledge-pattern-read.js";
 
-const KINDS: readonly string[] = ["failure_mode", "success_recipe", "constraint"];
 const SOURCES: readonly string[] = ["mission_owner_compile", "agent_candidate", "operator", "auto_rework_draft"];
-const EVIDENCE_TYPES: readonly string[] = ["mission", "workflow_run", "issue", "transition_event", "pr", "heartbeat_run"];
-
-const TITLE_MAX = 200;
-const SUMMARY_MAX = 1200;
-const TEXT_MAX = 2000;
-const TAGS_MAX = 8;
-const EVIDENCE_MAX = 10;
 
 export type KnowledgePattern = typeof companyKnowledgePatterns.$inferSelect;
 
@@ -50,96 +52,6 @@ export function knowledgePatternAdoptionRegistryEntries(
   cards: Array<Pick<KnowledgePattern, "id">>,
 ): AdoptionAssetRegistryEntry[] {
   return cards.map((card) => ({ assetType: "knowledge_pattern", assetRef: card.id, resolvedRef: card.id }));
-}
-
-function readTrimmed(value: unknown, field: string, max: number, required: boolean): string | null {
-  if (value == null) {
-    if (required) throw new Error(`knowledge pattern ${field} is required`);
-    return null;
-  }
-  if (typeof value !== "string") throw new Error(`knowledge pattern ${field} must be a string`);
-  const trimmed = value.trim();
-  if (required && trimmed === "") throw new Error(`knowledge pattern ${field} must not be empty`);
-  if (trimmed.length > max) throw new Error(`knowledge pattern ${field} exceeds ${max} chars`);
-  return trimmed === "" ? null : trimmed;
-}
-
-function readEvidence(value: unknown): Array<Record<string, unknown>> {
-  if (value == null) return [];
-  if (!Array.isArray(value) || value.length > EVIDENCE_MAX) {
-    throw new Error(`knowledge pattern evidence must be an array of at most ${EVIDENCE_MAX} refs`);
-  }
-  return value.map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error("knowledge pattern evidence entries must be objects");
-    }
-    const record = item as Record<string, unknown>;
-    if (!EVIDENCE_TYPES.includes(String(record.type))) {
-      throw new Error(`knowledge pattern evidence type must be one of ${EVIDENCE_TYPES.join(", ")}`);
-    }
-    const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : null;
-    if (!id) throw new Error("knowledge pattern evidence entries require a non-empty id");
-    const note = typeof record.note === "string" ? record.note.trim().slice(0, 300) : null;
-    return { type: String(record.type), id, ...(note ? { note } : {}) };
-  });
-}
-
-function readTags(value: unknown): string[] {
-  if (value == null) return [];
-  if (!Array.isArray(value) || value.length > TAGS_MAX) {
-    throw new Error(`knowledge pattern scopeTags must be an array of at most ${TAGS_MAX}`);
-  }
-  return value.map((tag) => String(tag).trim().toLowerCase().slice(0, 40)).filter((tag) => tag !== "");
-}
-
-/** [근거 실재성 검증] evidence 참조가 실제 행을 가리키는지 확인한다(2026-11-14 결함 수정 ⓑ).
- *  검증 가능 타입: mission/workflow_run/issue/transition_event/heartbeat_run — 모두 uuid PK.
- *  'pr'은 외부 GitHub 참조로 DB 테이블이 없어 형식 검증만 적용(존재 검증은 흡수 Top-2에서 별도 논의).
- *  위조 근거(존재하지 않는 id)로 즉시 active 카드가 되는 것을 막는다. */
-async function assertEvidenceExists(db: Db, evidence: Array<Record<string, unknown>>): Promise<void> {
-  for (const entry of evidence) {
-    const type = String(entry.type);
-    const id = String(entry.id);
-    if (type === "pr") continue;
-    if (!isUuidLike(id)) {
-      throw new Error(`knowledge pattern evidence ${type} id must be a uuid (got "${id.slice(0, 40)}")`);
-    }
-    const exists = await evidenceRowExists(db, type, id);
-    if (!exists) {
-      throw new Error(`knowledge pattern evidence ${type} ${id} does not exist`);
-    }
-  }
-}
-
-async function evidenceRowExists(db: Db, type: string, id: string): Promise<boolean> {
-  switch (type) {
-    case "mission": {
-      const rows = await db.select({ id: missions.id }).from(missions).where(eq(missions.id, id)).limit(1);
-      return rows.length > 0;
-    }
-    case "workflow_run": {
-      const rows = await db.select({ id: workflowRuns.id }).from(workflowRuns).where(eq(workflowRuns.id, id)).limit(1);
-      return rows.length > 0;
-    }
-    case "issue": {
-      const rows = await db.select({ id: issues.id }).from(issues).where(eq(issues.id, id)).limit(1);
-      return rows.length > 0;
-    }
-    case "transition_event": {
-      const rows = await db
-        .select({ id: workflowTransitionEvents.id })
-        .from(workflowTransitionEvents)
-        .where(eq(workflowTransitionEvents.id, id))
-        .limit(1);
-      return rows.length > 0;
-    }
-    case "heartbeat_run": {
-      const rows = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).limit(1);
-      return rows.length > 0;
-    }
-    default:
-      return true;
-  }
 }
 
 export function knowledgePatternsService(db: Db) {
@@ -153,13 +65,14 @@ export function knowledgePatternsService(db: Db) {
       rootCause?: string | null;
       scopeTags?: readonly string[];
     }): Promise<RelatedKnowledgePattern[]> => {
-      const cards = await knowledgePatternsService(db).search({ companyId: input.companyId, limit: 50 });
+      const cards = await searchKnowledgePatterns(db, { companyId: input.companyId, limit: 50 });
       return selectRelatedKnowledgePatterns(
         cards,
         [input.title, input.symptoms ?? "", input.rootCause ?? "", ...(input.scopeTags ?? [])],
       );
     },
-    /** append-only 생성. supersedeId가 있으면 같은 회사의 기존 카드를 대체 체인으로 연결한다. */
+    /** append-only 생성. supersedeId가 있으면 같은 회사의 기존 카드를 대체 체인으로 연결한다.
+     *  [T1c] files/symbols/coupled/errorSignatures를 공유 Zod로 정규화해 저장(누락 시 빈 배열). */
     create: async (input: {
       companyId: string;
       kind: unknown;
@@ -170,6 +83,10 @@ export function knowledgePatternsService(db: Db) {
       rootCause?: unknown;
       whatWorked?: unknown;
       scopeTags?: unknown;
+      files?: unknown;
+      symbols?: unknown;
+      coupled?: unknown;
+      errorSignatures?: unknown;
       source: unknown;
       createdByAgentId?: string | null;
       supersedeId?: string | null;
@@ -185,6 +102,7 @@ export function knowledgePatternsService(db: Db) {
       const rootCause = readTrimmed(input.rootCause, "rootCause", TEXT_MAX, false);
       const whatWorked = readTrimmed(input.whatWorked, "whatWorked", TEXT_MAX, false);
       const scopeTags = readTags(input.scopeTags);
+      const { files, symbols, coupled, errorSignatures } = readEntities(input);
 
       // [근거 실재성 ⓑ] 위조 근거가 즉시 active 카드가 되는 것을 쓰기 시점에 차단한다.
       await assertEvidenceExists(db, evidence);
@@ -218,6 +136,10 @@ export function knowledgePatternsService(db: Db) {
             ...(rootCause ? { rootCause } : {}),
             ...(whatWorked ? { whatWorked } : {}),
             scopeTags,
+            files,
+            symbols,
+            coupled,
+            errorSignatures,
             source,
             createdByAgentId: input.createdByAgentId ?? null,
             supersededById: null,
@@ -367,49 +289,7 @@ export function knowledgePatternsService(db: Db) {
       return updated;
     },
 
-    /** 검색 — superseded 기본 제외. kind/tags/q(제목·요약·증상·근본원인 ILIKE) 필터.
-     *  draft 초안은 기본 제외(includeDrafts=true일 때만 노출 — 승인 화면 전용). */
-    search: async (input: {
-      companyId: string;
-      kind?: string | null;
-      tags?: readonly string[] | null;
-      q?: string | null;
-      includeSuperseded?: boolean;
-      includeDrafts?: boolean;
-      limit?: number;
-    }): Promise<KnowledgePattern[]> => {
-      const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
-      const conditions = [eq(companyKnowledgePatterns.companyId, input.companyId)];
-      if (!input.includeSuperseded) {
-        conditions.push(isNull(companyKnowledgePatterns.supersededById));
-      }
-      if (!input.includeDrafts) {
-        conditions.push(eq(companyKnowledgePatterns.status, KNOWLEDGE_PATTERN_STATUS_ACTIVE));
-      }
-      if (input.kind && KINDS.includes(input.kind)) {
-        conditions.push(eq(companyKnowledgePatterns.kind, input.kind));
-      }
-      const tags = readTags(input.tags);
-      if (tags.length > 0) {
-        conditions.push(sql`${companyKnowledgePatterns.scopeTags} && ARRAY[${sql.join(tags.map((tag) => sql`${tag}`), sql`, `)}]::text[]`);
-      }
-      const q = input.q?.trim();
-      if (q) {
-        const pattern = `%${q.replace(/[%_]/g, (m) => `\\${m}`)}%`;
-        const textCondition = or(
-          ilike(companyKnowledgePatterns.title, pattern),
-          ilike(companyKnowledgePatterns.summary, pattern),
-          ilike(companyKnowledgePatterns.symptoms, pattern),
-          ilike(companyKnowledgePatterns.rootCause, pattern),
-        );
-        if (textCondition) conditions.push(textCondition);
-      }
-      return db
-        .select()
-        .from(companyKnowledgePatterns)
-        .where(and(...conditions))
-        .orderBy(desc(companyKnowledgePatterns.createdAt))
-        .limit(limit);
-    },
+    /** 검색(실제 구현은 knowledge-pattern-read.ts) — q·엔티티 질의 시 관련도 재정렬(T1c). */
+    search: (input: KnowledgePatternSearchInput): Promise<KnowledgePattern[]> => searchKnowledgePatterns(db, input),
   };
 }
