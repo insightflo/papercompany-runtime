@@ -74,6 +74,13 @@ export const instanceExperimentalSettingsSchema = z.object({
   //   미션 목록은 부분 롤아웃용. 플래그와 무관하게 같은 진단 임계 반복+구조화 판정이면 자동 허용된다.
   enableStaleSourceIssueWakeupV1: z.boolean().default(false),
   staleSourceIssueWakeupAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
+  // [resume review-relief v1] 실패 런 resume preview 의 보수 검토 차단 완화 — 기본 off(fail-closed,
+  //   off 면 기존 차단 목록과 동일). 사람 승인(해소 결정+continuation accepted) 또는 #720 stuck
+  //   판정이 성립한 미션에서 정책 매니페스트 미등록·선행 산출물 미검증·종말 스텝 owner 잔재를
+  //   경고로 낮춘다. external effect 미확인 스텝은 사람 승인이 있을 때만 완화되고, 활성 실행·
+  //   활성 자원·예산 차단은 그대로 유지된다. 미션 목록은 부분 롤아웃용.
+  enableResumeReviewReliefV1: z.boolean().default(false),
+  resumeReviewReliefAllowedMissionIdsV1: z.array(z.string().uuid()).default([]),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

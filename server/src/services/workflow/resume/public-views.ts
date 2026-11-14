@@ -2,6 +2,7 @@ import type {
   ResumeBlocker as PublicResumeBlocker,
   ResumePreview as PublicResumePreview,
   ResumeRequestView as PublicResumeRequestView,
+  ResumeWarning,
 } from "@paperclipai/shared/types/workflow-resume";
 import { resumeRequestSchema } from "@paperclipai/shared/validators/workflow-resume";
 import { HttpError } from "../../../errors.js";
@@ -38,6 +39,18 @@ export function projectResumePreview(input: {
       if (typeof stepId === "string") result.stepId = stepId;
       return result;
     }),
+    // [review-relief v1] 완화 투영 — 서버 preview 는 항상 채우지만 구형 객체 대비 선택 확장.
+    ...(preview.warnings
+      ? {
+          warnings: preview.warnings.map((warning): ResumeWarning => {
+            const result: ResumeWarning = { code: warning.code, message: warning.message };
+            const stepId = typeof warning.detail?.stepId === "string" ? warning.detail.stepId : undefined;
+            if (typeof stepId === "string") result.stepId = stepId;
+            return result;
+          }),
+        }
+      : {}),
+    ...(preview.relief ? { relief: preview.relief } : {}),
     affected: preview.affectedStepIds.map((stepId) => {
       const step = frozenStep(stepId);
       return { stepId, name: step.name, action: step.type === "if" || step.type === "complete" ? "reevaluate" : "execute" };

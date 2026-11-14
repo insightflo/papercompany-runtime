@@ -8,6 +8,12 @@ import { checkStepEligibility } from "./eligibility.js";
 import { forwardReachable } from "./graph.js";
 import { buildGraphNodes, kindOf } from "./preview-graph.js";
 import { projectResumePreview } from "./public-views.js";
+import {
+  classifyReviewRelief,
+  hasAcceptedHumanApprovalForMission,
+  isResumeReviewReliefEnabled,
+  type ResumeReliefBasisName,
+} from "./review-relief.js";
 import type { ResumeExecutionHistoryScope } from "./read-model.js";
 import {
   readResumeMissionWorkspaceHistory,
@@ -61,6 +67,10 @@ export interface ResumePreview {
   definitionHash: string | null;
   eligible: boolean;
   blockers: ResumePreviewBlocker[];
+  /** [review-relief v1] 완화로 경고로 내려간 항목(플래그 OFF·기반 없음 → 항상 []). */
+  warnings?: ResumePreviewBlocker[];
+  /** [review-relief v1] 완화 상태·기반(활성 아님 → active:false, bases:[]). */
+  relief?: { active: boolean; bases: ResumeReliefBasisName[] };
   affectedStepIds: string[];
   preservedStepIds: string[];
   generationPossible: boolean;
@@ -98,6 +108,7 @@ function blockedPreview(
 ): ResumePreviewResult {
   return previewResult({
     schemaVersion: 1, scope, definitionHash, eligible: false, blockers,
+    warnings: [], relief: { active: false, bases: [] },
     affectedStepIds: [], preservedStepIds: [], generationPossible: true,
     token: null, expiresAt: null,
   }, [], null, "unknown");
@@ -208,7 +219,7 @@ export async function assembleResumePreview(
     )).orderBy(issueWorkProducts.id);
   const issueIdsWithProducts = new Set(workProducts.map((row) => row.issueId));
 
-  const blockers: ResumePreviewBlocker[] = [
+  let blockers: ResumePreviewBlocker[] = [
     ...wholeMissionBlockers(history, requestRows, executionRows, stuckStepRunIds),
     ...recordedCheckerBlockers(history),
     ...companyBudgetBlockers,
@@ -274,10 +285,34 @@ export async function assembleResumePreview(
   };
   const state = buildSnapshotState(history, validated, affected, facts, blockers);
 
+  // [review-relief v1] 플래그 ON + (사람 승인 또는 stuck 판정)일 때만 오탐성 보수 차단을
+  //   경고로 내린다. OFF·기반 없음 → blockers 그대로(기존 동작과 동일). 활성 실행·external
+  //   미확인(무승인)·예산 등은 classifyReviewRelief 계약이 유지한다.
+  let warnings: ResumePreviewBlocker[] = [];
+  let reliefBases: ResumeReliefBasisName[] = [];
+  if (await isResumeReviewReliefEnabled(tx, validated.missionId)) {
+    const humanApproval = await hasAcceptedHumanApprovalForMission(tx, {
+      companyId: validated.companyId,
+      missionId: validated.missionId,
+      since: history.selected.run.completedAt,
+    });
+    const classified = classifyReviewRelief({
+      blockers,
+      humanApproval,
+      stuck: stuckStepRunIds.size > 0,
+      policyMissing: policyView.policyMissing,
+      history,
+    });
+    blockers = classified.hardBlockers;
+    warnings = classified.warnings;
+    reliefBases = classified.bases;
+  }
+
   if (blockers.length > 0) {
     return previewResult({
       schemaVersion: 1, scope: validated, definitionHash: definition.definitionHash,
-      eligible: false, blockers, affectedStepIds: affected, preservedStepIds: preserved,
+      eligible: false, blockers, warnings, relief: { active: reliefBases.length > 0, bases: reliefBases },
+      affectedStepIds: affected, preservedStepIds: preserved,
       generationPossible: generationPossible(policyView.policy, affected),
       token: null, expiresAt: null,
     }, frozenSteps, state, budget);
@@ -287,7 +322,8 @@ export async function assembleResumePreview(
   const token = signSnapshot(state, signer.key, now);
   return previewResult({
     schemaVersion: 1, scope: validated, definitionHash: definition.definitionHash,
-    eligible: true, blockers: [], affectedStepIds: affected, preservedStepIds: preserved,
+    eligible: true, blockers: [], warnings, relief: { active: reliefBases.length > 0, bases: reliefBases },
+    affectedStepIds: affected, preservedStepIds: preserved,
     generationPossible: generationPossible(policyView.policy, affected),
     token, expiresAt: new Date(now.getTime() + SNAPSHOT_TTL_MS).toISOString(),
   }, frozenSteps, state, budget);

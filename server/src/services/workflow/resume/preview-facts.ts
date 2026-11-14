@@ -35,10 +35,11 @@ type StepRow = ResumeWorkspaceMissionHistory["missionSteps"][number];
 const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const ACTIVE_EXECUTION_STATES: ReadonlySet<string> = new Set(["queued", "running"]);
 
-/** [liveness 교정 2026-10-22] 잔여 흔적 판정용 종료 상태 어휘 — 스텝/하트비트/웨이크업. */
-const TERMINAL_STEP_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "skipped"]);
-const TERMINAL_HEARTBEAT_STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
-const TERMINAL_WAKEUP_STATUSES: ReadonlySet<string> = new Set(["coalesced", "skipped", "completed", "failed", "cancelled", "timed_out"]);
+/** [liveness 교정 2026-10-22] 잔여 흔적 판정용 종료 상태 어휘 — 스텝/하트비트/웨이크업.
+ *   review-relief 완화 판정도 동일 어휘를 쓴다(단일 원본 — 복제 금지). */
+export const TERMINAL_STEP_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "skipped"]);
+export const TERMINAL_HEARTBEAT_STATUSES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+export const TERMINAL_WAKEUP_STATUSES: ReadonlySet<string> = new Set(["coalesced", "skipped", "completed", "failed", "cancelled", "timed_out"]);
 
 /** [stuck 판정 임계] running 스텝의 마지막 durable 활동(종말 하트비트) 이후 이 시간이
  *   지나면 "stuck" 후보로 본다. 디스패치/재시도는 분 단위로 진행되므로 30분 무진행은

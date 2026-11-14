@@ -9,6 +9,21 @@ export type ResumeBlocker = {
   message: string;
 };
 
+/** [review-relief v1] 완화된 보수 검토 차단의 경고 표시. 서버는 완화가 동작할 때만 채운다. */
+export type ResumeWarning = {
+  code: string;
+  stepId?: string;
+  message: string;
+};
+
+/** 완화 기반 — human_approval(사람 결정 해소+continuation accepted) 또는 stuck(#720 판정). */
+export type ResumeReliefBasis = "human_approval" | "stuck";
+
+export type ResumeRelief = {
+  active: boolean;
+  bases: ResumeReliefBasis[];
+};
+
 export type ResumePreview = {
   schemaVersion: 1;
   companyId: string;
@@ -17,6 +32,10 @@ export type ResumePreview = {
   startStepId: string;
   eligible: boolean;
   blockers: ResumeBlocker[];
+  /** [review-relief v1] 완화로 차단에서 경고로 내려간 항목. 기존 응답은 생략된다. */
+  warnings?: ResumeWarning[];
+  /** [review-relief v1] 완화 상태·기반. 기존 응답은 생략된다. */
+  relief?: ResumeRelief;
   affected: Array<{ stepId: string; name: string; action: "execute" | "reevaluate" }>;
   preserved: Array<{ stepId: string; name: string }>;
   evidence: Array<{ id: string; sha256: string }>;
