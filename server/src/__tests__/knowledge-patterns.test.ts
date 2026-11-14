@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import express from "express";
 import request from "supertest";
-import { activityLog, agents, companies, createDb } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { activityLog, agents, companies, companyKnowledgePatterns, createDb, workflowDefinitions, workflowRuns } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -27,6 +28,7 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
   let companyId: string;
   let otherCompanyId: string;
   let ownerAgentId: string;
+  let evidenceWorkflowRunId: string;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("knowledge-patterns-");
@@ -42,6 +44,14 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
       id: ownerAgentId, companyId, name: "Mission Owner", role: "owner",
       status: "active", adapterType: "claude_local", adapterConfig: {},
       runtimeConfig: {}, permissions: {},
+    });
+    // [근거 실재성 ⓑ] evidence 검증이 실제 행만 통과시키므로 픽스처도 실재 run을 쓴다.
+    const workflowDefinitionId = randomUUID();
+    evidenceWorkflowRunId = randomUUID();
+    await db.insert(workflowDefinitions).values({ id: workflowDefinitionId, companyId, name: "evidence-fixture", stepsJson: [] });
+    await db.insert(workflowRuns).values({
+      id: evidenceWorkflowRunId, workflowId: workflowDefinitionId, companyId,
+      status: "completed", triggeredBy: "test",
     });
   }, 60_000);
 
@@ -60,7 +70,7 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
       kind: "failure_mode",
       title: "구조 게이트 토큰 불일치로 QA 스텝 무발사",
       summary: "생산자가 같은 세대에서 재완료되면 구 게이트 PASS 토큰과 현 토큰이 영구 불일치해 QA 이슈가 조용히 발사되지 않는다.",
-      evidence: [{ type: "workflow_run", id: "38fb7ef5", note: "PR #156으로 수정" }],
+      evidence: [{ type: "workflow_run", id: evidenceWorkflowRunId, note: "PR #156으로 수정" }],
       symptoms: "런 running 유지 + 마지막 QA 스텝 pending 지속 + 로그 없음",
       rootCause: "이중완료가 completedAt을 재스탬프",
       whatWorked: "게이트 CAS 재큐 + 재검증(PR #156)",
@@ -116,6 +126,59 @@ describeEP("company knowledge patterns (append-only curated incident cards)", ()
     const byText = await svc.search({ companyId, q: "거짓" });
     expect(byText).toHaveLength(1);
     expect(byText[0]?.title).toBe("n8n 거짓 성공");
+  });
+
+  it("rejects evidence referencing a nonexistent row and creates no card [defect-b]", async () => {
+    const svc = knowledgePatternsService(db);
+    const before = await db.select({ id: companyKnowledgePatterns.id }).from(companyKnowledgePatterns);
+    await expect(svc.create(sampleCard({
+      title: "위조 근거 1",
+      evidence: [{ type: "mission", id: randomUUID() }],
+    }))).rejects.toThrow(/knowledge pattern evidence mission .* does not exist/);
+    await expect(svc.create(sampleCard({
+      title: "위조 근거 2",
+      evidence: [{ type: "issue", id: "not-a-uuid" }],
+    }))).rejects.toThrow(/knowledge pattern evidence issue id must be a uuid/);
+    const after = await db.select({ id: companyKnowledgePatterns.id }).from(companyKnowledgePatterns);
+    expect(after.length).toBe(before.length);
+  });
+
+  it("routes: nonexistent evidence maps to 422, not 500 [defect-b]", async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.actor = { type: "board", userId: "u1", source: "session", isInstanceAdmin: false, companyIds: [companyId] }; next(); });
+    app.use("/api", knowledgePatternsRoutes(db));
+    app.use(errorHandler);
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/knowledge-patterns`)
+      .send({ kind: "failure_mode", title: "위조 근거 카드", summary: "존재하지 않는 미션 참조", evidence: [{ type: "mission", id: randomUUID() }] });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("does not exist");
+  });
+
+  it("concurrent supersedes of one target: exactly one winner, no orphan active card [defect-a]", async () => {
+    const svc = knowledgePatternsService(db);
+    const target = await svc.create(sampleCard({ title: "동시 대체 대상 카드" }));
+    const results = await Promise.allSettled([
+      svc.create(sampleCard({ title: "대체안 A", supersedeId: target.id })),
+      svc.create(sampleCard({ title: "대체안 B", supersedeId: target.id })),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(Error);
+    // 패자의 거절 경로는 두 가지다: 갱신 전 사전검사에서 패("already superseded") 또는
+    // 가드 UPDATE 0행으로 롤백("superseded concurrently"). 어느 쪽이든 고아 카드는 없어야 한다.
+    expect(String((rejected[0] as PromiseRejectedResult).reason.message)).toMatch(/already superseded|superseded concurrently/);
+    // 체인 연결 확인: 대상은 승자를 가리키고, 승자 카드만 active로 존재(패배 쪽 고아 없음).
+    const [row] = await db.select().from(companyKnowledgePatterns).where(eq(companyKnowledgePatterns.id, target.id));
+    expect(row!.supersededById).toBe((fulfilled[0] as PromiseFulfilledResult<{ id: string }>).value.id);
+    const replacementTitles = await db
+      .select({ title: companyKnowledgePatterns.title })
+      .from(companyKnowledgePatterns)
+      .where(eq(companyKnowledgePatterns.companyId, companyId));
+    expect(replacementTitles.filter((r) => r.title === "대체안 A" || r.title === "대체안 B")).toHaveLength(1);
   });
 
   it("rejects invalid kinds/sources and over-long titles", async () => {
