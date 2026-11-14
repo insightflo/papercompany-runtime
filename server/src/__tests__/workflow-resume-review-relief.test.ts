@@ -29,11 +29,9 @@ import { resumeApplyBody } from "./helpers/workflow-resume-apply-fixture.js";
 import { seedPreviewGraph, previewScope } from "./helpers/workflow-resume-preview-fixture.js";
 
 /**
- * [목적] review-relief v1 검증 — ①플래그 OFF 동작 불변 ②사람 승인(해소+accepted) 시 오탐 보수
- *   차단(매니페스트 미등록·스텝 효과·missing_evidence·종말 스텝 owner 잔재) 경고화·재개 성립
- *   ③external 효과 미확인은 사람 승인 없이(stuck 만으로) 완화 금지 ④활성 실행·미션 상태 차단 유지
- *   ⑤apply 경로까지 일관(완료 스텝 보존·실패 스텝부터 재개 요청 성립).
- * 실제 임베디드 PostgreSQL + 실제 frozen 캡처. reviewed policy 는 fixture 배열(비워 policy-missing).
+ * [목적] review-relief v1 검증 — ①플래그 OFF 동작 불변 ②사람 승인(해소+accepted) 시 오탐 보수 차단
+ *   경고화·재개 성립 ③external 미확인은 사람 승인 없이(stuck 만으로) 완화 금지 ④활성 실행·미션
+ *   상태 차단 유지 ⑤apply 경로 일관(완료 스텝 보존·실패 스텝부터). 실제 임베디드 PostgreSQL.
  */
 
 vi.mock("../services/workflow/resume/reviewed-policy.js", async () => {
@@ -53,18 +51,16 @@ async function setReliefFlag(db: Db, experimental: Record<string, unknown>) {
 
 /** 미션 이슈 + resolved 결정 + accepted continuation(= #721 구조화 사람 승인 판정). */
 async function seedHumanApproval(db: Db, scenario: ResumeApplyScenario, acceptedAt: Date) {
-  const [issue] = await db.insert(issues).values({
-    companyId: scenario.companyId, missionId: scenario.missionId,
-    title: "Resume approval", status: "blocked", assigneeAgentId: scenario.agentId,
-  }).returning();
+  const [issue] = await db.insert(issues).values({ companyId: scenario.companyId,
+    missionId: scenario.missionId, title: "Resume approval", status: "blocked",
+    assigneeAgentId: scenario.agentId }).returning();
   const decisionId = randomUUID(), continuationWakeId = randomUUID();
   await db.insert(operatorDecisions).values({
-    id: decisionId, companyId: scenario.companyId,
-    requestKey: `relief:${randomUUID()}`, requestHash: "rh",
-    interactionType: "single_select", priority: "high", title: "approve resume direction",
-    sourceType: "mission_owner_human_input", sourceId: randomUUID(),
-    sourceContext: { missionId: scenario.missionId }, issueId: issue!.id,
-    status: "resolved", continuationMode: "issue_current_assignee",
+    id: decisionId, companyId: scenario.companyId, requestKey: `relief:${randomUUID()}`,
+    requestHash: "rh", interactionType: "single_select", priority: "high",
+    title: "approve resume direction", sourceType: "mission_owner_human_input",
+    sourceId: randomUUID(), sourceContext: { missionId: scenario.missionId },
+    issueId: issue!.id, status: "resolved", continuationMode: "issue_current_assignee",
     definition: { options: [], actions: [], selection: null,
       comment: { mode: "disabled", label: null, placeholder: null, maxLength: 0 },
       approvedScope: [], forbiddenScope: [] },
@@ -80,12 +76,10 @@ async function seedHumanApproval(db: Db, scenario: ResumeApplyScenario, accepted
     source: "system", triggerDetail: "system", reason: "operator_decision_continuation",
     payload: { issueId: issue!.id }, status: "completed", requestedAt: acceptedAt,
   });
-  await db.insert(operatorDecisionContinuations).values({
-    companyId: scenario.companyId, operatorDecisionId: decisionId, issueId: issue!.id,
-    state: "accepted", targetAgentId: scenario.agentId, wakeupRequestId: continuationWakeId,
-    idempotencyKey: `rc:${randomUUID()}`,
-    acceptedAt,
-  });
+  await db.insert(operatorDecisionContinuations).values({ companyId: scenario.companyId,
+    operatorDecisionId: decisionId, issueId: issue!.id, state: "accepted",
+    targetAgentId: scenario.agentId, wakeupRequestId: continuationWakeId,
+    idempotencyKey: `rc:${randomUUID()}`, acceptedAt });
   return issue!.id;
 }
 
@@ -122,7 +116,10 @@ describeEP("resume review-relief v1", () => {
     resetReviewedPolicies();
     await db.delete(instanceSettings);
   });
-  beforeEach(() => { resetReviewedPolicies(); });
+
+  function scopeOf(s: ResumeApplyScenario) {
+    return { companyId: s.companyId, missionId: s.missionId, workflowRunId: s.runId, startStepId: "gate" };
+  }
 
   async function reliefScenario(prefix: string) {
     const scenario = await seedResumeApplyScenario(db, sql, prefix, {
@@ -135,10 +132,7 @@ describeEP("resume review-relief v1", () => {
 
   it("flag OFF — blockers/warnings/relief identical to legacy fail-closed behavior", async () => {
     const scenario = await reliefScenario("off-");
-    const result = await previewResume(db, {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    }, applySigner(NOW));
+    const result = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(result.preview.eligible).toBe(false);
     expect(result.preview.relief).toEqual({ active: false, bases: [] });
     expect(result.preview.warnings).toEqual([]);
@@ -152,10 +146,7 @@ describeEP("resume review-relief v1", () => {
     const scenario = await reliefScenario("on-");
     await setReliefFlag(db, { enableResumeReviewReliefV1: true });
     await seedHumanApproval(db, scenario, new Date("2026-09-07T10:00:00.000Z"));
-    const result = await previewResume(db, {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    }, applySigner(NOW));
+    const result = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(result.preview.eligible).toBe(true);
     expect(result.preview.token).toBeTruthy();
     expect(result.preview.relief).toEqual({ active: true, bases: ["human_approval"] });
@@ -172,19 +163,14 @@ describeEP("resume review-relief v1", () => {
     const scenario = await reliefScenario("old-");
     await setReliefFlag(db, { enableResumeReviewReliefV1: true });
     await seedHumanApproval(db, scenario, new Date("2026-09-01T00:00:00.000Z"));
-    const result = await previewResume(db, {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    }, applySigner(NOW));
+    const result = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(result.preview.eligible).toBe(false);
     expect(result.preview.relief).toEqual({ active: false, bases: [] });
     expect(result.preview.warnings).toEqual([]);
   });
 
   it("stuck basis alone does NOT relieve effect-unknown steps (contract 1)", async () => {
-    const scenario = await seedResumeApplyScenario(db, sql, "stuckonly-", {
-      missionStatus: "active", runStatus: "running",
-    });
+    const scenario = await seedResumeApplyScenario(db, sql, "stuckonly-", { missionStatus: "active", runStatus: "running" });
     resetReviewedPolicies();
     await setReliefFlag(db, { enableResumeReviewReliefV1: true });
     const [wakeup] = await db.insert(agentWakeupRequests).values({
@@ -200,17 +186,13 @@ describeEP("resume review-relief v1", () => {
       status: "running", startedAt: new Date(NOW.getTime() - 3_600_000),
       dispatchOwnerWakeupRequestId: wakeup!.id, dispatchOwnerHeartbeatRunId: hb!.id,
     }).where(eq(workflowStepRuns.id, scenario.stepRunIds.redo));
-    const result = await previewResume(db, {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    }, applySigner(NOW));
+    const result = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(result.preview.eligible).toBe(false);
     expect(result.preview.relief).toEqual({ active: true, bases: ["stuck"] });
     // 전역 매니페스트 미등록은 경고로 내려가도 스텝 effect-unknown 은 남는다(사람 승인 없음).
     expect(result.preview.warnings!.map((w) => w.code)).toContain("external_effect_unknown");
     const hardStepUnknown = result.preview.blockers.filter((b) =>
-      (b.code === "external_effect_unknown" || b.code === "control_tool_effects_unverified")
-      && b.detail?.stepId);
+      (b.code === "external_effect_unknown" || b.code === "control_tool_effects_unverified") && b.detail?.stepId);
     expect(hardStepUnknown.length).toBeGreaterThan(0);
   });
 
@@ -218,12 +200,8 @@ describeEP("resume review-relief v1", () => {
     const scenario = await reliefScenario("live-");
     await setReliefFlag(db, { enableResumeReviewReliefV1: true });
     await seedHumanApproval(db, scenario, new Date("2026-09-07T10:00:00.000Z"));
-    await db.update(heartbeatRuns).set({ status: "running", finishedAt: null })
-      .where(eq(heartbeatRuns.status, "failed"));
-    const result = await previewResume(db, {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    }, applySigner(NOW));
+    await db.update(heartbeatRuns).set({ status: "running", finishedAt: null }).where(eq(heartbeatRuns.status, "failed"));
+    const result = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(result.preview.eligible).toBe(false);
     expect(result.preview.blockers.some((b) => b.code === "active_work")).toBe(true);
   });
@@ -232,11 +210,7 @@ describeEP("resume review-relief v1", () => {
     const scenario = await reliefScenario("apply-");
     await setReliefFlag(db, { enableResumeReviewReliefV1: true });
     await seedHumanApproval(db, scenario, new Date("2026-09-07T10:00:00.000Z"));
-    const scope = {
-      companyId: scenario.companyId, missionId: scenario.missionId,
-      workflowRunId: scenario.runId, startStepId: "gate",
-    };
-    const preview = await previewResume(db, scope, applySigner(NOW));
+    const preview = await previewResume(db, scopeOf(scenario), applySigner(NOW));
     expect(preview.preview.eligible).toBe(true);
     const view = await applyResume(db, boardActor(scenario.companyId),
       resumeApplyBody(scenario, { token: preview.preview.token! }), applySigner(NOW));
@@ -270,16 +244,13 @@ describeEP("review-relief — live failed-run shapes (2026-11 7-run census)", ()
     { id: "s2", name: "Skipped downstream", agentId: "agent-1", dependencies: ["s1"] },
   ];
 
-  function scenarioLike(graph: { companyId: string; agentId: string; missionId: string; runId: string }) {
-    return {
-      companyId: graph.companyId, agentId: graph.agentId, missionId: graph.missionId,
-      stepRunIds: {}, runId: graph.runId, workflowId: "", definitionHash: "",
-    } as unknown as ResumeApplyScenario;
+  function scenarioLike(g: { companyId: string; agentId: string; missionId: string; runId: string }) {
+    return { companyId: g.companyId, agentId: g.agentId, missionId: g.missionId,
+      stepRunIds: {}, runId: g.runId, workflowId: "", definitionHash: "" } as unknown as ResumeApplyScenario;
   }
 
   async function setStepStatus(runId: string, stepId: string, status: string) {
-    await db.update(workflowStepRuns).set({
-      status,
+    await db.update(workflowStepRuns).set({ status,
       ...(status === "completed" ? { startedAt: RUN_COMPLETED_AT, completedAt: RUN_COMPLETED_AT } : {}),
     }).where(and(eq(workflowStepRuns.workflowRunId, runId), eq(workflowStepRuns.stepId, stepId)));
   }
